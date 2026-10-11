@@ -1,0 +1,93 @@
+{
+  "name": "lark-channel-bridge",
+  "version": "0.5.7",
+  "description": "Bridge Feishu/Lark messenger with local CLI coding agents",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zarazhangrui/feishu-claude-code-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zarazhangrui/feishu-claude-code-bridge/issues"
+  },
+  "homepage": "https://github.com/zarazhangrui/feishu-claude-code-bridge#readme",
+  "bin": {
+    "lark-channel-bridge": "./bin/lark-channel-bridge.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "README.zh.md",
+    "packages/codex-core/LICENSE",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "tsup --watch",
+    "build": "pnpm build:core && tsup && node tools/prepare-web-core.mjs",
+    "build:core": "tsup --config packages/codex-core/tsup.config.ts && node tools/core-licenses.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:web": "pnpm build:core && node tools/prepare-web-core.mjs && node tools/run-web-tests.mjs",
+    "test:unit": "vitest run tests/unit --passWithNoTests",
+    "test:integration": "vitest run tests/integration --passWithNoTests",
+    "test:process": "vitest run tests/process --passWithNoTests",
+    "ci:local": "git diff --check && pnpm test && pnpm typecheck && pnpm build",
+    "ci:platform": "pnpm test && pnpm typecheck && pnpm build",
+    "prepare": "npm run build",
+    "prepublishOnly": "pnpm typecheck && pnpm build"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.4.0",
+    "@larksuite/channel": "^0.3.0",
+    "@larksuiteoapi/node-sdk": "1.67.0",
+    "commander": "^12.1.0",
+    "cross-spawn": "^7.0.6",
+    "graceful-fs": "^4.2.11",
+    "proper-lockfile": "^4.1.2",
+    "qrcode-terminal": "^0.12.0",
+    "ws": "8.20.0"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "@types/graceful-fs": "^4.1.9",
+    "@types/node": "^22.10.0",
+    "@types/proper-lockfile": "^4.1.4",
+    "@types/qrcode-terminal": "^0.12.2",
+    "@types/ws": "8.18.1",
+    "tsup": "^8.3.5",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "protobufjs"
+    ]
+  },
+  "keywords": [
+    "feishu",
+    "lark",
+    "claude",
+    "claude-code",
+    "codex",
+    "cli",
+    "channel",
+    "bridge"
+  ],
+  "license": "MIT"
+}

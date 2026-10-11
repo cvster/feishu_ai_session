@@ -1,0 +1,29 @@
+# Local upstream checkout
+vendor/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local runtime/output
+.runtime/
+tmp/
+build/
+dist/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Local environment files
+.env
+!.env.example
+
+# Node install cache
+node_modules/
+upstream-overrides/claudecodeui-1.25.2/server/codex-core/
+upstream-overrides/claudecodeui-1.25.2/shared/codex-core-models.js
+
+# Windows extras
+Thumbs.db
+Desktop.ini

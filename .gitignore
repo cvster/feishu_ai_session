@@ -1,0 +1,21 @@
+node_modules/
+dist/
+coverage/
+.corepack/
+*.log
+*.tsbuildinfo
+
+.env
+.env.local
+.env.*.local
+.npmrc
+
+.DS_Store
+.idea/
+.vscode/
+
+# Local maintenance scripts and unreleased changelog are not part of the package
+scripts/
+CHANGELOG.md
+tests-smoke/
+.deploy-check/

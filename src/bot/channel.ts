@@ -1,0 +1,2151 @@
+import type {
+  LarkChannel,
+  LarkChannelOptions,
+  NormalizedMessage,
+} from '@larksuite/channel';
+import { createLarkChannel } from '@larksuite/channel';
+import { dirname, join } from 'node:path';
+import { claudeCapability, codexCapability } from '../agent/capability';
+import { modelLabel, normalizeModelSelection, resolveModelArg } from '../agent/models';
+import {
+  buildAgentPrompt,
+  buildCodexUserPrompt,
+  type BridgePromptInteractiveCard,
+  type BridgePromptMention,
+  type BridgePromptQuotedMessage,
+  type BridgePromptTopicMessage,
+} from '../agent/prompt';
+import type { AgentAdapter, AgentEvent } from '../agent/types';
+import { handleCardAction } from '../card/dispatcher';
+import { CallbackAuth } from '../card/callback-auth';
+import { CallbackNonceStore } from '../card/callback-store';
+import { renderCard, type RunCardRenderOptions } from '../card/run-renderer';
+import { prepareRunControlIcons } from '../card/run-control-icons';
+import {
+  renderMarkdownContinuation,
+  renderMarkdownWindowClosed,
+  type MarkdownContinuationReason,
+} from '../card/stream-recovery';
+import {
+  finalizeIfRunning,
+  initialState,
+  markIdleTimeout,
+  markInterrupted,
+  reduce,
+  startRunRuntime,
+  type RunState,
+  projectNameFromCwd,
+  updateRunRuntime,
+} from '../card/run-state';
+import { renderText } from '../card/text-renderer';
+import { tryHandleCommand, type Controls } from '../commands';
+import type { AppConfig } from '../config/schema';
+import {
+  getAgentStopGraceMs,
+  getCotMessages,
+  getMaxConcurrentRuns,
+  getMessageReplyMode,
+  getRequireMentionInGroup,
+  getRunIdleTimeoutMs,
+  getShowToolCalls,
+} from '../config/schema';
+import { resolveAppSecret } from '../config/secret-resolver';
+import { getLogContext, log, reportMetric, withTrace } from '../core/logger';
+import { MediaCache, type LocalAttachment } from '../media/cache';
+import {
+  toPolicyAttachment,
+  toPromptAttachment,
+} from '../media/attachment';
+import { canUseDm, canUseGroup } from '../policy/access';
+import type { ScopeContext } from '../policy/run-policy';
+import { createOwnerRefreshController } from '../policy/owner';
+import { RunExecutor } from '../runtime/run-executor';
+import type { SessionCatalog } from '../session/catalog';
+import type { SessionStore } from '../session/store';
+import type { WorkspaceStore } from '../workspace/store';
+import { ActiveRuns, type RunHandle } from './active-runs';
+import { ChatModeCache, type ChatMode } from './chat-mode-cache';
+import { handleCommentMention } from './comments';
+import { recordRunSessionEvent, startRunFlow } from './run-flow';
+import { commandSessionCatalogIdentity } from './session-catalog-identity';
+import { startKeepalive } from './keepalive';
+import { PendingQueue } from './pending-queue';
+import { ProcessPool } from './process-pool';
+import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quote';
+import { lookupMessageThreadId } from './thread-id';
+import { addWorkingReaction, removeReaction } from './reaction';
+import { fetchKnownChats } from './lark-info';
+import { isSoloUserBotChat } from './group';
+import { CodexNameSync } from './thread-name';
+import { startAaSessionGroupSync } from './aa-session-groups';
+import { startCodexTurnSync } from './codex-turn-sync';
+import { CodexSubmissionStore } from '../session/codex-submissions';
+import { submitFeishuCodex } from './codex-submission-flow';
+import { startCodexUserInput } from './codex-user-input';
+import { registerLiveRunCardRefresh } from '../card/run-refresh';
+import type { AppPaths } from '../config/app-paths';
+import {
+  clearCardStreamProgress,
+  createDirectLarkHttpInstance,
+  getConfirmedCardStreamContent,
+} from '../platform/lark-http';
+import {
+  consumeCotEvents,
+  CotClient,
+  CotPublisher,
+  finalAnswerOnlyState,
+} from './cot';
+
+const DEBOUNCE_MS = 600;
+const RUN_STATUS_POLL_MS = 15_000;
+// Feishu automatically closes CardKit streaming mode after 10 minutes. Rotate
+// early enough that the handoff marker itself can still be flushed reliably.
+const MARKDOWN_STREAM_ROTATE_MS = 8 * 60_000;
+const STREAM_TERMINAL_GRACE_MS = 3000;
+const REACTION_CLEANUP_GRACE_MS = 1000;
+const LARK_HTTP_TIMEOUT_MS = 30_000;
+
+// Lark SDK logs API errors at error level even when the caller catches them.
+// These specific codes are EXPECTED in our flow (wiki-node lookup that
+// usually misses, fileComment.get that we deliberately let fall back to
+// .list) and the surrounding noise is already covered by our own logs.
+const SUPPRESSED_API_ERROR_CODES = new Set([
+  131005, // wiki.space.getNode "not found" — the doc isn't a wiki node
+  1069307, // drive.fileComment.get "not exist" — fall back to .list
+  1069302, // drive.fileCommentReply.create — whole-doc comments don't accept replies; fall back to fileComment.create
+]);
+
+const SUPPRESSED_ENDPOINT_API_ERRORS = [
+  {
+    code: 99991672,
+    urlPart: '/open-apis/wiki/v2/spaces/get_node',
+  },
+];
+
+function codeFromObj(m: unknown): number | undefined {
+  if (!m || typeof m !== 'object') return undefined;
+  const top = (m as { code?: unknown }).code;
+  if (typeof top === 'number') return top;
+  const nested = (m as { response?: { data?: { code?: unknown } } })?.response?.data?.code;
+  return typeof nested === 'number' ? nested : undefined;
+}
+
+function urlFromObj(m: unknown): string | undefined {
+  if (!m || typeof m !== 'object') return undefined;
+  const configUrl = (m as { config?: { url?: unknown } })?.config?.url;
+  if (typeof configUrl === 'string') return configUrl;
+  const requestPath = (m as { request?: { path?: unknown } })?.request?.path;
+  return typeof requestPath === 'string' ? requestPath : undefined;
+}
+
+function isSuppressedSdkMessage(msg: unknown): boolean {
+  if (Array.isArray(msg)) return msg.some(isSuppressedSdkMessage);
+  const code = codeFromObj(msg);
+  if (code === undefined) return false;
+  if (SUPPRESSED_API_ERROR_CODES.has(code)) return true;
+  const url = urlFromObj(msg);
+  return SUPPRESSED_ENDPOINT_API_ERRORS.some(
+    (rule) => code === rule.code && url?.includes(rule.urlPart),
+  );
+}
+
+export function shouldSuppressSdkErrorLog(args: unknown[]): boolean {
+  return args.some(isSuppressedSdkMessage);
+}
+
+export function isSdkStreamUpdateFailure(args: unknown[]): boolean {
+  return args.some((arg) => typeof arg === 'string' && arg.includes('[stream] update failed'));
+}
+
+function buildQuietLogger(onStreamUpdateFailure?: (args: unknown[]) => void): {
+  error: (...m: unknown[]) => void;
+  warn: (...m: unknown[]) => void;
+  info: (...m: unknown[]) => void;
+  debug: (...m: unknown[]) => void;
+  trace: (...m: unknown[]) => void;
+} {
+  return {
+    error: (...args: unknown[]) => {
+      if (shouldSuppressSdkErrorLog(args)) return;
+      log.warn('sdk', 'error', { args: stringifyArgs(args) });
+    },
+    warn: (...args: unknown[]) => {
+      if (isSdkStreamUpdateFailure(args)) onStreamUpdateFailure?.(args);
+      log.warn('sdk', 'warn', { args: stringifyArgs(args) });
+    },
+    info: (...args: unknown[]) => log.info('sdk', 'info', { args: stringifyArgs(args) }),
+    debug: () => {},
+    trace: () => {},
+  };
+}
+
+function stringifyArgs(args: unknown[]): string {
+  return args
+    .map((a) => {
+      if (typeof a === 'string') return a;
+      try {
+        return JSON.stringify(a);
+      } catch {
+        return String(a);
+      }
+    })
+    .join(' ');
+}
+
+export interface BridgeChannel {
+  channel: LarkChannel;
+  disconnect(): Promise<void>;
+}
+
+export interface StartChannelDeps {
+  cfg: AppConfig;
+  agent: AgentAdapter;
+  sessions: SessionStore;
+  sessionCatalog?: SessionCatalog;
+  workspaces: WorkspaceStore;
+  controls: Controls;
+  appPaths?: Pick<AppPaths, 'secretsFile' | 'keystoreSaltFile' | 'mediaDir' | 'profileDir'>;
+}
+
+export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
+  const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
+  const activeRuns = new ActiveRuns();
+  // ChatModeCache stays per-bridge-instance — invalidated on restart along
+  // with everything else. Topic-mode chats only need one chat.get() call ever.
+  const chatModeCache = new ChatModeCache();
+  // Concurrency cap — reads `preferences.maxConcurrentRuns` on each acquire,
+  // so /config bumps take effect for the next run.
+  const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
+  const executor = new RunExecutor({ agent, pool, activeRuns });
+  const submissions = controls.profileConfig.agentKind === 'codex' && agent.submit && deps.appPaths?.profileDir
+    ? new CodexSubmissionStore(join(deps.appPaths.profileDir, 'codex-submissions.json')) : undefined;
+  await submissions?.load();
+  controls.codexSubmissions = submissions;
+
+  // Resolve the App Secret to plaintext. The config field can be a literal
+  // string, a "${VAR}" template, or a {source, id} SecretRef referencing
+  // the encrypted keystore / env / file / exec provider. Re-resolved on
+  // every startChannel so /account change picks up new secrets.
+  const appSecret = await resolveAppSecret(cfg, deps.appPaths);
+  const callbackNonceStore = deps.appPaths?.mediaDir
+    ? new CallbackNonceStore(join(dirname(deps.appPaths.mediaDir), 'callback-nonces.json'))
+    : undefined;
+  await callbackNonceStore?.load();
+  const callbackAuth = callbackNonceStore
+    ? new CallbackAuth({
+        keys: [{ version: 1, secret: appSecret }],
+        nonceStore: callbackNonceStore,
+      })
+    : undefined;
+  const activePolicyFingerprints = new Map<string, string>();
+  // Per-scope record of the model used on the last run, so a `/config` model
+  // switch can inject a one-time "model changed" note into the next (resumed)
+  // prompt. In-memory only: on restart the first run re-seeds silently.
+  const lastRunModelByScope = new Map<string, string>();
+  // The channel SDK logs markdown/card update failures but can resolve the
+  // stream normally. Keep a per-message marker so we can send the complete
+  // final answer as a fresh message instead of leaving a half-rendered card.
+  const streamDeliveryFailures = new Map<string, Error>();
+  const cotClient = new CotClient({
+    tenant: cfg.accounts.app.tenant,
+    appId: cfg.accounts.app.id,
+    appSecret,
+  });
+  const threadModeOverrideWarnedChats = new Set<string>();
+  const logThreadModeOverride: LogThreadModeOverride = ({ chatId, resolvedMode, threadId }) => {
+    const fields = { chatId, cachedMode: resolvedMode, threadId };
+    if (threadModeOverrideWarnedChats.has(chatId)) {
+      log.info('chat', 'mode-overridden-by-thread', fields);
+      return;
+    }
+    threadModeOverrideWarnedChats.add(chatId);
+    log.warn('chat', 'mode-overridden-by-thread', fields);
+  };
+
+  const opts: LarkChannelOptions = {
+    appId: cfg.accounts.app.id,
+    appSecret,
+    domain:
+      cfg.accounts.app.tenant === 'lark'
+        ? 'https://open.larksuite.com'
+        : 'https://open.feishu.cn',
+    source: 'lark-channel-bridge',
+    logger: buildQuietLogger((args) => {
+      const traceId = getLogContext()?.traceId;
+      if (!traceId) return;
+      streamDeliveryFailures.set(traceId, new Error(stringifyArgs(args)));
+    }),
+    policy: {
+      dmMode: 'open',
+      requireMention: false,
+      respondToMentionAll: false,
+    },
+    // Disable per-chat serialization so we can implement our own
+    // debounce + run-chain policy (see pending-queue + runChain below).
+    safety: {
+      chatQueue: { enabled: false },
+    },
+    // Attach raw Feishu event body to normalized events so we can read fields
+    // the normalizer drops (e.g. action.form_value on CardKit 2.0 form submits).
+    includeRawEvent: true,
+    outbound: {
+      streamThrottleMs: 400,
+    },
+    // SDK 1.65.0-alpha.3+ knobs.
+    wsConfig: {
+      // 3s liveness watchdog: if no inbound message arrives within 3s after
+      // the last ping, SDK presumes connection dead and forces a reconnect.
+      pingTimeout: 3,
+    },
+    // 8s handshake timeout (replaces hardcoded 15s). Fast-fail + fast-retry
+    // beats slow-fail in unstable networks.
+    handshakeTimeoutMs: 8_000,
+    // Feishu is directly reachable on this host. Axios honors HTTP(S)_PROXY
+    // by default even when the channel SDK does not, so use a dedicated
+    // proxy-disabled instance for every Feishu REST call. This is scoped to
+    // Feishu; agent subprocesses still inherit the process proxy environment.
+    httpInstance: createDirectLarkHttpInstance(LARK_HTTP_TIMEOUT_MS),
+    // WebSocket proxy support is opt-in in the channel SDK. Keep it disabled
+    // as the matching half of the direct Feishu route.
+    respectProxyEnv: false,
+  };
+
+  const channel = createLarkChannel(opts);
+  const media = new MediaCache(channel, deps.appPaths?.mediaDir);
+  const batchTasks = new Set<Promise<void>>();
+  let disconnecting = false;
+
+  // Pending → run handoff: while a run is active on a chat, block its pending
+  // queue so messages keep accumulating without flushing. When the run ends,
+  // unblock arms a fresh quiet-window timer. Net effect: at most one run per
+  // chat in flight, and everything sent during a run merges into the next
+  // batch (only flushed once 600ms of silence has passed *after* the run).
+  const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
+    const firstMsg = batch[0];
+    if (!firstMsg) return;
+    pending.block(scope);
+    const task = withTrace({ chatId: firstMsg.chatId }, async () => {
+      log.info('flush', 'start', {
+        scope,
+        batchSize: batch.length,
+        chatId: firstMsg.chatId,
+        threadId: firstMsg.threadId,
+        msgId: firstMsg.messageId,
+      });
+      try {
+        const resolvedMode = await chatModeCache.resolve(channel, firstMsg.chatId);
+        // Feishu/Lark converted topic groups may still resolve as `group` from
+        // the chat info API/cache, while message events already carry threadId.
+        // Treat threadId as authoritative for IM messages so scope and replies
+        // stay isolated per topic.
+        const mode = firstMsg.threadId ? 'topic' : resolvedMode;
+        if (firstMsg.threadId && resolvedMode !== 'topic') {
+          chatModeCache.invalidate(firstMsg.chatId);
+          logThreadModeOverride({
+            chatId: firstMsg.chatId,
+            resolvedMode,
+            threadId: firstMsg.threadId,
+          });
+        }
+        await runAgentBatch({
+          channel,
+          executor,
+          sessions,
+          sessionCatalog,
+          workspaces,
+          media,
+          batch,
+          controls,
+          cotClient,
+          callbackAuth,
+          activePolicyFingerprints,
+          lastRunModelByScope,
+          streamDeliveryFailures,
+          agent,
+          scope,
+          mode,
+        });
+      } catch (err) {
+        log.fail('flush', err);
+      } finally {
+        pending.unblock(scope);
+        log.info('flush', 'end');
+      }
+    });
+    batchTasks.add(task);
+    void task.finally(() => batchTasks.delete(task)).catch(() => {});
+  });
+
+  // Counter for stdout reconnect escalation; reset on `reconnected`.
+  let consecutiveReconnects = 0;
+
+  channel.on({
+    message: async (msg) => {
+      if (disconnecting) return;
+      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
+        intakeMessage({
+          channel,
+          agent,
+          sessions,
+          sessionCatalog,
+          workspaces,
+          activeRuns,
+          pending,
+          msg,
+          controls,
+          chatModeCache,
+          logThreadModeOverride,
+          executor,
+          pool,
+        }),
+      ).catch((err) => log.fail('intake', err));
+    },
+    reject: (evt) => {
+      log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
+    },
+    cardAction: async (evt) => {
+      await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
+        await handleCardAction({
+          channel,
+          evt,
+          sessions,
+          sessionCatalog,
+          workspaces,
+          activeRuns,
+          agent,
+          processPool: pool,
+          runExecutor: executor,
+          controls,
+          pending,
+          chatModeCache,
+          callbackAuth,
+          callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope),
+        });
+      }).catch((err) => log.fail('cardAction', err));
+    },
+    comment: async (evt) => {
+      await withTrace({ chatId: 'comment' }, async () => {
+        await handleCommentMention({
+          channel,
+          evt,
+          agent,
+          sessions,
+          sessionCatalog,
+          workspaces,
+          activeRuns,
+          executor,
+          controls,
+        }).catch((err) => log.fail('comment', err));
+      }).catch((err) => log.fail('comment', err));
+    },
+    reconnecting: () => {
+      consecutiveReconnects++;
+      log.warn('ws', 'reconnecting', { consecutive: consecutiveReconnects });
+      reportMetric('ws_reconnect', 1, { kind: 'ws' });
+      // Stdout escalation — surface jitter that's hidden in the file log.
+      if (consecutiveReconnects === 3) {
+        console.error('⚠️ 已连续重连 3 次,网络可能不稳。');
+      } else if (consecutiveReconnects === 10) {
+        console.error('❌ 已连续重连 10 次,建议在飞书发 /reconnect 或重启 bot。');
+      }
+    },
+    reconnected: () => {
+      if (consecutiveReconnects > 1) {
+        log.info('ws', 'recovered', { afterAttempts: consecutiveReconnects });
+      } else {
+        log.info('ws', 'reconnected');
+      }
+      consecutiveReconnects = 0;
+    },
+    // Classify common WS errors into the `network` phase so /doctor and grep
+    // can find them without scanning generic `ws.fail` entries.
+    error: (err) => {
+      const msg = err?.message ?? String(err);
+      if (/ENOTFOUND|getaddrinfo/.test(msg)) {
+        log.fail('network', err, { kind: 'dns', code: err.code });
+      } else if (/handshake|did not complete/.test(msg)) {
+        log.fail('network', err, { kind: 'handshake-timeout', code: err.code });
+      } else if (/timeout/i.test(msg)) {
+        log.fail('network', err, { kind: 'timeout', code: err.code });
+      } else {
+        log.fail('ws', err, { code: err.code });
+      }
+    },
+  });
+
+  await channel.connect();
+  // Clear keys on account changes: Feishu image keys belong to one app only.
+  controls.runControlIcons = undefined;
+  if (deps.appPaths?.profileDir && channel.rawClient.im?.v1?.image?.create) {
+    try {
+      controls.runControlIcons = await prepareRunControlIcons({
+        appId: cfg.accounts.app.id,
+        cachePath: join(deps.appPaths.profileDir, 'run-control-icons.json'),
+        upload: async (png) => {
+          const response = await channel.rawClient.im.v1.image.create({
+            data: { image_type: 'message', image: png },
+          });
+          const key = response?.image_key;
+          if (!key) throw new Error('Image upload returned no key');
+          return key;
+        },
+      });
+      log.info('card-icons', 'ready', { fork: 'git-double-branch' });
+    } catch (err) {
+      log.warn('card-icons', 'upload-failed', { error: String(err) });
+    }
+  }
+  const ownerRefresh = createOwnerRefreshController({
+    controls,
+    source: channel,
+    appId: cfg.accounts.app.id,
+  });
+  await ownerRefresh.start();
+  const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
+  const aaSessionGroupSync =
+    sessionCatalog && deps.appPaths?.profileDir
+      ? startAaSessionGroupSync({
+          channel,
+          controls,
+          sessionCatalog,
+          workspaces,
+          profileStateDir: deps.appPaths.profileDir,
+        })
+      : undefined;
+  controls.withAaSessionGroupSyncPaused = aaSessionGroupSync
+    ? (operation) => aaSessionGroupSync.withPaused(operation)
+    : undefined;
+  let codexNameSync = controls.profileConfig.agentKind === 'codex' && deps.appPaths?.profileDir
+    ? new CodexNameSync({
+        channel, agent, appId: cfg.accounts.app.id,
+        statePath: join(deps.appPaths.profileDir, 'codex-name-sync.json'),
+        knownChats: () => controls.knownChats ?? [],
+      })
+    : undefined;
+  try {
+    await codexNameSync?.load();
+  } catch (err) {
+    // Never reset a damaged baseline and overwrite user names, or take down
+    // the messaging service because the optional name synchronizer failed.
+    log.warn('session', 'name-sync-disabled', { err: String(err) });
+    codexNameSync = undefined;
+  }
+  const codexTurnSync =
+    sessionCatalog && deps.appPaths?.profileDir
+      ? await startCodexTurnSync({
+          channel,
+          controls,
+          sessionCatalog,
+          profileStateDir: deps.appPaths.profileDir,
+          nameSync: codexNameSync,
+          submissionStore: submissions,
+        })
+      : undefined;
+
+  controls.refreshMirroredRunCard = codexTurnSync
+    ? (scope, messageId) => codexTurnSync.refreshMessage(scope, messageId)
+    : undefined;
+  controls.codexReplySync = controls.profileConfig.agentKind === 'codex' ? codexTurnSync : undefined;
+  controls.codexUserInput = controls.profileConfig.agentKind === 'codex' && sessionCatalog && deps.appPaths?.profileDir
+    ? await startCodexUserInput({ channel, controls, sessionCatalog, profileStateDir: deps.appPaths.profileDir })
+    : undefined;
+
+  for (const record of submissions?.records() ?? []) {
+    if (record.status !== 'pending') continue;
+    for (const message of record.messages) pending.push(record.scope, message);
+  }
+
+  const identity = channel.botIdentity;
+  // Late-bind the bot's own IM identity into the agent adapter so the system
+  // prompt can state "this open_id is you" with the real value. Covers both
+  // initial start and credential-swap reconnects (both go through here).
+  if (identity?.openId) {
+    agent.setBotIdentity?.({
+      openId: identity.openId,
+      ...(identity.name ? { name: identity.name } : {}),
+    });
+  }
+  log.info('ws', 'connected', {
+    bot: identity?.name ?? 'unknown',
+    openId: identity?.openId ?? '-',
+    agent: `${agent.displayName} (${agent.id})`,
+    appId: cfg.accounts.app.id,
+    procId: controls.processId,
+  });
+  console.log('正在监听消息。按 Ctrl+C 退出。\n');
+
+  // App-level keepalive: 15s probe + wake-up detection + HTTP reachability.
+  // Defense-in-depth — the SDK's pingTimeout watchdog handles half-dead WS,
+  // this catches anything that the SDK misses (silent state stuck, etc.).
+  const probeDomain =
+    cfg.accounts.app.tenant === 'lark'
+      ? 'https://open.larksuite.com'
+      : 'https://open.feishu.cn';
+  const keepalive = startKeepalive({
+    channel,
+    domain: probeDomain,
+    forceReconnect: () => controls.restart(),
+  });
+
+  return {
+    channel,
+    disconnect: async () => {
+      disconnecting = true;
+      activeRuns.pauseNewRuns('bridge-disconnect');
+      pending.cancelAll();
+      await executor.waitForSubmissions();
+      if (submissions) await Promise.allSettled([...batchTasks]);
+      await activeRuns.disconnectAll();
+      ownerRefresh.stop();
+      knownChatsRefresh.stop();
+      aaSessionGroupSync?.stop();
+      await controls.codexUserInput?.stop();
+      controls.codexUserInput = undefined;
+      await codexTurnSync?.stop();
+      controls.codexReplySync = undefined;
+      controls.refreshMirroredRunCard = undefined;
+      keepalive.stop();
+      pending.cancelAll();
+      const [disconnectResult, ...flushResults] = await Promise.allSettled([
+        channel.disconnect(),
+        sessions.flush(),
+        sessionCatalog?.flush(),
+        callbackNonceStore?.flush(),
+        workspaces.flush(),
+        submissions?.flush(),
+      ]);
+      for (const [idx, result] of flushResults.entries()) {
+        if (result.status === 'rejected') {
+          log.fail('disconnect', result.reason, { step: `flush-${idx}` });
+        }
+      }
+      if (disconnectResult.status === 'rejected') {
+        throw disconnectResult.reason;
+      }
+    },
+  };
+}
+
+function startKnownChatsRefreshTimer(
+  channel: LarkChannel,
+  controls: Controls,
+): { stop(): void } {
+  const intervalMs = 30 * 60 * 1000;
+  const refresh = async (): Promise<void> => {
+    const chats = await fetchKnownChats(channel);
+    if (chats.length > 0) {
+      controls.knownChats = chats;
+    }
+  };
+  void refresh();
+  const timer = setInterval(() => void refresh(), intervalMs);
+  return {
+    stop() {
+      clearInterval(timer);
+    },
+  };
+}
+
+async function sendNonAllowedGroupHint(
+  channel: LarkChannel,
+  chatId: string,
+  replyToMessageId: string,
+): Promise<void> {
+  const text =
+    '当前群尚未加入响应列表，所以 bot 不会处理消息。\n' +
+    'Bot owner/管理员可在本群发 /invite group 加入白名单。';
+  try {
+    await channel.send(chatId, { text }, { replyTo: replyToMessageId });
+  } catch {
+    await channel.send(chatId, { text });
+  }
+}
+
+interface IntakeDeps {
+  channel: LarkChannel;
+  agent: AgentAdapter;
+  sessions: SessionStore;
+  sessionCatalog?: SessionCatalog;
+  workspaces: WorkspaceStore;
+  activeRuns: ActiveRuns;
+  pending: PendingQueue;
+  msg: NormalizedMessage;
+  controls: Controls;
+  chatModeCache: ChatModeCache;
+  logThreadModeOverride: LogThreadModeOverride;
+  executor: RunExecutor;
+  pool: ProcessPool;
+}
+
+type LogThreadModeOverride = (input: {
+  chatId: string;
+  resolvedMode: ChatMode;
+  threadId: string;
+}) => void;
+
+async function intakeMessage(deps: IntakeDeps): Promise<void> {
+  const {
+    channel,
+    agent,
+    sessions,
+    sessionCatalog,
+    workspaces,
+    activeRuns,
+    pending,
+    msg,
+    controls,
+    chatModeCache,
+    logThreadModeOverride,
+    executor,
+    pool,
+  } = deps;
+  const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
+  // Resolve scope (and underlying chat mode) once at intake — every
+  // downstream consumer keys off these.
+  const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
+  // Feishu delivers a sizable fraction of topic-group message events without a
+  // `thread_id` (notably the message that opens a new topic). We route topic
+  // replies (`replyInThread`) and isolate per-topic session scope off it, so a
+  // missing one makes the reply escape into a brand-new topic AND collapses the
+  // scope to the chat level. When getChatMode says this is a topic group but
+  // the event dropped `thread_id`, backfill it from the raw message — the same
+  // recovery the card-click path uses.
+  let threadId = msg.threadId;
+  if (!threadId && resolvedMode === 'topic') {
+    threadId = await lookupMessageThreadId(channel, msg.messageId);
+    if (threadId) {
+      log.info('intake', 'thread-id-backfilled', {
+        chatId: msg.chatId,
+        msgId: msg.messageId,
+        threadId,
+      });
+    }
+  }
+  // Carry the (possibly backfilled) threadId on the message so the batched
+  // flush — which reads `firstMsg.threadId` for reply routing and topic scope —
+  // sees it.
+  const emsg: NormalizedMessage = threadId === msg.threadId ? msg : { ...msg, threadId };
+  // Some groups are converted into topic groups after creation. In that state
+  // getChatMode can lag behind the message event shape, so threadId is the
+  // stronger signal for topic-scoped sessions and reply routing.
+  const chatMode = threadId ? 'topic' : resolvedMode;
+  if (threadId && resolvedMode !== 'topic') {
+    chatModeCache.invalidate(msg.chatId);
+    logThreadModeOverride({
+      chatId: msg.chatId,
+      resolvedMode,
+      threadId,
+    });
+  }
+  const scope = chatMode === 'topic' && threadId
+    ? `${msg.chatId}:${threadId}`
+    : msg.chatId;
+  log.info('intake', 'enter', {
+    scope,
+    chatType: msg.chatType,
+    chatMode,
+    resolvedMode,
+    threadId,
+    msgId: msg.messageId,
+    sender: msg.senderId,
+    preview,
+    resources: msg.resources.length,
+  });
+
+  const accessDecision =
+    msg.chatType === 'p2p'
+      ? canUseDm(controls.profileConfig, controls, msg.senderId)
+      : canUseGroup(controls.profileConfig, controls, msg.chatId, msg.senderId);
+  if (!accessDecision.ok) {
+    log.info('intake', 'skip-not-allowed-user', {
+      scope,
+      sender: msg.senderId.slice(-6),
+      reason: accessDecision.reason,
+    });
+    if (msg.chatType !== 'p2p' && accessDecision.reason === 'denied-chat' && msg.mentionedBot) {
+      void sendNonAllowedGroupHint(channel, msg.chatId, msg.messageId).catch((err) =>
+        log.warn('intake', 'non-allowed-hint-failed', { err: String(err) }),
+      );
+    }
+    return;
+  }
+
+  // Group-mention policy. p2p is always unrestricted; in groups (regular and
+  // topic) we drop messages that don't @bot when the user has opted into the
+  // quiet-by-default behavior. Slash commands are NOT exempt — the user
+  // chose strict mode so the group stays uniformly quiet unless mentioned.
+  // @全员 is already filtered by SDK (`respondToMentionAll: false`), so any
+  // event reaching here is either targeted or undirected chatter.
+  if (
+    msg.chatType !== 'p2p' &&
+    getRequireMentionInGroup(controls.cfg) &&
+    !msg.mentionedBot
+  ) {
+    let soloUserBotChat = false;
+    try {
+      soloUserBotChat = await isSoloUserBotChat(channel, msg.chatId);
+    } catch (err) {
+      log.warn('intake', 'solo-chat-check-failed', {
+        scope,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (!soloUserBotChat) {
+      log.info('intake', 'skip-no-mention', { scope, chatType: msg.chatType });
+      return;
+    }
+    log.info('intake', 'solo-chat-no-mention-allowed', { scope, chatType: msg.chatType });
+  }
+
+  const handled = await tryHandleCommand({
+    channel,
+    msg: emsg,
+    scope,
+    chatMode,
+    sessions,
+    workspaces,
+    agent,
+    activeRuns,
+    sessionCatalog,
+    sessionCatalogIdentity: await commandSessionCatalogIdentity({
+      msg: emsg,
+      scope,
+      mode: chatMode,
+      workspaces,
+      controls,
+      access: accessDecision,
+    }),
+    runExecutor: executor,
+    processPool: pool,
+    controls,
+    dmGroupCreationOnly: true,
+  });
+  if (handled) {
+    const dropped = controls.codexSubmissions ? [] : pending.cancel(scope);
+    log.info('intake', 'command', { scope, droppedPending: dropped.length });
+    return;
+  }
+
+  if (controls.codexSubmissions) {
+    const currentThread = sessionCatalog?.entries().filter(e => e.scopeId === scope && e.status === 'active' && e.agentId === 'codex')
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.threadId;
+    if (!await controls.codexSubmissions.receive(scope, emsg, currentThread)) return;
+  }
+
+  if (activeRuns.newRunsPaused()) return; // durable pending will resume on reconnect
+  const size = pending.push(scope, emsg);
+  log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+}
+
+interface RunBatchDeps {
+  channel: LarkChannel;
+  agent: AgentAdapter;
+  executor: RunExecutor;
+  sessions: SessionStore;
+  sessionCatalog?: SessionCatalog;
+  workspaces: WorkspaceStore;
+  media: MediaCache;
+  batch: NormalizedMessage[];
+  controls: Controls;
+  cotClient: CotClient;
+  callbackAuth?: CallbackAuth;
+  activePolicyFingerprints: Map<string, string>;
+  lastRunModelByScope: Map<string, string>;
+  streamDeliveryFailures: Map<string, Error>;
+  scope: string;
+  mode: ChatMode;
+}
+
+async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
+  const {
+    channel,
+    agent,
+    executor,
+    sessions,
+    sessionCatalog,
+    workspaces,
+    media,
+    batch,
+    controls,
+    cotClient,
+    callbackAuth,
+    activePolicyFingerprints,
+    lastRunModelByScope,
+    streamDeliveryFailures,
+    scope,
+    mode,
+  } = deps;
+  if (batch.length === 0) return;
+  const firstMsg = batch[0];
+  const lastMsg = batch[batch.length - 1];
+  if (!firstMsg || !lastMsg) return;
+
+  const chatId = firstMsg.chatId;
+  const threadId = firstMsg.threadId;
+  const runTraceId = getLogContext()?.traceId;
+
+  const resourceItems = batch.flatMap((m) =>
+    m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
+  );
+  let attachments: LocalAttachment[];
+  try {
+    attachments = await media.resolve(resourceItems, { ...controls.profileConfig.attachments,
+      failOnResolutionError: Boolean(controls.codexSubmissions) });
+  } catch (error) {
+    if (!controls.codexSubmissions) throw error;
+    for (const record of controls.codexSubmissions.records()) {
+      if (record.status === 'pending' && record.messages.some(m => batch.some(b => b.messageId === m.messageId))) {
+        await controls.codexSubmissions.mark(record.id, { status: 'rejected', error: String(error) });
+      }
+    }
+    await channel.send(chatId, { markdown: '⚠️ 附件下载或读取失败，消息未提交。请重新上传后再试。' },
+      { replyTo: lastMsg.messageId, ...(mode === 'topic' && threadId ? { replyInThread: true } : {}) });
+    return;
+  }
+  if (attachments.length > 0) {
+    log.info('media', 'resolved', { count: attachments.length });
+    for (const attachment of attachments) {
+      log.info('attachment', 'decision', {
+        decision: attachment.decision,
+        kind: attachment.kind,
+        hash: attachment.hash,
+        size: attachment.size,
+        sourceMessageId: attachment.sourceMessageId,
+        reason: attachment.rejectionReason,
+      });
+    }
+  }
+
+  // Collect any reply-quote targets in the batch. Dedup so the same target
+  // quoted by multiple messages in one batch only fetches once. Filter out
+  // ids that are themselves in the batch — those are already in the prompt.
+  const batchIds = new Set(batch.map((m) => m.messageId));
+  const quoteTargets = [
+    ...new Set(
+      batch
+        .map((m) => replyQuoteTargetForMessage(m, mode))
+        .filter((id): id is string => Boolean(id) && !batchIds.has(id!)),
+    ),
+  ];
+  const quotes: QuotedContext[] = [];
+  for (const targetId of quoteTargets) {
+    const q = await fetchQuotedContext(channel, targetId);
+    if (q) {
+      quotes.push(q);
+      log.info('quote', 'fetched', {
+        messageId: targetId,
+        type: q.rawContentType,
+        contentChars: q.content.length,
+      });
+    }
+  }
+
+  // Topic upstream context. When the bot is pulled into a topic for the FIRST
+  // time (no session yet for this scope), the topic's earlier messages — the
+  // root question that may never have @-mentioned the bot, plus prior replies —
+  // live nowhere the agent can see them. Fetch them so it isn't blind to what
+  // the user is pointing at. An already-engaged topic keeps that history in its
+  // resumed session, so we skip the fetch there.
+  let topicContext: QuotedContext[] = [];
+  if (mode === 'topic' && threadId && !sessions.getRaw(scope)) {
+    const exclude = new Set([...batchIds, ...quoteTargets]);
+    topicContext = await fetchTopicContext(channel, threadId, {
+      maxMessages: 40,
+      excludeIds: exclude,
+    });
+    if (topicContext.length > 0) {
+      log.info('topic', 'context-fetched', {
+        scope,
+        threadId,
+        count: topicContext.length,
+      });
+    }
+  }
+
+  // Detect a model switch since this scope's last run. When resuming an
+  // existing conversation the transcript still claims the old model, so tell
+  // the (now-switched) agent its model changed — otherwise it keeps echoing
+  // the previously-announced model. Only fires when a prior model was seen
+  // for this scope (never on the first run) and the selection actually
+  // changed. `requestedModel` (the `--model` value, or undefined for default)
+  // is reused below to log requested-vs-actual against the init event.
+  const agentKind = controls.profileConfig.agentKind;
+  const modelPref = controls.profileConfig.preferences.model;
+  const modelSelection = normalizeModelSelection(agentKind, modelPref);
+  const requestedModel = resolveModelArg(agentKind, modelPref);
+  const prevModel = lastRunModelByScope.get(scope);
+  const modelSwitched = prevModel !== undefined && prevModel !== modelSelection;
+  lastRunModelByScope.set(scope, modelSelection);
+  const extraInstructions = modelSwitched
+    ? [
+        `用户刚把本会话使用的模型切换为「${modelLabel(agentKind, modelPref)}」。` +
+          '之前的对话里可能提到别的模型,请以当前模型为准;若被问到你用的是什么模型,据此回答。',
+      ]
+    : undefined;
+
+  const prompt = buildPrompt(
+    batch,
+    attachments,
+    quotes,
+    topicContext,
+    channel.botIdentity,
+    extraInstructions,
+    agentKind === 'codex',
+  );
+  log.info('prompt', 'built', {
+    promptChars: prompt.length,
+    quotes: quotes.length,
+    topicContext: topicContext.length,
+    ...(modelSwitched ? { modelSwitchedTo: modelSelection } : {}),
+  });
+
+  // For topic groups: thread the reply so it lands in the same topic as the
+  // user's message. Otherwise the SDK posts at top level and the user's
+  // topic discussion breaks visually.
+  const sendOpts = {
+    replyTo: lastMsg.messageId,
+    ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
+  };
+  log.info('flush', 'reply-target', {
+    scope,
+    mode,
+    chatId,
+    threadId,
+    replyTo: sendOpts.replyTo,
+    replyInThread: sendOpts.replyInThread === true,
+  });
+
+  const accessDecision =
+    firstMsg.chatType === 'p2p'
+      ? canUseDm(controls.profileConfig, controls, firstMsg.senderId)
+      : canUseGroup(controls.profileConfig, controls, firstMsg.chatId, firstMsg.senderId);
+  const scopeContext: ScopeContext = {
+    source: 'im',
+    chatId,
+    actorId: firstMsg.senderId,
+    ...(threadId ? { threadId } : {}),
+  };
+  const capability =
+    controls.profileConfig.agentKind === 'codex'
+      ? codexCapability(controls.profileConfig)
+      : claudeCapability(controls.profileConfig);
+  const flowInput = {
+    scopeId: scope,
+    scope: scopeContext,
+    prompt,
+    attachments: attachments.map(toPolicyAttachment),
+    access: accessDecision,
+    capability,
+    profileConfig: controls.profileConfig,
+    sessions,
+    sessionCatalog,
+    workspaces,
+    executor,
+    checkSessionArchived: controls.codexReplySync?.isScopeArchived
+      ? () => controls.codexReplySync!.isScopeArchived!(scope)
+      : undefined,
+    now: Date.now(),
+    stopGraceMs: getAgentStopGraceMs(controls.cfg),
+    observability: {
+      profile: controls.profile,
+      agent: capability.agentId,
+      source: 'im',
+      stage: 'submit',
+    },
+  } satisfies Parameters<typeof startRunFlow>[0];
+  if (agentKind === 'codex' && agent.submit && controls.codexReplySync && controls.codexSubmissions) {
+    const result = await submitFeishuCodex(flowInput, batch, controls.codexSubmissions, controls, sendOpts);
+    if (result.status === 'accepted' && result.continuationWarning) {
+      await channel.send(chatId, { markdown: `⚠️ 消息已接收，但队列启动未确认：${result.continuationWarning}。请在 Codex 桌面检查队列。` }, sendOpts);
+    }
+    if (result.status !== 'accepted' && result.status !== 'deferred') await channel.send(chatId, { markdown: result.status === 'unknown'
+      ? `⚠️ 消息接收结果暂时无法确认，未自动重发：${result.message}`
+      : `⚠️ 消息提交失败：${result.message}` }, sendOpts);
+    return;
+  }
+  const flow = await startRunFlow(flowInput);
+  if (!flow.ok) {
+    log.info('run-flow', 'rejected', { scope, code: flow.rejectReason.code });
+    log.warn('policy', 'denied', {
+      scope,
+      source: 'im',
+      code: flow.rejectReason.code,
+    });
+    await channel.send(chatId, { markdown: flow.rejectReason.userVisible }, sendOpts);
+    return;
+  }
+
+  const { execution, cwdRealpath: cwd } = flow;
+  activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
+  const handle = execution.handle;
+  const eventStream = execution.subscribe();
+  if (flow.resumeFrom) {
+    log.info('session', 'resume', { sessionId: flow.resumeFrom, cwd });
+  } else {
+    log.info('session', 'fresh', { cwd });
+  }
+  let runCodexThreadId: string | undefined;
+  let runCodexTurnId: string | undefined;
+  const recordSession = (evt: AgentEvent): void => {
+    if (evt.type === 'user_input') {
+      controls.codexUserInput?.accept(evt.prompt, handle.run.runId,
+        { scope, replyTo: sendOpts.replyTo, replyInThread: sendOpts.replyInThread });
+      return;
+    }
+    if (evt.type === 'user_input_resolved') {
+      controls.codexUserInput?.resolve(evt.threadId, evt.requestId, handle.run.runId);
+      return;
+    }
+    if (evt.type === 'done' && runCodexThreadId && runCodexTurnId) {
+      controls.codexUserInput?.endTurn(runCodexThreadId, runCodexTurnId);
+    }
+    recordRunSessionEvent({
+      scopeId: scope,
+      botAppId: controls.profileConfig.accounts.app.id,
+      sessions,
+      sessionCatalog,
+      capability,
+      policy: flow.policy,
+      event: evt,
+    });
+    if (evt.type === 'system' && evt.sessionId) {
+      log.info('session', 'set', { sessionId: evt.sessionId });
+    }
+    // Ground truth for "which model is actually running": claude reports the
+    // model it loaded in its init event. Logging requested-vs-actual reveals
+    // whether the --model pin took effect or claude silently fell back (e.g.
+    // an id this claude build/account doesn't recognize).
+    if (evt.type === 'system' && evt.model) {
+      log.info('session', 'model', {
+        requested: requestedModel ?? 'default',
+        actual: evt.model,
+      });
+    }
+    if (evt.type === 'system' && evt.threadId) {
+      runCodexThreadId = evt.threadId;
+      if (evt.turnId) {
+        runCodexTurnId = evt.turnId;
+        controls.codexReplySync?.observeTurn(scope, evt.threadId, evt.turnId,
+          sendOpts.replyTo, sendOpts.replyInThread);
+      }
+      log.info('session', 'set-thread', { threadId: evt.threadId });
+    }
+  };
+
+  // Resolve idle-timeout for this run: scope override (on SessionEntry) wins
+  // over global default (preferences). 0 / undefined = no watchdog.
+  const scopeOverride = sessions.getIdleTimeoutMinutes(scope);
+  const idleTimeoutMs =
+    scopeOverride !== undefined
+      ? scopeOverride > 0
+        ? scopeOverride * 60_000
+        : undefined
+      : getRunIdleTimeoutMs(controls.cfg);
+  if (idleTimeoutMs) {
+    log.info('flush', 'idle-watchdog', { idleTimeoutMs });
+  }
+
+  const replyMode = getMessageReplyMode(controls.cfg);
+  log.info('flush', 'reply-mode', { mode: replyMode });
+  const cotMessages = getCotMessages(controls.cfg);
+  const cotEnabled = cotMessages !== 'off';
+
+  // Re-read prefs on every flush so toggling /config mid-stream takes
+  // effect immediately. Cheap object lookups, no allocation when on.
+  const filterForPrefs = (state: RunState): RunState => {
+    state = { ...state, projectName: state.projectName ?? projectNameFromCwd(cwd) };
+    if (getShowToolCalls(controls.cfg)) return state;
+    return { ...state, blocks: state.blocks.filter((b) => b.kind !== 'tool') };
+  };
+  const cardRenderOptions = callbackAuth
+    ? {
+        ...controls.runControlIcons,
+        signCallback: (action: string) =>
+          callbackAuth.sign({
+            runId: execution.runId,
+            scope,
+            chatId,
+            operatorOpenId: firstMsg.senderId,
+            action,
+            policyFingerprint: flow.policy.policyFingerprint,
+            ttlMs: 24 * 60 * 60 * 1000,
+          }),
+      }
+    : { ...controls.runControlIcons };
+
+  // For non-card modes Claude's output doesn't surface visually until either
+  // a first streamed token (markdown mode) or the whole run ends (text mode).
+  // Add a "Typing" reaction to the triggering message as an instant ack, but
+  // never let that outbound API call block agent event draining.
+  const reactionPromise =
+    !controls.codexReplySync && (cotEnabled || replyMode === 'card')
+      ? undefined : addWorkingReaction(channel, lastMsg.messageId);
+
+  try {
+    const replySync = controls.codexReplySync;
+    if (replySync) {
+      // Submission/execution monitoring must not render a second reply. The
+      // app-server snapshot synchronizer is the sole owner of turn deliveries.
+      const finalState = await processAgentStream(handle, eventStream, scope,
+        idleTimeoutMs, recordSession, async () => {}, () => Boolean(runCodexThreadId && runCodexTurnId &&
+          controls.codexUserInput?.isWaiting(runCodexThreadId, runCodexTurnId)));
+      if (handle.detached) return;
+      await replySync.runNow();
+      // A failure before turn/start has no turn to mirror (e.g. queue rejected).
+      // Surface only that submission error, never duplicate a turn's answer.
+      if (!runCodexTurnId && finalState.terminal === 'error') {
+        await channel.send(chatId, { markdown: `⚠️ 消息提交失败：${finalState.errorMsg ?? 'Codex 未创建新轮次'}` }, sendOpts);
+      }
+      return;
+    } else if (cotEnabled) {
+      const cotPublisher = new CotPublisher({
+        client: cotClient,
+        chatId,
+        // The CoT bubble follows this origin message's thread. In a topic the
+        // triggering message is itself in-topic, so the bubble lands in the
+        // topic; message_cot has no thread_id receive type, so origin is the
+        // only lever we have (see CotClient.create).
+        originMessageId: lastMsg.messageId,
+        runId: execution.runId,
+        scope,
+        inputPreview: lastMsg.content,
+      });
+      await cotPublisher.start();
+      if (!cotPublisher.disabled) {
+        const cotDone = consumeCotEvents(execution.subscribe(), cotPublisher, {
+          detail: cotMessages,
+        });
+        const finalState = await processAgentStream(
+          handle,
+          eventStream,
+          scope,
+          idleTimeoutMs,
+          recordSession,
+          async () => {},
+        );
+        await cotDone;
+        if (cotPublisher.degradedReason) {
+          await sendCotDegradedNotice({
+            channel,
+            chatId,
+            scope,
+            sendOpts,
+            reason: cotPublisher.degradedReason,
+          });
+        }
+        await sendFinalReply({
+          channel,
+          chatId,
+          scope,
+          state: filterForPrefs(finalAnswerOnlyState(finalState)),
+          replyMode,
+          sendOpts,
+          cardRenderOptions,
+        });
+        return;
+      }
+      log.warn('cot', 'fallback-existing-reply', { reason: 'create-disabled' });
+    }
+
+    if (replyMode === 'card') {
+      let latestState: RunState = initialState;
+      let producerStarted = false;
+      let cardCtrl:
+        | { update(next: object | ((current: object) => object)): Promise<void> }
+        | undefined;
+      const renderDone = processAgentStream(
+        handle,
+        eventStream,
+        scope,
+        idleTimeoutMs,
+        recordSession,
+        async (state) => {
+          latestState = state;
+          if (cardCtrl) {
+            await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
+          }
+        },
+      );
+      const streamDone = channel.stream(
+        chatId,
+        {
+          card: {
+            initial: renderCard(initialState, cardRenderOptions),
+            producer: async (ctrl) => {
+              producerStarted = true;
+              cardCtrl = ctrl;
+              const unregisterRefresh = registerLiveRunCardRefresh(ctrl.messageId, scope, async () => {
+                const runtime = latestState.runtime;
+                const refreshed = runtime
+                  ? { ...latestState, runtime: { ...runtime, checkedAtMs: Date.now() } }
+                  : latestState;
+                await ctrl.update(renderCard(filterForPrefs(refreshed), cardRenderOptions));
+              });
+              try {
+                await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
+                await renderDone;
+              } finally {
+                unregisterRefresh();
+              }
+            },
+          },
+        },
+        sendOpts,
+      );
+      await awaitRenderAwareStream({
+        mode: replyMode,
+        streamDone,
+        renderDone,
+        producerStarted: () => producerStarted,
+        deliveryFailure: () =>
+          runTraceId ? streamDeliveryFailures.get(runTraceId) : undefined,
+        fallback: async (state) => {
+          await channel.send(
+            chatId,
+            { card: renderCard(filterForPrefs(state), cardRenderOptions) },
+            sendOpts,
+          );
+        },
+      });
+    } else if (replyMode === 'markdown') {
+      let latestState: RunState = initialState;
+      let renderDone!: Promise<RunState>;
+      type MarkdownCtrl = { setContent(markdown: string): Promise<void> };
+      type MarkdownStreamRecord = {
+        generation: number;
+        startedAtMs: number;
+        baseline?: string;
+        reason: MarkdownContinuationReason;
+        producerStarted: boolean;
+        ctrl?: MarkdownCtrl;
+        error?: Error;
+        stop(): void;
+        done: Promise<unknown>;
+      };
+      let generation = 0;
+      let activeStream!: MarkdownStreamRecord;
+      const renderedMarkdown = (state: RunState): string =>
+        renderText(filterForPrefs(state));
+      const streamMarkdown = (state: RunState, stream: MarkdownStreamRecord): string => {
+        const current = renderedMarkdown(state);
+        return stream.baseline === undefined
+          ? current
+          : renderMarkdownContinuation(stream.baseline, current, stream.reason);
+      };
+      let finalFallbackSent = false;
+      const sendFinalOnlyFallback = async (state: RunState): Promise<void> => {
+        if (finalFallbackSent) return;
+        const filtered = filterForPrefs(state);
+        const lastText = [...filtered.blocks].reverse().find((block) => block.kind === 'text');
+        const finalOnly: RunState = {
+          ...filtered,
+          blocks: lastText ? [lastText] : [],
+          reasoning: { content: '', active: false },
+          footer: null,
+        };
+        const meaningfulBody = renderText({
+          ...finalOnly, runtime: undefined, execution: undefined, projectName: undefined,
+        });
+        if (!meaningfulBody.trim()) return;
+        const body = renderText(finalOnly);
+        if (body.trim()) {
+          finalFallbackSent = true;
+          await channel.send(chatId, { markdown: body }, sendOpts);
+        }
+      };
+      const startMarkdownStream = (
+        baseline: string | undefined,
+        reason: MarkdownContinuationReason,
+      ): MarkdownStreamRecord => {
+        let stop!: () => void;
+        const stopped = new Promise<void>((resolve) => {
+          stop = resolve;
+        });
+        const record: MarkdownStreamRecord = {
+          generation: ++generation,
+          startedAtMs: Date.now(),
+          baseline,
+          reason,
+          producerStarted: false,
+          stop,
+          done: Promise.resolve(),
+        };
+        record.done = channel.stream(
+          chatId,
+          {
+            markdown: async (ctrl) => {
+              record.producerStarted = true;
+              record.ctrl = ctrl;
+              await ctrl.setContent(streamMarkdown(latestState, record));
+              await Promise.race([renderDone.then(() => undefined), stopped]);
+            },
+          },
+          sendOpts,
+        );
+        void record.done.catch((err) => {
+          record.error = err instanceof Error ? err : new Error(String(err));
+        });
+        return record;
+      };
+      const rotateMarkdownStream = async (
+        state: RunState,
+        reason: MarkdownContinuationReason,
+      ): Promise<void> => {
+        const previous = activeStream;
+        const confirmed = runTraceId ? getConfirmedCardStreamContent(runTraceId) : undefined;
+        const baseline = reason === 'window_rotated' ? renderedMarkdown(state) : (confirmed ?? '');
+
+        if (reason === 'window_rotated' && previous.ctrl) {
+          await previous.ctrl
+            .setContent(renderMarkdownWindowClosed(streamMarkdown(state, previous)))
+            .catch((err) => {
+              log.warn('stream', 'window-close-marker-failed', {
+                mode: replyMode,
+                err: err instanceof Error ? err.message : String(err),
+              });
+            });
+        }
+        previous.stop();
+        await previous.done.catch((err) => {
+          log.warn('stream', 'segment-close-failed', {
+            mode: replyMode,
+            generation: previous.generation,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        });
+
+        if (runTraceId) streamDeliveryFailures.delete(runTraceId);
+        activeStream = startMarkdownStream(baseline, reason);
+        log.warn('stream', 'starting-continuation', {
+          mode: replyMode,
+          reason,
+          generation: activeStream.generation,
+          confirmedChars: baseline.length,
+        });
+      };
+
+      renderDone = processAgentStream(
+        handle,
+        eventStream,
+        scope,
+        idleTimeoutMs,
+        recordSession,
+        async (state) => {
+          latestState = state;
+          if (state.terminal === 'running') {
+            const failure = runTraceId ? streamDeliveryFailures.get(runTraceId) : undefined;
+            if (failure || activeStream.error) {
+              const detail = failure?.message ?? activeStream.error?.message ?? '';
+              await rotateMarkdownStream(
+                state,
+                detail.includes('200850') ? 'window_timeout' : 'transport',
+              );
+            } else if (Date.now() - activeStream.startedAtMs >= MARKDOWN_STREAM_ROTATE_MS) {
+              await rotateMarkdownStream(state, 'window_rotated');
+            }
+          }
+          if (activeStream.ctrl) {
+            await activeStream.ctrl.setContent(streamMarkdown(state, activeStream));
+          }
+        },
+      );
+      activeStream = startMarkdownStream(undefined, 'transport');
+      const finalState = await renderDone;
+      const terminalFailure = runTraceId ? streamDeliveryFailures.get(runTraceId) : undefined;
+      if (terminalFailure || activeStream.error) {
+        const detail = terminalFailure?.message ?? activeStream.error?.message ?? '';
+        await rotateMarkdownStream(
+          finalState,
+          detail.includes('200850') ? 'window_timeout' : 'transport',
+        );
+        if (activeStream.ctrl) {
+          await activeStream.ctrl.setContent(streamMarkdown(finalState, activeStream));
+        }
+      }
+      activeStream.stop();
+      await awaitRenderAwareStream({
+        mode: replyMode,
+        streamDone: activeStream.done,
+        renderDone: Promise.resolve(finalState),
+        producerStarted: () => activeStream.producerStarted,
+        deliveryFailure: () =>
+          runTraceId ? streamDeliveryFailures.get(runTraceId) : undefined,
+        fallback: sendFinalOnlyFallback,
+      });
+
+      const intendedFinal = streamMarkdown(finalState, activeStream);
+      const confirmedFinal = runTraceId ? getConfirmedCardStreamContent(runTraceId) : undefined;
+      const deliveryFailure = runTraceId ? streamDeliveryFailures.get(runTraceId) : undefined;
+      if (
+        deliveryFailure ||
+        (confirmedFinal !== undefined && confirmedFinal !== intendedFinal)
+      ) {
+        log.warn('stream', 'final-delivery-unconfirmed', {
+          mode: replyMode,
+          generation: activeStream.generation,
+          intendedChars: intendedFinal.length,
+          confirmedChars: confirmedFinal?.length,
+          err: deliveryFailure?.message,
+        });
+        await sendFinalOnlyFallback(finalState);
+      }
+    } else {
+      // text mode: drain the agent stream without sending anything during
+      // the run, then post the final rendered text once as a plain markdown
+      // (msg_type=post) message — no card, no streaming, no typewriter.
+      const finalState = await processAgentStream(
+        handle,
+        eventStream,
+        scope,
+        idleTimeoutMs,
+        recordSession,
+        async () => {},
+      );
+      await sendFinalReply({
+        channel,
+        chatId,
+        scope,
+        state: filterForPrefs(finalState),
+        replyMode,
+        sendOpts,
+        cardRenderOptions,
+      });
+    }
+  } catch (err) {
+    log.fail('stream', err);
+  } finally {
+    if (handle.interrupted && runCodexThreadId && runCodexTurnId) {
+      controls.codexUserInput?.endTurn(runCodexThreadId, runCodexTurnId);
+    }
+    if (runTraceId) {
+      clearCardStreamProgress(runTraceId);
+      const cleanup = setTimeout(() => streamDeliveryFailures.delete(runTraceId), 60_000);
+      cleanup.unref?.();
+    }
+    activePolicyFingerprints.delete(scope);
+    scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
+  }
+}
+
+async function sendFinalReply(input: {
+  channel: LarkChannel;
+  chatId: string;
+  scope: string;
+  state: RunState;
+  replyMode: ReturnType<typeof getMessageReplyMode>;
+  sendOpts: { replyTo: string; replyInThread?: boolean };
+  cardRenderOptions: RunCardRenderOptions;
+}): Promise<void> {
+  const body = renderText(input.state);
+
+  if (input.replyMode === 'card') {
+    const result = await input.channel.send(
+      input.chatId,
+      { card: renderCard(input.state, input.cardRenderOptions) },
+      input.sendOpts,
+    );
+    log.info('outbound', 'sent', outboundLogFields(input, 'card', body, result));
+  } else if (input.replyMode === 'markdown') {
+    if (body.trim()) {
+      try {
+        await input.channel.stream(
+          input.chatId,
+          {
+            markdown: async (ctrl) => {
+              await ctrl.setContent(body);
+            },
+          },
+          input.sendOpts,
+        );
+        log.info('outbound', 'sent', outboundLogFields(input, 'markdown-stream', body));
+      } catch (err) {
+        log.warn('outbound', 'markdown-stream-fallback', {
+          err: err instanceof Error ? err.message : String(err),
+        });
+        const result = await input.channel.send(
+          input.chatId,
+          { markdown: body },
+          input.sendOpts,
+        );
+        log.info('outbound', 'sent', outboundLogFields(input, 'markdown', body, result));
+      }
+    }
+  } else if (body.trim()) {
+    const result = await input.channel.send(
+      input.chatId,
+      { markdown: body },
+      input.sendOpts,
+    );
+    log.info('outbound', 'sent', outboundLogFields(input, 'text', body, result));
+  }
+}
+
+async function sendCotDegradedNotice(input: {
+  channel: LarkChannel;
+  chatId: string;
+  scope: string;
+  sendOpts: { replyTo: string; replyInThread?: boolean };
+  reason: string;
+}): Promise<void> {
+  log.warn('cot', 'degraded', {
+    scope: input.scope,
+    reason: input.reason,
+    replyInThread: input.sendOpts.replyInThread === true,
+  });
+  try {
+    await input.channel.send(
+      input.chatId,
+      { markdown: 'COT 过程消息更新失败，已停止展示过程；最终答案仍会继续发送。' },
+      input.sendOpts,
+    );
+  } catch (err) {
+    log.warn('cot', 'degraded-notice-failed', {
+      scope: input.scope,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function outboundLogFields(
+  input: {
+    scope?: string;
+    replyMode: ReturnType<typeof getMessageReplyMode>;
+    sendOpts?: { replyTo?: string; replyInThread?: boolean };
+  },
+  type: string,
+  body: string,
+  result?: { messageId?: string },
+): Record<string, unknown> {
+  return {
+    type,
+    scope: input.scope,
+    mode: input.replyMode,
+    chars: body.length,
+    messageId: result?.messageId,
+    replyTo: input.sendOpts?.replyTo,
+    replyInThread: input.sendOpts?.replyInThread === true,
+  };
+}
+
+/**
+ * Drive the agent's event stream into a stateful RunState, calling `flush`
+ * on every state transition. Used by both card and markdown reply modes —
+ * the only difference between the two is what `flush` does with the state.
+ */
+async function processAgentStream(
+  handle: RunHandle,
+  events: AsyncIterable<AgentEvent>,
+  scope: string,
+  idleTimeoutMs: number | undefined,
+  recordSession: (event: AgentEvent) => void,
+  flush: (state: RunState) => Promise<void>,
+  waitingForInput?: () => boolean,
+): Promise<RunState> {
+  const runStart = Date.now();
+  let state: RunState = startRunRuntime(initialState, runStart);
+  let flushTail = Promise.resolve();
+  const enqueueFlush = (snapshot: RunState): Promise<void> => {
+    const task = flushTail.then(() => flush(snapshot));
+    // Keep the serialization chain usable after an individual delivery
+    // failure; the caller still receives that failure through `task`.
+    flushTail = task.catch(() => {});
+    return task;
+  };
+
+  let statusPollRunning = false;
+  let statusPollInFlight: Promise<void> = Promise.resolve();
+  const statusPoll = setInterval(() => {
+    if (statusPollRunning || state.terminal !== 'running') return;
+    statusPollRunning = true;
+    statusPollInFlight = (async () => {
+      let processRunning = true;
+      try {
+        processRunning = !(await handle.run.waitForExit(0));
+      } catch (err) {
+        log.warn('run', 'status-poll-failed', {
+          scope,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+      const nowMs = Date.now();
+      state = updateRunRuntime(state, { nowMs, processRunning });
+      log.info('run', 'status-poll', {
+        scope,
+        processRunning,
+        elapsedMs: nowMs - runStart,
+        inactiveMs: nowMs - (state.runtime?.lastActivityAtMs ?? runStart),
+      });
+      try {
+        await enqueueFlush(state);
+      } catch (err) {
+        // A heartbeat is diagnostic/UI-only. A transient Feishu failure must
+        // not stop the agent event drain.
+        log.warn('run', 'status-delivery-failed', {
+          scope,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })().finally(() => {
+      statusPollRunning = false;
+    });
+  }, RUN_STATUS_POLL_MS);
+  statusPoll.unref?.();
+
+  // Idle watchdog: claude going silent for `idleTimeoutMs` is treated as
+  // "presumed hung", we stop() and surface a timeout marker on the card.
+  //
+  // BUT — claude can legitimately be silent for a long time when it's
+  // waiting on a long-running tool call (e.g. `lark-cli` printing an
+  // OAuth URL and blocking until the user clicks authorize). In that
+  // case there's no event stream activity from claude itself, only the
+  // tool subprocess running. We track which tool_use ids haven't matched
+  // a tool_result yet, and pause the watchdog whenever the set is
+  // non-empty.
+  //
+  // The watchdog re-arms when:
+  //  - a tool_result drains the in-flight set to zero, OR
+  //  - any non-tool event arrives while the set is empty.
+  let idleFired = false;
+  let timer: NodeJS.Timeout | undefined;
+  const inFlightTools = new Set<string>();
+  const blockingInputs = new Set<string | number>();
+  const armOrPauseIdle = (): void => {
+    if (handle.detached) return;
+    if (!idleTimeoutMs) return;
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+    if (inFlightTools.size > 0 || blockingInputs.size > 0 || waitingForInput?.()) return;
+    timer = setTimeout(() => {
+      if (handle.detached) return;
+      if (waitingForInput?.()) { armOrPauseIdle(); return; }
+      idleFired = true;
+      handle.interrupted = true;
+      log.warn('agent', 'idle-timeout', { scope, idleTimeoutMs });
+      void handle.run.stop().catch(() => {
+        /* stop errors are non-fatal */
+      });
+    }, idleTimeoutMs);
+  };
+  armOrPauseIdle();
+
+  try {
+    for await (const evt of events) {
+      if (handle.interrupted || (handle.detached && evt.type !== 'system')) break;
+
+      state = updateRunRuntime(state, { nowMs: Date.now(), activity: true });
+
+      // Track tool flight before re-arming the idle timer so the arm step
+      // sees the correct set size. tool_use opens a window; tool_result
+      // closes it. Other event types are bookkept after the if/else.
+      if (evt.type === 'tool_use') {
+        inFlightTools.add(evt.id);
+        log.info('agent', 'tool-in-flight', {
+          tool: evt.name,
+          inFlight: inFlightTools.size,
+        });
+      } else if (evt.type === 'tool_result') {
+        inFlightTools.delete(evt.id);
+        log.info('agent', 'tool-done', { inFlight: inFlightTools.size });
+      } else if (evt.type === 'user_input' && evt.prompt.request.isBlocking) {
+        blockingInputs.add(evt.prompt.requestId);
+      } else if (evt.type === 'user_input_resolved') {
+        blockingInputs.delete(evt.requestId);
+      }
+      armOrPauseIdle();
+
+      if (evt.type === 'system' || evt.type === 'user_input' || evt.type === 'user_input_resolved') {
+        recordSession(evt);
+        state = reduce(state, evt);
+        await enqueueFlush(state);
+        continue;
+      }
+      if (evt.type === 'usage') {
+        const { costUsd, inputTokens, outputTokens } = evt;
+        if (costUsd !== undefined || inputTokens !== undefined || outputTokens !== undefined) {
+          log.info('agent', 'usage', {
+            ...(costUsd !== undefined ? { costUsd: Number(costUsd.toFixed(4)) } : {}),
+            ...(inputTokens !== undefined ? { inputTokens } : {}),
+            ...(outputTokens !== undefined ? { outputTokens } : {}),
+          });
+          if (costUsd !== undefined) reportMetric('cost_usd', costUsd);
+          if (inputTokens !== undefined) reportMetric('tokens_in', inputTokens);
+          if (outputTokens !== undefined) reportMetric('tokens_out', outputTokens);
+        }
+        continue;
+      }
+
+      const prevTerminal = state.terminal;
+      if (evt.type === 'done' || evt.type === 'error') recordSession(evt);
+      const prevFooter = state.footer;
+      state = reduce(state, evt);
+      if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
+        log.info('card', 'transition', { footer: state.footer, terminal: state.terminal });
+      }
+      await enqueueFlush(state);
+      // Stop iterating as soon as we have a terminal state. Some claude
+      // versions don't close stdout immediately after the result event, which
+      // would leave the for-await waiting forever otherwise.
+      if (state.terminal !== 'running') break;
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+    clearInterval(statusPoll);
+    await statusPollInFlight;
+  }
+
+  // Detaching is not a task terminal event; never publish a false completion.
+  if (handle.detached) return state;
+
+  // If state already reached a terminal event (done/error/etc.) before the
+  // watchdog or interrupt could land, don't clobber it — that real terminal
+  // wins. This avoids "claude finished but flush was slow → timer fired
+  // mid-flush → user sees 'idle_timeout' on a successful run".
+  if (state.terminal === 'running') {
+    if (idleFired) {
+      state = markIdleTimeout(state, Math.round(idleTimeoutMs! / 60_000));
+    } else if (handle.interrupted) {
+      state = markInterrupted(state);
+    } else {
+      state = finalizeIfRunning(state);
+    }
+  }
+  state = updateRunRuntime(state, { nowMs: Date.now(), processRunning: false });
+  log.info('card', 'final', { scope, terminal: state.terminal, interrupted: handle.interrupted });
+  reportMetric('run_e2e_ms', Date.now() - runStart, { terminal: state.terminal });
+  await enqueueFlush(state);
+  if (handle.interrupted) {
+    await handle.run.stop();
+  }
+  return state;
+}
+
+async function awaitRenderAwareStream(input: {
+  mode: 'card' | 'markdown';
+  streamDone: Promise<unknown>;
+  renderDone: Promise<RunState>;
+  producerStarted: () => boolean;
+  deliveryFailure?: () => Error | undefined;
+  fallback: (state: RunState) => Promise<void>;
+}): Promise<void> {
+  let fallbackSent = false;
+  const fallbackForDeliveryFailure = async (state: RunState): Promise<boolean> => {
+    const failure = input.deliveryFailure?.();
+    if (!failure || fallbackSent) return false;
+    fallbackSent = true;
+    log.warn('stream', 'delivery-failed-final-fallback', {
+      mode: input.mode,
+      err: failure.message,
+    });
+    await runFallbackReply(input.mode, state, input.fallback);
+    return true;
+  };
+  const streamResult = input.streamDone.then(
+    () => ({ kind: 'stream' as const, ok: true as const }),
+    (err) => ({ kind: 'stream' as const, ok: false as const, err }),
+  );
+  const renderResult = input.renderDone.then(
+    (state) => ({ kind: 'render' as const, ok: true as const, state }),
+    (err) => ({ kind: 'render' as const, ok: false as const, err }),
+  );
+  const first = await Promise.race([streamResult, renderResult]);
+  if (!first.ok) {
+    if (first.kind === 'stream') {
+      log.fail('stream', first.err, { mode: input.mode, step: 'stream' });
+      const rendered = await renderResult;
+      if (!rendered.ok) throw rendered.err;
+      await runFallbackReply(input.mode, rendered.state, input.fallback);
+      return;
+    }
+    throw first.err;
+  }
+
+  if (first.kind === 'stream') {
+    const rendered = await renderResult;
+    if (!rendered.ok) throw rendered.err;
+    await fallbackForDeliveryFailure(rendered.state);
+    return;
+  }
+
+  if (!input.producerStarted()) {
+    log.warn('stream', 'producer-not-started-before-agent-terminal', { mode: input.mode });
+    await runFallbackReply(input.mode, first.state, input.fallback);
+    return;
+  }
+
+  const terminal = await Promise.race([
+    streamResult,
+    delay(STREAM_TERMINAL_GRACE_MS).then(() => undefined),
+  ]);
+  if (!terminal) {
+    log.warn('stream', 'terminal-grace-expired', {
+      mode: input.mode,
+      graceMs: STREAM_TERMINAL_GRACE_MS,
+    });
+    if (await fallbackForDeliveryFailure(first.state)) return;
+    void streamResult.then(async (result) => {
+      if (!result.ok) {
+        log.fail('stream', result.err, { mode: input.mode, step: 'stream-terminal-late' });
+        if (!fallbackSent) {
+          fallbackSent = true;
+          await runFallbackReply(input.mode, first.state, input.fallback);
+        }
+        return;
+      }
+      await fallbackForDeliveryFailure(first.state);
+    });
+    return;
+  }
+  if (!terminal.ok) {
+    log.fail('stream', terminal.err, { mode: input.mode, step: 'stream-terminal' });
+    fallbackSent = true;
+    await runFallbackReply(input.mode, first.state, input.fallback);
+    return;
+  }
+  await fallbackForDeliveryFailure(first.state);
+}
+
+async function runFallbackReply(
+  mode: 'card' | 'markdown',
+  state: RunState,
+  fallback: (state: RunState) => Promise<void>,
+): Promise<void> {
+  try {
+    await fallback(state);
+  } catch (err) {
+    log.fail('stream', err, { mode, step: 'fallback' });
+  }
+}
+
+function scheduleWorkingReactionCleanup(
+  channel: LarkChannel,
+  messageId: string,
+  reactionPromise: Promise<string | undefined> | undefined,
+): void {
+  if (!reactionPromise) return;
+
+  void (async () => {
+    const reactionResult = reactionPromise.then(
+      (reactionId) => ({ ok: true as const, reactionId }),
+      (err) => ({ ok: false as const, err }),
+    );
+    const settled = await Promise.race([
+      reactionResult,
+      delay(REACTION_CLEANUP_GRACE_MS).then(() => undefined),
+    ]);
+
+    if (!settled) {
+      log.warn('reaction', 'cleanup-deferred', {
+        messageId,
+        graceMs: REACTION_CLEANUP_GRACE_MS,
+      });
+      void reactionResult.then((result) => {
+        if (!result.ok || !result.reactionId) return;
+        void removeReaction(channel, messageId, result.reactionId);
+      });
+      return;
+    }
+
+    if (!settled.ok || !settled.reactionId) return;
+    await removeReaction(channel, messageId, settled.reactionId);
+  })();
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildPrompt(
+  batch: NormalizedMessage[],
+  attachments: LocalAttachment[],
+  quotes: QuotedContext[] = [],
+  topicContext: QuotedContext[] = [],
+  botIdentity?: { openId: string; name?: string },
+  extraInstructions?: string[],
+  rawCodexInput = false,
+): string {
+  const first = batch[0];
+  if (!first) return '';
+
+  const fileKeys = batch.flatMap((m) => m.resources.map((r) => r.fileKey));
+  // When the debounce window merged messages (possibly from several senders —
+  // common in bot-at-bot group chats), annotate each segment with its sender
+  // so the agent can tell who said what. Single-message batches stay verbatim.
+  const annotate = batch.length > 1;
+  const texts = batch
+    .map((m) => {
+      const text = stripAttachmentRefs(m.content, fileKeys).trim();
+      if (!text) return '';
+      return annotate ? `${senderAnnotation(m)} ${text}` : text;
+    })
+    .filter(Boolean);
+  const userPart =
+    texts.length > 0
+      ? texts.join('\n\n')
+      : attachments.length > 0
+        ? '请看下面的附件。'
+        : '（对方发来一条没有正文的消息——通常是只 @ 了你的唤醒（ping）。请简短回应。）';
+
+  const senderType = senderTypeOf(first);
+  const mentions = mergeMentions(batch);
+  const quotedMessages = quotes.map(toPromptQuote);
+  const topicMessages = topicContext.map(toPromptTopicMessage);
+  const interactiveCards = batch.map(toPromptInteractiveCard).filter(isDefined);
+  const promptAttachments = attachments.map(toPromptAttachment);
+
+  if (rawCodexInput) {
+    return buildCodexUserPrompt({
+      userInput: userPart,
+      ...(extraInstructions?.length ? { instructions: extraInstructions } : {}),
+      ...(topicMessages.length ? { topicContext: topicMessages } : {}),
+      ...(quotedMessages.length ? { quotedMessages } : {}),
+      ...(interactiveCards.length ? { interactiveCards } : {}),
+      ...(promptAttachments.length ? { attachments: promptAttachments } : {}),
+      ...(mentions.length
+        ? {
+            mentions: mentions.filter(
+              (mention) => !botIdentity?.openId || mention.openId !== botIdentity.openId,
+            ),
+          }
+        : {}),
+    });
+  }
+
+  return buildAgentPrompt({
+    context: {
+      chatId: first.chatId,
+      chatType: first.chatType,
+      senderId: first.senderId,
+      ...(first.senderName ? { senderName: first.senderName } : {}),
+      ...(senderType ? { senderType } : {}),
+      ...(botIdentity?.openId ? { botOpenId: botIdentity.openId } : {}),
+      ...(mentions.length > 0 ? { mentions } : {}),
+      ...(first.threadId ? { threadId: first.threadId } : {}),
+      messageIds: batch.map((m) => m.messageId),
+      source: 'im',
+    },
+    ...(extraInstructions && extraInstructions.length > 0
+      ? { instructions: extraInstructions }
+      : {}),
+    userInput: userPart,
+    ...(topicMessages.length > 0 ? { topicContext: topicMessages } : {}),
+    quotedMessages,
+    interactiveCards,
+    attachments: promptAttachments,
+  });
+}
+
+/**
+ * Classify the sender as human or bot from the raw Feishu event
+ * (`sender.sender_type`: 'user' = human, 'app' = bot). The normalizer drops
+ * this field, so read it off `msg.raw` (`includeRawEvent: true` above).
+ * Unknown / missing values return undefined — omit rather than guess.
+ */
+function senderTypeOf(msg: NormalizedMessage): 'user' | 'bot' | undefined {
+  const raw = msg.raw as { sender?: { sender_type?: unknown } } | undefined;
+  const senderType = raw?.sender?.sender_type;
+  if (senderType === 'user') return 'user';
+  if (senderType === 'app' || senderType === 'bot') return 'bot';
+  return undefined;
+}
+
+function senderAnnotation(msg: NormalizedMessage): string {
+  const name = msg.senderName ?? msg.senderId;
+  const type = senderTypeOf(msg);
+  return type ? `[${name} (${type})]:` : `[${name}]:`;
+}
+
+function mergeMentions(batch: NormalizedMessage[]): BridgePromptMention[] {
+  const seen = new Set<string>();
+  const out: BridgePromptMention[] = [];
+  for (const msg of batch) {
+    for (const mention of msg.mentions ?? []) {
+      const dedupeKey = mention.openId ?? `${mention.name ?? ''}:${mention.key}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      out.push({
+        ...(mention.openId ? { openId: mention.openId } : {}),
+        ...(mention.name ? { name: mention.name } : {}),
+        ...(mention.isBot !== undefined ? { isBot: mention.isBot } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+function replyQuoteTargetForMessage(
+  msg: NormalizedMessage,
+  mode: ChatMode,
+): string | undefined {
+  const replyTo = msg.replyToMessageId;
+  if (!replyTo) return undefined;
+
+  // Feishu topic messages use root_id/parent_id as the topic root anchor even
+  // for ordinary in-topic messages. Treat that as structure, not a quote.
+  if (mode === 'topic' && msg.threadId && msg.rootId && replyTo === msg.rootId) {
+    return undefined;
+  }
+  return replyTo;
+}
+
+function stripAttachmentRefs(text: string, fileKeys: string[]): string {
+  if (!text || fileKeys.length === 0) return text;
+  let out = text;
+  for (const key of fileKeys) {
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`!?\\[[^\\]]*\\]\\(${escaped}\\)`, 'g'), '');
+    out = out.replace(
+      new RegExp(
+        `<\\s*(?:file|image|img|audio|video|media|folder)\\b[^>]*\\bkey\\s*=\\s*["']${escaped}["'][^>]*>`,
+        'gi',
+      ),
+      '',
+    );
+  }
+  return out.replace(/\n{3,}/g, '\n\n');
+}
+
+function toPromptQuote(q: QuotedContext): BridgePromptQuotedMessage {
+  return {
+    messageId: q.messageId,
+    senderId: q.senderId,
+    ...(q.senderName ? { senderName: q.senderName } : {}),
+    ...(q.createdAt ? { createdAt: q.createdAt } : {}),
+    rawContentType: q.rawContentType,
+    content: q.content,
+  };
+}
+
+function toPromptTopicMessage(q: QuotedContext): BridgePromptTopicMessage {
+  return {
+    messageId: q.messageId,
+    senderId: q.senderId,
+    ...(q.senderName ? { senderName: q.senderName } : {}),
+    ...(q.senderType ? { senderType: q.senderType } : {}),
+    ...(q.createdAt ? { createdAt: q.createdAt } : {}),
+    rawContentType: q.rawContentType,
+    content: q.content,
+  };
+}
+
+function toPromptInteractiveCard(m: NormalizedMessage): BridgePromptInteractiveCard | undefined {
+  if (m.rawContentType !== 'interactive') return undefined;
+  const rawContent = (m.raw as { message?: { content?: unknown } } | undefined)
+    ?.message?.content;
+  if (typeof rawContent !== 'string' || rawContent.length === 0) return undefined;
+  return {
+    messageId: m.messageId,
+    content: parseJsonOrRaw(rawContent),
+  };
+}
+
+function parseJsonOrRaw(input: string): unknown {
+  try {
+    return JSON.parse(input) as unknown;
+  } catch {
+    return input;
+  }
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined;
+}

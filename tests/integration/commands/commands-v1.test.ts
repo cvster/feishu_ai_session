@@ -1,0 +1,977 @@
+import { mkdir, realpath, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { NormalizedMessage } from '@larksuite/channel';
+import { ActiveRuns } from '../../../src/bot/active-runs.js';
+import { tryHandleCommand, type CommandContext, type Controls } from '../../../src/commands/index.js';
+import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/config/profile-schema.js';
+import { createRootConfig, loadRootConfig, saveRootConfig } from '../../../src/config/profile-store.js';
+import { SessionStore } from '../../../src/session/store.js';
+import { SessionCatalog, type SessionCatalogIdentity } from '../../../src/session/catalog.js';
+import { WorkspaceStore } from '../../../src/workspace/store.js';
+import { CodexThreadReader } from '../../../src/session/codex-thread-reader.js';
+import { CodexSubmissionStore } from '../../../src/session/codex-submissions.js';
+import { registerLiveRunCardRefresh } from '../../../src/card/run-refresh.js';
+import { createFakeAgent } from '../../helpers/fake-agent.js';
+import { createFakeChannel, type FakeChannel } from '../../helpers/fake-channel.js';
+import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
+
+interface RunOverrides {
+  fromCardAction?: boolean;
+  messageId?: string;
+  scope?: string;
+  senderId?: string;
+  chatId?: string;
+  chatMode?: CommandContext['chatMode'];
+  mentions?: NormalizedMessage['mentions'];
+  formValue?: Record<string, unknown>;
+  sessionCatalogIdentity?: SessionCatalogIdentity;
+  dmGroupCreationOnly?: boolean;
+  codexHistoryProvider?: CommandContext['codexHistoryProvider'];
+}
+
+interface Harness {
+  tmp: TmpProfile;
+  channel: FakeChannel;
+  sessions: SessionStore;
+  sessionCatalog: SessionCatalog;
+  workspaces: WorkspaceStore;
+  activeRuns: ActiveRuns;
+  agent: ReturnType<typeof createFakeAgent>;
+  controls: Controls;
+  run(content: string, overrides?: RunOverrides): Promise<boolean>;
+}
+
+const cleanups: Array<() => Promise<void>> = [];
+
+describe('Bridge command contracts', () => {
+  afterEach(async () => {
+    await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  });
+
+  it('switches /cd to any existing non-risk working directory', async () => {
+    const h = await createHarness();
+    const target = join(h.tmp.root, 'plain-workdir');
+    const file = join(h.tmp.workspace, 'not-a-directory.txt');
+    await mkdir(target, { recursive: true });
+    await writeFile(file, 'not a directory', 'utf8');
+
+    await expect(h.run('/cd relative')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('绝对路径');
+
+    await expect(h.run(`/cd ${file}`)).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('路径不是目录');
+
+    await expect(h.run(`/cd ${target}`)).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('已切换 cwd');
+    expect(lastMarkdown(h.channel)).not.toContain('允许访问目录');
+    await expect(realpath(target)).resolves.toBe(h.workspaces.cwdFor('chat-1'));
+
+    await expect(h.run(`/cd ${h.tmp.workspace}`)).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('已切换 cwd');
+    await expect(realpath(h.tmp.workspace)).resolves.toBe(h.workspaces.cwdFor('chat-1'));
+  });
+
+  it('applies a working directory submitted from a setup card', async () => {
+    const h = await createHarness();
+    const target = join(h.tmp.root, 'card-workdir');
+    await mkdir(target, { recursive: true });
+
+    await expect(h.run('/cd form', { formValue: { cwd: target } })).resolves.toBe(true);
+
+    expect(h.workspaces.cwdFor('chat-1')).toBe(await realpath(target));
+    expect(lastMarkdown(h.channel)).toContain('已切换 cwd');
+  });
+
+  it('creates an allowed group and proactively sends a concise welcome card', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('/new chat Payment Debug')).resolves.toBe(true);
+
+    expect(h.channel.createdChats).toHaveLength(1);
+    expect(h.channel.createdChats[0]?.options).toMatchObject({
+      name: 'Payment Debug',
+      inviteUserIds: ['ou-admin'],
+    });
+    const root = await loadRootConfig(h.controls.configPath);
+    expect(root?.profiles.claude?.access.allowedChats).toContain('oc_fake_1');
+    expect(h.workspaces.cwdFor('oc_fake_1')).toBe(await realpath(h.tmp.workspace));
+    const proactive = h.channel.sent.find((message) => message.chatId === 'oc_fake_1');
+    const welcomeCard = JSON.stringify(proactive?.content);
+    expect(welcomeCard).not.toContain('workspace_setup_form');
+    expect(welcomeCard).not.toContain('保存目录并开启新会话');
+    expect(welcomeCard).toContain('发送第一条任务时会自动创建会话');
+    expect(welcomeCard).toContain('@机器人 + 任务内容');
+    expect(welcomeCard).toContain('finish');
+    expect(welcomeCard).toContain('panel');
+  });
+
+  it('opens the creation form from a friendly DM phrase', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('新建会话')).resolves.toBe(true);
+
+    expect(h.channel.createdChats).toHaveLength(0);
+    expect(JSON.stringify(lastContent(h.channel))).toContain('new_chat_form');
+    expect(JSON.stringify(lastContent(h.channel))).toContain('new.chat.form');
+    expect(JSON.stringify(lastContent(h.channel))).toContain('reasoning_effort');
+    expect(JSON.stringify(lastContent(h.channel))).toContain('gpt-5.6-sol');
+  });
+
+  it('opens the creation form from the configured bot menu text', async () => {
+    const h = await createHarness();
+    h.controls.knownChats = [
+      { id: 'oc-existing-1', name: 'Codex任务1' },
+      { id: 'oc-existing-2', name: 'Codex任务2' },
+    ];
+
+    await expect(h.run('新建群会话')).resolves.toBe(true);
+
+    const content = JSON.stringify(lastContent(h.channel));
+    expect(content).toContain('new_chat_form');
+    expect(content).toContain('Codex任务3');
+  });
+
+  it('opens a click-first task panel from friendly menu text', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('打开控制台')).resolves.toBe(true);
+
+    const panel = JSON.stringify(lastContent(h.channel));
+    expect(panel).toContain('Codex 任务控制台');
+    expect(panel).toContain('panel.new');
+    expect(panel).toContain('config');
+    expect(panel).toContain('ws.list');
+    expect(panel).toContain('new.chat.setup');
+    expect(panel).toContain('panel.groups');
+    expect(panel).toContain('panel.sessions');
+  });
+
+  it('creates a work group for an existing Codex session and later archives it before dissolving the group', async () => {
+    const h = await createHarness();
+    h.controls.profileConfig.agentKind = 'codex';
+    h.controls.profileConfig.codex = { binaryPath: 'codex', inheritCodexHome: true };
+    const cwd = await realpath(h.tmp.workspace);
+    const provider: NonNullable<CommandContext['codexHistoryProvider']> = async () => [
+      {
+        threadId: 'thread-existing',
+        preview: 'Linux 驱动学习',
+        name: 'Linux驱动学习',
+        cwd,
+        createdAtMs: 1_700_000_000_000,
+        updatedAtMs: 1_700_000_100_000,
+        source: 'appServer',
+      },
+    ];
+
+    await expect(h.run('/panel sessions', { codexHistoryProvider: provider })).resolves.toBe(true);
+    const sessionsCard = JSON.stringify(lastContent(h.channel));
+    expect(sessionsCard).toContain('为此会话建群');
+    const sessionToken = extractActionToken(sessionsCard, 'panel.session-group');
+
+    await expect(h.run(`/panel session-group ${sessionToken}`)).resolves.toBe(true);
+    expect(h.channel.createdChats[0]?.options).toMatchObject({ name: 'Linux驱动学习' });
+    expect(h.workspaces.cwdFor('oc_fake_1')).toBe(cwd);
+    const binding = h.sessionCatalog.entries().find(
+      (entry) => entry.scopeId === 'oc_fake_1' && entry.status === 'active',
+    );
+    expect(binding?.threadId).toBe('thread-existing');
+    expect(JSON.stringify(h.channel.sent.find((message) => message.chatId === 'oc_fake_1')?.content))
+      .toContain('已绑定现有 Codex 会话');
+
+    await expect(h.run('/panel groups')).resolves.toBe(true);
+    const groupsCard = JSON.stringify(lastContent(h.channel));
+    const groupToken = extractActionToken(groupsCard, 'panel.group');
+    await expect(h.run(`/panel group-finish-confirm ${groupToken}`)).resolves.toBe(true);
+
+    expect(h.agent.archivedThreads).toContain('thread-existing');
+    expect(h.sessionCatalog.entries().find((entry) => entry.threadId === 'thread-existing')?.status)
+      .toBe('archived');
+    expect(h.channel.rawClient.requests).toContainEqual({
+      method: 'im.v1.chat.delete',
+      params: { path: { chat_id: 'oc_fake_1' } },
+    });
+    await h.run(`/panel session-group ${sessionToken}`);
+    expect(h.channel.createdChats).toHaveLength(1);
+    expect(lastMarkdown(h.channel)).toContain('会话已归档');
+  });
+
+  it('restricts production private chat to workspace-group creation', async () => {
+    const h = await createHarness();
+
+    await expect(
+      h.run('帮我检查项目', { dmGroupCreationOnly: true }),
+    ).resolves.toBe(true);
+    let content = JSON.stringify(lastContent(h.channel));
+    expect(content).toContain('new_chat_form');
+    expect(content).toContain('私聊仅用于创建工作群');
+
+    await expect(
+      h.run('/status', { dmGroupCreationOnly: true }),
+    ).resolves.toBe(true);
+    content = JSON.stringify(lastContent(h.channel));
+    expect(content).toContain('new_chat_form');
+    expect(content).not.toContain('当前状态');
+
+    await expect(
+      h.run('/new chat setup', { dmGroupCreationOnly: true }),
+    ).resolves.toBe(true);
+    expect(JSON.stringify(lastContent(h.channel))).toContain('new.chat.form');
+  });
+
+  it('checks a cached creation card against external archives before creating a group', async () => {
+    const h = await createHarness(); h.controls.profileConfig.agentKind = 'codex';
+    h.controls.profileConfig.codex = { binaryPath: 'codex' };
+    const cwd = await realpath(h.tmp.workspace);
+    await h.run('/panel sessions', { codexHistoryProvider: async () => [{
+      threadId: 'external-archive', name: '旧卡片', cwd, preview: '', source: 'appServer', createdAtMs: 1, updatedAtMs: 2,
+    }] });
+    const token = extractActionToken(JSON.stringify(lastContent(h.channel)), 'panel.session-group');
+    h.controls.codexReplySync = { observeTurn() {}, runNow: async () => {}, isThreadArchived: async () => true };
+    await h.run(`/panel session-group ${token}`);
+    expect(h.channel.createdChats).toEqual([]);
+    expect(lastMarkdown(h.channel)).toContain('会话已归档');
+  });
+
+  it('cancels group creation if archive happens during the naming lookup', async () => {
+    const h = await createHarness(); h.controls.profileConfig.agentKind = 'codex';
+    h.controls.profileConfig.codex = { binaryPath: 'codex' };
+    const cwd = await realpath(h.tmp.workspace);
+    await h.run('/panel sessions', { codexHistoryProvider: async () => [{
+      threadId: 'late-archive', name: '待建群', cwd, preview: '', source: 'appServer', createdAtMs: 1, updatedAtMs: 2,
+    }] });
+    const token = extractActionToken(JSON.stringify(lastContent(h.channel)), 'panel.session-group');
+    Object.assign(h.channel, { listChats: async () => { h.sessionCatalog.archiveCodexThread('late-archive'); return []; } });
+    await h.run(`/panel session-group ${token}`);
+    expect(h.channel.createdChats).toEqual([]); expect(lastMarkdown(h.channel)).toContain('会话已归档');
+  });
+
+  it('forks a non-AA session into its own group without rebinding the source', async () => {
+    const h = await createHarness();
+    const source = prepareForkSource(h);
+    const forkThread = vi.fn(async () => ({ threadId: 'fork-non-aa', name: 'project (1)', cwd: source.cwdRealpath }));
+    Object.assign(h.agent, { forkThread });
+    await h.run('/fork', { chatMode: 'group' });
+    expect(forkThread).toHaveBeenCalledWith(source.threadId);
+    expect(h.channel.createdChats[0]?.options).toMatchObject({ name: 'project (1)' });
+    expect(h.sessionCatalog.activeFor(source)?.threadId).toBe('source-thread');
+    expect(h.sessionCatalog.entries().find((entry) => entry.scopeId === 'oc_fake_1')?.threadId).toBe('fork-non-aa');
+    expect(h.agent.archivedThreads).toEqual([]);
+  });
+
+  it('retries failed group creation without creating a second fork', async () => {
+    const h = await createHarness();
+    const source = prepareForkSource(h);
+    const forkThread = vi.fn(async () => ({ threadId: 'fork-retry', name: 'retry (1)', cwd: source.cwdRealpath }));
+    Object.assign(h.agent, { forkThread });
+    vi.spyOn(h.channel.rawClient.im.v1.chat, 'create').mockRejectedValueOnce(new Error('network failed'));
+    await h.run('/fork', { chatMode: 'group' });
+    expect(lastMarkdown(h.channel)).toContain('建群尚未完成');
+    await h.run('/fork', { chatMode: 'group' });
+    expect(forkThread).toHaveBeenCalledTimes(1);
+    expect(h.channel.createdChats).toHaveLength(1);
+  });
+
+  it('immediately creates an AA fork group while keeping the scanner paused through binding', async () => {
+    const h = await createHarness();
+    const source = prepareForkSource(h);
+    let paused = false;
+    h.controls.withAaSessionGroupSyncPaused = async (operation) => {
+      paused = true;
+      try { return await operation(); } finally { paused = false; }
+    };
+    const forkThread = vi.fn(async () => {
+      expect(paused).toBe(true);
+      return { threadId: 'fork-aa', name: 'AA-test (1)', cwd: source.cwdRealpath };
+    });
+    Object.assign(h.agent, { forkThread });
+    const create = h.channel.rawClient.im.v1.chat.create;
+    vi.spyOn(h.channel.rawClient.im.v1.chat, 'create').mockImplementation(async (input) => {
+      expect(paused).toBe(true);
+      return create(input);
+    });
+    await h.run('/fork', { chatMode: 'group' });
+    expect(forkThread).toHaveBeenCalledTimes(1);
+    expect(h.channel.createdChats).toHaveLength(1);
+    expect(h.channel.createdChats[0]?.options).toMatchObject({ name: 'AA-test (1)' });
+    expect(h.sessionCatalog.entries().find((entry) => entry.scopeId === 'oc_fake_1'))
+      .toMatchObject({ threadId: 'fork-aa', recentTurnReplayCount: 3 });
+    expect(lastMarkdown(h.channel)).toContain('绑定同名的新会话');
+    expect(h.sessionCatalog.activeFor(source)?.threadId).toBe('source-thread');
+    expect(paused).toBe(false);
+  });
+
+  it('keeps the exact fork title even if a same-name group exists and the title exceeds 48 characters', async () => {
+    const h = await createHarness();
+    const source = prepareForkSource(h);
+    const name = `project-${'x'.repeat(50)} (2)`;
+    h.controls.knownChats = [{ id: 'unrelated-group', name }];
+    Object.assign(h.agent, { forkThread: vi.fn(async () => ({ threadId: 'fork-exact-title', name, cwd: source.cwdRealpath })) });
+    await h.run('/fork', { chatMode: 'group' });
+    expect(h.channel.createdChats[0]?.options).toMatchObject({ name });
+    expect(h.sessionCatalog.entries().find((entry) => entry.scopeId === 'oc_fake_1')?.threadId)
+      .toBe('fork-exact-title');
+    expect(h.sessionCatalog.activeFor(source)?.threadId).toBe('source-thread');
+  });
+
+  it('does not fork a group binding belonging to another bot', async () => {
+    const h = await createHarness();
+    const source = prepareForkSource(h);
+    h.sessionCatalog.upsertActive({ ...source, botAppId: 'other-bot' });
+    const forkThread = vi.fn();
+    Object.assign(h.agent, { forkThread });
+    await h.run('/fork', { chatMode: 'group' });
+    expect(forkThread).not.toHaveBeenCalled();
+    expect(lastMarkdown(h.channel)).toContain('尚未绑定本机器人');
+  });
+
+  it('asks for confirmation before starting a new session from the panel', async () => {
+    const h = await createHarness();
+    h.sessions.set('chat-1', 'session-old', await realpath(h.tmp.workspace));
+
+    await expect(h.run('/panel new')).resolves.toBe(true);
+    expect(JSON.stringify(lastContent(h.channel))).toContain('panel.new-confirm');
+
+    await expect(h.run('/panel new-confirm')).resolves.toBe(true);
+    expect(h.sessions.getRaw('chat-1')).toBeUndefined();
+    expect(h.workspaces.cwdFor('chat-1')).toBe(await realpath(h.tmp.workspace));
+    expect(JSON.stringify(lastContent(h.channel))).toContain('Codex 任务控制台');
+  });
+
+  it('increments a submitted default name if that group already exists', async () => {
+    const h = await createHarness();
+    h.controls.knownChats = [
+      { id: 'oc-existing-1', name: 'Codex任务1' },
+      { id: 'oc-existing-2', name: 'Codex任务2' },
+    ];
+
+    await expect(
+      h.run('/new chat form', {
+        formValue: { group_name: 'Codex任务2', cwd: h.tmp.workspace },
+      }),
+    ).resolves.toBe(true);
+
+    expect(h.channel.createdChats[0]?.options).toMatchObject({ name: 'Codex任务3' });
+  });
+
+  it('creates a group from the creation card values', async () => {
+    const h = await createHarness();
+    const target = join(h.tmp.root, 'selected-project');
+    await mkdir(target, { recursive: true });
+
+    await expect(
+      h.run('/new chat form', {
+        formValue: { group_name: 'Selected Project', cwd: target },
+      }),
+    ).resolves.toBe(true);
+
+    expect(h.channel.createdChats[0]?.options).toMatchObject({ name: 'Selected Project' });
+    expect(h.workspaces.cwdFor('oc_fake_1')).toBe(await realpath(target));
+  });
+
+  it('lets a non-admin group member archive the Codex thread and dissolve the group', async () => {
+    const h = await createHarness();
+    h.controls.profileConfig.agentKind = 'codex';
+    const cwd = await realpath(h.tmp.workspace);
+    const identity: SessionCatalogIdentity = {
+      scopeId: 'chat-1',
+      agentId: 'codex',
+      cwdRealpath: cwd,
+      policyFingerprint: 'policy-1',
+    };
+    h.sessionCatalog.upsertActive({ ...identity, threadId: 'thread-1' });
+    h.sessions.set('chat-1', 'legacy-session', cwd);
+
+    await expect(
+      h.run('终止任务', { chatMode: 'group', senderId: 'ou-colleague' }),
+    ).resolves.toBe(true);
+    const confirmationCard = JSON.stringify(lastContent(h.channel));
+    expect(confirmationCard).toContain('finish.archive');
+    expect(confirmationCard).toContain('finish.confirm');
+    expect(h.channel.rawClient.requests).not.toContainEqual(
+      expect.objectContaining({ method: 'im.v1.chat.delete' }),
+    );
+
+    await expect(
+      h.run('/finish confirm', {
+        chatMode: 'group',
+        senderId: 'ou-colleague',
+        sessionCatalogIdentity: identity,
+      }),
+    ).resolves.toBe(true);
+
+    expect(h.agent.archivedThreads).toEqual(['thread-1']);
+    expect(h.sessionCatalog.activeFor(identity)).toBeUndefined();
+    expect(h.sessions.getRaw('chat-1')).toBeUndefined();
+    expect(h.workspaces.cwdFor('chat-1')).toBeUndefined();
+    expect(h.channel.rawClient.requests).toContainEqual({
+      method: 'im.v1.chat.delete',
+      params: { path: { chat_id: 'chat-1' } },
+    });
+  });
+
+  it('explains 232017 after archiving and preserves the group workspace on deletion failure', async () => {
+    const h = await createHarness();
+    h.controls.profileConfig.agentKind = 'codex';
+    const cwd = await realpath(h.tmp.workspace);
+    const identity: SessionCatalogIdentity = {
+      scopeId: 'chat-1', agentId: 'codex', cwdRealpath: cwd, policyFingerprint: 'policy-1',
+    };
+    h.sessionCatalog.upsertActive({ ...identity, threadId: 'thread-no-delete-permission' });
+    vi.spyOn(h.channel.rawClient.im.v1.chat, 'delete').mockRejectedValue({
+      response: { data: { code: 232017, msg: 'No permission' } },
+    });
+    await h.run('/finish confirm', { chatMode: 'group', sessionCatalogIdentity: identity });
+    expect(h.agent.archivedThreads).toEqual(['thread-no-delete-permission']);
+    expect(h.sessionCatalog.activeFor(identity)).toBeUndefined();
+    expect(h.workspaces.cwdFor('chat-1')).toBe(cwd);
+    expect(lastMarkdown(h.channel)).toContain('Codex 会话已归档');
+    expect(h.sessionCatalog.isScopeArchived('chat-1')).toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('im:chat:operate_as_owner');
+  });
+
+  it('can archive the Codex thread while retaining the group and workspace', async () => {
+    const h = await createHarness();
+    h.controls.profileConfig.agentKind = 'codex';
+    const cwd = await realpath(h.tmp.workspace);
+    const identity: SessionCatalogIdentity = {
+      scopeId: 'chat-1',
+      agentId: 'codex',
+      cwdRealpath: cwd,
+      policyFingerprint: 'policy-1',
+    };
+    h.sessionCatalog.upsertActive({ ...identity, threadId: 'thread-keep-group' });
+    h.sessions.set('chat-1', 'legacy-session', cwd);
+
+    await expect(
+      h.run('/finish archive', { chatMode: 'group', sessionCatalogIdentity: identity }),
+    ).resolves.toBe(true);
+
+    expect(h.agent.archivedThreads).toEqual(['thread-keep-group']);
+    expect(h.sessionCatalog.isScopeArchived('chat-1')).toBe(true);
+    expect(lastMarkdown(h.channel)).not.toContain('下一条消息将开启新会话');
+    expect(h.sessionCatalog.activeFor(identity)).toBeUndefined();
+    expect(h.sessions.getRaw('chat-1')).toBeUndefined();
+    expect(h.workspaces.cwdFor('chat-1')).toBe(cwd);
+    expect(h.channel.rawClient.requests).not.toContainEqual(
+      expect.objectContaining({ method: 'im.v1.chat.delete' }),
+    );
+    expect(lastMarkdown(h.channel)).toContain('群和工作目录已保留');
+  });
+
+  it('scopes named workspaces by profile, scope, and owner', async () => {
+    const h = await createHarness();
+    const alternate = join(h.tmp.root, 'alternate');
+    await mkdir(alternate, { recursive: true });
+
+    h.workspaces.setCwd('chat-a', h.tmp.workspace);
+    await expect(h.run('/ws save main', { scope: 'chat-a', chatId: 'chat-a' })).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('工作目录别名已保存');
+
+    h.workspaces.setCwd('chat-b', alternate);
+    await expect(h.run('/ws', { scope: 'chat-b', chatId: 'chat-b' })).resolves.toBe(true);
+    expect(JSON.stringify(lastContent(h.channel))).not.toContain('main');
+
+    await expect(h.run('/ws use main', { scope: 'chat-b', chatId: 'chat-b' })).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('未找到工作目录别名');
+    expect(h.workspaces.cwdFor('chat-b')).toBe(alternate);
+  });
+
+  it('continues to support legacy unscoped workspace aliases', async () => {
+    const h = await createHarness();
+    const legacy = join(h.tmp.root, 'legacy-alias');
+    await mkdir(legacy, { recursive: true });
+    h.workspaces.saveNamed('legacy', legacy);
+
+    await expect(h.run('/ws')).resolves.toBe(true);
+    expect(JSON.stringify(lastContent(h.channel))).toContain('legacy');
+
+    await expect(h.run('/ws use legacy')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('已切换到 `legacy`');
+    await expect(realpath(legacy)).resolves.toBe(h.workspaces.cwdFor('chat-1'));
+
+    await expect(h.run('/ws remove legacy')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('已删除工作目录别名');
+    expect(h.workspaces.getNamed('legacy')).toBeUndefined();
+  });
+
+  it('removes scoped workspace aliases without deleting same-name legacy aliases', async () => {
+    const h = await createHarness();
+    const legacy = join(h.tmp.root, 'legacy-main');
+    await mkdir(legacy, { recursive: true });
+    h.workspaces.saveNamed('main', legacy);
+
+    await expect(h.run('/ws save main')).resolves.toBe(true);
+    await expect(h.run('/ws remove main')).resolves.toBe(true);
+
+    expect(lastMarkdown(h.channel)).toContain('已删除工作目录别名');
+    expect(h.workspaces.getNamed('main')).toBe(legacy);
+
+    await expect(h.run('/ws use main')).resolves.toBe(true);
+    await expect(realpath(legacy)).resolves.toBe(h.workspaces.cwdFor('chat-1'));
+  });
+
+  it('keeps directory commands admin-only', async () => {
+    const h = await createHarness();
+
+    await expect(h.run(`/cd ${h.tmp.workspace}`, { senderId: 'ou-not-admin' })).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
+
+    await expect(h.run('/ws save mine', { senderId: 'ou-not-admin' })).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
+  });
+
+  it('does not expose authorization root management commands', async () => {
+    const h = await createHarness();
+    const plain = join(h.tmp.root, 'plain-nongit');
+    await mkdir(plain, { recursive: true });
+
+    await expect(h.run(`/ws add ${plain} docs`)).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('用法');
+    expect(lastMarkdown(h.channel)).not.toContain('允许访问目录');
+
+    await expect(h.run(`/ws remove --root ${plain}`)).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('未找到工作目录别名');
+  });
+
+  it('keeps /ws remove as alias removal by default', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('/ws save main')).resolves.toBe(true);
+    await expect(h.run('/ws remove main')).resolves.toBe(true);
+
+    expect(lastMarkdown(h.channel)).toContain('已删除工作目录别名');
+  });
+
+  it('shows workspace paths in group-visible workspace replies', async () => {
+    const h = await createHarness();
+    const target = join(h.tmp.root, 'sensitive-client-name');
+    await mkdir(target, { recursive: true });
+    const targetRealpath = await realpath(target);
+
+    await expect(h.run(`/cd ${target}`, { chatMode: 'group' })).resolves.toBe(true);
+    await expect(h.run('/ws save client', { chatMode: 'group' })).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('client');
+    expect(lastMarkdown(h.channel)).toContain(targetRealpath);
+
+    await expect(h.run('/ws save main', { chatMode: 'group' })).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('工作目录别名已保存');
+    expect(lastMarkdown(h.channel)).toContain(targetRealpath);
+
+    await expect(h.run('/ws', { chatMode: 'group' })).resolves.toBe(true);
+    const card = JSON.stringify(lastContent(h.channel));
+    expect(card).toContain(jsonStringFragment(targetRealpath));
+    expect(card).not.toContain('使用 $HOME');
+
+    await expect(h.run('/ws use main', { chatMode: 'group' })).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('已切换到 `main`');
+    expect(lastMarkdown(h.channel)).toContain(targetRealpath);
+  });
+
+  it('shows full workspace paths in p2p workspace replies', async () => {
+    const h = await createHarness();
+    const target = join(h.tmp.root, 'sensitive-p2p-client');
+    await mkdir(target, { recursive: true });
+    const targetRealpath = await realpath(target);
+
+    await expect(h.run(`/cd ${target}`)).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain(targetRealpath);
+
+    await expect(h.run('/ws save client')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain(targetRealpath);
+
+    await expect(h.run('/ws')).resolves.toBe(true);
+    const card = JSON.stringify(lastContent(h.channel));
+    expect(card).toContain(jsonStringFragment(targetRealpath));
+  });
+
+  it('shows invalid /cd paths in group-visible replies', async () => {
+    const h = await createHarness();
+    const file = join(h.tmp.root, 'sensitive-client-name', 'not-a-directory.txt');
+    await mkdir(join(h.tmp.root, 'sensitive-client-name'), { recursive: true });
+    await writeFile(file, 'not a directory', 'utf8');
+
+    await expect(h.run(`/cd ${file}`, { chatMode: 'group' })).resolves.toBe(true);
+
+    expect(lastMarkdown(h.channel)).toContain('路径不是目录');
+    expect(lastMarkdown(h.channel)).toContain(await realpath(file));
+  });
+
+  it('treats legacy document workspace commands as informational no-ops', async () => {
+    const h = await createHarness();
+    const target = join(h.tmp.root, 'sensitive-doc-root');
+    await mkdir(target, { recursive: true });
+
+    await expect(h.run(`/doc ws bind doc-token ${target}`, { chatMode: 'group' })).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('不需要绑定工作区');
+    expect(lastMarkdown(h.channel)).not.toContain(target);
+  });
+
+  it('keeps Claude resume history details out of group chats', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('/resume', { chatMode: 'group' })).resolves.toBe(true);
+
+    expect(lastMarkdown(h.channel)).toContain('私聊');
+    expect(lastMarkdown(h.channel)).not.toContain(h.tmp.workspace);
+  });
+
+  it('renders /status passively with policy and owner state', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('/status')).resolves.toBe(true);
+
+    expect(h.agent.runOptions).toHaveLength(0);
+    const status = JSON.stringify(lastContent(h.channel));
+    expect(status).toContain('Fake Agent');
+    expect(status).toContain('工作目录');
+    expect(status).toContain('**session**');
+    expect(status).toContain('(无)');
+    expect(status).not.toContain('**conversation**');
+    expect(status).toContain('permission');
+    expect(status).toContain('plan');
+    expect(status).not.toContain('bypassPermissions');
+    expect(status).not.toContain('workspace-write/workspace-write');
+    expect(status).toContain('owner');
+    expect(status).toContain(jsonStringFragment(await realpath(h.tmp.workspace)));
+  });
+
+  it('uses /refresh as the button-friendly current-status alias', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('/refresh', { chatMode: 'group' })).resolves.toBe(true);
+
+    const status = JSON.stringify(lastContent(h.channel));
+    expect(status).toContain('当前状态');
+    expect(status).toContain('Fake Agent');
+  });
+
+  it('refreshes a live clicked reply with no duplicate card', async () => {
+    const h = await createHarness();
+    const refresh = vi.fn(async () => {});
+    const remove = registerLiveRunCardRefresh('om_live_reply', 'chat-1', refresh);
+    try {
+      await h.run('/refresh', { chatMode: 'group', fromCardAction: true, messageId: 'om_live_reply' });
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(h.channel.sent).toHaveLength(0);
+      expect(h.channel.rawClient.requests).toHaveLength(0);
+    } finally { remove(); }
+  });
+
+  it('delegates mirrored refresh to its original CardKit sequence owner', async () => {
+    const h = await createHarness();
+    h.controls.refreshMirroredRunCard = vi.fn(async () => true);
+    await h.run('/refresh', { chatMode: 'group', fromCardAction: true, messageId: 'om_mirrored_reply' });
+    expect(h.controls.refreshMirroredRunCard).toHaveBeenCalledWith('chat-1', 'om_mirrored_reply');
+    expect(h.channel.sent).toHaveLength(0);
+  });
+
+  it('updates pre-restart bridge cards in place, retaining typed refresh behavior', async () => {
+    const h = await createHarness();
+    prepareForkSource(h);
+    const read = vi.spyOn(CodexThreadReader.prototype, 'readThread').mockResolvedValue({
+      id: 'thread-source', turns: [{ id: 'turn-refresh', status: 'completed', items: [
+        { type: 'agentMessage', text: 'fresh answer' },
+      ] }],
+    });
+    try {
+      await h.run('/refresh', { chatMode: 'group', fromCardAction: true, messageId: 'om_old_reply' });
+      expect(h.channel.sent).toHaveLength(0);
+      expect(h.channel.rawClient.requests.at(-1)).toMatchObject({
+        method: 'im.v1.message.patch', params: { messageId: 'om_old_reply' },
+      });
+      expect(JSON.stringify(h.channel.rawClient.requests.at(-1))).toContain('fresh answer');
+      await h.run('/refresh', { chatMode: 'group' });
+      expect(h.channel.sent).toHaveLength(1);
+    } finally { read.mockRestore(); }
+  });
+
+  it('never falls back to a duplicate card after refresh delivery failure', async () => {
+    const h = await createHarness();
+    prepareForkSource(h);
+    const read = vi.spyOn(CodexThreadReader.prototype, 'readThread').mockResolvedValue({
+      id: 'thread-source', turns: [{ id: 'turn-refresh', status: 'completed', items: [] }],
+    });
+    vi.spyOn(h.channel, 'updateCard').mockRejectedValue(new Error('timeout'));
+    try {
+      await h.run('/refresh', { chatMode: 'group', fromCardAction: true, messageId: 'om_old_reply' });
+      expect(h.channel.sent).toHaveLength(1);
+      expect(lastMarkdown(h.channel)).toContain('原卡片已保留');
+      expect(h.channel.sent.some((message) => 'card' in (message.content as object))).toBe(false);
+    } finally { read.mockRestore(); }
+  });
+
+  it('shows workspace paths in group-visible /status replies', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('/status', { chatMode: 'group' })).resolves.toBe(true);
+
+    const status = JSON.stringify(lastContent(h.channel));
+    expect(status).toContain(jsonStringFragment(await realpath(h.tmp.workspace)));
+    expect(status).toContain('chat-1');
+  });
+
+  it('rejects admin-only commands for non owner/admin users', async () => {
+    const h = await createHarness();
+
+    await expect(
+      h.run('/ps', { senderId: 'ou-not-admin' }),
+    ).resolves.toBe(true);
+
+    expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
+  });
+
+  it.each([false, true])('stops only the current turn and preserves later submissions (continuation failure: %s)', async failStart => {
+    const h = await createHarness(); prepareForkSource(h);
+    const store = new CodexSubmissionStore(join(h.tmp.profile, 'submissions.json')); await store.load();
+    await store.receive('chat-1', { ...message('next input', { chatId: 'chat-1', senderId: 'ou-admin' }), messageId: 'next-input' }, 'source-thread');
+    await store.mark('next-input', { status: 'accepted', threadId: 'source-thread', queueId: 'next-queue' });
+    h.controls.codexSubmissions = store;
+    const runNow = vi.fn(async () => {});
+    h.controls.codexReplySync = { observeTurn() {}, runNow };
+    const status = vi.spyOn(CodexThreadReader.prototype, 'readThreadStatus').mockResolvedValue({ type: 'idle' })
+      .mockResolvedValueOnce({ type: 'active' });
+    const read = vi.spyOn(CodexThreadReader.prototype, 'readThread').mockResolvedValue({ id: 'source-thread',
+      turns: [{ id: 'live', status: 'inProgress', items: [] }] });
+    const interrupt = vi.spyOn(CodexThreadReader.prototype, 'interruptTurn').mockResolvedValue();
+    const list = vi.spyOn(CodexThreadReader.prototype, 'listQueuedSubmissions').mockResolvedValue([{ id: 'next-queue', input: [] }]);
+    const start = vi.spyOn(CodexThreadReader.prototype, 'startQueuedTurn');
+    if (failStart) start.mockRejectedValue(new Error('connection lost'));
+    else start.mockResolvedValue('next-turn');
+    const stop = vi.spyOn(CodexThreadReader.prototype, 'stop').mockResolvedValue();
+    const remote = process.env.CODEX_QUEUE_REMOTE;
+    process.env.CODEX_QUEUE_REMOTE = 'ws://127.0.0.1:1';
+    try {
+      await expect(h.run('/panel stop', { chatMode: 'group', fromCardAction: true })).resolves.toBe(true);
+      expect(interrupt).toHaveBeenCalledWith('source-thread', 'live');
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(start).toHaveBeenCalledWith('source-thread', 'next-queue');
+      expect(store.records()[0]?.status).toBe('accepted');
+      expect(runNow).toHaveBeenCalledTimes(1);
+      if (failStart) {
+        expect(JSON.stringify(h.channel.sent)).toContain('当前响应已停止，但后续队列继续执行未确认');
+        expect(JSON.stringify(h.channel.sent)).not.toContain('停止请求未确认');
+      }
+    } finally {
+      for (const spy of [status, read, interrupt, list, start, stop]) spy.mockRestore();
+      if (remote === undefined) delete process.env.CODEX_QUEUE_REMOTE;
+      else process.env.CODEX_QUEUE_REMOTE = remote;
+    }
+  });
+
+  it.each(['win32', 'linux'] as const)('explains unavailable stop control appropriately on %s and preserves unsent input', async (platform) => {
+    const h = await createHarness();
+    prepareForkSource(h);
+    h.controls.profileConfig.codex!.codexHome = join(h.tmp.root, 'no-shared-server');
+    const store = new CodexSubmissionStore(join(h.tmp.profile, 'submissions.json'));
+    await store.load();
+    await store.receive('chat-1', message('pending input', { chatId: 'chat-1', senderId: 'ou-admin' }), 'source-thread');
+    h.controls.codexSubmissions = store;
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const remote = process.env.CODEX_QUEUE_REMOTE;
+    try {
+      Object.defineProperty(process, 'platform', { ...descriptor, value: platform });
+      delete process.env.CODEX_QUEUE_REMOTE;
+      await expect(h.run('/stop', { chatMode: 'group', fromCardAction: true })).resolves.toBe(true);
+      expect(lastMarkdown(h.channel)).toContain(platform === 'win32'
+        ? 'windows不支持桥接停止会话，请在 Codex 桌面停止任务。'
+        : '没有可用的公开共享连接，请在 Codex 桌面停止任务。');
+      expect(store.records().map(record => record.status)).toEqual(['pending']);
+    } finally {
+      Object.defineProperty(process, 'platform', descriptor);
+      if (remote === undefined) delete process.env.CODEX_QUEUE_REMOTE;
+      else process.env.CODEX_QUEUE_REMOTE = remote;
+    }
+  });
+
+  it('does not expose access allowlists through the Lark /config form', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('/config')).resolves.toBe(true);
+
+    const configCard = JSON.stringify(lastContent(h.channel));
+    expect(configCard).not.toContain('allowed_users');
+    expect(configCard).not.toContain('allowed_chats');
+    expect(configCard).not.toContain('admins');
+  });
+
+  it('manages profile access lists through /invite and /remove', async () => {
+    const h = await createHarness();
+
+    await expect(
+      h.run('/invite user @Alice', { mentions: [mention('ou-alice', 'Alice')] }),
+    ).resolves.toBe(true);
+    await expect(
+      h.run('/invite admin @Bob', { mentions: [mention('ou-bob', 'Bob')] }),
+    ).resolves.toBe(true);
+    await expect(
+      h.run('/invite group', {
+        chatId: 'oc-group-1',
+        scope: 'oc-group-1',
+        chatMode: 'group',
+      }),
+    ).resolves.toBe(true);
+
+    let root = await loadRootConfig(h.controls.configPath);
+    expect(root?.profiles.claude?.access.allowedUsers).toContain('ou-alice');
+    expect(root?.profiles.claude?.access.admins).toEqual(['ou-admin', 'ou-bob']);
+    expect(root?.profiles.claude?.access.allowedChats).toContain('oc-group-1');
+    expect(root?.profiles.claude?.preferences).not.toHaveProperty('access');
+
+    await expect(
+      h.run('/remove user @Alice', { mentions: [mention('ou-alice', 'Alice')] }),
+    ).resolves.toBe(true);
+    root = await loadRootConfig(h.controls.configPath);
+    expect(root?.profiles.claude?.access.allowedUsers).not.toContain('ou-alice');
+  });
+
+  it('adds every known bot group through /invite all group', async () => {
+    const h = await createHarness();
+    h.controls.knownChats = [
+      { id: 'oc-group-1', name: 'Group One' },
+      { id: 'oc-group-2', name: 'Group Two' },
+    ];
+
+    await expect(h.run('/invite all group')).resolves.toBe(true);
+
+    const root = await loadRootConfig(h.controls.configPath);
+    expect(root?.profiles.claude?.access.allowedChats).toEqual(['oc-group-1', 'oc-group-2']);
+  });
+});
+
+function prepareForkSource(h: Harness) {
+  h.controls.profileConfig.agentKind = 'codex';
+  h.controls.profileConfig.codex = { binaryPath: 'codex', inheritCodexHome: true };
+  const source = {
+    scopeId: 'chat-1', agentId: 'codex' as const, cwdRealpath: h.workspaces.cwdFor('chat-1')!,
+    policyFingerprint: 'fork-policy', threadId: 'source-thread', botAppId: 'app-id',
+  };
+  h.sessionCatalog.upsertActive(source);
+  return source;
+}
+
+async function createHarness(): Promise<Harness> {
+  const tmp = await createTmpProfile('commands-v1-');
+  const channel = createFakeChannel();
+  const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
+  const sessionCatalog = new SessionCatalog(join(tmp.profile, 'sessions.catalog.json'));
+  const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
+  const activeRuns = new ActiveRuns();
+  const agent = createFakeAgent();
+  const workspaceRealpath = await realpath(tmp.workspace);
+  const profileConfig = appConfig(workspaceRealpath);
+  const configPath = join(tmp.root, 'config.json');
+  await saveRootConfig(createRootConfig('claude', profileConfig), configPath);
+  const controls = {
+    profile: 'claude',
+    profileConfig,
+    botOwnerId: 'ou-owner',
+    ownerRefreshState: 'ok',
+    ownerRefreshedAt: 1_700_000_000_000,
+    async refreshOwner() {},
+    restart: vi.fn(async () => {}),
+    exit: vi.fn(async () => {}),
+    configPath,
+    cfg: profileConfig,
+    processId: 'proc-1',
+  } satisfies Controls;
+
+  workspaces.setCwd('chat-1', workspaceRealpath);
+
+  const run = (content: string, overrides: RunOverrides = {}): Promise<boolean> => {
+    const chatId = overrides.chatId ?? 'chat-1';
+    const scope = overrides.scope ?? chatId;
+    return tryHandleCommand({
+      channel: channel as unknown as CommandContext['channel'],
+      msg: { ...message(content, {
+        chatId,
+        senderId: overrides.senderId ?? 'ou-admin',
+        mentions: overrides.mentions ?? [],
+      }), ...(overrides.messageId ? { messageId: overrides.messageId } : {}) },
+      scope,
+      chatMode: overrides.chatMode ?? 'p2p',
+      sessions,
+      sessionCatalog,
+      sessionCatalogIdentity: overrides.sessionCatalogIdentity,
+      workspaces,
+      agent,
+      activeRuns,
+      controls,
+      formValue: overrides.formValue,
+      fromCardAction: overrides.fromCardAction,
+      dmGroupCreationOnly: overrides.dmGroupCreationOnly,
+      codexHistoryProvider: overrides.codexHistoryProvider,
+    });
+  };
+
+  cleanups.push(async () => {
+    await Promise.all([sessions.flush(), sessionCatalog.flush(), workspaces.flush()]);
+    await tmp.cleanup();
+  });
+
+  return { tmp, channel, sessions, sessionCatalog, workspaces, activeRuns, agent, controls, run };
+}
+
+function extractActionToken(cardJson: string, cmd: string): string {
+  const escaped = cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`"cmd":"${escaped}","arg":"([^"]+)"`).exec(cardJson);
+  if (!match?.[1]) throw new Error(`missing action token for ${cmd}`);
+  return match[1];
+}
+
+function appConfig(defaultWorkspace: string): ProfileConfig {
+  const config = createDefaultProfileConfig({
+    agentKind: 'claude',
+    accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
+    access: { admins: ['ou-admin'] },
+    sandbox: { defaultMode: 'read-only', maxMode: 'workspace-write' },
+    preferences: { maxConcurrentRuns: 2 },
+  });
+  config.workspaces.default = defaultWorkspace;
+  return config;
+}
+
+function message(
+  content: string,
+  opts: {
+    chatId: string;
+    senderId: string;
+    mentions?: NormalizedMessage['mentions'];
+  },
+): NormalizedMessage {
+  return {
+    messageId: `om-${content.replace(/\W+/g, '-').slice(0, 20)}`,
+    chatId: opts.chatId,
+    chatType: 'p2p',
+    senderId: opts.senderId,
+    senderName: 'User',
+    content,
+    resources: [],
+    mentions: opts.mentions ?? [],
+    mentionedBot: false,
+  } as unknown as NormalizedMessage;
+}
+
+function mention(openId: string, name: string): NonNullable<NormalizedMessage['mentions']>[number] {
+  return {
+    openId,
+    name,
+    isBot: false,
+  } as NonNullable<NormalizedMessage['mentions']>[number];
+}
+
+function lastContent(channel: FakeChannel): Record<string, unknown> {
+  const content = channel.sent.at(-1)?.content;
+  expect(content).toBeTypeOf('object');
+  return content as Record<string, unknown>;
+}
+
+function lastMarkdown(channel: FakeChannel): string {
+  const content = lastContent(channel);
+  expect(content.markdown).toBeTypeOf('string');
+  return content.markdown as string;
+}
+
+function jsonStringFragment(value: string): string {
+  return JSON.stringify(value).slice(1, -1);
+}
