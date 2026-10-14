@@ -1,5 +1,5 @@
 import type { NativeSessionLocks } from '../tools/locks';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AgentAdapter, AgentEvent, AgentRun } from '../agent/types';
 import { ActiveRuns, type RunHandle } from '../bot/active-runs';
 import { ProcessPool } from '../bot/process-pool';
@@ -7,6 +7,7 @@ import type { RunPolicyAllow } from '../policy/run-policy';
 import { log } from '../core/logger';
 import { RunRejected, SpawnFailed } from './errors';
 import type { CodexSubmissionResult } from '../../packages/codex-core/src/submission';
+import type { RunDelivery } from '../worker/protocol';
 
 export interface RunExecutorDeps {
   agent: AgentAdapter;
@@ -36,6 +37,9 @@ export interface SubmitRunInput {
   images?: readonly string[];
   attachmentPaths?: readonly string[];
   stopGraceMs?: number;
+  requestKey?: string;
+  delivery?: RunDelivery;
+  idleTimeoutMs?: number;
   nowait?: boolean;
   observability?: {
     profile: string;
@@ -158,7 +162,7 @@ export class RunExecutor {
       );
     }
 
-    const runId = this.createRunId();
+    const runId = input.requestKey ? createHash('sha256').update(input.requestKey).digest('hex') : this.createRunId();
     const startedAt = this.now();
     const queueWaitMs = startedAt - submittedAt;
     const runOptions = {
@@ -168,6 +172,9 @@ export class RunExecutor {
       sessionId: input.sessionId,
       sessionName: this.sessionNameForScope?.(input.scopeId),
       initialSessionId: input.sessionId ? undefined : this.initialSessionIdForScope?.(input.scopeId),
+      requestKey: input.requestKey,
+      delivery: input.delivery,
+      idleTimeoutMs: input.idleTimeoutMs,
       threadId: input.threadId,
       model: input.model,
       reasoningEffort: input.reasoningEffort,
@@ -241,6 +248,7 @@ export class RunExecutor {
         if (waitForExit || (releaseNative && !handle.detached)) {
           const exited = await run.waitForExit(this.postDoneExitGraceMs);
           if (!exited) {
+            if (run.detach) { await run.detach(); return; }
             log.warn('run', 'post-done-exit-timeout', {
               ...dimensions,
               graceMs: this.postDoneExitGraceMs,

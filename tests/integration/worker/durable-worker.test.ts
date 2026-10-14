@@ -1,0 +1,68 @@
+import { mkdtemp, rm, readFile, appendFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, expect, it, vi } from 'vitest';
+import type { AgentAdapter, AgentRunOptions, AgentEvent } from '../../../src/agent/types';
+import { startWorkerServer } from '../../../src/worker/server';
+import { WorkerClient } from '../../../src/worker/client';
+import { DurableClaudeAdapter } from '../../../src/worker/adapter';
+import { JobStore, jobIdFor, submissionFingerprint } from '../../../src/worker/store';
+import type { WorkerSubmission, WorkerJob } from '../../../src/worker/protocol';
+import { ActiveRuns } from '../../../src/bot/active-runs';
+import { buildWorkerUnit } from '../../../src/cli/commands/worker';
+
+import { fixture, cleanups } from '../../helpers/worker-fixture';
+
+it('detaches bridge observers without cancelling execution, then replays the same task with one native invocation', async () => {
+  const h = await fixture(); const run = h.adapter.run(h.options);
+  const events = run.events[Symbol.asyncIterator](); await events.next();
+  const active = new ActiveRuns(); active.register('oc_group', run); await active.disconnectAll();
+  expect(h.stop).not.toHaveBeenCalled();
+  expect((await h.client.snapshot(run.runId)).job.status).toBe('running');
+  h.finish(); await vi.waitFor(async () => expect((await h.client.snapshot(run.runId)).job.status).toBe('completed'));
+  const replay: AgentEvent[] = [];
+  for await (const event of new DurableClaudeAdapter(h.client, h.raw).observe(run.runId).events) replay.push(event);
+  expect(replay.filter(event => event.type === 'text').map(event => event.delta).join('')).toBe('before restart\nafter restart');
+  const duplicate = await h.client.submit({ requestKey: 'message-one', options: { ...h.options, sessionId: 'native', initialSessionId: undefined } });
+  expect(duplicate.id).toBe(run.runId); expect(h.calls).toHaveLength(1);
+  expect(h.calls[0]).toMatchObject({ prompt: 'real request', cwd: h.dir, initialSessionId: 'native' });
+});
+it('rejects altered request content, overlapping messages, and concurrent native writers', async () => {
+  const h = await fixture(); const job = await h.client.submit({ requestKey: 'message-one', options: h.options });
+  await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+  await expect(h.client.submit({ requestKey: 'message-one', options: { ...h.options, prompt: 'changed' } })).rejects.toThrow('内容已变化');
+  await expect(h.client.submit({ requestKey: 'different-batch', options: h.options })).rejects.toThrow('原任务接收');
+  await expect(h.client.submit({ requestKey: 'new-message', options: { ...h.options, delivery: undefined } })).rejects.toThrow('已有任务');
+  await h.client.stop(job.id); await vi.waitFor(async () => expect((await h.client.snapshot(job.id)).job.status).toBe('interrupted'));
+  expect(h.stop).toHaveBeenCalledOnce();
+});
+it('does not restart accepted-but-uncertain work after a worker restart, and repairs incomplete event tails', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'worker-recovery-')); cleanups.push(() => rm(dir, { recursive: true, force: true }));
+  const stateDir = join(dir, 'worker'), store = new JobStore(join(stateDir, 'jobs')); await store.load();
+  const input: WorkerSubmission = { requestKey: 'uncertain', options: { runId: 'r', prompt: 'work', cwd: dir } };
+  const job: WorkerJob = { ...input, version: 1, id: jobIdFor(input.requestKey), fingerprint: submissionFingerprint(input), status: 'accepted', createdAt: 1, updatedAt: 1 };
+  await store.put(job); await store.append(job.id, { type: 'text', delta: 'saved' });
+  await appendFile(join(store.root, `${job.id}.ndjson`), '{"seq":2');
+  const run = vi.fn();
+  const server = await startWorkerServer({ stateDir, agent: { id: 'claude', run } as unknown as AgentAdapter, sourceId: 'local', botAppId: 'cli_test' });
+  cleanups.push(() => server.close());
+  const client = new WorkerClient(stateDir, 'local', 'cli_test');
+  const snapshot = await client.snapshot(job.id);
+  expect(snapshot.job.status).toBe('unknown'); expect(snapshot.events.map(row => row.seq)).toEqual([1, 2]);
+  expect(snapshot.events[0]!.event).toEqual({ type: 'text', delta: 'saved' });
+  expect((await client.submit(input)).status).toBe('unknown'); expect(run).not.toHaveBeenCalled();
+});
+it('requires a local bearer token and verifies the configured application/source', async () => {
+  const h = await fixture();
+  const endpoint = JSON.parse(await readFile(join(h.stateDir, 'endpoint.json'), 'utf8'));
+  expect((await fetch(`${endpoint.url}/jobs`)).status).toBe(401);
+  await expect(new WorkerClient(h.stateDir, 'another-account', 'cli_test').health()).rejects.toThrow('不匹配');
+  await expect(new WorkerClient(h.stateDir, 'local-claude', 'cli_test', 'codex').health()).rejects.toThrow('不匹配');
+  expect(h.calls).toHaveLength(0);
+});
+it('defines an independent systemd unit with no bridge lifetime dependency', () => {
+  const unit = buildWorkerUnit({ node: '/node', entry: '/bridge/bin/entry.mjs', profile: 'p', config: '/state/config.json', envPath: '/bin' });
+  expect(unit).toContain('worker run --profile "p"');
+  expect(unit).not.toMatch(/PartOf=|BindsTo=|bot\.p/);
+  expect(unit).toContain('KillMode=control-group'); expect(unit).toContain('Restart=on-failure');
+});

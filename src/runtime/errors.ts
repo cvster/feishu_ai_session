@@ -7,7 +7,8 @@ export type RunRejectedCode =
   | 'policy-expired'
   | 'reconnect-in-progress'
   | 'run-already-active'
-  | 'native-session-busy';
+  | 'native-session-busy'
+  | 'execution-worker-unavailable';
 export type SpawnFailedCode =
   | 'agent-spawn-failed'
   | 'agent-prepare-failed'

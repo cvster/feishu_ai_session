@@ -7,6 +7,10 @@ import { translateEvent } from '../../../src/agent/claude/stream-json.js';
 import type { AgentEvent } from '../../../src/agent/types.js';
 
 describe('Claude stream-json translator', () => {
+  it('reports a failed result as an error even when the CLI exits successfully', () => {
+    expect([...translateEvent({ type: 'result', is_error: true, errors: ['execution failed'] })])
+      .toEqual([{ type: 'error', terminationReason: 'failed', message: 'execution failed' }]);
+  });
   it('translates system init metadata', () => {
     expect([
       ...translateEvent({

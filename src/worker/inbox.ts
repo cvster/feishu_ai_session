@@ -1,0 +1,63 @@
+import { readFile } from 'node:fs/promises';
+import type { NormalizedMessage } from '@larksuite/channel';
+import { writeFileAtomic } from '../platform/atomic-write';
+import { messageRequestId } from './identity';
+import type { WorkerJob } from './protocol';
+
+interface InboxEntry { scope: string; message: NormalizedMessage; status: 'pending' | 'accepted' | 'rejected'; notified?: boolean }
+/** Bridge-only writer; persists input before debounce and keeps receipt identities. */
+export class WorkerInbox {
+  private entries: Record<string, InboxEntry> = {};
+  private queued = new Set<string>();
+  private deferredUntil = new Map<string, number>();
+  private saving: Promise<void> = Promise.resolve();
+  constructor(private readonly path: string) {}
+  async load(): Promise<void> {
+    try {
+      const raw = JSON.parse(await readFile(this.path, 'utf8'));
+      if (raw.version !== 1 || !raw.entries || Array.isArray(raw.entries)) throw new Error('Invalid Claude inbox');
+      for (const value of Object.values(raw.entries) as InboxEntry[]) if (!value.message?.messageId || !value.scope || !['pending', 'accepted', 'rejected'].includes(value.status)) throw new Error('Invalid Claude inbox receipt');
+      this.entries = raw.entries;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  private key(scope: string, message: NormalizedMessage) { return JSON.stringify([scope, messageRequestId(message)]); }
+  async receive(scope: string, message: NormalizedMessage): Promise<boolean> {
+    const key = this.key(scope, message);
+    if (this.entries[key]) return false;
+    this.entries[key] = { scope, message, status: 'pending' }; await this.persist(); return true;
+  }
+  markQueued(scope: string, message: NormalizedMessage): void { this.queued.add(this.key(scope, message)); }
+  releaseQueued(scope: string, messages: NormalizedMessage[]): void { for (const message of messages) this.queued.delete(this.key(scope, message)); }
+  available(): InboxEntry[] { return Object.entries(this.entries).filter(([key, entry]) => entry.status === 'pending' && !this.queued.has(key) && (this.deferredUntil.get(key) ?? 0) <= Date.now()).map(([, entry]) => entry); }
+  defer(scope: string, messages: NormalizedMessage[]): void {
+    for (const message of messages) this.deferredUntil.set(this.key(scope, message), Date.now() + 5000);
+  }
+  async notifyOnce(scope: string, messages: NormalizedMessage[]): Promise<boolean> {
+    let first = false;
+    for (const message of messages) {
+      const entry = this.entries[this.key(scope, message)];
+      if (entry && !entry.notified) { entry.notified = true; first = true; }
+    }
+    if (first) await this.persist(); return first;
+  }
+  async reject(scope: string, messages: NormalizedMessage[]): Promise<void> {
+    for (const message of messages) {
+      const key = this.key(scope, message), entry = this.entries[key];
+      if (entry?.status === 'pending') entry.status = 'rejected';
+      this.queued.delete(key);
+    }
+    await this.persist();
+  }
+  async reconcile(jobs: WorkerJob[]): Promise<void> {
+    const receipts = new Set(jobs.flatMap(job => (job.options.delivery?.messageIds ?? []).map(id => JSON.stringify([job.options.delivery!.scope, id]))));
+    let changed = false;
+    for (const [key, entry] of Object.entries(this.entries)) if (entry.status === 'pending' && receipts.has(key)) { entry.status = 'accepted'; changed = true; }
+    if (changed) await this.persist();
+  }
+  private persist(): Promise<void> {
+    const data = `${JSON.stringify({ version: 1, entries: this.entries })}\n`;
+    this.saving = this.saving.then(() => writeFileAtomic(this.path, data, { mode: 0o600 }));
+    void this.saving.catch(() => {}); return this.saving;
+  }
+  flush(): Promise<void> { return this.saving; }
+}

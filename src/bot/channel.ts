@@ -85,6 +85,11 @@ import { isSoloUserBotChat } from './group';
 import { CodexNameSync } from './thread-name';
 import { startAaSessionGroupSync } from './aa-session-groups';
 import { startCodexTurnSync } from './codex-turn-sync';
+import { DurableClaudeAdapter } from '../worker/adapter';
+import { startWorkerReplies } from '../worker/replies';
+import { messageRequestId } from '../worker/identity';
+import { WorkerInbox } from '../worker/inbox';
+import { isJobActive } from '../worker/protocol';
 import { CodexSubmissionStore } from '../session/codex-submissions';
 import { submitFeishuCodex } from './codex-submission-flow';
 import { startCodexUserInput } from './codex-user-input';
@@ -232,6 +237,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     await controls.toolBindings.load();
     if (sessionCatalog) controls.toolBindings.migrate(sessionCatalog, id => controls.toolRegistry!.get(id).sourceId);
     await controls.toolBindings.flush();
+    controls.workerInbox = new WorkerInbox(join(deps.appPaths.profileDir, 'claude-inbox.json'));
+    await controls.workerInbox.load();
     const nativeSessionLocks = new NativeSessionLocks();
     controls.executorForTool = id => {
       let instance = executors.get(id);
@@ -403,6 +410,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       } catch (err) {
         log.fail('flush', err);
       } finally {
+        controls.workerInbox?.releaseQueued(scope, batch);
         pending.unblock(scope);
         log.info('flush', 'end');
       }
@@ -584,6 +592,36 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   controls.codexUserInput = controls.profileConfig.agentKind === 'codex' && sessionCatalog && deps.appPaths?.profileDir
     ? await startCodexUserInput({ channel, controls, sessionCatalog, profileStateDir: deps.appPaths.profileDir })
     : undefined;
+  const claudeTool = controls.toolRegistry?.get('claude').agent;
+  let workerReplies: Awaited<ReturnType<typeof startWorkerReplies>> | undefined;
+  if (claudeTool instanceof DurableClaudeAdapter && sessionCatalog && deps.appPaths?.profileDir) {
+    workerReplies = await startWorkerReplies({
+      adapter: claudeTool, channel, controls, sessions, catalog: sessionCatalog, activeRuns,
+      statePath: join(deps.appPaths.profileDir, 'worker-replies.json'),
+      onReady: async jobs => {
+        if (disconnecting) return;
+        await controls.workerInbox?.reconcile(jobs);
+        const busy = new Set(jobs.filter(isJobActive).map(job => job.options.delivery?.scope).filter((scope): scope is string => Boolean(scope)));
+        for (const entry of pending.snapshot()) if (controls.toolBindings?.get(entry.scope)?.toolId === 'claude' && !busy.has(entry.scope) && !activeRuns.get(entry.scope)) pending.unblock(entry.scope);
+        for (const entry of controls.workerInbox?.available() ?? []) {
+          const binding = controls.toolBindings?.get(entry.scope);
+          if (binding?.toolId !== 'claude' || binding.sourceId !== claudeTool.client.sourceId || sessionCatalog.isScopeArchived(entry.scope)) {
+            await controls.workerInbox?.reject(entry.scope, [entry.message]); continue;
+          }
+          if (busy.has(entry.scope) || activeRuns.get(entry.scope)) continue;
+          controls.workerInbox!.markQueued(entry.scope, entry.message); pending.push(entry.scope, entry.message);
+        }
+      },
+      renderOptions: job => ({ ...controls.runControlIcons,
+        ...(callbackAuth && job.options.delivery ? { signCallback: action => callbackAuth.sign({
+          runId: job.id, scope: job.options.delivery!.scope, chatId: job.options.delivery!.chatId,
+          operatorOpenId: job.options.delivery!.operatorOpenId, action,
+          policyFingerprint: job.options.delivery!.policyFingerprint, ttlMs: 24 * 60 * 60 * 1000,
+        }) } : {}),
+      }),
+    });
+  }
+  controls.claudeReplySync = workerReplies;
 
   for (const record of submissions?.records() ?? []) {
     if (record.status !== 'pending') continue;
@@ -630,8 +668,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       activeRuns.pauseNewRuns('bridge-disconnect');
       pending.cancelAll();
       await Promise.all([executor, ...executors.values()].map(item => item.waitForSubmissions()));
-      if (submissions) await Promise.allSettled([...batchTasks]);
       await activeRuns.disconnectAll();
+      if (submissions) await Promise.allSettled([...batchTasks]);
+      await workerReplies?.stop();
+      controls.claudeReplySync = undefined;
       ownerRefresh.stop();
       knownChatsRefresh.stop();
       aaSessionGroupSync?.stop();
@@ -649,6 +689,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         callbackNonceStore?.flush(),
         workspaces.flush(),
         controls.toolBindings?.flush(),
+        controls.workerInbox?.flush(),
         submissions?.flush(),
       ]);
       for (const [idx, result] of flushResults.entries()) {
@@ -866,6 +907,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   });
   if (handled) {
     const dropped = controls.codexSubmissions ? [] : pending.cancel(scope);
+    if (dropped.length) await controls.workerInbox?.reject(scope, dropped);
     log.info('intake', 'command', { scope, droppedPending: dropped.length });
     return;
   }
@@ -874,6 +916,15 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     const currentThread = sessionCatalog?.entries().filter(e => e.scopeId === scope && e.status === 'active' && e.agentId === 'codex')
       .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.threadId;
     if (!await controls.codexSubmissions.receive(scope, emsg, currentThread)) return;
+  }
+  if (agent instanceof DurableClaudeAdapter) {
+    try {
+      const id = messageRequestId(emsg);
+      if ((await agent.client.list()).some(job => job.options.delivery?.scope === scope && job.options.delivery.messageIds?.includes(id))) return;
+    } catch { /* Submission will fail closed if the worker remains unavailable. */ }
+    if (controls.workerInbox && !await controls.workerInbox.receive(scope, emsg)) return;
+    controls.workerInbox?.markQueued(scope, emsg);
+    if (activeRuns.get(scope)) pending.block(scope);
   }
 
   if (activeRuns.newRunsPaused()) return; // durable pending will resume on reconnect
@@ -909,7 +960,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     sessionCatalog,
     workspaces,
     media,
-    batch,
+    batch: inputBatch,
     controls: rootControls,
     cotClient,
     callbackAuth,
@@ -926,6 +977,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   if (binding && tool && binding.sourceId !== tool.sourceId) throw new Error('会话数据来源已变化，不能恢复到其他账户/目录');
   const agent = tool?.agent ?? primaryAgent;
   const executor = rootControls.executorForTool?.(toolId) ?? primaryExecutor;
+  const batch = agent instanceof DurableClaudeAdapter ? [...new Map(inputBatch.map(message => [messageRequestId(message), message])).values()] : inputBatch;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
   const lastMsg = batch[batch.length - 1];
@@ -1097,6 +1149,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       : undefined,
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
+    ...(agent instanceof DurableClaudeAdapter ? {
+      requestKey: JSON.stringify([controls.profile, scope, batch.map(messageRequestId).sort()]),
+      delivery: { scope, chatId, replyTo: lastMsg.messageId, replyInThread: sendOpts.replyInThread,
+        operatorOpenId: firstMsg.senderId, policyFingerprint: '', botAppId: controls.profileConfig.accounts.app.id,
+        sourceId: agent.client.sourceId, messageIds: batch.map(messageRequestId) },
+      idleTimeoutMs: sessions.getIdleTimeoutMinutes(scope) !== undefined
+        ? (sessions.getIdleTimeoutMinutes(scope)! * 60_000 || undefined) : getRunIdleTimeoutMs(controls.cfg),
+    } : {}),
     observability: {
       profile: controls.profile,
       agent: capability.agentId,
@@ -1116,13 +1176,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   }
   const flow = await startRunFlow(flowInput);
   if (!flow.ok) {
+    if (controls.workerInbox && !['run-already-active', 'execution-worker-unavailable', 'pool-full', 'native-session-busy', 'reconnect-in-progress'].includes(flow.rejectReason.code)) await controls.workerInbox.reject(scope, batch);
     log.info('run-flow', 'rejected', { scope, code: flow.rejectReason.code });
     log.warn('policy', 'denied', {
       scope,
       source: 'im',
       code: flow.rejectReason.code,
     });
-    await channel.send(chatId, { markdown: flow.rejectReason.userVisible }, sendOpts);
+    if (!controls.workerInbox || await controls.workerInbox.notifyOnce(scope, batch)) await channel.send(chatId, { markdown: flow.rejectReason.userVisible }, sendOpts);
     return;
   }
 
@@ -1138,6 +1199,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   let runCodexThreadId: string | undefined;
   let runCodexTurnId: string | undefined;
   const recordSession = (evt: AgentEvent): void => {
+    if (agent instanceof DurableClaudeAdapter && (handle.interrupted || handle.detached)) return;
     if (evt.type === 'user_input') {
       controls.codexUserInput?.accept(evt.prompt, handle.run.runId,
         { scope, replyTo: sendOpts.replyTo, replyInThread: sendOpts.replyInThread });
@@ -1187,6 +1249,26 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       log.info('session', 'set-thread', { threadId: evt.threadId });
     }
   };
+
+  if (agent instanceof DurableClaudeAdapter && controls.claudeReplySync) {
+    // The journal-backed publisher is the only reply owner, including after restart.
+    // This observer maintains intake ordering and the current bridge's session state.
+    for await (const event of eventStream) {
+      recordSession(event);
+      if (event.type === 'error') {
+        await controls.claudeReplySync.runNow();
+        const recorded = await agent.client.snapshot(execution.runId).then(() => true, () => false);
+        if (!recorded && !handle.detached) {
+          if (event.retryable) controls.workerInbox?.defer(scope, batch);
+          else await controls.workerInbox?.reject(scope, batch);
+          if (!controls.workerInbox || await controls.workerInbox.notifyOnce(scope, batch)) await channel.send(chatId, { markdown: `⚠️ ${event.message}` }, sendOpts);
+        }
+      }
+    }
+    await controls.claudeReplySync.runNow();
+    activePolicyFingerprints.delete(scope);
+    return;
+  }
 
   // Resolve idle-timeout for this run: scope override (on SessionEntry) wins
   // over global default (preferences). 0 / undefined = no watchdog.

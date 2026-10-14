@@ -1,6 +1,7 @@
 import type { CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { AgentAdapter } from '../agent/types';
 import { routeCommandContext } from '../tools/context';
+import { createHash } from 'node:crypto';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
 import type { PendingQueue } from '../bot/pending-queue';
@@ -139,7 +140,10 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     try {
       const scopedCtx = await routeCommandContext(ctx);
       const ok = await runCommandHandler(name ?? '', args, scopedCtx);
-      if (ok && !scopedCtx.controls.codexSubmissions && (cmd === 'stop' || cmd === 'panel.stop')) deps.pending.cancel(scope);
+      if (ok && !scopedCtx.controls.codexSubmissions && (cmd === 'stop' || cmd === 'panel.stop')) {
+        const dropped = deps.pending.cancel(scope);
+        if (dropped.length) await scopedCtx.controls.workerInbox?.reject(scope, dropped);
+      }
       if (!ok) log.warn('cardAction', 'unknown', { cmd });
     } catch (err) {
       log.fail('cardAction', err, { cmd });
@@ -207,6 +211,7 @@ function forwardToAgent(
     senderName: deps.evt.operator.name,
     content: `[card-click] ${JSON.stringify(merged)}`,
     rawContentType: 'card_action',
+    raw: { bridgeCallbackId: createHash('sha256').update(String(payload.bridge_token)).digest('hex') },
     resources: [],
     mentions: [],
     mentionAll: false,

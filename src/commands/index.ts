@@ -115,6 +115,8 @@ export interface Controls {
   toolBindings?: ToolBindingStore;
   defaultToolId?: import('../config/profile-schema').AgentKind;
   executorForTool?(id: import('../config/profile-schema').AgentKind): RunExecutor;
+  claudeReplySync?: { runNow(): Promise<void>; stopScope(scope: string): Promise<boolean> };
+  workerInbox?: import('../worker/inbox').WorkerInbox;
   codexSubmissions?: import('../session/codex-submissions').CodexSubmissionStore;
   codexUserInput?: import('../bot/codex-user-input').CodexInputHandle;
   /** Refresh a persisted mirrored CardKit delivery using its original sequence owner. */
@@ -135,7 +137,7 @@ export interface Controls {
   ownerRefreshedAt?: number;
   ownerRefreshError?: string;
   refreshOwner(channel?: LarkChannel): Promise<void>;
-  /** Restart the bridge in-process: disconnect WS, kill claude runs, reload
+  /** Restart the bridge in-process: disconnect observers, reload
    * config, reconnect with the new credentials. */
   restart(opts?: { wait?: boolean }): Promise<void>;
   /** Stop this whole process gracefully (disconnect + exit). Used by /exit
@@ -858,10 +860,12 @@ async function finishPanelGroup(ctx: CommandContext, token: string): Promise<voi
   await ctx.activeRuns.stopScopes(scopes);
   const binding = ctx.controls.toolBindings?.get(target.chatId);
   const toolId = target.toolId ?? binding?.toolId ?? 'codex';
+  if (toolId === 'claude' && scopes.length === 0) await controlsForTool(ctx.controls, 'claude').claudeReplySync?.stopScope(target.chatId);
   const selectedAgent = ctx.controls.toolRegistry?.get(toolId).agent ?? ctx.agent;
-  if (target.threadId && toolId === 'claude' && binding) {
-    ctx.controls.toolBindings!.archive('claude', binding.sourceId, target.threadId);
-    ctx.sessionCatalog?.archiveScope(target.chatId, target.threadId);
+  if (toolId === 'claude' && binding) {
+    const nativeId = target.threadId ?? binding.nativeId;
+    if (nativeId) ctx.controls.toolBindings!.archive('claude', binding.sourceId, nativeId);
+    ctx.sessionCatalog?.archiveScope(target.chatId, nativeId ?? 'pending-claude');
     await ctx.controls.toolBindings!.flush();
   }
   if (target.threadId && toolId === 'codex' && selectedAgent.archiveThread) {
@@ -902,7 +906,7 @@ async function handleNewChat(
   const tool = ctx.controls.toolRegistry?.get(toolId);
   const targetAgent = tool?.agent ?? ctx.agent;
   if (tool && (targetAgent.id !== toolId || !await targetAgent.isAvailable())) {
-    await reply(ctx, `❌ ${toolId === 'claude' ? 'Claude Code' : 'Codex'} 不可用，请检查本机安装和认证。`);
+    await reply(ctx, `❌ ${toolId === 'claude' ? 'Claude Code' : 'Codex'} 不可用，请检查本机安装和认证${toolId === 'claude' ? '，以及独立 worker 服务' : ''}。`);
     return;
   }
   let sourceCwd = effectiveWorkspaceCwd(ctx);
@@ -1751,6 +1755,7 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
   }
   const scope = targetScope || ctx.scope;
   let ok = ctx.activeRuns.interrupt(scope);
+  if (!ok && ctx.controls.claudeReplySync) ok = await ctx.controls.claudeReplySync.stopScope(scope);
   if (!ok && ctx.controls.codexSubmissions) {
     const threadId = ctx.sessionCatalog?.entries().filter(e => e.scopeId === scope && e.agentId === 'codex' && e.status === 'active')
       .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.threadId;
@@ -1827,6 +1832,7 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
       : `⏳ 正在停止任务并归档当前 ${toolName} 会话…`,
   );
   await ctx.activeRuns.stopScopes(groupScopes);
+  if (ctx.controls.profileConfig.agentKind === 'claude' && groupScopes.length === 0) await ctx.controls.claudeReplySync?.stopScope(ctx.scope);
 
   const catalogEntry =
     ctx.sessionCatalog && ctx.sessionCatalogIdentity
@@ -1849,10 +1855,11 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
     }
   }
 
-  if (catalogEntry?.sessionId && ctx.controls.profileConfig.agentKind === 'claude') {
+  if (ctx.controls.profileConfig.agentKind === 'claude') {
     const binding = ctx.controls.toolBindings?.get(ctx.scope);
-    if (binding) { ctx.controls.toolBindings!.archive('claude', binding.sourceId, catalogEntry.sessionId); await ctx.controls.toolBindings!.flush(); }
-    ctx.sessionCatalog?.archiveScope(ctx.scope, catalogEntry.sessionId);
+    const nativeId = catalogEntry?.sessionId ?? binding?.nativeId;
+    if (binding && nativeId) { ctx.controls.toolBindings!.archive('claude', binding.sourceId, nativeId); await ctx.controls.toolBindings!.flush(); }
+    ctx.sessionCatalog?.archiveScope(ctx.scope, nativeId ?? 'pending-claude');
   }
   if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
     if (catalogEntry?.threadId) ctx.sessionCatalog.archiveCodexThread(catalogEntry.threadId);

@@ -20,6 +20,7 @@ import { RunRejected, type RunRejectedCode } from '../runtime/errors';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
+import type { RunDelivery } from '../worker/protocol';
 
 export interface StartRunFlowInput {
   scopeId: string;
@@ -36,6 +37,9 @@ export interface StartRunFlowInput {
   executor: RunExecutor;
   now: number;
   stopGraceMs?: number;
+  requestKey?: string;
+  delivery?: RunDelivery;
+  idleTimeoutMs?: number;
   observability?: {
     profile: string;
     agent: string;
@@ -199,6 +203,9 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
               .filter((path): path is string => Boolean(path))
           : undefined,
       stopGraceMs: input.stopGraceMs,
+      requestKey: input.requestKey,
+      delivery: input.delivery ? { ...input.delivery, policyFingerprint: policy.policyFingerprint } : undefined,
+      idleTimeoutMs: input.idleTimeoutMs,
       observability: input.observability,
     });
   } catch (err) {
@@ -208,7 +215,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
         rejectReason: {
           code: err.code,
           userVisible:
-            err.code === 'session-archived' || err.code === 'archive-check-unavailable' || err.code === 'native-session-busy'
+            err.code === 'session-archived' || err.code === 'archive-check-unavailable' || err.code === 'native-session-busy' || err.code === 'execution-worker-unavailable'
               ? err.message
               : err.code === 'reconnect-in-progress'
               ? '当前 bot 正在重连，稍后会继续处理新消息。'

@@ -20,6 +20,7 @@ export function controlsForTool(root: Controls, toolId: AgentKind, scope?: strin
       if (key === 'cfg') return { ...target.cfg, agentKind: toolId,
         preferences: { ...target.cfg.preferences, model: profile.preferences.model, reasoningEffort: profile.preferences.reasoningEffort } };
       if (toolId !== 'codex' && ['codexSubmissions', 'codexReplySync', 'codexUserInput'].includes(String(key))) return undefined;
+      if (toolId !== 'claude' && ['claudeReplySync', 'workerInbox'].includes(String(key))) return undefined;
       return Reflect.get(target, key, receiver);
     },
   });

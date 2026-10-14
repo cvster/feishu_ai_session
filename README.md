@@ -103,6 +103,23 @@ Bindings use `(tool, local source, native ID)`. Same-name sessions create separa
 
 Claude resume uses a conservative Linux `/proc` check: a Claude process still running in the same cwd blocks the request. End the original terminal session before continuing in the group. Platforms without an occupation probe refuse resume; the probe cannot prevent an external terminal from starting immediately afterward. Native-session leases also prevent concurrent writers within the bridge. Claude archival is bridge-only, preserves transcripts, and prevents automatic group recreation. Per-profile `tool-bindings.json` persists tool choices and archive state; existing catalog bindings migrate on startup.
 
+### Independent Claude worker and bridge restarts
+
+Claude IM work-group tasks execute in a separate worker. On Linux, after configuring the profile:
+
+```bash
+lark-channel-bridge worker start --profile lennox-codex
+lark-channel-bridge worker status --profile lennox-codex
+```
+
+The independent `lark-channel-worker.<profile>.service` owns Claude processes. Starting an existing worker is idempotent; routine bridge restarts never restart it. Missing or mismatched workers fail explicitly, with no inline execution fallback. `worker run --profile <profile>` supports independent supervisors; end-to-end recovery is currently validated on Linux.
+
+The worker persists acceptance before spawning, journals output under `execution-worker/jobs`, deduplicates requests, and owns idle timeouts. The bridge persists input before debounce in `claude-inbox.json`, reconciles worker receipts, and resumes pending messages without replaying explicitly cancelled input. `worker-replies.json` preserves reply IDs and card sequences. After a bridge restart, replies update the original card/post; text mode remains final-only. Separate CoT bubbles are not emitted in worker mode.
+
+Initial Feishu replies use stable UUIDs. Ambiguous sends retry only within the API's one-hour deduplication window; after 55 minutes, automatic resend pauses for manual reconciliation while the journal retains the output. [Feishu SDK UUID documentation](https://larksuite.github.io/oapi-sdk-java/com/lark/oapi/service/im/v1/model/CreateMessageReqBody.Builder.html)
+
+This protects **bridge restarts**, not worker/host restarts. `worker stop` stops active Claude tasks. On worker restart, persisted completed results remain deliverable; uncertain tasks are reported and never automatically rerun or rolled back. Worker account source and concurrency are read at startup; upgrade the worker separately from bridge deployments. This phase covers IM work groups, not comment-reply recovery or external Claude terminal mirroring.
+
 ### Multiple profiles: separate bots
 
 By default, the bridge starts with the currently selected profile. Use `profile use <name>` to change it. Each profile keeps its own app credentials, sessions, working directories, and logs. Create multiple profiles only when you need to connect multiple PersonalAgent apps, or run Claude and Codex as separate bots:

@@ -9,6 +9,8 @@ import { CodexAdapter } from '../agent/codex/adapter';
 import { listCodexThreadHistory } from '../session/codex-history';
 import { ToolRegistry } from './types';
 import { ClaudeSessionProvider } from './claude-sessions';
+import { DurableClaudeAdapter } from '../worker/adapter';
+import { WorkerClient } from '../worker/client';
 
 export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, primary: AgentAdapter): ToolRegistry {
   const registry = new ToolRegistry();
@@ -29,7 +31,8 @@ export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, prim
   const claudeHistory = new ClaudeSessionProvider(claudeHome);
   registry.register({ id: 'claude', label: 'Claude Code', sourceId: resolve(claudeHome),
     reserveSessionId: randomUUID,
-    agent: primary.id === 'claude' ? primary : new ClaudeAdapter({ binary: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude', larkChannel }),
+    agent: new DurableClaudeAdapter(new WorkerClient(join(paths.profileDir, 'execution-worker'), resolve(claudeHome), profile.accounts.app.id),
+      primary.id === 'claude' ? primary : new ClaudeAdapter({ binary: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude', larkChannel })),
     listSessions: () => claudeHistory.listSessions() });
   return registry;
 }

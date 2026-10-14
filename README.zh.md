@@ -105,6 +105,23 @@ daemon 日志在 `~/.lark-channel/profiles/<profile>/logs/daemon/`。
 
 Claude 的归档保存在桥接账本中，不删除原生 transcript；已归档会话不会自动重新建群。工具绑定和归档状态保存在 profile 的 `tool-bindings.json`，旧群根据会话目录迁移。不要删除该文件来切换工具或绕过归档。
 
+### Claude 独立执行服务与桥接重启
+
+群内 Claude 任务由独立 worker 执行，飞书桥接只提交请求和同步回复。配置好 profile 后，在 Linux 上先启动 worker：
+
+```bash
+lark-channel-bridge worker start --profile lennox-codex
+lark-channel-bridge worker status --profile lennox-codex
+```
+
+worker 是独立的 `lark-channel-worker.<profile>.service`。`worker start` 不重启已运行的 worker；日常 `lark-channel-bridge restart --profile <profile>` 只重启桥接。未启动或来源不匹配时，Claude 请求明确失败，不降级为桥接子进程执行。其他 supervisor 可用 `worker run --profile <profile>` 单独管理；本阶段完整恢复验证以 Linux 为准。
+
+任务接收记录和输出保存在 profile 的 `execution-worker/jobs`，接收持久化后才启动 Claude。相同请求 ID 不重复执行；空闲超时由 worker 处理，桥接断开不触发超时取消。桥接会保存 debounce 前的输入到 `claude-inbox.json`，重启后核对 worker 收据，再恢复尚未提交的消息。停止命令取消的待处理消息不会重新入队。桥接重启后能继续更新同一卡片或富文本消息，纯文本模式仍只发送最终结果；worker 模式暂不另发 CoT 过程气泡。
+
+`worker-replies.json` 保存回复 ID、卡片序号和发送进度。首发使用稳定的飞书 `uuid` 去重；发送确认丢失后在一小时去重窗口内核对并重试，超过 55 分钟则暂停自动重发，保留输出等待人工核对，避免重复消息。[飞书 SDK 对 uuid 的说明](https://larksuite.github.io/oapi-sdk-java/com/lark/oapi/service/im/v1/model/CreateMessageReqBody.Builder.html)
+
+此机制保障**桥接重启**，不保障 worker 自身重启、退出或主机重启时当前 Claude 进程继续运行。`worker stop` 会停止其任务；worker 重启后已持久化的完整结果仍可补发，未确认完成的任务标记为状态不确定，不自动重跑，也不回滚已产生的操作。worker 启动时读取账户目录和并发上限；升级或调整 worker 应与日常桥接部署分开处理。当前保活和回复恢复覆盖 IM 工作群，不承诺评论入口的回复恢复或外部 Claude 终端直播。
+
 ### 多 profile：分别运行多个机器人
 
 默认情况下，bridge 使用当前激活的 profile；可以通过 `profile use <name>` 切换。每个 profile 会维护独立的应用凭据、会话、工作目录和日志。只有在需要同时连接多个 PersonalAgent 应用，或分别运行 Claude 和 Codex 时，才需要创建多个 profile：

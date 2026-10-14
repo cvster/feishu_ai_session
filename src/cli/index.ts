@@ -24,6 +24,7 @@ import {
   runServiceUnregister,
 } from './commands/service';
 import { runStart } from './commands/start';
+import { runWorker, workerService } from './commands/worker';
 
 const program = new Command();
 
@@ -71,6 +72,16 @@ program
 const profile = program
   .command('profile')
   .description('Manage local bridge profiles');
+
+const worker = program.command('worker').description('Manage the independent Claude execution worker');
+worker.command('run').description('Run a worker in the foreground under an independent supervisor')
+  .option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
+  .action(runWorker);
+for (const action of ['start', 'stop', 'status'] as const) {
+  worker.command(action).description(action === 'stop' ? 'Stop the worker and its active Claude tasks' : `${action} the independent worker (does not restart the bridge)`)
+    .option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
+    .action(options => workerService(action, options));
+}
 
 profile
   .command('list')

@@ -25,6 +25,9 @@ interface ClaudeRawEvent {
     cache_read_input_tokens?: number;
   };
   total_cost_usd?: number;
+  is_error?: boolean;
+  errors?: string[];
+  result?: string;
 }
 
 export function* translateEvent(raw: unknown): Generator<AgentEvent> {
@@ -80,6 +83,7 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
         costUsd: evt.total_cost_usd,
       };
     }
-    yield { type: 'done', sessionId: evt.session_id, terminationReason: 'normal' };
+    if (evt.is_error) yield { type: 'error', terminationReason: 'failed', message: evt.errors?.join('\n') || evt.result || evt.subtype || 'Claude 未完成本次任务' };
+    else yield { type: 'done', sessionId: evt.session_id, terminationReason: 'normal' };
   }
 }

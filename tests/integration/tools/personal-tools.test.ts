@@ -75,6 +75,20 @@ async function harness() {
 }
 
 describe('personal multi-tool workflows', () => {
+  it('archives a pending Claude reservation before its first init event and stops a recovered worker task', async () => {
+    const h = await harness(); h.registry.get('claude').reserveSessionId = () => 'same-uuid';
+    const stopScope = vi.fn(async () => true);
+    h.controls.claudeReplySync = { runNow: async () => {}, stopScope };
+    const creation = h.context(); creation.formValue = { group_name: 'AA-pending', cwd: h.dir, agent_kind: 'claude' };
+    await runCommandHandler('new', 'chat form', creation);
+    const group = h.groups[0]!.id;
+    expect(h.catalog.entries()).toHaveLength(0);
+    await runCommandHandler('finish', 'archive', h.context(group, 'group'));
+    expect(stopScope).toHaveBeenCalledWith(group);
+    expect(h.catalog.isScopeArchived(group)).toBe(true);
+    expect(h.bindings.isArchived('claude', 'claude-home', 'same-uuid')).toBe(true);
+    await h.sync(); expect(h.groups).toHaveLength(2); // pending Claude group and the separate Codex AA source
+  });
   it('imports same name and UUID from both tools, stays idempotent, and resumes Claude with its original ID and cwd', async () => {
     const h = await harness(); await h.sync(); await h.sync();
     expect(h.groups).toHaveLength(2);

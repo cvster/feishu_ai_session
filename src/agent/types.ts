@@ -2,6 +2,7 @@ import type { AgentAvailability } from './preflight';
 import type { ClaudePermissionMode, CodexSandboxMode } from '../config/permissions';
 import type { CodexInputPrompt, CodexRequestId } from '../session/codex-user-input';
 import type { CodexSubmissionResult } from '../../packages/codex-core/src/submission';
+import type { RunDelivery } from '../worker/protocol';
 
 export type { ClaudePermissionMode } from '../config/permissions';
 
@@ -27,7 +28,7 @@ export type AgentEvent =
       threadId?: string;
       terminationReason: 'normal' | 'interrupted' | 'timeout';
     }
-  | { type: 'error'; message: string; terminationReason: 'failed' | 'interrupted' | 'timeout' };
+  | { type: 'error'; message: string; terminationReason: 'failed' | 'interrupted' | 'timeout'; submissionStatus?: 'rejected' | 'unknown'; retryable?: boolean };
 
 export const CLAUDE_DEFAULT_PERMISSION_MODE: ClaudePermissionMode = 'bypassPermissions';
 
@@ -38,6 +39,9 @@ export interface AgentRunOptions {
   sessionId?: string;
   sessionName?: string;
   initialSessionId?: string;
+  requestKey?: string;
+  delivery?: RunDelivery;
+  idleTimeoutMs?: number;
   threadId?: string;
   model?: string;
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
