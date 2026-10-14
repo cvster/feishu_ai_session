@@ -46,7 +46,17 @@ describe('agent model catalog', () => {
 
   it('labels a stored value using the picker option text', () => {
     expect(modelLabel('codex', 'gpt-6.1-sol')).toBe('GPT-6.1-Sol');
-    expect(modelLabel('claude', 'claude-opus-4-8')).toBe('Opus 4.8（最新）');
+    expect(modelLabel('claude', 'claude-opus-4-8')).toBe('Opus 4.8');
     expect(modelLabel('claude', DEFAULT_MODEL)).toContain('跟随默认');
+  });
+
+  it.each([
+    ['claude-opus-5-5', 'Opus 5.5（最新）'],
+    ['claude-fable-5-1', 'Fable 5.1'],
+  ])('offers %s and forwards its concrete model ID only to Claude', (model, label) => {
+    expect(supportedModels('claude')).toContainEqual({ value: model, label });
+    expect(normalizeModelSelection('claude', model)).toBe(model);
+    expect(resolveModelArg('claude', model)).toBe(model);
+    expect(resolveModelArg('codex', model)).toBeUndefined();
   });
 });

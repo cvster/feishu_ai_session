@@ -2837,7 +2837,12 @@ async function showConfigForm(ctx: CommandContext): Promise<void> {
     admins: access.admins,
     knownChats: ctx.controls.knownChats ?? [],
   });
-  await sendReplacementManagedCard(ctx, card);
+  // Settings can be opened from an answer's footer as well as the console.
+  // Keep that carrier message (and its controls) intact throughout the form.
+  const replyOptions = ctx.fromCardAction && ctx.chatMode !== 'topic'
+    ? {}
+    : commandReplyOptions(ctx);
+  await sendManagedCard(ctx.channel, ctx.msg.chatId, card, replyOptions);
 }
 
 async function showResultCardInPlace(

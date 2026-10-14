@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import type { NormalizedMessage } from '@larksuite/channel';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActiveRuns } from '../../../src/bot/active-runs';
+import { isManaged, sendManagedCard } from '../../../src/card/managed';
 import { tryHandleCommand, type CommandContext, type Controls } from '../../../src/commands/index';
 import { resolveAppPaths } from '../../../src/config/app-paths';
 import { getSecret, listSecretIds } from '../../../src/config/keystore';
@@ -69,15 +70,62 @@ describe('profile-aware account and config commands', () => {
     expect(root.profiles.claude?.access.requireMentionInGroup).toBe(true);
     expect(root.profiles.claude?.larkCli.identityPreset).toBe('bot-only');
   });
-  it('sends model settings independently before recalling the clicked console', async () => {
+  it.each(['p2p', 'group', 'topic'] as const)('opens settings in %s without recalling or changing the source card', async (chatMode) => {
     const h = await createHarness();
+    const source = await sendManagedCard(h.channel as unknown as CommandContext['channel'], 'chat-1', {
+      body: { elements: [{ tag: 'markdown', content: 'Original answer / console' }] },
+    });
     const send = vi.spyOn(h.channel, 'send');
+    const update = vi.spyOn(h.channel, 'updateCardById');
     const recall = vi.fn(async () => {});
     Object.assign(h.channel, { recallMessage: recall });
-    await h.command('/config');
-    expect(send).toHaveBeenCalledWith('chat-1', expect.anything(), undefined);
-    expect(recall).toHaveBeenCalledTimes(1);
-    expect(send.mock.invocationCallOrder[0]).toBeLessThan(recall.mock.invocationCallOrder[0]!);
+    await h.command('/config', undefined, { chatMode, messageId: source.messageId, threadId: 'omt_topic' });
+    expect(send).toHaveBeenCalledWith('chat-1', expect.anything(), chatMode === 'topic'
+      ? { replyTo: source.messageId, replyInThread: true }
+      : undefined);
+    expect(recall).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(isManaged(source.messageId)).toBe(true);
+    const form = JSON.stringify(h.channel.sent.at(-1)?.content);
+    expect(form).toContain('偏好设置');
+    expect(form).toContain('claude-opus-5-5');
+    expect(form).toContain('claude-fable-5-1');
+    expect(form).not.toContain('gpt-6.1-sol');
+  });
+
+  it('opens settings from a text command without recalling the command message', async () => {
+    const h = await createHarness();
+    const recall = vi.fn(async () => {});
+    Object.assign(h.channel, { recallMessage: recall });
+    await h.command('/config', undefined, { fromCardAction: false, messageId: 'om_config_command' });
+    expect(h.channel.sent.at(-1)?.options).toEqual({ replyTo: 'om_config_command' });
+    expect(recall).not.toHaveBeenCalled();
+  });
+
+  it.each(['submit', 'cancel'])('only updates the new settings form on %s, keeping the CC answer', async (action) => {
+    vi.useFakeTimers();
+    const h = await createHarness();
+    const source = await sendManagedCard(h.channel as unknown as CommandContext['channel'], 'chat-1', {
+      body: { elements: [{ tag: 'markdown', content: 'CC answer with settings button' }] },
+    });
+    const recall = vi.fn(async () => {});
+    Object.assign(h.channel, { recallMessage: recall });
+    const send = vi.spyOn(h.channel, 'send');
+    const update = vi.spyOn(h.channel, 'updateCardById');
+    await h.command('/config', undefined, { messageId: source.messageId });
+    const form = await send.mock.results[0]!.value;
+    const formCardId = (send.mock.calls[0]![1] as { cardId: string }).cardId;
+    await h.command(`/config ${action}`, { model: 'claude-opus-5-5' }, { messageId: form.messageId });
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(formCardId).not.toBe(source.cardId);
+    expect(update).toHaveBeenCalledWith(formCardId, expect.anything(), 1);
+    expect(recall).not.toHaveBeenCalled();
+    expect(isManaged(source.messageId)).toBe(true);
+    expect(isManaged(form.messageId)).toBe(false);
+    expect(h.channel.sent[0]?.content).toMatchObject({
+      card: { body: { elements: [{ content: 'CC answer with settings button' }] } },
+    });
   });
 
   it('keeps the old console when sending replacement settings fails', async () => {
@@ -124,18 +172,18 @@ describe('profile-aware account and config commands', () => {
     expect((root as unknown as { accounts?: unknown }).accounts).toBeUndefined();
   });
 
-  it('persists the picked model and clears it when "default" is chosen', async () => {
+  it.each(['claude-opus-4-8', 'claude-opus-5-5', 'claude-fable-5-1'])('persists %s and clears it when "default" is chosen', async (model) => {
     vi.useFakeTimers();
     const h = await createHarness();
 
     await h.command('/config submit', {
-      model: 'claude-opus-4-8',
+      model,
       message_reply: 'text',
     });
     const withModel = await waitForRoot(h.rootDir, (candidate) =>
-      candidate.profiles.claude?.preferences.model === 'claude-opus-4-8',
+      candidate.profiles.claude?.preferences.model === model,
     );
-    expect(withModel.profiles.claude?.preferences.model).toBe('claude-opus-4-8');
+    expect(withModel.profiles.claude?.preferences.model).toBe(model);
 
     await h.command('/config submit', {
       model: 'default',
@@ -276,12 +324,17 @@ describe('profile-aware account and config commands', () => {
   });
 });
 
+type CommandOverrides = Partial<Pick<CommandContext, 'chatMode' | 'fromCardAction'>> & {
+  messageId?: string;
+  threadId?: string;
+};
+
 async function createHarness(options: {
   preferences?: RootConfig['profiles'][string]['preferences'];
 } = {}): Promise<{
   rootDir: string;
   channel: ReturnType<typeof createFakeChannel>;
-  command(content: string, formValue?: Record<string, unknown>): Promise<boolean>;
+  command(content: string, formValue?: Record<string, unknown>, overrides?: CommandOverrides): Promise<boolean>;
 }> {
   const rootDir = await mkdtemp(join(tmpdir(), 'bridge-profile-config-command-'));
   roots.push(rootDir);
@@ -309,19 +362,23 @@ async function createHarness(options: {
   return {
     rootDir,
     channel,
-    command: (content: string, formValue?: Record<string, unknown>) =>
+    command: (content: string, formValue?: Record<string, unknown>, overrides: CommandOverrides = {}) =>
       tryHandleCommand({
         channel: channel as unknown as CommandContext['channel'],
-        msg: message(content),
+        msg: {
+          ...message(content),
+          ...(overrides.messageId ? { messageId: overrides.messageId } : {}),
+          ...(overrides.threadId ? { threadId: overrides.threadId } : {}),
+        },
         scope: 'chat-1',
-        chatMode: 'p2p',
+        chatMode: overrides.chatMode ?? 'p2p',
         sessions,
         workspaces,
         agent: new FakeAgentAdapter(),
         activeRuns: new ActiveRuns(),
         controls,
         formValue,
-        fromCardAction: true,
+        fromCardAction: overrides.fromCardAction ?? true,
       }),
   };
 }
