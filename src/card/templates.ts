@@ -93,10 +93,12 @@ export function workspacesCard(current: string | undefined, named: Record<string
 export function newChatWorkspaceCard(
   chatName: string,
   binding?: { threadId: string; existing: boolean },
+  agentKind: 'codex' | 'claude' = 'codex',
 ): object {
+  const toolName = agentKind === 'codex' ? 'Codex' : 'Claude Code';
   const bindingText = binding?.existing
-    ? `这个群已绑定现有 Codex 会话 \`${binding.threadId.slice(0, 8)}…\`，可以直接继续原对话。`
-    : '这个群已绑定独立 Codex 会话，发送第一条任务时会自动创建会话。';
+    ? `这个群已绑定现有 ${toolName} 会话 \`${binding.threadId.slice(0, 8)}…\`，可以直接继续原对话。`
+    : `这个群已绑定独立 ${toolName} 会话，发送第一条任务时会自动创建会话。`;
   const elements: object[] = [
     {
       tag: 'markdown',
@@ -157,13 +159,14 @@ export function taskPanelCard(info: TaskPanelInfo): object {
   const model = modelLabel(info.agentKind, info.model);
   return {
     schema: '2.0',
-    config: { summary: { content: 'Codex 任务控制台' } },
+    config: { summary: { content: `${info.agentKind === 'codex' ? 'Codex' : 'Claude Code'} 任务控制台` } },
     body: {
       elements: [
         {
           tag: 'markdown',
           content: [
         `💬 **群/范围**：${escapeMd(scopeLabel)}`,
+        `🛠️ **执行工具**：${info.agentKind === 'codex' ? 'Codex' : 'Claude Code'}`,
         `🤖 **模型**：${escapeMd(model)}${info.agentKind === 'codex' ? ` · ${info.reasoningEffort}` : ''}`,
         `📁 **工作目录**：\`${escapeCode(info.cwd ?? '(未设置)')}\``,
         `🔗 **会话**：${session}`,
@@ -203,7 +206,7 @@ export function taskPanelCard(info: TaskPanelInfo): object {
   };
 }
 
-export function newSessionConfirmationCard(): object {
+export function newSessionConfirmationCard(agentKind: 'codex' | 'claude' = 'codex'): object {
   return {
     schema: '2.0',
     config: { summary: { content: '确认新建会话' } },
@@ -211,7 +214,7 @@ export function newSessionConfirmationCard(): object {
       elements: [
         {
           tag: 'markdown',
-          content: '当前会话将结束，工作目录保持不变。下一条任务会建立一个全新的 Codex 会话。',
+          content: `当前会话将结束，工作目录保持不变。下一条任务会建立一个全新的 ${agentKind === 'codex' ? 'Codex' : 'Claude Code'} 会话。`,
         },
         { tag: 'hr' },
         cardKitButtonRow([
@@ -224,18 +227,19 @@ export function newSessionConfirmationCard(): object {
 }
 
 /** Destructive confirmation shown before archiving the session and dissolving the group. */
-export function finishTaskConfirmationCard(): object {
+export function finishTaskConfirmationCard(agentKind: 'codex' | 'claude' = 'codex'): object {
+  const toolName = agentKind === 'codex' ? 'Codex' : 'Claude Code';
   return {
     schema: '2.0',
-    config: { summary: { content: '确认终止 Codex 任务' } },
+    config: { summary: { content: `确认终止 ${toolName} 任务` } },
     body: {
       elements: [
         {
           tag: 'markdown',
           content:
             '⚠️ **请选择终止方式**\n\n' +
-            '- **仅终止会话**：停止运行并归档当前 Codex 会话，保留群和工作目录；下一条消息会开启新会话。\n' +
-            '- **归档并解散群**：永久解散当前飞书群；Codex 会话记录会保留在归档中，可稍后重新建群继续。',
+            `- **仅终止会话**：停止运行并归档当前 ${toolName} 会话，保留群和工作目录；后续消息不会自动新建会话。\n` +
+            '- **归档并解散群**：永久解散当前飞书群，原会话历史保留。',
         },
         {
           tag: 'button',
@@ -282,7 +286,7 @@ export function managedGroupsCard(entries: ManagedGroupCardEntry[], page: number
   const elements: object[] = [
     {
       tag: 'markdown',
-      content: '👥 **工作群管理**\n\n选择一个群查看其绑定会话，并执行归档或解散操作。解散群不会删除 Codex 会话记录。',
+      content: '👥 **工作群管理**\n\n选择一个群查看其绑定会话，并执行归档或解散操作。解散群不会删除原生会话记录。',
     },
     { tag: 'hr' },
   ];
@@ -307,19 +311,19 @@ export function managedGroupsCard(entries: ManagedGroupCardEntry[], page: number
     ...(hasMore ? [{ text: '下一页', value: { cmd: 'panel.groups', arg: String(page + 1) } } satisfies ButtonSpec] : []),
     { text: '返回控制台', value: { cmd: 'panel.refresh' } },
   ]));
-  return { schema: '2.0', config: { summary: { content: 'Codex 工作群管理' } }, body: { elements } };
+  return { schema: '2.0', config: { summary: { content: '工作群管理' } }, body: { elements } };
 }
 
-/** Second-level page listing existing local Codex sessions. */
+/** Second-level page listing native sessions from registered tools. */
 export function existingSessionsCard(entries: ExistingSessionCardEntry[], page: number, hasMore: boolean): object {
   const elements: object[] = [
     {
       tag: 'markdown',
-      content: '🗂️ **现有 Codex 会话**\n\n可以直接为历史会话创建飞书工作群，原会话 ID 和上下文保持不变。',
+      content: '🗂️ **现有会话**\n\n可以直接为历史会话创建飞书工作群，原会话 ID 和上下文保持不变。',
     },
     { tag: 'hr' },
   ];
-  if (entries.length === 0) elements.push({ tag: 'markdown', content: '没有找到可管理的 Codex 会话。' });
+  if (entries.length === 0) elements.push({ tag: 'markdown', content: '没有找到可管理的会话。' });
   for (const entry of entries) {
     elements.push({
       tag: 'markdown',
@@ -339,7 +343,7 @@ export function existingSessionsCard(entries: ExistingSessionCardEntry[], page: 
     ...(hasMore ? [{ text: '下一页', value: { cmd: 'panel.sessions', arg: String(page + 1) } } satisfies ButtonSpec] : []),
     { text: '返回控制台', value: { cmd: 'panel.refresh' } },
   ]));
-  return { schema: '2.0', config: { summary: { content: '现有 Codex 会话' } }, body: { elements } };
+  return { schema: '2.0', config: { summary: { content: '现有会话' } }, body: { elements } };
 }
 
 export function managedGroupDetailCard(entry: ManagedGroupCardEntry): object {
@@ -354,7 +358,7 @@ export function managedGroupDetailCard(entry: ManagedGroupCardEntry): object {
             `👥 **${escapeMd(entry.name)}**\n\n` +
             `🔗 会话：${entry.threadId ? `\`${entry.threadId}\`` : '尚未建立'}\n` +
             `📁 目录：\`${escapeCode(entry.cwd ?? '(未设置)')}\`\n\n` +
-            '归档并解散后，群会永久删除，但 Codex 会话记录仍保留，可从“现有会话”再次创建群。',
+            '归档并解散后，群会永久删除，原生会话历史仍保留；桥接不会自动为已归档会话重新建群。',
         },
         { tag: 'hr' },
         cardKitButtonRow([
@@ -396,17 +400,18 @@ export function newChatCreationCard(
   defaultCwd?: string,
   model = 'gpt-5.6-sol',
   reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' = 'high',
+  tools = [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
 ): object {
   return {
     schema: '2.0',
-    config: { summary: { content: '创建 Codex 工作群' } },
+    config: { summary: { content: '创建工作群' } },
     body: {
       elements: [
         {
           tag: 'markdown',
           content:
-            '🚀 **创建 Codex 工作群**\n\n' +
-            '机器人私聊仅用于创建工作群；创建后请在群里与 Codex 交互。\n\n' +
+            '🚀 **创建工作群**\n\n' +
+            '机器人私聊仅用于创建工作群；创建后请在群里与所选工具交互。\n\n' +
             '每个群拥有独立会话和工作目录。提交后会自动建群、拉你入群并发送工作区卡片。',
         },
         { tag: 'hr' },
@@ -423,24 +428,10 @@ export function newChatCreationCard(
               required: true,
             },
             {
-              tag: 'select_static',
-              name: 'model',
-              label: { tag: 'plain_text', content: '模型' },
-              initial_option: model,
-              options: supportedModels('codex').map((option) => ({
-                text: { tag: 'plain_text', content: option.label },
-                value: option.value,
-              })),
-            },
-            {
-              tag: 'select_static',
-              name: 'reasoning_effort',
-              label: { tag: 'plain_text', content: '推理程度' },
-              initial_option: reasoningEffort,
-              options: CODEX_STANDARD_REASONING_VALUES.map((value) => ({
-                text: { tag: 'plain_text', content: value },
-                value,
-              })),
+              tag: 'select_static', name: 'agent_kind',
+              label: { tag: 'plain_text', content: '执行工具（创建后固定）' },
+              initial_option: 'codex',
+              options: tools.map(tool => ({ text: { tag: 'plain_text', content: tool.label }, value: tool.id })),
             },
             {
               tag: 'input',
@@ -601,7 +592,7 @@ export function helpCard(agentName = 'Agent'): object {
         '- `/config` — 调整偏好、访问控制和 lark-cli 身份策略',
         '- `/status` — 当前状态',
         '- `/stop` — 结束当前正在跑的任务（也可点卡片底部“停止”按钮）',
-        '- “终止任务”或 `/finish` — 归档当前 Codex 会话，可选择保留或解散群',
+        '- “终止任务”或 `/finish` — 归档当前工具会话，可选择保留或解散群',
         '- `/stop comment:<scopeHash>` — 管理员停止云文档评论任务',
         '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',
         '- `/timeout comment:<scopeHash> N` — 管理员设置云文档评论任务探活',

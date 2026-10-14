@@ -208,7 +208,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
         rejectReason: {
           code: err.code,
           userVisible:
-            err.code === 'session-archived' || err.code === 'archive-check-unavailable'
+            err.code === 'session-archived' || err.code === 'archive-check-unavailable' || err.code === 'native-session-busy'
               ? err.message
               : err.code === 'reconnect-in-progress'
               ? '当前 bot 正在重连，稍后会继续处理新消息。'
@@ -234,6 +234,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
 export function recordRunSessionEvent(input: RecordRunSessionEventInput): void {
   if (input.event.type !== 'system') return;
   if (input.capability.agentId === 'claude' && input.event.sessionId) {
+    if (input.sessionCatalog?.isScopeArchived(input.scopeId)) return;
     const cwdRealpath = input.event.cwd ?? input.policy.cwdRealpath;
     input.sessions.set(input.scopeId, input.event.sessionId, cwdRealpath);
     input.sessionCatalog?.upsertActive({

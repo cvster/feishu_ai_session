@@ -17,6 +17,8 @@ import {
   type AgentRunOptions,
 } from '../types';
 import { translateEvent } from './stream-json';
+import { claudeWorkspaceOccupation } from './occupation';
+import { RunRejected, SpawnFailed } from '../../runtime/errors';
 
 export interface ClaudeAdapterOptions {
   binary?: string;
@@ -55,6 +57,18 @@ export class ClaudeAdapter implements AgentAdapter {
     });
   }
 
+  async prepareRun(opts: AgentRunOptions): Promise<void> {
+    const availability = await this.checkAvailability();
+    if (!availability.ok) throw new SpawnFailed('claude binary check failed', availability.error,
+      availability.diagnostic.code, availability.diagnostic);
+    if (!opts.sessionId || !opts.cwd) return;
+    const occupation = await claudeWorkspaceOccupation(opts.cwd, this.binary);
+    if (occupation === 'busy') throw new RunRejected('native-session-busy',
+      '该目录仍有 Claude Code 进程运行，请先在原终端结束会话，再从群内继续。');
+    if (occupation === 'unknown') throw new RunRejected('archive-check-unavailable',
+      '无法确认原 Claude 会话是否被占用，本次请求未执行。');
+  }
+
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) {
       throw new Error('cwd is required for ClaudeAdapter.run');
@@ -81,6 +95,10 @@ export class ClaudeAdapter implements AgentAdapter {
       systemPromptFile.path,
     ];
     if (opts.sessionId) args.push('--resume', opts.sessionId);
+    else {
+      if (opts.initialSessionId) args.push('--session-id', opts.initialSessionId);
+      if (opts.sessionName) args.push('--name', opts.sessionName);
+    }
     if (opts.model) args.push('--model', opts.model);
 
     const child = spawnProcess(this.binary, args, {

@@ -126,6 +126,20 @@ describe('ClaudeAdapter process contract', () => {
     expect(record.argv[5]).toBe('bypassPermissions');
   });
 
+  it('uses a preallocated ID and native name for a new session without resuming nonexistent history', async () => {
+    const fake = await createFakeClaude({ lines: [{ type: 'result', subtype: 'success', session_id: 'created', is_error: false }] });
+    cleanup.push(fake.dir);
+    const run = new ClaudeAdapter({ binary: fake.path }).run({ runId: 'new-named', cwd: fake.dir,
+      prompt: 'first real request', initialSessionId: '12345678-1234-4234-8234-123456789abc', sessionName: 'AA-任务' });
+    await collect(run.events);
+    const record = await readRecord(fake.recordPath);
+    expect(record.argv).toContain('--session-id');
+    expect(record.argv).toContain('12345678-1234-4234-8234-123456789abc');
+    expect(record.argv).toContain('--name'); expect(record.argv).toContain('AA-任务');
+    expect(record.argv).not.toContain('--resume');
+    expect(record.stdin).toBe('first real request');
+  });
+
   it('includes stderr when the process exits non-zero', async () => {
     const fake = await createFakeClaude({
       lines: [{ type: 'assistant', message: { content: [{ type: 'text', text: 'before failure' }] } }],

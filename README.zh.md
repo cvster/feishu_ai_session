@@ -93,7 +93,19 @@ lark-channel-bridge unregister [--profile <name>]
 
 daemon 日志在 `~/.lark-channel/profiles/<profile>/logs/daemon/`。
 
-### 多 profile：分别运行 Claude 和 Codex
+### 同一机器人使用 Codex 和 Claude Code
+
+在私聊“新建会话”卡片中选择 **Codex** 或 **Claude Code**，填写群名和工作目录后创建工作群。默认选择 Codex；工具保存在群绑定中，创建后固定，`/new`、目录切换和服务重启不会把 Claude 群改成 Codex 群。旧命令未传工具时沿用 profile 默认工具。两种 CLI 都需要在运行桥接的本机安装并分别完成登录；缺少 CLI 或恢复失败时不会自动切换工具。
+
+同步器每分钟发现两个工具中正式名称以 `AA` 开头的会话，沿用原会话 ID 和工作目录自动建群。Claude Code 从本地 `CLAUDE_CONFIG_DIR`（默认 `~/.claude`）的主会话 JSONL 读取 `custom-title`；子代理、仅问题预览以 AA 开头、未正式命名的会话不会建群。可在 Claude CLI 中用 `/rename AA-项目名` 命名。主动创建的 AA 工作群不会被重复导入。
+
+身份按 `(工具, 本地数据源, 原生会话 ID)` 区分。同名 Codex 和 Claude 会话各有独立群，重名时添加 `（Claude Code）` 或 `（Codex）`，必要时再加编号。名称和 UUID 相同也不会互相恢复或归档。私聊控制台“现有会话”统一列出两种工具的历史。
+
+群内 Claude 请求通过 `--resume <原会话 ID>` 恢复并流式回复。Codex 的现有桌面回复同步继续保留；本阶段不镜像外部 Claude 终端的实时输出。Claude 恢复前使用 Linux `/proc` 检查目录内 Claude 进程，同目录仍有进程时保守拒绝本次请求；请先结束原终端会话再从群内继续。其他平台无法确认占用时也拒绝恢复；该检查不能阻止外部终端在检查后同时启动。桥接内部另用原生会话锁防止同时写入。
+
+Claude 的归档保存在桥接账本中，不删除原生 transcript；已归档会话不会自动重新建群。工具绑定和归档状态保存在 profile 的 `tool-bindings.json`，旧群根据会话目录迁移。不要删除该文件来切换工具或绕过归档。
+
+### 多 profile：分别运行多个机器人
 
 默认情况下，bridge 使用当前激活的 profile；可以通过 `profile use <name>` 切换。每个 profile 会维护独立的应用凭据、会话、工作目录和日志。只有在需要同时连接多个 PersonalAgent 应用，或分别运行 Claude 和 Codex 时，才需要创建多个 profile：
 

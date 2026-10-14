@@ -93,7 +93,17 @@ Platform mapping:
 
 Daemon logs are under `~/.lark-channel/profiles/<profile>/logs/daemon/`.
 
-### Multiple profiles: Claude and Codex
+### Codex and Claude Code in one bot
+
+The DM creation card lets you choose **Codex** (default) or **Claude Code** and a working directory. Each group keeps its selected tool through resets, directory changes, and restarts. Commands without a tool field retain the profile default. Install and authenticate both CLIs locally; an unavailable tool or failed resume never falls back to another tool.
+
+Every minute, named `AA` sessions from either tool are imported into groups using their original native ID and cwd. Claude discovery reads main-session JSONL `custom-title` metadata from `CLAUDE_CONFIG_DIR` or `~/.claude`; subagents and prompt previews are excluded. Name a CLI session with `/rename AA-project`. Sessions already bound by proactive creation are not imported again.
+
+Bindings use `(tool, local source, native ID)`. Same-name sessions create separate groups with a tool suffix and, if needed, a numeric suffix. The DM session browser lists both tools. Claude group requests resume with the original ID and stream replies; existing Codex Desktop mirroring remains. External Claude terminal output is not mirrored in this phase.
+
+Claude resume uses a conservative Linux `/proc` check: a Claude process still running in the same cwd blocks the request. End the original terminal session before continuing in the group. Platforms without an occupation probe refuse resume; the probe cannot prevent an external terminal from starting immediately afterward. Native-session leases also prevent concurrent writers within the bridge. Claude archival is bridge-only, preserves transcripts, and prevents automatic group recreation. Per-profile `tool-bindings.json` persists tool choices and archive state; existing catalog bindings migrate on startup.
+
+### Multiple profiles: separate bots
 
 By default, the bridge starts with the currently selected profile. Use `profile use <name>` to change it. Each profile keeps its own app credentials, sessions, working directories, and logs. Create multiple profiles only when you need to connect multiple PersonalAgent apps, or run Claude and Codex as separate bots:
 

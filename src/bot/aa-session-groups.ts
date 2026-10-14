@@ -1,5 +1,7 @@
+import { controlsForTool } from '../tools/context';
+import type { AgentKind } from '../config/profile-schema';
 import type { LarkChannel } from '@larksuite/channel';
-import { codexCapability } from '../agent/capability';
+import { claudeCapability, codexCapability } from '../agent/capability';
 import { sendManagedCard } from '../card/managed';
 import { newChatWorkspaceCard } from '../card/templates';
 import { loadRootConfig, runtimeProfileConfig, saveRootConfig, withConfigFileLock } from '../config/profile-store';
@@ -26,6 +28,8 @@ export interface AaSessionGroupSyncDeps {
   profileStateDir: string;
   intervalMs?: number;
   historyProvider?: typeof listCodexThreadHistory;
+  toolId?: AgentKind;
+  sourceId?: string;
 }
 
 export interface AaSessionGroupSyncHandle {
@@ -70,8 +74,31 @@ export function startAaSessionGroupSync(deps: AaSessionGroupSyncDeps): AaSession
 }
 
 export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
-  const codex = deps.controls.profileConfig.codex;
-  if (deps.controls.profileConfig.agentKind !== 'codex' || !codex?.binaryPath) return;
+  if (!deps.controls.toolRegistry) return syncAaToolOnce(deps);
+  for (const tool of deps.controls.toolRegistry.all()) {
+    try {
+      if (!await tool.agent.isAvailable()) continue;
+      const rows = await tool.listSessions();
+      await syncAaToolOnce({ ...deps, toolId: tool.id, sourceId: tool.sourceId,
+        controls: controlsForTool(deps.controls, tool.id),
+        historyProvider: async () => rows.filter(row => !row.archived).map(row => ({
+          threadId: row.nativeId, name: row.name, cwd: row.cwd,
+          createdAtMs: row.createdAtMs, updatedAtMs: row.updatedAtMs, preview: '', source: tool.id,
+        })),
+      });
+    } catch (err) { log.fail('aa-session-groups', err, { toolId: tool.id, step: 'discover' }); }
+  }
+}
+
+async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
+  const toolId = deps.toolId ?? 'codex';
+  const sourceId = deps.sourceId ?? 'legacy';
+  const codex = deps.controls.profileConfig.codex ?? { binaryPath: 'codex' };
+  if (!deps.toolId && deps.controls.profileConfig.agentKind !== 'codex') return;
+  const capability = toolId === 'codex' ? codexCapability(deps.controls.profileConfig) : claudeCapability(deps.controls.profileConfig);
+  const nativeId = (entry: SessionCatalogEntry) => toolId === 'codex' ? entry.threadId : entry.sessionId;
+  const isBinding = (entry: SessionCatalogEntry) => entry.agentId === toolId && (!entry.sourceId || entry.sourceId === sourceId) && isCurrentBotBinding(entry, currentBotAppId, knownChatIds);
+  const isArchived = (id: string) => deps.controls.toolBindings?.isArchived(toolId, sourceId, id) || (toolId === 'codex' && deps.sessionCatalog.isThreadArchived?.(id));
 
   const inviteOpenIds = concreteInviteOpenIds(deps.controls);
   const actorId = deps.controls.botOwnerId ?? inviteOpenIds[0];
@@ -107,13 +134,14 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
   const boundThreadIds = new Set(
     catalogEntries
       .filter((entry) =>
-        isCurrentBotBinding(entry, currentBotAppId, knownChatIds) && entry.threadId,
+        isBinding(entry) && nativeId(entry),
       )
-      .map((entry) => entry.threadId as string),
+      .map((entry) => nativeId(entry)!),
   );
   const candidates = latestVersionSessions(history).filter(
     (thread) => isAaSession(thread) && !boundThreadIds.has(thread.threadId) &&
-      !deps.sessionCatalog.isThreadArchived?.(thread.threadId),
+      !deps.controls.toolBindings?.hasNativeBinding(toolId, sourceId, thread.threadId, knownChatIds) &&
+      !isArchived(thread.threadId),
   );
   if (candidates.length === 0) return;
 
@@ -121,12 +149,11 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
   const historyByThreadId = new Map(history.map((thread) => [thread.threadId, thread]));
 
   for (const thread of candidates) {
-    if (deps.sessionCatalog.isThreadArchived?.(thread.threadId)) continue;
+    if (isArchived(thread.threadId)) continue;
     // Another timer/manual action may have bound it while this sync was awaiting I/O.
     if (deps.sessionCatalog.entries().some(
       (entry) =>
-        entry.threadId === thread.threadId &&
-        isCurrentBotBinding(entry, currentBotAppId, knownChatIds),
+        nativeId(entry) === thread.threadId && isBinding(entry),
     )) continue;
 
     const workspace = await resolveWorkingDirectory(thread.cwd);
@@ -139,7 +166,7 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
     }
     const previous = findPreviousVersionBinding(
       thread,
-      deps.sessionCatalog.entries().filter((entry) => !deps.sessionCatalog.isScopeArchived?.(entry.scopeId)),
+      deps.sessionCatalog.entries().filter((entry) => isBinding(entry) && !deps.sessionCatalog.isScopeArchived?.(entry.scopeId)).map(entry => ({ ...entry, threadId: nativeId(entry) })),
       historyByThreadId,
       currentBotAppId,
       knownChatIds,
@@ -150,7 +177,7 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
       );
       const namesWithoutCurrent = new Set(usedNames);
       if (oldChat?.name) namesWithoutCurrent.delete(oldChat.name.trim());
-      const name = uniqueGroupName(thread.name!, namesWithoutCurrent);
+      const name = deps.toolId ? uniqueToolGroupName(thread.name!, namesWithoutCurrent, toolId) : uniqueGroupName(thread.name!, namesWithoutCurrent);
       const access = canUseGroup(
         deps.controls.profileConfig,
         deps.controls,
@@ -164,7 +191,7 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
         requestedCwd: workspace.cwdRealpath,
         cwdRealpath: workspace.cwdRealpath,
         access,
-        capability: codexCapability(deps.controls.profileConfig),
+        capability,
         profileConfig: deps.controls.profileConfig,
         now: Date.now(),
         codexHome: codex.codexHome,
@@ -178,23 +205,27 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
         continue;
       }
       try {
-        if (await deps.controls.codexReplySync?.isThreadArchived?.(thread.threadId) ||
-            deps.sessionCatalog.isThreadArchived?.(thread.threadId) ||
+        if ((toolId === 'codex' && await deps.controls.codexReplySync?.isThreadArchived?.(thread.threadId)) ||
+            isArchived(thread.threadId) ||
             deps.sessionCatalog.isScopeArchived?.(previous.scopeId)) continue;
         if (oldChat?.name.trim() !== name) {
           await renameChat(deps.channel, previous.scopeId, name);
         }
         deps.sessionCatalog.archiveActive(previous);
-        deps.sessionCatalog.archiveThread(thread.threadId);
+        if (toolId === 'codex') deps.sessionCatalog.archiveThread(thread.threadId);
+        else deps.sessionCatalog.archiveNativeSession('claude', thread.threadId, sourceId);
         deps.sessionCatalog.upsertActive({
           scopeId: previous.scopeId,
-          agentId: 'codex',
+          agentId: toolId,
+          sourceId,
           cwdRealpath: workspace.cwdRealpath,
           policyFingerprint: policy.policyFingerprint,
-          threadId: thread.threadId,
+          ...(toolId === 'codex' ? { threadId: thread.threadId } : { sessionId: thread.threadId }),
           botAppId: currentBotAppId,
           recentTurnReplayCount: null,
         });
+        deps.controls.toolBindings?.set(previous.scopeId, { toolId, sourceId, nativeId: thread.threadId, nativeCreated: true, name });
+        await deps.controls.toolBindings?.flush();
         deps.workspaces.setCwd(previous.scopeId, workspace.cwdRealpath);
         await Promise.all([deps.workspaces.flush(), deps.sessionCatalog.flush()]);
         await persistAllowedChat(deps.controls, previous.scopeId);
@@ -216,7 +247,7 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
       await sendManagedCard(
         deps.channel,
         previous.scopeId,
-        newChatWorkspaceCard(name, { threadId: thread.threadId, existing: true }),
+        newChatWorkspaceCard(name, { threadId: thread.threadId, existing: true }, toolId),
       ).catch((err) => log.warn('aa-session-groups', 'upgrade-welcome-failed', {
         chatId: previous.scopeId,
         err: errorText(err),
@@ -229,16 +260,16 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
       });
       continue;
     }
-    const name = uniqueGroupName(thread.name!, usedNames);
+    const name = deps.toolId ? uniqueToolGroupName(thread.name!, usedNames, toolId) : uniqueGroupName(thread.name!, usedNames);
     let created;
     try {
-      if (await deps.controls.codexReplySync?.isThreadArchived?.(thread.threadId) ||
-          deps.sessionCatalog.isThreadArchived?.(thread.threadId)) continue;
+      if ((toolId === 'codex' && await deps.controls.codexReplySync?.isThreadArchived?.(thread.threadId)) ||
+          isArchived(thread.threadId)) continue;
       created = await createBoundChat({
         channel: deps.channel,
         name,
         inviteOpenIds,
-        description: `自动绑定 Codex 会话 ${thread.threadId}`,
+        description: `自动绑定 ${toolId === 'codex' ? 'Codex' : 'Claude Code'} 会话 ${thread.threadId}`,
       });
     } catch (err) {
       log.fail('aa-session-groups', err, { step: 'create-chat', threadId: thread.threadId });
@@ -259,7 +290,7 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
       requestedCwd: workspace.cwdRealpath,
       cwdRealpath: workspace.cwdRealpath,
       access,
-      capability: codexCapability(deps.controls.profileConfig),
+      capability,
       profileConfig: deps.controls.profileConfig,
       now: Date.now(),
       codexHome: codex.codexHome,
@@ -274,16 +305,20 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
     }
     // Retire bindings for this thread that belonged to a previous bot before
     // recording the newly created group for the authenticated bot.
-    deps.sessionCatalog.archiveThread(thread.threadId);
+    if (toolId === 'codex') deps.sessionCatalog.archiveThread(thread.threadId);
+    else deps.sessionCatalog.archiveNativeSession('claude', thread.threadId, sourceId);
     deps.sessionCatalog.upsertActive({
       scopeId: created.chatId,
-      agentId: 'codex',
+      agentId: toolId,
+      sourceId,
       cwdRealpath: workspace.cwdRealpath,
       policyFingerprint: policy.policyFingerprint,
-      threadId: thread.threadId,
+      ...(toolId === 'codex' ? { threadId: thread.threadId } : { sessionId: thread.threadId }),
       botAppId: currentBotAppId,
-      recentTurnReplayCount: AA_RECENT_TURN_REPLAY_COUNT,
+      recentTurnReplayCount: toolId === 'codex' ? AA_RECENT_TURN_REPLAY_COUNT : undefined,
     });
+    deps.controls.toolBindings?.set(created.chatId, { toolId, sourceId, nativeId: thread.threadId, nativeCreated: true, name: created.name });
+    await deps.controls.toolBindings?.flush();
     await Promise.all([deps.workspaces.flush(), deps.sessionCatalog.flush()]);
     await persistAllowedChat(deps.controls, created.chatId).catch((err) =>
       log.fail('aa-session-groups', err, { step: 'allow-chat', chatId: created.chatId }),
@@ -298,7 +333,7 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
     await sendManagedCard(
       deps.channel,
       created.chatId,
-      newChatWorkspaceCard(created.name, { threadId: thread.threadId, existing: true }),
+      newChatWorkspaceCard(created.name, { threadId: thread.threadId, existing: true }, toolId),
     ).catch((err) => log.warn('aa-session-groups', 'welcome-failed', {
       chatId: created.chatId,
       err: errorText(err),
@@ -316,7 +351,7 @@ function isCurrentBotBinding(
   currentBotAppId: string,
   knownChatIds: Set<string>,
 ): boolean {
-  if (entry.status !== 'active' || entry.agentId !== 'codex') return false;
+  if (entry.status !== 'active') return false;
   if (!knownChatIds.has(entry.scopeId)) return false;
   return !entry.botAppId || entry.botAppId === currentBotAppId;
 }
@@ -396,6 +431,11 @@ function concreteInviteOpenIds(controls: Controls): string[] {
     ...(controls.botOwnerId ? [controls.botOwnerId] : []),
     ...controls.profileConfig.access.admins,
   ].filter((id) => /^ou_[A-Za-z0-9]+$/.test(id)))];
+}
+
+export function uniqueToolGroupName(title: string, usedNames: Set<string>, toolId: AgentKind): string {
+  const normalized = normalizeTitle(title);
+  return uniqueGroupName(usedNames.has(normalized) ? `${normalized}（${toolId === 'codex' ? 'Codex' : 'Claude Code'}）` : normalized, usedNames);
 }
 
 function uniqueGroupName(title: string, usedNames: Set<string>): string {

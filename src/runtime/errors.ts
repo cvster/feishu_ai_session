@@ -6,7 +6,8 @@ export type RunRejectedCode =
   | 'pool-full'
   | 'policy-expired'
   | 'reconnect-in-progress'
-  | 'run-already-active';
+  | 'run-already-active'
+  | 'native-session-busy';
 export type SpawnFailedCode =
   | 'agent-spawn-failed'
   | 'agent-prepare-failed'

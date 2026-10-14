@@ -1,0 +1,54 @@
+import { it, expect, afterEach } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { ToolBindingStore, sessionRefKey } from '../../../src/tools/bindings';
+import { NativeSessionLocks } from '../../../src/tools/locks';
+import { SessionCatalog } from '../../../src/session/catalog';
+const clean: string[] = [];
+afterEach(async () => { await Promise.all(clean.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
+it('persists immutable group choices and separates archives by tool and source', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tools-bindings-')); clean.push(root);
+  const path = join(root, 'bindings.json'); const store = new ToolBindingStore(path);
+  await store.load(); store.set('oc_c', { toolId: 'claude', sourceId: 'local', nativeId: 'same-id' });
+  store.set('oc_g', { toolId: 'codex', sourceId: 'local', nativeId: 'same-id' });
+  store.archive('claude', 'local', 'same-id'); await store.flush();
+  const restored = new ToolBindingStore(path); await restored.load();
+  expect(restored.get('oc_c:topic')?.toolId).toBe('claude');
+  expect(restored.isArchived('claude', 'local', 'same-id')).toBe(true);
+  expect(restored.isArchived('codex', 'local', 'same-id')).toBe(false);
+  expect(restored.isArchived('claude', 'another-account', 'same-id')).toBe(false);
+  expect(() => restored.set('oc_c', { toolId: 'codex', sourceId: 'local' })).toThrow('不能切换');
+  expect(() => restored.set('oc_c:topic', { toolId: 'codex', sourceId: 'local' })).toThrow('不能切换');
+});
+it('migrates existing Codex bindings without changing their native ID on restart', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tools-migration-')); clean.push(root);
+  const catalog = new SessionCatalog(join(root, 'catalog.json')); await catalog.load();
+  catalog.upsertActive({ scopeId: 'old-group', agentId: 'codex', cwdRealpath: root, policyFingerprint: 'legacy', threadId: 'old-native' });
+  await catalog.flush();
+  const path = join(root, 'bindings.json'); const store = new ToolBindingStore(path); await store.load();
+  store.migrate(catalog, () => 'original-home'); await store.flush();
+  const restored = new ToolBindingStore(path); await restored.load();
+  restored.migrate(catalog, () => 'changed-home');
+  expect(restored.get('old-group')).toMatchObject({ toolId: 'codex', sourceId: 'original-home', nativeId: 'old-native' });
+});
+it('rejects conflicting legacy tools for a group rather than silently routing to the latest row', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tools-conflict-')); clean.push(root);
+  const catalog = new SessionCatalog(join(root, 'catalog.json')); await catalog.load();
+  catalog.upsertActive({ scopeId: 'group', agentId: 'codex', cwdRealpath: root, policyFingerprint: 'c', threadId: 'native' });
+  catalog.upsertActive({ scopeId: 'group', agentId: 'claude', cwdRealpath: root, policyFingerprint: 'a', sessionId: 'native' });
+  await catalog.flush();
+  const store = new ToolBindingStore(join(root, 'bindings.json'));
+  expect(() => store.migrate(catalog, () => 'home')).toThrow('工具身份冲突');
+});
+it('fails closed on malformed persisted state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tools-invalid-')); clean.push(root);
+  const path = join(root, 'ledger.json'); await writeFile(path, '{"version":1,"bindings":{"chat":{"toolId":"unknown"}},"archived":[]}');
+  await expect(new ToolBindingStore(path).load()).rejects.toThrow('Invalid');
+});
+it('locks a native session across group executors while keeping different tools independent', () => {
+  const locks = new NativeSessionLocks(); const key = sessionRefKey('claude', 'local', 'id');
+  const release = locks.acquire(key)!; expect(locks.acquire(key)).toBeUndefined();
+  expect(locks.acquire(sessionRefKey('codex', 'local', 'id'))).toBeTypeOf('function');
+  release(); expect(locks.acquire(key)).toBeTypeOf('function');
+});

@@ -36,6 +36,8 @@ export interface AgentRunOptions {
   prompt: string;
   cwd?: string;
   sessionId?: string;
+  sessionName?: string;
+  initialSessionId?: string;
   threadId?: string;
   model?: string;
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';

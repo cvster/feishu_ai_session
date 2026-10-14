@@ -17,7 +17,8 @@ describe('CodexAdapter native queue mode', () => {
 
   it('accepts a message without observing an unfinished turn and validates attachments before sending', async () => {
     const fake = await createQueueCodex('inProgress'); cleanup.push(fake.dir);
-    const adapter = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir });
+    // Isolate endpoint discovery from a real local Codex Desktop socket.
+    const adapter = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir, codexHome: fake.dir });
     const prepared: unknown[] = [];
     const result = await adapter.submit({ runId: 'accept-only', cwd: fake.dir, prompt: 'do not wait', threadId: 'thread-existing' },
       async value => { prepared.push(value); });

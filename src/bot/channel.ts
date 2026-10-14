@@ -1,3 +1,9 @@
+import { NativeSessionLocks } from '../tools/locks';
+import { sessionRefKey } from '../tools/bindings';
+import { createToolRegistry } from '../tools/runtime';
+import { ToolBindingStore } from '../tools/bindings';
+import { controlsForTool, toolForScope } from '../tools/context';
+import { resolveAppPaths } from '../config/app-paths';
 import type {
   LarkChannel,
   LarkChannelOptions,
@@ -216,7 +222,36 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // Concurrency cap — reads `preferences.maxConcurrentRuns` on each acquire,
   // so /config bumps take effect for the next run.
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
-  const executor = new RunExecutor({ agent, pool, activeRuns });
+  const executor = new RunExecutor({ agent, pool, activeRuns, sessionNameForScope: scope => controls.toolBindings?.get(scope)?.name });
+  const executors = new Map<string, RunExecutor>();
+  if (deps.appPaths?.profileDir) {
+    const runtimePaths = resolveAppPaths({ rootDir: dirname(controls.configPath), profile: controls.profile });
+    controls.toolRegistry = createToolRegistry(controls.profileConfig, runtimePaths, agent);
+    controls.defaultToolId = controls.profileConfig.agentKind;
+    controls.toolBindings = new ToolBindingStore(join(deps.appPaths.profileDir, 'tool-bindings.json'));
+    await controls.toolBindings.load();
+    if (sessionCatalog) controls.toolBindings.migrate(sessionCatalog, id => controls.toolRegistry!.get(id).sourceId);
+    await controls.toolBindings.flush();
+    const nativeSessionLocks = new NativeSessionLocks();
+    controls.executorForTool = id => {
+      let instance = executors.get(id);
+      if (!instance) {
+        instance = new RunExecutor({
+          agent: controls.toolRegistry!.get(id).agent, pool, activeRuns,
+          sessionNameForScope: scope => controls.toolBindings?.get(scope)?.name,
+          initialSessionIdForScope: scope => {
+            const binding = controls.toolBindings?.get(scope);
+            return binding?.nativeCreated === false ? binding.nativeId : undefined;
+          },
+          nativeSessionLocks,
+          nativeSessionKey: nativeId => sessionRefKey(id, controls.toolRegistry!.get(id).sourceId, nativeId),
+        });
+        executors.set(id, instance);
+      }
+      return instance;
+    };
+  }
+
   const submissions = controls.profileConfig.agentKind === 'codex' && agent.submit && deps.appPaths?.profileDir
     ? new CodexSubmissionStore(join(deps.appPaths.profileDir, 'codex-submissions.json')) : undefined;
   await submissions?.load();
@@ -556,6 +591,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   }
 
   const identity = channel.botIdentity;
+  if (identity) for (const tool of controls.toolRegistry?.all() ?? []) tool.agent.setBotIdentity?.(identity);
   // Late-bind the bot's own IM identity into the agent adapter so the system
   // prompt can state "this open_id is you" with the real value. Covers both
   // initial start and credential-swap reconnects (both go through here).
@@ -593,7 +629,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       disconnecting = true;
       activeRuns.pauseNewRuns('bridge-disconnect');
       pending.cancelAll();
-      await executor.waitForSubmissions();
+      await Promise.all([executor, ...executors.values()].map(item => item.waitForSubmissions()));
       if (submissions) await Promise.allSettled([...batchTasks]);
       await activeRuns.disconnectAll();
       ownerRefresh.stop();
@@ -612,6 +648,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         sessionCatalog?.flush(),
         callbackNonceStore?.flush(),
         workspaces.flush(),
+        controls.toolBindings?.flush(),
         submissions?.flush(),
       ]);
       for (const [idx, result] of flushResults.entries()) {
@@ -686,17 +723,17 @@ type LogThreadModeOverride = (input: {
 async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const {
     channel,
-    agent,
+    agent: primaryAgent,
     sessions,
     sessionCatalog,
     workspaces,
     activeRuns,
     pending,
     msg,
-    controls,
+    controls: rootControls,
     chatModeCache,
     logThreadModeOverride,
-    executor,
+    executor: primaryExecutor,
     pool,
   } = deps;
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
@@ -740,6 +777,13 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const scope = chatMode === 'topic' && threadId
     ? `${msg.chatId}:${threadId}`
     : msg.chatId;
+  const toolId = toolForScope(rootControls, scope);
+  const controls = controlsForTool(rootControls, toolId, scope);
+  const tool = rootControls.toolRegistry?.get(toolId);
+  const binding = rootControls.toolBindings?.get(scope);
+  if (binding && tool && binding.sourceId !== tool.sourceId) throw new Error('会话数据来源已变化，不能恢复到其他账户/目录');
+  const agent = tool?.agent ?? primaryAgent;
+  const executor = rootControls.executorForTool?.(toolId) ?? primaryExecutor;
   log.info('intake', 'enter', {
     scope,
     chatType: msg.chatType,
@@ -859,14 +903,14 @@ interface RunBatchDeps {
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const {
     channel,
-    agent,
-    executor,
+    agent: primaryAgent,
+    executor: primaryExecutor,
     sessions,
     sessionCatalog,
     workspaces,
     media,
     batch,
-    controls,
+    controls: rootControls,
     cotClient,
     callbackAuth,
     activePolicyFingerprints,
@@ -875,6 +919,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     scope,
     mode,
   } = deps;
+  const toolId = toolForScope(rootControls, scope);
+  const controls = controlsForTool(rootControls, toolId, scope);
+  const tool = rootControls.toolRegistry?.get(toolId);
+  const binding = rootControls.toolBindings?.get(scope);
+  if (binding && tool && binding.sourceId !== tool.sourceId) throw new Error('会话数据来源已变化，不能恢复到其他账户/目录');
+  const agent = tool?.agent ?? primaryAgent;
+  const executor = rootControls.executorForTool?.(toolId) ?? primaryExecutor;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
   const lastMsg = batch[batch.length - 1];
@@ -1098,6 +1149,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
     if (evt.type === 'done' && runCodexThreadId && runCodexTurnId) {
       controls.codexUserInput?.endTurn(runCodexThreadId, runCodexTurnId);
+    }
+    if (evt.type === 'system') {
+      const binding = controls.toolBindings?.get(scope);
+      const nativeId = capability.agentId === 'codex' ? evt.threadId : evt.sessionId;
+      if (binding && nativeId && !sessionCatalog?.isScopeArchived(scope)) controls.toolBindings!.set(scope, { ...binding, nativeId, nativeCreated: true });
     }
     recordRunSessionEvent({
       scopeId: scope,

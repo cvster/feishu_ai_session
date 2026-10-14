@@ -1,3 +1,4 @@
+import type { NativeSessionLocks } from '../tools/locks';
 import { randomUUID } from 'node:crypto';
 import type { AgentAdapter, AgentEvent, AgentRun } from '../agent/types';
 import { ActiveRuns, type RunHandle } from '../bot/active-runs';
@@ -14,6 +15,10 @@ export interface RunExecutorDeps {
   createRunId?: () => string;
   now?: () => number;
   postDoneExitGraceMs?: number;
+  sessionNameForScope?(scope: string): string | undefined;
+  initialSessionIdForScope?(scope: string): string | undefined;
+  nativeSessionLocks?: NativeSessionLocks;
+  nativeSessionKey?(nativeId: string): string;
 }
 
 export interface SubmitRunInput {
@@ -52,6 +57,10 @@ export interface RunExecution {
 const DEFAULT_POST_DONE_EXIT_GRACE_MS = 2000;
 
 export class RunExecutor {
+  private readonly nativeSessionLocks?: NativeSessionLocks;
+  private readonly nativeSessionKey?: RunExecutorDeps['nativeSessionKey'];
+  private readonly initialSessionIdForScope?: RunExecutorDeps['initialSessionIdForScope'];
+  private readonly sessionNameForScope: RunExecutorDeps['sessionNameForScope'];
   private readonly submissions = new Set<Promise<CodexSubmissionResult>>();
   private readonly agent: AgentAdapter;
   private readonly pool: ProcessPool;
@@ -62,6 +71,10 @@ export class RunExecutor {
 
   constructor(deps: RunExecutorDeps) {
     this.agent = deps.agent;
+    this.sessionNameForScope = deps.sessionNameForScope;
+    this.initialSessionIdForScope = deps.initialSessionIdForScope;
+    this.nativeSessionLocks = deps.nativeSessionLocks;
+    this.nativeSessionKey = deps.nativeSessionKey;
     this.pool = deps.pool;
     this.activeRuns = deps.activeRuns;
     this.createRunId = deps.createRunId ?? randomUUID;
@@ -106,6 +119,16 @@ export class RunExecutor {
   }
 
   async submit(input: SubmitRunInput): Promise<RunExecution> {
+    const nativeId = input.threadId ?? input.sessionId;
+    if (!nativeId || !this.nativeSessionLocks || !this.nativeSessionKey) return this.submitImpl(input);
+    const release = this.nativeSessionLocks.acquire(this.nativeSessionKey(nativeId));
+    if (!release) throw new RunRejected('run-already-active', '同一工具会话已有桥接任务运行');
+    try {
+      return await this.submitImpl(input, release);
+    } catch (e) { release(); throw e; }
+  }
+
+  private async submitImpl(input: SubmitRunInput, releaseNative?: () => void): Promise<RunExecution> {
     const submittedAt = this.now();
     if (input.policy.expiresAt <= this.now()) {
       throw new RunRejected('policy-expired', 'run policy expired before spawn');
@@ -143,6 +166,8 @@ export class RunExecutor {
       prompt: input.policy.prompt,
       cwd: input.policy.cwdRealpath,
       sessionId: input.sessionId,
+      sessionName: this.sessionNameForScope?.(input.scopeId),
+      initialSessionId: input.sessionId ? undefined : this.initialSessionIdForScope?.(input.scopeId),
       threadId: input.threadId,
       model: input.model,
       reasoningEffort: input.reasoningEffort,
@@ -212,20 +237,24 @@ export class RunExecutor {
       cleaned = true;
       this.activeRuns.unregister(input.scopeId, run);
       release();
-      if (waitForExit) {
-        const exited = await run.waitForExit(this.postDoneExitGraceMs);
-        if (!exited) {
-          log.warn('run', 'post-done-exit-timeout', {
-            ...dimensions,
-            graceMs: this.postDoneExitGraceMs,
-          });
-          await run.stop().catch((err) => {
-            log.warn('run', 'post-done-stop-failed', {
+      try {
+        if (waitForExit || (releaseNative && !handle.detached)) {
+          const exited = await run.waitForExit(this.postDoneExitGraceMs);
+          if (!exited) {
+            log.warn('run', 'post-done-exit-timeout', {
               ...dimensions,
-              err: err instanceof Error ? err.message : String(err),
+              graceMs: this.postDoneExitGraceMs,
             });
-          });
+            await run.stop().catch((err) => {
+              log.warn('run', 'post-done-stop-failed', {
+                ...dimensions,
+                err: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
         }
+      } finally {
+        releaseNative?.();
       }
     };
     const fanout = new EventFanout(observeRunEvents(run.events, {

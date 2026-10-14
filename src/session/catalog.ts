@@ -20,6 +20,7 @@ export interface SessionCatalogEntry extends SessionCatalogIdentity {
   key: string;
   fingerprintVersion?: number;
   /** Feishu app that last established this chat binding. Legacy entries omit it. */
+  sourceId?: string;
   botAppId?: string;
   /** Number of recent completed Codex turns to replay when this chat is first attached. */
   recentTurnReplayCount?: number;
@@ -36,6 +37,7 @@ export interface UpsertSessionCatalogInput extends SessionCatalogIdentity {
   /** Only an explicit user-selected resume may reopen an archived group. */
   rebindArchivedScope?: boolean;
   now?: number;
+  sourceId?: string;
   botAppId?: string;
   /** `null` explicitly clears a pending creation-time replay marker. */
   recentTurnReplayCount?: number | null;
@@ -116,6 +118,20 @@ export class SessionCatalog {
     }
   }
 
+  archiveScope(scopeId: string, nativeId: string): void {
+    this.archivedScopes.set(scopeId, nativeId);
+    for (const [key, row] of this.data) if (row.scopeId === scopeId) this.data.set(key, { ...row, status: 'archived', updatedAt: Date.now() });
+    this.schedulePersist();
+  }
+
+  archiveNativeSession(agentId: CatalogAgentId, nativeId: string, sourceId?: string): void {
+    for (const [key, row] of this.data) {
+      if (row.agentId !== agentId || (sourceId && row.sourceId && row.sourceId !== sourceId)) continue;
+      if ((row.threadId ?? row.sessionId) === nativeId) this.data.set(key, { ...row, status: 'archived', updatedAt: Date.now() });
+    }
+    this.schedulePersist();
+  }
+
   isScopeArchived(scopeId: string): boolean { return this.archivedScopes.has(scopeId); }
   isThreadArchived(threadId: string): boolean { return this.archivedThreads.has(threadId); }
 
@@ -177,6 +193,7 @@ export class SessionCatalog {
     const entry: SessionCatalogEntry = {
       key,
       fingerprintVersion: CURRENT_FINGERPRINT_VERSION,
+      ...((input.sourceId ?? existing?.sourceId) ? { sourceId: input.sourceId ?? existing?.sourceId } : {}),
       ...(input.botAppId ? { botAppId: input.botAppId } : {}),
       ...(recentTurnReplayCount !== undefined ? { recentTurnReplayCount } : {}),
       scopeId: input.scopeId,
@@ -380,6 +397,7 @@ function normalizeEntry(input: unknown): SessionCatalogEntry | undefined {
     key: raw.key,
     fingerprintVersion:
       typeof raw.fingerprintVersion === 'number' ? raw.fingerprintVersion : 2,
+    ...(typeof raw.sourceId === 'string' ? { sourceId: raw.sourceId } : {}),
     ...(typeof raw.botAppId === 'string' ? { botAppId: raw.botAppId } : {}),
     ...(normalizeReplayCount(raw.recentTurnReplayCount) !== undefined
       ? { recentTurnReplayCount: normalizeReplayCount(raw.recentTurnReplayCount) }

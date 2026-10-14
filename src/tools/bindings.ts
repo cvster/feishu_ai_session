@@ -1,0 +1,77 @@
+import { readFile } from 'node:fs/promises';
+import type { AgentKind } from '../config/profile-schema';
+import type { SessionCatalog } from '../session/catalog';
+import { writeFileAtomic } from '../platform/atomic-write';
+
+export interface ToolBinding {
+  toolId: AgentKind;
+  sourceId: string;
+  name?: string;
+  nativeId?: string;
+  nativeCreated?: boolean;
+  model?: string;
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+}
+
+export function sessionRefKey(toolId: string, sourceId: string, nativeId: string): string {
+  return JSON.stringify([toolId, sourceId, nativeId]);
+}
+
+/** Group tool selection survives resets, cwd changes and restarts. */
+export class ToolBindingStore {
+  private bindings: Record<string, ToolBinding> = {};
+  private archived = new Set<string>();
+  private saving: Promise<void> = Promise.resolve();
+  constructor(private readonly path: string) {}
+  async load(): Promise<void> {
+    try {
+      const raw = JSON.parse(await readFile(this.path, 'utf8'));
+      if (raw.version !== 1 || !raw.bindings || !Array.isArray(raw.archived)) throw new Error('Invalid tool binding ledger');
+      for (const [scope, b] of Object.entries(raw.bindings)) {
+        const value = b as ToolBinding;
+        if (!value || !['codex', 'claude'].includes(value.toolId) || typeof value.sourceId !== 'string') throw new Error('Invalid tool binding');
+        this.bindings[scope] = value;
+      }
+      if (!raw.archived.every((k: unknown) => typeof k === 'string')) throw new Error('Invalid tool archives');
+      this.archived = new Set(raw.archived);
+    } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  }
+  get(scope: string): ToolBinding | undefined {
+    const b = this.bindings[scope] ?? this.bindings[scope.split(':')[0]!];
+    return b ? { ...b } : undefined;
+  }
+  set(scope: string, binding: ToolBinding): void {
+    const previous = this.get(scope);
+    if (previous && (previous.toolId !== binding.toolId || previous.sourceId !== binding.sourceId)) throw new Error('会话创建后不能切换执行工具');
+    this.bindings[scope] = { ...binding };
+    this.persist();
+  }
+  hasNativeBinding(toolId: AgentKind, sourceId: string, nativeId: string, knownChats: Set<string>): boolean {
+    return Object.entries(this.bindings).some(([scope, b]) => knownChats.has(scope.split(':')[0]!) && b.toolId === toolId && b.sourceId === sourceId && b.nativeId === nativeId);
+  }
+  archive(toolId: AgentKind, sourceId: string, nativeId: string): void {
+    this.archived.add(sessionRefKey(toolId, sourceId, nativeId)); this.persist();
+  }
+  isArchived(toolId: AgentKind, sourceId: string, nativeId: string): boolean {
+    return this.archived.has(sessionRefKey(toolId, sourceId, nativeId));
+  }
+  migrate(catalog: SessionCatalog, sourceFor: (id: AgentKind) => string): void {
+    const latest = new Map<string, ReturnType<SessionCatalog['entries']>[number]>();
+    for (const row of catalog.entries()) {
+      if (row.status !== 'active') continue;
+      const previous = latest.get(row.scopeId);
+      if (previous && previous.agentId !== row.agentId) throw new Error(`工具身份冲突：${row.scopeId}`);
+      if (!previous || (row.boundAt ?? row.updatedAt) >= (previous.boundAt ?? previous.updatedAt)) latest.set(row.scopeId, row);
+    }
+    for (const row of latest.values()) if (!this.get(row.scopeId)) this.set(row.scopeId, {
+      toolId: row.agentId, sourceId: row.sourceId ?? sourceFor(row.agentId), nativeId: row.threadId ?? row.sessionId,
+    });
+  }
+  private persist(): void {
+    // Snapshot before queuing: do not accidentally persist later mutations under an older operation.
+    const snapshot = JSON.stringify({ version: 1, bindings: this.bindings, archived: [...this.archived] }, null, 2);
+    this.saving = this.saving.then(() => writeFileAtomic(this.path, `${snapshot}\n`, { mode: 0o600 }));
+    void this.saving.catch(() => {}); // flush still propagates the write error.
+  }
+  async flush(): Promise<void> { await this.saving; }
+}
