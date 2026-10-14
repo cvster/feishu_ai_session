@@ -6,6 +6,9 @@ import {
   normalizeModelSelection,
   resolveModelArg,
   supportedModels,
+  normalizeReasoningEffort,
+  supportedReasoningEfforts,
+  unavailableModelNotice,
 } from '../../../src/agent/models.js';
 
 describe('agent model catalog', () => {
@@ -52,11 +55,25 @@ describe('agent model catalog', () => {
 
   it.each([
     ['claude-opus-5-5', 'Opus 5.5（最新）'],
-    ['claude-fable-5-1', 'Fable 5.1'],
   ])('offers %s and forwards its concrete model ID only to Claude', (model, label) => {
     expect(supportedModels('claude')).toContainEqual({ value: model, label });
     expect(normalizeModelSelection('claude', model)).toBe(model);
     expect(resolveModelArg('claude', model)).toBe(model);
     expect(resolveModelArg('codex', model)).toBeUndefined();
+  });
+
+  it('retires the unavailable Fable option and recovers old bindings via the CLI default', () => {
+    expect(supportedModels('claude').some(model => model.value === 'claude-fable-5-1')).toBe(false);
+    expect(normalizeModelSelection('claude', 'claude-fable-5-1')).toBe(DEFAULT_MODEL);
+    expect(resolveModelArg('claude', 'claude-fable-5-1')).toBeUndefined();
+    expect(unavailableModelNotice('claude', 'claude-fable-5-1')).toContain('不可用');
+    expect(unavailableModelNotice('claude', 'claude-opus-5-5')).toBeUndefined();
+  });
+
+  it('keeps CC effort within the native CLI levels while retaining Codex ultra', () => {
+    expect(supportedReasoningEfforts('claude')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    expect(normalizeReasoningEffort('claude', 'ultra')).toBe('high');
+    expect(normalizeReasoningEffort('claude', 'max')).toBe('max');
+    expect(normalizeReasoningEffort('codex', 'ultra')).toBe('ultra');
   });
 });

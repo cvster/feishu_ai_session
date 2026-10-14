@@ -10,8 +10,11 @@ export function submissionFingerprint(input: WorkerSubmission): string {
   // Native IDs may appear between an initial submission and its redelivery.
   // The request key owns the original invocation; redelivery never resumes it anew.
   const o = input.options;
-  return jobIdFor(JSON.stringify([o.prompt, o.cwd, o.model, o.permissionMode, o.sandbox,
-    o.images, o.attachmentPaths, o.delivery?.scope, o.delivery?.botAppId, o.delivery?.sourceId]));
+  const fields: unknown[] = [o.prompt, o.cwd, o.model, o.permissionMode, o.sandbox,
+    o.images, o.attachmentPaths, o.delivery?.scope, o.delivery?.botAppId, o.delivery?.sourceId];
+  // Preserve fingerprints of tasks accepted before CC effort was configurable.
+  if (o.reasoningEffort !== undefined) fields.push({ reasoningEffort: o.reasoningEffort });
+  return jobIdFor(JSON.stringify(fields));
 }
 
 /** Worker-only writer. Records acceptance before spawning and fsyncs every event. */

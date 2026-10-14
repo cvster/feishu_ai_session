@@ -1,5 +1,6 @@
 import type { AgentKind } from '../config/profile-schema';
-import { CODEX_MODEL_OPTIONS } from '../../packages/codex-core/src/models';
+import { CODEX_MODEL_OPTIONS, CODEX_STANDARD_REASONING_VALUES } from '../../packages/codex-core/src/models';
+import type { AgentRunOptions } from './types';
 
 /**
  * Sentinel selection meaning "don't pass `--model`; let the agent CLI /
@@ -29,7 +30,6 @@ export interface ModelOption {
 const CLAUDE_MODELS: ModelOption[] = [
   { value: DEFAULT_MODEL, label: '跟随默认（不指定）' },
   { value: 'claude-opus-5-5', label: 'Opus 5.5（最新）' },
-  { value: 'claude-fable-5-1', label: 'Fable 5.1' },
   { value: 'claude-opus-4-8', label: 'Opus 4.8' },
   { value: 'claude-opus-4-7', label: 'Opus 4.7' },
   { value: 'claude-sonnet-5', label: 'Sonnet 5（最新）' },
@@ -92,4 +92,24 @@ export function resolveModelArg(
 export function modelLabel(agentKind: AgentKind, value: string | undefined): string {
   const normalized = normalizeModelSelection(agentKind, value);
   return supportedModels(agentKind).find((m) => m.value === normalized)?.label ?? normalized;
+}
+
+/** A previously offered model was rejected by the configured Claude gateway.
+ * Keep old bindings resumable via the CLI default rather than sending it again. */
+export function unavailableModelNotice(agentKind: AgentKind, value: string | undefined): string | undefined {
+  if (agentKind === 'claude' && value === 'claude-fable-5-1') {
+    return 'Fable 5.1 在当前接入端不可用，已改为跟随 CLI 默认模型。';
+  }
+  return undefined;
+}
+
+type ReasoningEffort = NonNullable<AgentRunOptions['reasoningEffort']>;
+const CLAUDE_REASONING_VALUES: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+export function supportedReasoningEfforts(agentKind: AgentKind): readonly string[] {
+  return agentKind === 'codex' ? CODEX_STANDARD_REASONING_VALUES : CLAUDE_REASONING_VALUES;
+}
+
+export function normalizeReasoningEffort(agentKind: AgentKind, value: string | undefined): ReasoningEffort {
+  return supportedReasoningEfforts(agentKind).includes(value ?? '') ? value as ReasoningEffort : 'high';
 }

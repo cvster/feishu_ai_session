@@ -20,6 +20,22 @@ afterEach(async () => {
 });
 
 describe('IM run flow', () => {
+  it('resumes a CC binding with the selected effort and recovers an unavailable model via the CLI default', async () => {
+    const h = await createHarness({ defaultWorkspace: true });
+    h.profileConfig.preferences.model = 'claude-fable-5-1';
+    h.profileConfig.preferences.reasoningEffort = 'xhigh';
+    h.sessions.set('chat-1', 'existing-cc-session', await realpath(h.tmp.workspace));
+    const result = await startRunFlow({ scopeId: 'chat-1',
+      scope: { source: 'im', chatId: 'chat-1', actorId: 'ou_user' }, prompt: 'continue', attachments: [],
+      access: { ok: true, reason: 'allowed-user' }, capability: claudeCapability(h.profileConfig),
+      profileConfig: h.profileConfig, sessions: h.sessions, workspaces: h.workspaces,
+      executor: h.executor, now: 1000,
+    });
+    expect(result.ok).toBe(true);
+    expect(h.agent.runOptions[0]).toMatchObject({ sessionId: 'existing-cc-session', reasoningEffort: 'xhigh' });
+    expect(h.agent.runOptions[0]?.model).toBeUndefined();
+  });
+
   it.each(['persisted', 'external', 'unavailable'])('does not submit or create a session after archive: %s', async (mode) => {
     const h = await createHarness({ defaultWorkspace: true });
     const catalog = new SessionCatalog(join(h.tmp.profile, 'catalog.json'));

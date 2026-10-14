@@ -89,7 +89,7 @@ describe('profile-aware account and config commands', () => {
     const form = JSON.stringify(h.channel.sent.at(-1)?.content);
     expect(form).toContain('偏好设置');
     expect(form).toContain('claude-opus-5-5');
-    expect(form).toContain('claude-fable-5-1');
+    expect(form).not.toContain('claude-fable-5-1');
     expect(form).not.toContain('gpt-6.1-sol');
   });
 
@@ -172,7 +172,7 @@ describe('profile-aware account and config commands', () => {
     expect((root as unknown as { accounts?: unknown }).accounts).toBeUndefined();
   });
 
-  it.each(['claude-opus-4-8', 'claude-opus-5-5', 'claude-fable-5-1'])('persists %s and clears it when "default" is chosen', async (model) => {
+  it.each(['claude-opus-4-8', 'claude-opus-5-5'])('persists %s and clears it when "default" is chosen', async (model) => {
     vi.useFakeTimers();
     const h = await createHarness();
 
@@ -193,6 +193,30 @@ describe('profile-aware account and config commands', () => {
       candidate.profiles.claude?.preferences.model === undefined,
     );
     expect(cleared.profiles.claude?.preferences.model).toBeUndefined();
+  });
+
+  it('recovers an old Fable setting and preserves folded preferences when saving effort only', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness({ preferences: { model: 'claude-fable-5-1', showToolCalls: false,
+      cotMessages: 'brief', maxConcurrentRuns: 7, messageReply: 'text', messageReplyMigrated: true } });
+    await h.command('/config');
+    const card = JSON.stringify(h.channel.sent.at(-1)?.content);
+    expect(card).toContain('Fable 5.1 在当前接入端不可用');
+    expect(card).toContain('reasoning_effort');
+    await h.command('/config submit', { reasoning_effort: 'xhigh' });
+    const root = await waitForRoot(h.rootDir, candidate => candidate.profiles.claude?.preferences.reasoningEffort === 'xhigh');
+    expect(root.profiles.claude?.preferences).toMatchObject({
+      showToolCalls: false, cotMessages: 'brief', maxConcurrentRuns: 7, messageReply: 'text',
+    });
+    expect(root.profiles.claude?.preferences.model).toBeUndefined();
+  });
+
+  it('does not persist Codex-only ultra when submitted from an old or forged CC settings card', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness({ preferences: { reasoningEffort: 'medium' } });
+    await h.command('/config submit', { reasoning_effort: 'ultra', max_concurrent_runs: '8' });
+    const root = await waitForRoot(h.rootDir, candidate => candidate.profiles.claude?.preferences.maxConcurrentRuns === 8);
+    expect(root.profiles.claude?.preferences.reasoningEffort).toBe('medium');
   });
 
   it('keeps the current message reply mode when the config submit payload omits it', async () => {

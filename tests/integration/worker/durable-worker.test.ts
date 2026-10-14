@@ -13,6 +13,20 @@ import { buildWorkerUnit } from '../../../src/cli/commands/worker';
 
 import { fixture, cleanups } from '../../helpers/worker-fixture';
 
+it('persists and forwards CC effort, rejecting a changed effort under the same request key', async () => {
+  const h = await fixture();
+  const options = { ...h.options, reasoningEffort: 'xhigh' as const };
+  const run = h.adapter.run(options);
+  const events = run.events[Symbol.asyncIterator]();
+  await events.next();
+  expect(h.calls[0]?.reasoningEffort).toBe('xhigh');
+  expect((await h.client.snapshot(run.runId)).job.options.reasoningEffort).toBe('xhigh');
+  await expect(h.client.submit({ requestKey: options.requestKey!, options: { ...options, reasoningEffort: 'low' } })).rejects.toThrow('内容已变化');
+  expect(h.calls).toHaveLength(1);
+  h.finish();
+  while (!(await events.next()).done) { /* drain the completed task */ }
+});
+
 it('detaches bridge observers without cancelling execution, then replays the same task with one native invocation', async () => {
   const h = await fixture(); const run = h.adapter.run(h.options);
   const events = run.events[Symbol.asyncIterator](); await events.next();

@@ -140,6 +140,16 @@ describe('ClaudeAdapter process contract', () => {
     expect(record.stdin).toBe('first real request');
   });
 
+  it.each(['low', 'medium', 'high', 'xhigh', 'max'] as const)('passes %s effort to the native CC process', async (reasoningEffort) => {
+    const fake = await createFakeClaude({ lines: [{ type: 'result', session_id: 'sess-effort' }] });
+    cleanup.push(fake.dir);
+    const run = new ClaudeAdapter({ binary: fake.path }).run({ runId: 'effort-run', cwd: fake.dir,
+      prompt: 'hello', model: 'claude-opus-5-5', reasoningEffort });
+    await collect(run.events);
+    const record = await readRecord(fake.recordPath);
+    expect(record.argv.slice(-4)).toEqual(['--model', 'claude-opus-5-5', '--effort', reasoningEffort]);
+  });
+
   it('includes stderr when the process exits non-zero', async () => {
     const fake = await createFakeClaude({
       lines: [{ type: 'assistant', message: { content: [{ type: 'text', text: 'before failure' }] } }],

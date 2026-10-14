@@ -19,6 +19,7 @@ import {
 import { translateEvent } from './stream-json';
 import { claudeWorkspaceOccupation } from './occupation';
 import { RunRejected, SpawnFailed } from '../../runtime/errors';
+import { normalizeReasoningEffort } from '../models';
 
 export interface ClaudeAdapterOptions {
   binary?: string;
@@ -100,6 +101,7 @@ export class ClaudeAdapter implements AgentAdapter {
       if (opts.sessionName) args.push('--name', opts.sessionName);
     }
     if (opts.model) args.push('--model', opts.model);
+    if (opts.reasoningEffort) args.push('--effort', normalizeReasoningEffort('claude', opts.reasoningEffort));
 
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
