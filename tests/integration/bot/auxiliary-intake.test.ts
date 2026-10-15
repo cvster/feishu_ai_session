@@ -22,17 +22,22 @@ import { startChannel } from '../../../src/bot/channel';
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const f of cleanups.splice(0).reverse()) await f(); });
 const originalId = '11111111-1111-4111-8111-111111111111';
-async function harness(status: 'pending' | 'active' = 'active') {
+async function harness(status: 'pending' | 'active' = 'active', twoGroups = false) {
   const tmp = await createTmpProfile('aux-intake-'); cleanups.push(() => tmp.cleanup());
   const home = join(tmp.profile, 'codex-home'); await mkdir(home);
   const history = join(home, `${originalId}.jsonl`); await writeFile(history, 'source');
   const source = { toolId: 'codex' as const, sourceId: home, nativeId: originalId, historyPath: history };
   const bindings = new ToolBindingStore(join(tmp.profile, 'tool-bindings.json')); await bindings.load();
-  if (status === 'active') bindings.set('oc_aux', { toolId: 'codex', sourceId: home, name: 'FF-讨论', nativeCreated: false, linkedSource: source });
+  if (status === 'active') {
+    bindings.set('aux_shared', { toolId: 'codex', sourceId: home, name: 'FF-原会话', nativeCreated: false, linkedSource: source });
+    bindings.linkAuxiliary('oc_aux', 'aux_shared');
+    if (twoGroups) bindings.linkAuxiliary('oc_aux_2', 'aux_shared');
+  }
   await bindings.flush();
   await writeFile(join(tmp.profile, 'auxiliary-groups.json'), JSON.stringify({ version: 1, appId: 'cli_test', groups: {
     oc_aux: { chatId: 'oc_aux', name: '讨论', generation: 'generation', ownerId: 'ou_owner', status, notified: true,
       ...(status === 'active' ? { source, cwd: tmp.workspace } : {}) },
+    ...(twoGroups ? { oc_aux_2: { chatId: 'oc_aux_2', name: '第二群', generation: 'generation-b', ownerId: 'ou_owner', status, notified: true, source, cwd: tmp.workspace } } : {}),
   } }));
   const channel = createFakeChannel(); const handlers: { message?: (m: NormalizedMessage) => Promise<void> } = {};
   const download = vi.fn(async () => { throw new Error('must not download'); });
@@ -112,4 +117,22 @@ it.each([['ou_owner', 'ou_colleague'], ['ou_colleague', 'ou_owner']])('splits ow
       expect(prompt).toContain('本机只读'); expect(prompt).not.toContain('本次为所有者本人请求');
     }
   }
+});
+
+it('queues simultaneous group requests against one shared FF native conversation', async () => {
+  const h = await harness('active', true);
+  const implementation = h.submit.getMockImplementation()!;
+  let release!: () => void; const waiting = new Promise<void>(resolve => { release = resolve; });
+  h.submit.mockImplementationOnce(async (opts, beforeSend) => { await waiting; return implementation(opts, beforeSend); });
+  await Promise.all([h.message({ chatId: 'oc_aux', content: 'A 群的问题' }), h.message({ chatId: 'oc_aux_2', content: 'B 群的问题' })]);
+  try {
+    await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    expect(h.controls.toolBindings?.get('oc_aux_2')?.nativeCreated).toBe(false);
+  } finally { release(); }
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
+  expect(h.submit.mock.calls[0]?.[0].threadId).toBeUndefined();
+  expect(h.submit.mock.calls[1]?.[0].threadId).toBe('ff-independent');
+  expect(h.submit.mock.calls.map(([opts]) => opts.sessionName)).toEqual(['FF-原会话', 'FF-原会话']);
+  expect(h.controls.codexSubmissions?.records().map(r => r.scope).sort()).toEqual(['oc_aux', 'oc_aux_2']);
+  expect(h.controls.toolBindings?.get('oc_aux')?.nativeId).toBe(h.controls.toolBindings?.get('oc_aux_2')?.nativeId);
 });

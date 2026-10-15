@@ -412,6 +412,7 @@ async function syncThreadSnapshot(
       const delivery = stored.deliveries[scope];
       if (!isScopeActive(scope)) continue;
       if (delivery?.status === 'skipped') continue;
+      if (controls?.auxiliary?.isAuxiliary(scope.split(':')[0]!) && !stored.replyTargets?.[scope] && !(cliScopes.size === 1 && cliScopes.has(scope))) continue;
       try {
         await syncTurnToScope(channel, store, snapshot.id, turn, stored, scope, nowMs,
           bindings.find((entry) => entry.scopeId === scope)?.cwdRealpath, icons, false, controls,
@@ -623,7 +624,7 @@ function externalUserText(turn: CodexThreadTurn): string {
   return user ? textFromUnknown(user.content).trim() : '';
 }
 
-function associateSubmissions(snapshot: CodexThreadSnapshot, all: CodexSubmissionRecord[]):
+export function associateSubmissions(snapshot: CodexThreadSnapshot, all: CodexSubmissionRecord[]):
   Array<{ record: CodexSubmissionRecord; turn: CodexThreadTurn }> {
   const records = [...new Map(all.map(r => [r.id, r])).values()].filter(r => r.threadId === snapshot.id &&
     r.prompt !== undefined && r.status !== 'rejected' && r.status !== 'cancelled');

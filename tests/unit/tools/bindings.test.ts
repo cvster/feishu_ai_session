@@ -52,3 +52,19 @@ it('locks a native session across group executors while keeping different tools 
   expect(locks.acquire(sessionRefKey('codex', 'local', 'id'))).toBeTypeOf('function');
   release(); expect(locks.acquire(key)).toBeTypeOf('function');
 });
+
+it('persists shared auxiliary aliases and propagates native creation without merging unrelated sources', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tools-shared-')); clean.push(root);
+  const path = join(root, 'bindings.json'); const store = new ToolBindingStore(path); await store.load();
+  const linkedSource = { toolId: 'codex' as const, sourceId: 'home', nativeId: 'original', historyPath: 'history' };
+  store.set('aux_canonical', { toolId: 'codex', sourceId: 'home', name: 'FF-original', linkedSource, nativeCreated: false });
+  store.linkAuxiliary('oc_a', 'aux_canonical'); store.linkAuxiliary('oc_b', 'aux_canonical');
+  store.set('oc_a', { ...store.get('oc_a')!, nativeId: 'shared-native', nativeCreated: true }); await store.flush();
+  const restored = new ToolBindingStore(path); await restored.load();
+  expect(restored.get('oc_b')).toMatchObject({ nativeId: 'shared-native', nativeCreated: true, sharedScope: 'aux_canonical' });
+  expect(restored.hasNativeBinding('codex', 'home', 'shared-native', new Set(['oc_b']))).toBe(true);
+  store.set('personal', { toolId: 'codex', sourceId: 'home', nativeId: 'personal' });
+  expect(() => store.linkAuxiliary('personal', 'aux_canonical')).toThrow('不能覆盖');
+  expect(() => store.linkAuxiliary('oc_c', 'missing')).toThrow('Invalid');
+  await store.flush();
+});

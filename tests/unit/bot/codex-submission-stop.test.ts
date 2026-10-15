@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { CodexQueueContinuationError, stopCodexSubmissions, waitForCodexIntake } from '../../../src/bot/codex-submission-stop';
+import { CodexQueueContinuationError, stopCodexSubmissions, stopScopedCodexSubmissions, waitForCodexIntake } from '../../../src/bot/codex-submission-stop';
 import { CodexSubmissionStore } from '../../../src/session/codex-submissions';
 
 function writer(type = 'active') {
@@ -107,5 +107,33 @@ describe('stop current Codex response and continue queue', () => {
       expect(w.startQueuedTurn).not.toHaveBeenCalled();
       expect(store.records()[0]?.status).toBe('pending');
     } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('shared FF stop isolation', () => {
+  it('does not interrupt a later turn when the expected group turn has already ended', async () => {
+    const w = writer();
+    expect(await stopCodexSubmissions('t', w as any, undefined, 'previous')).toBe(false);
+    expect(w.interruptTurn).not.toHaveBeenCalled();
+  });
+  it.each(['own', 'peer'])('cancels only this group queued inputs and interrupts only its own active turn: %s', async owner => {
+    const dir = await mkdtemp(join(tmpdir(), 'ff-stop-scope-'));
+    const store = new CodexSubmissionStore(join(dir, 'submissions.json')); await store.load();
+    const w = writer();
+    try {
+      await store.prepare({ id: 'queued-own', scope: 'oc_a', messages: [{ messageId: 'a-q' } as any], status: 'accepted', createdAtMs: 1, updatedAtMs: 1,
+        threadId: 't', prompt: 'own queued', queueId: 'qa', clientUserMessageId: 'client-qa' });
+      await store.prepare({ id: 'active', scope: owner === 'own' ? 'oc_a' : 'oc_b', messages: [{ messageId: 'active-m' } as any], status: 'accepted', createdAtMs: 1, updatedAtMs: 1,
+        threadId: 't', prompt: 'active', turnId: 'live', clientUserMessageId: 'active-client' });
+      (w.readThread as any).mockResolvedValue({ id: 't', turns: [{ id: 'live', status: 'inProgress', items: [{ type: 'userMessage', clientId: 'active-client' }] }] });
+      let queue = [{ id: 'qa', input: [], clientUserMessageId: 'client-qa' }, { id: 'qb', input: [], clientUserMessageId: 'client-qb' }];
+      w.listQueuedSubmissions.mockImplementation(async () => queue);
+      w.deleteQueuedTurn.mockImplementation(async (...args: any[]) => { queue = queue.filter(q => q.id !== args[1]); });
+      expect(await stopScopedCodexSubmissions('t', 'oc_a', w as any, store, true)).toBe(owner === 'own');
+      expect(w.deleteQueuedTurn.mock.calls).toEqual([['t', 'qa']]);
+      expect(w.interruptTurn.mock.calls).toEqual(owner === 'own' ? [['t', 'live']] : []);
+      expect(store.records().find(r => r.id === 'queued-own')?.status).toBe('cancelled');
+      expect(w.startQueuedTurn.mock.calls).toEqual(owner === 'own' ? [['t', 'qb']] : []);
+    } finally { await store.flush(); await rm(dir, { recursive: true, force: true }); }
   });
 });

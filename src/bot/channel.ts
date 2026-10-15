@@ -1,3 +1,4 @@
+import { auxiliaryLinkError } from './auxiliary-membership';
 import { AuxiliaryGroups } from './auxiliary-groups';
 import { NativeSessionLocks } from '../tools/locks';
 import { sessionRefKey } from '../tools/bindings';
@@ -376,42 +377,46 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         msgId: firstMsg.messageId,
       });
       try {
-        const resolvedMode = await chatModeCache.resolve(channel, firstMsg.chatId);
-        // Feishu/Lark converted topic groups may still resolve as `group` from
-        // the chat info API/cache, while message events already carry threadId.
-        // Treat threadId as authoritative for IM messages so scope and replies
-        // stay isolated per topic.
-        if (firstMsg.threadId && resolvedMode !== 'topic') {
-          chatModeCache.invalidate(firstMsg.chatId);
-          logThreadModeOverride({
-            chatId: firstMsg.chatId,
-            resolvedMode,
-            threadId: firstMsg.threadId,
-          });
-        }
-        const requests = controls.auxiliary?.isAuxiliary(firstMsg.chatId)
-          ? controls.auxiliary.splitRequests(firstMsg.chatId, batch) : [batch];
-        for (const requestBatch of requests) {
-          if (disconnecting) break;
-          await runAgentBatch({
-            channel,
-            executor,
-            sessions,
-            sessionCatalog,
-            workspaces,
-            media,
-            batch: requestBatch,
-            controls,
-            cotClient,
-            callbackAuth,
-            activePolicyFingerprints,
-            lastRunModelByScope,
-            streamDeliveryFailures,
-            agent,
-            scope,
-            mode: requestBatch[0]?.threadId ? 'topic' : resolvedMode,
-          });
-        }
+        const drain = async () => {
+          const resolvedMode = await chatModeCache.resolve(channel, firstMsg.chatId);
+          // Feishu/Lark converted topic groups may still resolve as `group` from
+          // the chat info API/cache, while message events already carry threadId.
+          // Treat threadId as authoritative for IM messages so scope and replies
+          // stay isolated per topic.
+          if (firstMsg.threadId && resolvedMode !== 'topic') {
+            chatModeCache.invalidate(firstMsg.chatId);
+            logThreadModeOverride({
+              chatId: firstMsg.chatId,
+              resolvedMode,
+              threadId: firstMsg.threadId,
+            });
+          }
+          const requests = controls.auxiliary?.isAuxiliary(firstMsg.chatId)
+            ? controls.auxiliary.splitRequests(firstMsg.chatId, batch) : [batch];
+          for (const requestBatch of requests) {
+            if (disconnecting) break;
+            await runAgentBatch({
+              channel,
+              executor,
+              sessions,
+              sessionCatalog,
+              workspaces,
+              media,
+              batch: requestBatch,
+              controls,
+              cotClient,
+              callbackAuth,
+              activePolicyFingerprints,
+              lastRunModelByScope,
+              streamDeliveryFailures,
+              agent,
+              scope,
+              mode: requestBatch[0]?.threadId ? 'topic' : resolvedMode,
+            });
+          }
+        };
+        if (controls.auxiliary?.isAuxiliary(firstMsg.chatId)) await controls.auxiliary.withRun(firstMsg.chatId, drain);
+        else await drain();
       } catch (err) {
         log.fail('flush', err);
       } finally {
@@ -432,8 +437,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       cancelPending: async chatId => {
         const dropped = pending.cancel(chatId);
         if (dropped.length) await controls.workerInbox?.reject(chatId, dropped);
-        const remaining = controls.workerInbox?.available().filter(e => e.scope === chatId).map(e => e.message) ?? [];
-        if (remaining.length) await controls.workerInbox?.reject(chatId, remaining);
+        await controls.workerInbox?.rejectScope(chatId);
         for (const r of controls.codexSubmissions?.records() ?? []) if (r.scope === chatId && r.status === 'pending')
           await controls.codexSubmissions!.mark(r.id, { status: 'rejected', error: '辅助群正在退出' }, ['pending']);
       },
@@ -471,7 +475,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
     cardAction: async (evt) => {
       try { if (await controls.auxiliary?.action(evt)) return; }
-      catch (error) { await channel.send(evt.operator.openId, { text: `辅助群关联未完成：${String(error)}` }); return; }
+      catch (error) { await channel.send(evt.operator.openId, { text: `辅助群关联未完成：${auxiliaryLinkError(error)} 可私聊发送 /aux 重新选择。` }); return; }
       await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
         await handleCardAction({
           channel,
@@ -1029,6 +1033,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
   if (controls.auxiliary?.isAuxiliary(chatId) && !controls.auxiliary.isActive(chatId)) return;
+  const auxiliaryGeneration = controls.auxiliary?.get(chatId)?.generation;
   const runTraceId = getLogContext()?.traceId;
 
   const resourceItems = batch.flatMap((m) =>
@@ -1182,6 +1187,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     controls.profileConfig.agentKind === 'codex'
       ? codexCapability(controls.profileConfig)
       : claudeCapability(controls.profileConfig);
+  if (controls.auxiliary?.isActive(chatId)) await controls.auxiliary.prepareScope(chatId,
+    await commandSessionCatalogIdentity({ msg: firstMsg, scope, mode, workspaces, controls, access: accessDecision }));
   const flowInput = {
     scopeId: scope,
     scope: scopeContext,
@@ -1195,7 +1202,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     workspaces,
     executor,
     checkSessionArchived: controls.auxiliary?.isAuxiliary(chatId) || controls.codexReplySync?.isScopeArchived
-      ? async () => (controls.auxiliary?.isAuxiliary(chatId) && !controls.auxiliary.isActive(chatId)) ||
+      ? async () => (controls.auxiliary?.isAuxiliary(chatId) && (!controls.auxiliary.isActive(chatId) || controls.auxiliary.get(chatId)?.generation !== auxiliaryGeneration)) ||
         await controls.codexReplySync?.isScopeArchived?.(scope) || false
       : undefined,
     now: Date.now(),

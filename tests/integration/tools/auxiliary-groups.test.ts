@@ -36,7 +36,7 @@ async function harness(toolId: 'codex' | 'claude' = 'claude') {
   const leave = vi.fn(async () => ({ code: 0 }));
   const send = vi.fn(async () => ({ messageId: 'om_card' }));
   const channel = { rawClient: { im: { v1: { chat: {
-    get: vi.fn(async () => ({ code: 0, data: { name: '项目讨论' } })),
+    get: vi.fn(async () => ({ code: 0, data: { name: '项目讨论', chat_mode: 'group' as const } })),
   }, chatMembers: { delete: leave, isInChat: vi.fn(async () => ({ code: 0, data: { is_in_chat: true } })) } } } }, getChatMode: vi.fn(async () => 'p2p'),
     createCard: vi.fn(async (card: object) => { cards.push(card); return { cardId: `card-${cards.length}` }; }), send,
   } as unknown as LarkChannel;
@@ -59,7 +59,7 @@ async function harness(toolId: 'codex' | 'claude' = 'claude') {
   function event(payload = value(), actor = 'ou_owner', chatId = 'oc_dm'): CardActionEvent {
     return { chatId, messageId: 'om_card', operator: { openId: actor }, action: { value: payload } } as CardActionEvent;
   }
-  async function activate() { await groups.joined(joined); await groups.action(event()); await groups.action(event()); }
+  async function activate(chatId = 'oc_aux') { await groups.joined({ ...joined, chatId }); await groups.action(event()); await groups.action(event()); }
   return { root, home, history, cwd, cards, channel, leave, send, tools, agent, archive, bindings, sessions, catalog, workspaces,
     cancelPending, deps, groups, value, event, activate };
 }
@@ -68,7 +68,7 @@ describe('auxiliary owner linking and lifecycle', () => {
   it.each(['codex', 'claude'] as const)('links %s privately to an independent FF binding and inherits cwd/model', async tool => {
     const h = await harness(tool); await h.activate();
     expect(h.groups.get('oc_aux')).toMatchObject({ status: 'active', source: { toolId: tool, nativeId: sourceId, historyPath: h.history } });
-    expect(h.bindings.get('oc_aux')).toMatchObject({ name: 'FF-项目讨论', nativeCreated: false, model: 'original-model', reasoningEffort: 'high' });
+    expect(h.bindings.get('oc_aux')).toMatchObject({ name: 'FF-原会话', nativeCreated: false, model: 'original-model', reasoningEffort: 'high' });
     expect(h.bindings.get('oc_aux')?.nativeId).not.toBe(sourceId);
     expect(h.workspaces.cwdFor('oc_aux')).toBe(h.cwd);
     expect(h.bindings.get('oc_original')?.nativeId).toBe(sourceId);
@@ -77,6 +77,89 @@ describe('auxiliary owner linking and lifecycle', () => {
     const restored = new AuxiliaryGroups(h.deps); await restored.load();
     expect(restored.isActive('oc_aux')).toBe(true);
     expect(await restored.wrapPrompt('oc_aux', '原文\n[attachment]')).toContain('本次请求：\n原文\n[attachment]');
+  });
+  it.each(['codex', 'claude'] as const)('shares one %s FF binding for the same original session across groups and restarts', async tool => {
+    const h = await harness(tool); await h.activate(); await h.activate('oc_aux_2');
+    const a = h.bindings.get('oc_aux')!; const b = h.bindings.get('oc_aux_2')!;
+    expect(a.sharedScope).toBeTruthy(); expect(a.sharedScope).toBe(b.sharedScope);
+    expect(a.name).toBe('FF-原会话'); expect(a.nativeId).toBe(b.nativeId);
+    h.bindings.set('oc_aux', { ...a, nativeId: freshId, nativeCreated: true }); await h.bindings.flush();
+    expect(h.bindings.get('oc_aux_2')?.nativeId).toBe(freshId);
+    await h.groups.prepareScope('oc_aux_2', { scopeId: 'oc_aux_2', agentId: tool, cwdRealpath: h.cwd, policyFingerprint: 'shared' });
+    expect(h.catalog.entries().find(e => e.scopeId === 'oc_aux_2')).toMatchObject(tool === 'codex' ? { threadId: freshId } : { sessionId: freshId });
+    const bindings = new ToolBindingStore(join(h.root, 'bindings.json')); await bindings.load();
+    const restored = new AuxiliaryGroups({ ...h.deps, bindings }); await restored.load();
+    expect(bindings.get('oc_aux_2')?.nativeId).toBe(freshId);
+    expect(bindings.get('oc_original')?.nativeId).toBe(sourceId);
+    expect(restored.isActive('oc_aux_2')).toBe(true);
+  });
+  it('recovers first FF native creation from the catalog if the bridge stopped before its binding was saved', async () => {
+    const h = await harness('codex'); await h.activate(); await h.activate('oc_aux_2');
+    h.catalog.upsertActive({ scopeId: 'oc_aux', agentId: 'codex', cwdRealpath: h.cwd, policyFingerprint: 'creation', threadId: freshId }); await h.catalog.flush();
+    expect(h.bindings.get('oc_aux_2')?.nativeCreated).toBe(false);
+    const restored = new AuxiliaryGroups(h.deps); await restored.load();
+    expect(h.bindings.get('oc_aux_2')).toMatchObject({ nativeId: freshId, nativeCreated: true });
+    expect(restored.isActive('oc_aux')).toBe(true);
+  });
+  it('coalesces simultaneous selections into a single canonical FF conversation', async () => {
+    const h = await harness(); await h.groups.joined(joined); await h.groups.action(h.event()); const first = h.event();
+    await h.groups.joined({ ...joined, chatId: 'oc_aux_2' }); await h.groups.action(h.event()); const second = h.event();
+    await Promise.all([h.groups.action(first), h.groups.action(second)]);
+    expect(h.bindings.get('oc_aux')?.sharedScope).toBe(h.bindings.get('oc_aux_2')?.sharedScope);
+    expect(h.bindings.entries().filter(([key]) => key.startsWith('aux_'))).toHaveLength(1);
+  });
+  it('serializes first runs across groups so only one native FF session is materialized', async () => {
+    const h = await harness('codex'); await h.activate(); await h.activate('oc_aux_2');
+    let release!: () => void; const waiting = new Promise<void>(resolve => { release = resolve; });
+    const events: string[] = [];
+    const first = h.groups.withRun('oc_aux', async () => {
+      events.push('a-start'); await waiting;
+      h.bindings.set('oc_aux', { ...h.bindings.get('oc_aux')!, nativeId: freshId, nativeCreated: true });
+      events.push('a-end');
+    });
+    const second = h.groups.withRun('oc_aux_2', async () => {
+      events.push('b-start'); expect(h.bindings.get('oc_aux_2')?.nativeId).toBe(freshId);
+    });
+    await vi.waitFor(() => expect(events).toEqual(['a-start'])); release(); await Promise.all([first, second]);
+    expect(events).toEqual(['a-start', 'a-end', 'b-start']);
+    expect(h.agent.threadNames).toEqual([{ threadId: freshId, name: 'FF-原会话' }]);
+  });
+  it.each(['codex', 'claude'] as const)('retains shared %s history until the last linked group leaves', async tool => {
+    const h = await harness(tool); await h.activate(); await h.activate('oc_aux_2');
+    h.bindings.set('oc_aux', { ...h.bindings.get('oc_aux')!, nativeId: freshId, nativeCreated: true });
+    const stop = vi.fn(async () => {});
+    await h.groups.leave('oc_aux', 'ou_owner', stop);
+    expect(h.archive).not.toHaveBeenCalled(); expect(h.bindings.isArchived(tool, h.home, freshId)).toBe(false);
+    expect(h.groups.isActive('oc_aux_2')).toBe(true); expect(h.bindings.get('oc_aux_2')?.nativeId).toBe(freshId);
+    await h.groups.leave('oc_aux_2', 'ou_owner', stop);
+    expect(h.archive.mock.calls).toEqual(tool === 'codex' ? [[freshId]] : []);
+    expect(h.bindings.isArchived(tool, h.home, freshId)).toBe(true);
+    expect(h.bindings.isArchived(tool, h.home, sourceId)).toBe(false);
+  });
+  it('migrates legacy per-group FF bindings without deleting their old transcripts', async () => {
+    const h = await harness('codex'); await h.activate(); await h.activate('oc_aux_2');
+    const otherId = '33333333-3333-4333-8333-333333333333';
+    for (const [chat, native] of [['oc_aux', freshId], ['oc_aux_2', otherId]] as const) {
+      h.bindings.set(chat, { ...h.bindings.get(chat)!, sharedScope: undefined, nativeId: native, nativeCreated: true, name: `FF-${chat}` });
+      await writeFile(join(h.root, native + '.jsonl'), 'old FF history');
+      h.catalog.upsertActive({ scopeId: chat, agentId: 'codex', cwdRealpath: h.cwd, policyFingerprint: 'legacy', threadId: native });
+    }
+    await Promise.all([h.bindings.flush(), h.catalog.flush()]);
+    const restored = new AuxiliaryGroups(h.deps); await restored.load();
+    expect(h.bindings.get('oc_aux')?.sharedScope).toBe(h.bindings.get('oc_aux_2')?.sharedScope);
+    expect(h.bindings.get('oc_aux_2')?.nativeId).toBe(freshId);
+    expect(h.bindings.get('oc_aux_2')?.name).toBe('FF-原会话');
+    expect(h.catalog.entries().find(e => e.threadId === otherId)?.status).toBe('archived');
+    expect(await readFile(join(h.root, otherId + '.jsonl'), 'utf8')).toBe('old FF history');
+    expect(h.archive).not.toHaveBeenCalled();
+  });
+  it('renames the shared Claude transcript without touching the original transcript', async () => {
+    const h = await harness(); await h.activate();
+    const history = join(h.home, 'projects', '-project', freshId + '.jsonl'); await writeFile(history, '{}\n');
+    h.bindings.set('oc_aux', { ...h.bindings.get('oc_aux')!, nativeCreated: true });
+    await h.groups.withRun('oc_aux', async () => {});
+    expect(JSON.parse((await readFile(history, 'utf8')).trim().split('\n').at(-1)!)).toMatchObject({ type: 'custom-title', customTitle: 'FF-原会话', sessionId: freshId });
+    expect(await readFile(h.history, 'utf8')).toBe('original history\n');
   });
   it('deduplicates concurrent joins, ignores non-owner invites and existing personal bindings', async () => {
     const h = await harness();
@@ -174,11 +257,11 @@ describe('auxiliary owner linking and lifecycle', () => {
   });
   it('checks actual bot membership at confirmation and tolerates an already-completed leave', async () => {
     const h = await harness(); await h.groups.joined(joined); await h.groups.action(h.event());
-    vi.mocked(h.channel.rawClient.im.v1.chatMembers.isInChat).mockResolvedValueOnce({ code: 0, data: { is_in_chat: false } });
+    vi.mocked(h.channel.rawClient.im.v1.chat.get).mockResolvedValueOnce({ code: 0, data: { name: '项目讨论' } });
     await expect(h.groups.action(h.event())).rejects.toThrow('已不在目标群');
     expect(h.groups.isActive('oc_aux')).toBe(false);
     await h.groups.action(h.event());
-    vi.mocked(h.channel.rawClient.im.v1.chatMembers.isInChat).mockResolvedValueOnce({ code: 0, data: { is_in_chat: false } });
+    vi.mocked(h.channel.rawClient.im.v1.chat.get).mockResolvedValueOnce({ code: 0, data: { name: '项目讨论' } });
     await h.groups.leave('oc_aux', 'ou_owner', async () => {});
     expect(h.leave).not.toHaveBeenCalled(); expect(h.groups.get('oc_aux')?.status).toBe('archived');
   });

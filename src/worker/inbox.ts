@@ -40,6 +40,9 @@ export class WorkerInbox {
     }
     if (first) await this.persist(); return first;
   }
+  async rejectScope(scope: string): Promise<void> {
+    await this.reject(scope, Object.values(this.entries).filter(e => e.scope === scope && e.status === 'pending').map(e => e.message));
+  }
   async reject(scope: string, messages: NormalizedMessage[]): Promise<void> {
     for (const message of messages) {
       const key = this.key(scope, message), entry = this.entries[key];

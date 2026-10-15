@@ -1,17 +1,19 @@
 import { randomUUID } from 'node:crypto';
-import { access, readFile, readdir } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, readFile, readdir, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BotAddedEvent, CardActionEvent, LarkChannel } from '@larksuite/channel';
 import type { AgentKind } from '../config/profile-schema';
 import type { ToolRegistry } from '../tools/types';
-import type { ToolBindingStore, LinkedSession } from '../tools/bindings';
-import type { SessionCatalog } from '../session/catalog';
+import { sessionRefKey, type ToolBindingStore, type LinkedSession } from '../tools/bindings';
+import type { SessionCatalog, SessionCatalogIdentity } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { resolveWorkingDirectory } from '../policy/workspace';
 import { sendManagedCard } from '../card/managed';
 import { waitForBridgeGroupCreation } from './group';
+import { auxiliaryBotIsMember } from './auxiliary-membership';
 
 export interface AuxiliaryGroup {
   chatId: string;
@@ -48,6 +50,7 @@ interface Choice {
 /** Private owner selection; no source conversation is resumed or mutated. */
 export class AuxiliaryGroups {
   private records: Record<string, AuxiliaryGroup> = {};
+  private renamed = new Set<string>();
   private choices = new Map<string, Choice>();
   private saving: Promise<void> = Promise.resolve();
   private chains = new Map<string, Promise<unknown>>();
@@ -65,10 +68,108 @@ export class AuxiliaryGroups {
       }
       this.records = raw.groups;
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+    await this.migrateSharedBindings();
   }
   get(chatId: string): AuxiliaryGroup | undefined { return this.records[chatId]; }
   isActive(chatId: string): boolean { return this.get(chatId)?.status === 'active'; }
   isAuxiliary(chatId: string): boolean { return !!this.get(chatId); }
+  private sourceKey(source: LinkedSession): string { return sessionRefKey(source.toolId, source.sourceId, source.nativeId); }
+  private references(row: AuxiliaryGroup): AuxiliaryGroup[] {
+    return Object.values(this.records).filter(r => r.source && row.source && r.ownerId === row.ownerId &&
+      this.sourceKey(r.source) === this.sourceKey(row.source) &&
+      (r.status === 'active' || (r.status === 'leaving' && !r.archivedNative)));
+  }
+  /** Upgrade old per-chat FF bindings without deleting or merging native transcripts. */
+  private async migrateSharedBindings(): Promise<void> {
+    const buckets = new Map<string, AuxiliaryGroup[]>();
+    for (const row of Object.values(this.records)) if (row.source &&
+      (row.status === 'active' || (row.status === 'leaving' && !row.archivedNative))) {
+      const key = this.sourceKey(row.source);
+      buckets.set(key, [...(buckets.get(key) ?? []), row]);
+    }
+    for (const rows of buckets.values()) {
+      if (rows.every(r => this.deps.bindings.get(r.chatId)?.sharedScope)) {
+        const binding = this.deps.bindings.get(rows[0]!.chatId)!;
+        if (!binding.nativeCreated) {
+          const ids = [...new Set(this.deps.catalog?.entries().filter(e => e.status === 'active' && e.agentId === binding.toolId &&
+            rows.some(r => r.chatId === e.scopeId)).map(e => e.threadId ?? e.sessionId).filter((id): id is string => !!id))];
+          if (ids.length > 1) throw new Error('共享 FF 的原生会话记录冲突');
+          if (ids[0]) {
+            if (ids[0] === rows[0]!.source!.nativeId) throw new Error('共享 FF 记录不能指向原会话');
+            this.deps.bindings.set(rows[0]!.chatId, { ...binding, nativeId: ids[0], nativeCreated: true });
+          }
+        }
+        continue;
+      }
+      const existing = rows.find(r => this.deps.bindings.get(r.chatId)?.sharedScope);
+      const candidates = rows.map(row => {
+        const binding = this.deps.bindings.get(row.chatId);
+        const catalog = this.deps.catalog?.entries().filter(e => e.scopeId === row.chatId && e.status === 'active')
+          .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+        return { row, binding, id: catalog?.threadId ?? catalog?.sessionId ?? (binding?.nativeCreated ? binding.nativeId : undefined) };
+      });
+      const chosen = candidates.find(c => c.row === existing) ?? candidates.find(c => c.id) ?? candidates[0]!;
+      if (!chosen.binding || !chosen.row.source) throw new Error('辅助群缺少工具绑定');
+      let name = chosen.row.source.nativeId;
+      try { name = (await this.deps.tools.get(chosen.row.source.toolId).listSessions()).find(s => s.nativeId === chosen.row.source!.nativeId)?.name || name; }
+      catch { /* An unavailable source title must not prevent history recovery. */ }
+      const sharedScope = chosen.binding.sharedScope ?? `aux_${randomUUID()}`;
+      if (!chosen.binding.sharedScope) this.deps.bindings.set(sharedScope, { ...chosen.binding, sharedScope: undefined,
+        name: `FF-${name}`, nativeId: chosen.id ?? chosen.binding.nativeId, nativeCreated: !!chosen.id });
+      const canonical = this.deps.bindings.get(sharedScope)!;
+      if (canonical.nativeId === chosen.row.source.nativeId) throw new Error('辅助会话不能指向原会话');
+      for (const row of rows) {
+        for (const entry of this.deps.catalog?.entries().filter(e => e.scopeId === row.chatId && e.status === 'active') ?? []) {
+          if ((entry.threadId ?? entry.sessionId) !== canonical.nativeId) this.deps.catalog!.archiveActive(entry);
+        }
+        this.deps.bindings.linkAuxiliary(row.chatId, sharedScope);
+        this.deps.sessions.remove(row.chatId);
+        row.cwd = chosen.row.cwd;
+        if (row.cwd) this.deps.workspaces.setCwd(row.chatId, row.cwd);
+      }
+    }
+    await Promise.all([this.deps.bindings.flush(), this.deps.sessions.flush(), this.deps.catalog?.flush(), this.deps.workspaces.flush()]);
+    if (buckets.size) await this.save();
+  }
+  async withRun<T>(chatId: string, work: () => Promise<T>): Promise<T> {
+    const generation = this.get(chatId)?.generation;
+    const key = this.deps.bindings.get(chatId)?.sharedScope ?? chatId;
+    return this.serial(`run:${key}`, async () => {
+      if (!this.isActive(chatId) || generation !== this.get(chatId)?.generation) throw new Error('辅助群关联已变更');
+      await this.renameSharedSession(chatId);
+      return work();
+    });
+  }
+  private async renameSharedSession(chatId: string): Promise<void> {
+    const b = this.deps.bindings.get(chatId);
+    if (!b?.sharedScope || !b.nativeCreated || !b.nativeId || !b.name) return;
+    const key = JSON.stringify([b.sourceId, b.toolId, b.nativeId, b.name]);
+    if (this.renamed.has(key)) return;
+    if (b.nativeId === b.linkedSource?.nativeId) throw new Error('拒绝修改原会话名称');
+    if (b.toolId === 'codex') {
+      const agent = this.deps.tools.get('codex').agent;
+      if (!agent.setThreadName) throw new Error('Codex 未提供会话改名能力');
+      await agent.setThreadName(b.nativeId, b.name);
+    } else {
+      const path = await findSessionHistory('claude', b.sourceId, b.nativeId);
+      if (!path) throw new Error('辅助 Claude 会话记录不可读');
+      const file = await open(path, constants.O_WRONLY | constants.O_APPEND);
+      try { await file.writeFile(JSON.stringify({ type: 'custom-title', sessionId: b.nativeId, customTitle: b.name }) + '\n'); }
+      finally { await file.close(); }
+    }
+    this.renamed.add(key);
+  }
+  /** Materialize a chat-local routing catalog entry for the shared native conversation. */
+  async prepareScope(chatId: string, identity: SessionCatalogIdentity | undefined): Promise<void> {
+    const b = this.deps.bindings.get(chatId);
+    if (!identity || !b?.sharedScope || !b.nativeCreated || !b.nativeId || !this.isActive(chatId)) return;
+    if (b.nativeId === b.linkedSource?.nativeId) throw new Error('辅助会话不能恢复原会话');
+    if (this.deps.catalog?.isScopeArchived(chatId)) throw new Error('辅助群已归档');
+    this.deps.catalog?.upsertActive({ ...identity, sourceId: b.sourceId, botAppId: this.deps.appId,
+      ...(b.toolId === 'codex' ? { threadId: b.nativeId } : { sessionId: b.nativeId }) });
+    this.deps.sessions.set(chatId, b.nativeId, this.get(chatId)!.cwd!);
+    await Promise.all([this.deps.catalog?.flush(), this.deps.sessions.flush()]);
+  }
   private serial<T>(chatId: string, work: () => Promise<T>): Promise<T> {
     const next = (this.chains.get(chatId) ?? Promise.resolve()).catch(() => {}).then(work);
     this.chains.set(chatId, next);
@@ -134,7 +235,7 @@ export class AuxiliaryGroups {
     const base: Choice = { chatId: row.chatId, generation: row.generation, ownerId: row.ownerId,
       expires: Date.now() + 15 * 60_000, page, toolId };
     const buttons: object[] = [];
-    let description = '选择执行工具，再选择已有会话。仅关联知识，新群独立运行。';
+    let description = '选择执行工具，再选择已有会话。原会话保持独立，关联同一来源的群共用 FF 辅助会话。';
     if (toolId) {
       const tool = this.deps.tools.get(toolId);
       const sessions = (await tool.listSessions()).filter(s => !s.archived && !s.name?.startsWith('FF-') && !this.isAuxiliaryNative(toolId, tool.sourceId, s.nativeId) &&
@@ -169,18 +270,30 @@ export class AuxiliaryGroups {
       if (!workspace.ok) throw new Error(workspace.userVisible);
       const historyPath = await findSessionHistory(tool.id, tool.sourceId, source.nativeId);
       if (!historyPath) throw new Error('未找到原会话的可读取记录，请重新选择。');
-      const membership = await this.deps.channel.rawClient.im.v1.chatMembers.isInChat({ path: { chat_id: row.chatId } });
-      if (membership.code || membership.data?.is_in_chat !== true) throw new Error('机器人已不在目标群内，无法关联。');
+      if (!await auxiliaryBotIsMember(this.deps.channel, row.chatId)) throw new Error('机器人已不在目标群内，无法关联。');
       const linkedSource: LinkedSession = { toolId: tool.id, sourceId: tool.sourceId, nativeId: source.nativeId, historyPath };
       const original = this.deps.bindings.entries().find(([, b]) => b.toolId === tool.id && b.sourceId === tool.sourceId && b.nativeId === source.nativeId)?.[1];
-      this.deps.bindings.set(row.chatId, { toolId: tool.id, sourceId: tool.sourceId, name: `FF-${row.name}`,
-        nativeId: tool.reserveSessionId?.(), nativeCreated: false, linkedSource,
-        model: original?.model, reasoningEffort: original?.reasoningEffort });
-      this.deps.sessions.remove(row.chatId);
-      this.deps.workspaces.setCwd(row.chatId, workspace.cwdRealpath);
-      await Promise.all([this.deps.bindings.flush(), this.deps.sessions.flush(), this.deps.workspaces.flush()]);
-      row.source = linkedSource; row.cwd = workspace.cwdRealpath; row.status = 'active';
-      await this.save(); this.choices.delete(token);
+      const activated = await this.serial(`source:${this.sourceKey(linkedSource)}`, async () => {
+        if (row.status !== 'pending' || row.generation !== choice.generation) return false;
+        const peer = Object.values(this.records).find(r => r.chatId !== row.chatId && r.ownerId === row.ownerId && r.source &&
+          this.sourceKey(r.source) === this.sourceKey(linkedSource) && (r.status === 'active' || (r.status === 'leaving' && !r.archivedNative)));
+        const peerBinding = peer ? this.deps.bindings.get(peer.chatId) : undefined;
+        const sharedScope = peerBinding?.sharedScope ?? `aux_${randomUUID()}`;
+        const name = `FF-${source.name || source.nativeId}`;
+        const shared = peerBinding ? { ...peerBinding, sharedScope: undefined, name } : { toolId: tool.id, sourceId: tool.sourceId, name,
+          nativeId: tool.reserveSessionId?.(), nativeCreated: false, linkedSource,
+          model: original?.model, reasoningEffort: original?.reasoningEffort };
+        if (shared.nativeId === source.nativeId) throw new Error('辅助会话不能指向原会话');
+        this.deps.bindings.set(sharedScope, shared);
+        this.deps.bindings.linkAuxiliary(row.chatId, sharedScope);
+        this.deps.sessions.remove(row.chatId);
+        const cwd = peer?.cwd ?? workspace.cwdRealpath;
+        this.deps.workspaces.setCwd(row.chatId, cwd);
+        await Promise.all([this.deps.bindings.flush(), this.deps.sessions.flush(), this.deps.workspaces.flush()]);
+        row.source = linkedSource; row.cwd = cwd; row.status = 'active';
+        await this.save(); this.choices.delete(token); return true;
+      });
+      if (!activated) return;
       await this.deps.channel.send(row.ownerId, { text: `已关联「${row.name}」到 ${tool.label} 会话「${source.name || source.nativeId}」。` });
       await this.deps.channel.send(row.chatId, { text: '辅助已启用，请 @我提问。每次提问会先读取关联会话的最新进展。' });
     });
@@ -227,18 +340,20 @@ export class AuxiliaryGroups {
     return wrapAuxiliaryPrompt(source, location, message, this.isOwnerRequest(chatId, senderIds));
   }
   async leave(chatId: string, actor: string, stop: () => Promise<void>): Promise<void> {
-    await this.serial(chatId, async () => {
+    await this.serial(`source:${this.get(chatId)?.source ? this.sourceKey(this.get(chatId)!.source!) : chatId}`, async () => {
       const row = this.get(chatId);
       if (!row || actor !== row.ownerId || row.status === 'archived') return;
       row.status = 'leaving'; await this.save();
       await this.deps.cancelPending(chatId); await stop();
       const binding = this.deps.bindings.get(chatId);
       if (!row.archivedNative && binding) {
+        const sharedElsewhere = this.references(row).some(peer => peer.chatId !== chatId);
         const ids = new Set(this.deps.catalog?.entries().filter(e => e.scopeId === chatId && e.status === 'active')
           .map(e => e.threadId ?? e.sessionId).filter((x): x is string => !!x));
         if (binding.nativeCreated && binding.nativeId) ids.add(binding.nativeId);
         for (const id of ids) {
           if (id === row.source?.nativeId) throw new Error('拒绝归档关联原会话。');
+          if (sharedElsewhere) continue;
           if (binding.toolId === 'codex') {
             const agent = this.deps.tools.get('codex').agent;
             if (!agent.archiveThread) throw new Error('当前 Codex 未提供原生归档能力。');
@@ -250,9 +365,7 @@ export class AuxiliaryGroups {
         await Promise.all([this.deps.bindings.flush(), this.deps.catalog?.flush()]);
         row.archivedNative = true; await this.save();
       }
-      const membership = await this.deps.channel.rawClient.im.v1.chatMembers.isInChat({ path: { chat_id: chatId } });
-      if (membership.code || typeof membership.data?.is_in_chat !== 'boolean') throw new Error('暂时无法确认机器人群成员状态。');
-      if (membership.data.is_in_chat) {
+      if (await auxiliaryBotIsMember(this.deps.channel, chatId)) {
         const result = await this.deps.channel.rawClient.im.v1.chatMembers.delete({
           path: { chat_id: chatId }, params: { member_id_type: 'app_id' },
           data: { id_list: [this.deps.appId] },
@@ -262,7 +375,7 @@ export class AuxiliaryGroups {
       this.deps.sessions.remove(chatId); this.deps.workspaces.removeCwd(chatId);
       await Promise.all([this.deps.sessions.flush(), this.deps.workspaces.flush()]);
       row.status = 'archived'; delete row.running; await this.save();
-      await this.deps.channel.send(row.ownerId, { text: `已退出「${row.name}」并归档辅助会话，原会话保留。` });
+      await this.deps.channel.send(row.ownerId, { text: `已退出「${row.name}」。${this.references(row).length ? '其他关联群继续共用 FF 辅助会话。' : 'FF 辅助会话已归档。'}原会话保留。` });
     });
   }
 }

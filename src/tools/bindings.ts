@@ -11,6 +11,8 @@ export interface LinkedSession {
 }
 
 export interface ToolBinding {
+  /** Canonical auxiliary binding; chat aliases retain their own routing scope. */
+  sharedScope?: string;
   linkedSource?: LinkedSession;
   toolId: AgentKind;
   sourceId: string;
@@ -38,24 +40,47 @@ export class ToolBindingStore {
       for (const [scope, b] of Object.entries(raw.bindings)) {
         const value = b as ToolBinding;
         if (!value || !['codex', 'claude'].includes(value.toolId) || typeof value.sourceId !== 'string') throw new Error('Invalid tool binding');
+        if (value.sharedScope !== undefined && (typeof value.sharedScope !== 'string' || !value.sharedScope)) throw new Error('Invalid shared scope');
         if (value.linkedSource && (!['codex', 'claude'].includes(value.linkedSource.toolId) ||
           ![value.linkedSource.sourceId, value.linkedSource.nativeId, value.linkedSource.historyPath].every(v => typeof v === 'string' && v.length > 0))) throw new Error('Invalid linked source');
         this.bindings[scope] = value;
       }
+      for (const scope of Object.keys(this.bindings)) this.get(scope); // validate shared aliases before accepting state
       if (!raw.archived.every((k: unknown) => typeof k === 'string')) throw new Error('Invalid tool archives');
       this.archived = new Set(raw.archived);
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
   }
-  entries(): [string, ToolBinding][] { return structuredClone(Object.entries(this.bindings)); }
+  entries(): [string, ToolBinding][] { return Object.keys(this.bindings).map(scope => [scope, this.get(scope)!]); }
   get(scope: string): ToolBinding | undefined {
     const b = this.bindings[scope] ?? this.bindings[scope.split(':')[0]!];
-    return b ? structuredClone(b) : undefined;
+    if (!b) return undefined;
+    if (!b.sharedScope) return structuredClone(b);
+    const shared = this.bindings[b.sharedScope];
+    if (!shared || shared.sharedScope || !shared.linkedSource || shared.toolId !== b.toolId || shared.sourceId !== b.sourceId ||
+      !b.linkedSource || sessionRefKey(shared.linkedSource.toolId, shared.linkedSource.sourceId, shared.linkedSource.nativeId) !==
+      sessionRefKey(b.linkedSource.toolId, b.linkedSource.sourceId, b.linkedSource.nativeId)) throw new Error('Invalid shared auxiliary binding');
+    return structuredClone({ ...shared, sharedScope: b.sharedScope });
   }
   set(scope: string, binding: ToolBinding): void {
     const previous = this.get(scope);
     if (previous && (previous.toolId !== binding.toolId || previous.sourceId !== binding.sourceId)) throw new Error('会话创建后不能切换执行工具');
+    if (binding.sharedScope) {
+      const shared = this.get(binding.sharedScope);
+      if (!shared?.linkedSource || shared.sharedScope || !binding.linkedSource ||
+        sessionRefKey(shared.toolId, shared.sourceId, shared.linkedSource.nativeId) !==
+        sessionRefKey(binding.toolId, binding.sourceId, binding.linkedSource.nativeId)) throw new Error('Invalid shared auxiliary binding');
+      if (previous?.sharedScope !== binding.sharedScope) throw new Error('共享辅助绑定须通过关联接口建立');
+      this.bindings[binding.sharedScope] = { ...binding, sharedScope: undefined };
+    }
     this.bindings[scope] = { ...binding };
     this.persist();
+  }
+  linkAuxiliary(scope: string, sharedScope: string): void {
+    const shared = this.get(sharedScope);
+    if (!shared?.linkedSource || shared.sharedScope || scope === sharedScope) throw new Error('Invalid shared auxiliary target');
+    const previous = this.get(scope);
+    if (previous && (!previous.linkedSource || previous.toolId !== shared.toolId || previous.sourceId !== shared.sourceId)) throw new Error('不能覆盖个人或其他工具绑定');
+    this.bindings[scope] = { ...shared, sharedScope }; this.persist();
   }
   /** A fresh invitation may choose another tool after the previous FF lifecycle ended. */
   releaseAuxiliary(scope: string): void {
@@ -63,7 +88,7 @@ export class ToolBindingStore {
     delete this.bindings[scope]; this.persist();
   }
   hasNativeBinding(toolId: AgentKind, sourceId: string, nativeId: string, knownChats: Set<string>): boolean {
-    return Object.entries(this.bindings).some(([scope, b]) => knownChats.has(scope.split(':')[0]!) && b.toolId === toolId && b.sourceId === sourceId && b.nativeId === nativeId);
+    return this.entries().some(([scope, b]) => knownChats.has(scope.split(':')[0]!) && b.toolId === toolId && b.sourceId === sourceId && b.nativeId === nativeId);
   }
   archive(toolId: AgentKind, sourceId: string, nativeId: string): void {
     this.archived.add(sessionRefKey(toolId, sourceId, nativeId)); this.persist();

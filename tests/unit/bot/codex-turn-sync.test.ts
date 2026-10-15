@@ -45,6 +45,30 @@ describe('Codex desktop turn sync', () => {
     } finally { await handle.stop(); await catalog.flush(); }
   });
 
+  it('shares FF history while sending each answer only to its originating group, including after restart', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codex-shared-ff-')); cleanup.push(dir);
+    const catalog = new SessionCatalog(join(dir, 'catalog.json'));
+    for (const scopeId of ['oc_a', 'oc_b']) catalog.upsertActive({ scopeId, agentId: 'codex', cwdRealpath: dir, policyFingerprint: scopeId, threadId: 'shared' });
+    const submissions = new CodexSubmissionStore(join(dir, 'outbox.json')); await submissions.load();
+    const turns: CodexThreadSnapshot['turns'] = [];
+    for (const group of ['a', 'b']) {
+      await submissions.prepare({ id: group, scope: `oc_${group}`, messages: [{ messageId: `m_${group}` } as any], status: 'accepted',
+        createdAtMs: 1, updatedAtMs: 1, threadId: 'shared', clientUserMessageId: `client_${group}`, prompt: 'same', replyTo: `m_${group}` });
+      const turn = externalTurn(`turn_${group}`, 'completed', 'same', `answer ${group}`); turn.items[0]!.clientId = `client_${group}`; turns.push(turn);
+    }
+    const controls = controlsForCodex();
+    controls.auxiliary = { isAuxiliary: () => true, isActive: () => true, trackRun: async () => {} } as any;
+    const channel = createFakeChannel();
+    const deps = { channel: channel as unknown as LarkChannel, controls, sessionCatalog: catalog, profileStateDir: dir, intervalMs: 60_000,
+      submissionStore: submissions, reader: { readThread: async () => ({ id: 'shared', turns }), stop: async () => {} } };
+    let sync = await startCodexTurnSync(deps);
+    try {
+      await sync.runNow();
+      expect(channel.sent.map(m => [m.chatId, (m.options as { replyTo?: string })?.replyTo])).toEqual([['oc_a', 'm_a'], ['oc_b', 'm_b']]);
+      await sync.stop(); sync = await startCodexTurnSync(deps); await sync.runNow(); expect(channel.sent).toHaveLength(2);
+    } finally { await sync.stop(); await catalog.flush(); }
+  });
+
   it('uses client IDs to distinguish identical submissions and does not echo CLI newline input', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codex-client-match-')); cleanup.push(dir);
     const catalog = new SessionCatalog(join(dir, 'catalog.json'));

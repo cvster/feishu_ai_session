@@ -22,7 +22,10 @@ export async function submitFeishuCodex(input: StartRunFlowInput, batch: Normali
   const inheritedFreshBinding = incoming.every(r => r.expectedThreadId === undefined) && store.records().some(r =>
     r.scope === input.scopeId && r.expectedThreadId === undefined && r.threadId === prepared.threadId &&
     (r.status === 'accepted' || r.status === 'completed') && incoming.every(i => r.createdAtMs <= i.createdAtMs));
-  if (incoming.some(r => r.expectedThreadId !== prepared.threadId) && !inheritedFreshBinding) {
+  const binding = controls.toolBindings?.get(input.scopeId);
+  const inheritedSharedBinding = !!binding?.sharedScope && binding.nativeCreated && binding.nativeId === prepared.threadId &&
+    incoming.every(r => r.expectedThreadId === undefined);
+  if (incoming.some(r => r.expectedThreadId !== prepared.threadId) && !inheritedFreshBinding && !inheritedSharedBinding) {
     for (const r of incoming) await store.mark(r.id, { status: 'rejected', error: '会话绑定已改变，请重新发送。' });
     return { status: 'rejected', message: '会话绑定已改变，请重新发送。' };
   }
@@ -53,6 +56,12 @@ export async function submitFeishuCodex(input: StartRunFlowInput, batch: Normali
       recordRunSessionEvent({ scopeId: input.scopeId, botAppId: input.profileConfig.accounts.app.id,
         sessions: input.sessions, sessionCatalog: input.sessionCatalog, capability: input.capability,
         policy: prepared.policy, event: { type: 'system', threadId: value.threadId } });
+      const currentBinding = controls.toolBindings?.get(input.scopeId);
+      if (currentBinding?.sharedScope) {
+        if (value.threadId === currentBinding.linkedSource?.nativeId) throw new Error('拒绝绑定到原会话');
+        controls.toolBindings!.set(input.scopeId, { ...currentBinding, nativeId: value.threadId, nativeCreated: true });
+        await controls.toolBindings!.flush();
+      }
       await input.sessionCatalog?.flush();
       await store.mark(record.id, { threadId: value.threadId, knownTurnIds: value.knownTurnIds,
         transport: value.transport, status: 'sending' }, ['pending']);

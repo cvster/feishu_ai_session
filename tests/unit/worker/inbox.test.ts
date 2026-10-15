@@ -39,3 +39,13 @@ it('fails closed on damaged receipts', async () => {
   const h = await inboxFixture(); await writeFile(h.path, '{"version":1,"entries":{"bad":{}}}');
   await expect(new WorkerInbox(h.path).load()).rejects.toThrow('Invalid');
 });
+
+it('rejects all inputs from an exiting group, including queued/deferred items, without cancelling peers', async () => {
+  const h = await inboxFixture();
+  await h.inbox.receive('group', msg('queued')); h.inbox.markQueued('group', msg('queued'));
+  await h.inbox.receive('group', msg('deferred')); h.inbox.defer('group', [msg('deferred')]);
+  await h.inbox.receive('other', msg('peer'));
+  await h.inbox.rejectScope('group');
+  const restored = new WorkerInbox(h.path); await restored.load();
+  expect(restored.available().map(e => e.message.messageId)).toEqual(['peer']);
+});

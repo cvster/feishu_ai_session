@@ -3,7 +3,7 @@ import { routeCommandContext } from '../tools/context';
 import type { ToolRegistry } from '../tools/types';
 import type { ToolBindingStore } from '../tools/bindings';
 import { randomUUID } from 'node:crypto';
-import { CodexQueueContinuationError, stopCodexSubmissions, waitForCodexIntake } from '../bot/codex-submission-stop';
+import { CodexQueueContinuationError, stopCodexSubmissions, stopScopedCodexSubmissions, waitForCodexIntake } from '../bot/codex-submission-stop';
 import { resolveSharedCodexEndpoint } from '../../packages/codex-core/src/queue';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -1807,7 +1807,11 @@ async function handleStop(args: string, ctx: CommandContext, strict = false): Pr
       }
       const writer = new CodexThreadReader({ binary: codex.binaryPath, profileStateDir: commandProfilePaths(ctx).profileDir,
         codexHome: codex.codexHome, inheritCodexHome: codex.inheritCodexHome !== false, sharedServer: true, passive: true, remote });
-      try { ok = await stopCodexSubmissions(threadId, writer, () => waitForCodexIntake(scope, ctx.controls.codexSubmissions!)); }
+      try {
+        ok = ctx.controls.toolBindings?.get(scope)?.sharedScope
+          ? await stopScopedCodexSubmissions(threadId, scope, writer, ctx.controls.codexSubmissions, strict)
+          : await stopCodexSubmissions(threadId, writer, () => waitForCodexIntake(scope, ctx.controls.codexSubmissions!));
+      }
       catch (error) {
         if (strict) throw error;
         await reply(ctx, error instanceof CodexQueueContinuationError
