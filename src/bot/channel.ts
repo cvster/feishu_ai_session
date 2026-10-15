@@ -2,6 +2,8 @@ import { auxiliaryLinkError } from './auxiliary-membership';
 import { AuxiliaryApprovals } from './auxiliary-approvals';
 import { AuxiliaryGroups } from './auxiliary-groups';
 import { parsePrivateFFInput } from './auxiliary-private';
+import { startA2AServer } from '../a2a/server';
+import { createA2ARunner } from '../a2a/runner';
 import { NativeSessionLocks } from '../tools/locks';
 import { sessionRefKey } from '../tools/bindings';
 import { createToolRegistry } from '../tools/runtime';
@@ -359,6 +361,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const channel = createLarkChannel(opts);
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
   const batchTasks = new Set<Promise<void>>();
+  let a2a: Awaited<ReturnType<typeof startA2AServer>>;
   let disconnecting = false;
 
   // Pending → run handoff: while a run is active on a chat, block its pending
@@ -448,7 +451,12 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     controls.auxiliaryApprovals = new AuxiliaryApprovals({
       path: join(deps.appPaths.profileDir, 'ff-approvals.json'), channel, auxiliary: controls.auxiliary,
       bindings: controls.toolBindings, ownerId: () => controls.botOwnerId,
+      validateApi: scope => a2a?.validScope(scope) ?? Promise.resolve(false),
       resume: async approval => {
+        if (controls.auxiliary?.apiRequest(approval.scope)) {
+          if (!a2a) throw new Error('A2A 服务未启用');
+          await a2a.resume(approval); return;
+        }
         const msg: NormalizedMessage = { ...approval.message, messageId: approval.receiptMessageId!,
           senderId: approval.actorId, createTime: Date.now(), resources: [], mentions: [], mentionAll: false,
           mentionedBot: true, rawContentType: 'text', raw: undefined,
@@ -599,7 +607,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
   });
   await ownerRefresh.start();
-  await controls.auxiliaryApprovals?.recover();
   await controls.auxiliary?.recover().catch(error => log.warn('auxiliary', 'recovery-failed', { error: String(error) }));
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
   const aaSessionGroupSync =
@@ -709,6 +716,17 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   });
   console.log('正在监听消息。按 Ctrl+C 退出。\n');
 
+  if (deps.appPaths?.profileDir && controls.auxiliary && controls.auxiliaryApprovals) {
+    try {
+      a2a = await startA2AServer({ configPath: join(deps.appPaths.profileDir, 'a2a.json'),
+        tasksPath: join(deps.appPaths.profileDir, 'a2a-tasks.json'), auxiliary: controls.auxiliary,
+        approvals: controls.auxiliaryApprovals, ownerId: () => controls.ownerRefreshState === 'ok' ? controls.botOwnerId : undefined,
+        execute: createA2ARunner({ controls, sessions, sessionCatalog, workspaces }) });
+      if (a2a) log.info('a2a', 'listening', { profile: controls.profile });
+    } catch (error) { log.warn('a2a', 'startup-failed', { error: String(error) }); }
+  }
+  await controls.auxiliaryApprovals?.recover();
+
   // App-level keepalive: 15s probe + wake-up detection + HTTP reachability.
   // Defense-in-depth — the SDK's pingTimeout watchdog handles half-dead WS,
   // this catches anything that the SDK misses (silent state stuck, etc.).
@@ -727,6 +745,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     disconnect: async () => {
       disconnecting = true;
       activeRuns.pauseNewRuns('bridge-disconnect');
+      await a2a?.close();
       pending.cancelAll();
       await Promise.all([executor, ...executors.values()].map(item => item.waitForSubmissions()));
       await activeRuns.disconnectAll();

@@ -6,6 +6,8 @@
 
 [中文主 README：主要用法与部署](./README.md) · [飞书权限申请清单](./docs/FEISHU_PERMISSIONS.md)
 
+其他 agent 可通过 [FF 项目助手 A2A 接口](./docs/A2A_API.md) 委派问答/调试任务。默认端口 36999，使用自定义用户名路径、永久及易读双别名、独立密钥、全量轮询和飞书私聊权限确认；默认关闭，不是通用模型供应商接口。
+
 关于能实现的效果，详情可以阅读[飞书文档](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e)
 
 ## 主要功能

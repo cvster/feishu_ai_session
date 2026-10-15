@@ -11,6 +11,7 @@
 - [飞书权限申请清单](docs/FEISHU_PERMISSIONS.md)：权限标识、申请用途、事件订阅与验收步骤。
 - [详细配置与排错](README.zh.md)：权限模式、访问控制、会话与日志等进阶说明。
 - [多服务目录说明](docs/MONOREPO.md)：飞书桥接、共享 Codex core 与独立 Web 服务的边界。
+- [FF 项目助手 A2A 接口](docs/A2A_API.md)：通过内网 HTTP 给其他 agent 委派任务，默认端口 36999，支持双别名、完整结果轮询及飞书权限确认。
 
 ## 主要功能
 

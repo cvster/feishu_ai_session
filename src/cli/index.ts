@@ -25,6 +25,7 @@ import {
 } from './commands/service';
 import { runStart } from './commands/start';
 import { runWorker, workerService } from './commands/worker';
+import { runA2A, type A2AOptions } from './commands/a2a';
 
 const program = new Command();
 
@@ -74,6 +75,17 @@ const profile = program
   .description('Manage local bridge profiles');
 
 const worker = program.command('worker').description('Manage the independent Claude execution worker');
+const a2a = program.command('a2a').description('Manage FF project-assistant A2A HTTP endpoints (never restarts services)');
+for (const action of ['configure', 'list', 'enable', 'disable', 'alias', 'grant', 'revoke'] as const) {
+  const command = a2a.command(['configure', 'list'].includes(action) ? action : `${action} <session>`)
+    .option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
+    .option('--namespace <name>', 'stable URL username').option('--host <ipv4>', 'local 10.88 address')
+    .option('--port <port>', 'HTTP port (default 36999)').option('--alias <name>', 'optional readable session alias')
+    .option('--name <name>', 'credential holder name').option('--owner', 'issue an unrestricted owner credential; omit for coworkers')
+    .option('--key-id <id>', 'credential ID to revoke');
+  if (['configure', 'list'].includes(action)) command.action((options: A2AOptions) => runA2A(action, undefined, options));
+  else command.action((session: string, options: A2AOptions) => runA2A(action, session, options));
+}
 worker.command('run').description('Run a worker in the foreground under an independent supervisor')
   .option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
   .action(runWorker);

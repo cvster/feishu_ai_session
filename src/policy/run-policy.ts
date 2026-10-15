@@ -16,7 +16,7 @@ import {
 } from './fingerprint';
 
 export interface ScopeContext {
-  source: 'im' | 'card' | 'comment';
+  source: 'im' | 'card' | 'comment' | 'a2a';
   chatId?: string;
   threadId?: string;
   actorId: string;

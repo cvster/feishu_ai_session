@@ -19,6 +19,22 @@ describe('Codex desktop turn sync', () => {
     await Promise.all(cleanup.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
+  it('never mirrors API artifacts into either its task scope or the FF personal workgroup', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codex-api-ff-')); cleanup.push(dir);
+    const catalog = new SessionCatalog(join(dir, 'catalog.json'));
+    for (const scopeId of ['a2a_task', 'oc_ffowner']) catalog.upsertActive({ scopeId, agentId: 'codex', cwdRealpath: dir, policyFingerprint: scopeId, threadId: 'shared' });
+    const controls = controlsForCodex();
+    controls.auxiliary = { isAuxiliary: (scope: string) => scope.startsWith('a2a_'), isActive: () => true } as any;
+    controls.toolBindings = { get: (scope: string) => scope === 'oc_ffowner' ? { auxiliaryWorkgroup: true } : undefined } as any;
+    const channel = createFakeChannel();
+    const turn = externalTurn('api-turn', 'inProgress', 'API task', 'API progress');
+    const sync = await startCodexTurnSync({ channel: channel as unknown as LarkChannel, controls, sessionCatalog: catalog,
+      profileStateDir: dir, intervalMs: 60_000, reader: { readThread: async () => ({ id: 'shared', turns: [turn] }), stop: async () => {} } });
+    try {
+      await sync.runNow(); turn.status = 'completed'; await sync.runNow(); expect(channel.sent).toEqual([]);
+    } finally { await sync.stop(); await catalog.flush(); }
+  });
+
   it('delivers a fast completed submission on the first snapshot and preserves one card across restart', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codex-fast-submit-')); cleanup.push(dir);
     const catalog = new SessionCatalog(join(dir, 'catalog.json'));

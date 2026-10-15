@@ -39,6 +39,7 @@ interface Deps {
   bindings: ToolBindingStore;
   ownerId(): string | undefined;
   resume(approval: AuxiliaryApproval): Promise<void>;
+  validateApi?(scope: string): Promise<boolean>;
   now?(): number;
 }
 
@@ -64,6 +65,13 @@ export class AuxiliaryApprovals {
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   private key(scope: string, messageId: string): string { return JSON.stringify([scope, messageId]); }
+  private privateDelivery(scope: string): boolean { return !!(this.deps.auxiliary.privateRequest(scope) || this.deps.auxiliary.apiRequest(scope)); }
+  apiStatus(scope: string): AuxiliaryApproval['status'] | undefined {
+    const r = Object.values(this.approvals).filter(r => r.scope === scope).at(-1);
+    if (!r) return;
+    if (!this.current(r)) return 'stale';
+    return r.status === 'pending' && this.now() > r.expiresAt ? 'expired' : r.status;
+  }
   async remember(scope: string, messages: readonly NormalizedMessage[], text: string): Promise<void> {
     const first = messages[0], last = messages.at(-1), group = this.deps.auxiliary.get(scope);
     if (!first || !last || !group || !this.deps.auxiliary.isActive(scope)) return;
@@ -114,10 +122,10 @@ export class AuxiliaryApprovals {
   }
   private async sendCard(r: AuxiliaryApproval): Promise<void> {
     if (!this.current(r)) { r.status = 'stale'; await this.save(); return; }
-    if (!r.cardId) { r.cardId = (await this.deps.channel.createCard(approvalCard(r, !!this.deps.auxiliary.privateRequest(r.scope)))).cardId; await this.save(); }
+    if (!r.cardId) { r.cardId = (await this.deps.channel.createCard(approvalCard(r, this.privateDelivery(r.scope)))).cardId; await this.save(); }
     if (r.cardSendingSince && this.now() - r.cardSendingSince > 55 * 60_000) throw new Error('确认卡片发送结果不明且超过去重窗口，请联系所有者检查。');
     r.cardSendingSince ??= this.now(); await this.save();
-    const privateRequest = this.deps.auxiliary.privateRequest(r.scope);
+    const privateRequest = this.privateDelivery(r.scope);
     const result = await this.deps.channel.rawClient.im.v1.message.create({ params: { receive_id_type: privateRequest ? 'open_id' : 'chat_id' },
       data: { receive_id: privateRequest ? r.ownerId : r.message.chatId, msg_type: 'interactive',
         content: JSON.stringify({ type: 'card', data: { card_id: r.cardId } }), uuid: `ff-approval-${r.id.slice(0, 32)}` } });
@@ -132,7 +140,7 @@ export class AuxiliaryApprovals {
     await this.serial(id, async () => {
       const r = this.approvals[id];
       if (!r || event.operator.openId !== r.ownerId || this.deps.ownerId() !== r.ownerId || event.messageId !== r.cardMessageId) return;
-      if (this.deps.auxiliary.privateRequest(r.scope)) { if (await this.deps.channel.getChatMode(event.chatId) !== 'p2p') return; }
+      if (this.privateDelivery(r.scope)) { if (await this.deps.channel.getChatMode(event.chatId) !== 'p2p') return; }
       else if (event.chatId !== r.message.chatId) return;
       if (!this.current(r)) { r.status = 'stale'; await this.save(); await this.updateCard(r); return; }
       if (r.status !== 'pending' && !(r.status === 'approved' && value.decision === 'approve')) return;
@@ -150,16 +158,23 @@ export class AuxiliaryApprovals {
   private async continue(r: AuxiliaryApproval): Promise<void> {
     if (!this.current(r)) { r.status = 'stale'; await this.save(); return; }
     const privateRequest = this.deps.auxiliary.privateRequest(r.scope);
+    const apiRequest = this.deps.auxiliary.apiRequest(r.scope);
+    if (apiRequest && !await this.deps.validateApi?.(r.scope)) { r.status = 'stale'; await this.save(); return; }
     if (privateRequest && !await this.deps.auxiliary.validatePrivate(r.scope, r.actorId, r.message.chatId)) {
       r.status = 'stale'; await this.save(); return;
     }
     r.status = 'resuming'; await this.save();
     if (!r.receiptMessageId) {
-      try {
-        const receipt = await this.deps.channel.send(r.message.chatId,
-          { text: `${privateRequest ? `request_id=${privateRequest.requestId} ` : ''}所有者已同意，继续执行本次确认的操作。` }, { replyTo: r.message.messageId, ...(r.message.threadId ? { replyInThread: true } : {}) });
-        r.receiptMessageId = receipt.messageId; await this.save();
-      } catch (error) { r.status = 'unknown'; await this.save(); throw error; }
+      if (apiRequest) {
+        // This is an internal continuation identity, never a Feishu message.
+        r.receiptMessageId = `a2a_approval_${r.id}`; await this.save();
+      } else {
+        try {
+          const receipt = await this.deps.channel.send(r.message.chatId,
+            { text: `${privateRequest ? `request_id=${privateRequest.requestId} ` : ''}所有者已同意，继续执行本次确认的操作。` }, { replyTo: r.message.messageId, ...(r.message.threadId ? { replyInThread: true } : {}) });
+          r.receiptMessageId = receipt.messageId; await this.save();
+        } catch (error) { r.status = 'unknown'; await this.save(); throw error; }
+      }
     }
     try { await this.deps.resume(r); r.status = 'resumed'; await this.save(); }
     catch (error) { r.status = 'approved'; await this.save(); throw error; }
@@ -167,7 +182,7 @@ export class AuxiliaryApprovals {
   private async updateCard(r: AuxiliaryApproval): Promise<void> {
     if (!r.cardId) return;
     r.sequence++; await this.save();
-    try { await this.deps.channel.updateCardById(r.cardId, approvalCard(r, !!this.deps.auxiliary.privateRequest(r.scope)), r.sequence); }
+    try { await this.deps.channel.updateCardById(r.cardId, approvalCard(r, this.privateDelivery(r.scope)), r.sequence); }
     catch (error) { log.warn('auxiliary-approval', 'card-update-failed', { id: r.id, error: String(error) }); }
   }
   async recover(): Promise<void> {
