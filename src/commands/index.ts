@@ -775,7 +775,7 @@ async function createGroupForPanelSession(
   }
   let created;
   try {
-    created = await createBoundChat({ channel: ctx.channel, name, inviteOpenId: ctx.msg.senderId });
+    created = await createBoundChat({ channel: ctx.channel, name, inviteOpenId: ctx.msg.senderId, toolId });
   } catch (err) {
     await reply(ctx, `❌ 创建群失败：${errorText(err)}`);
     return false;
@@ -936,6 +936,7 @@ async function handleNewChat(
       channel: ctx.channel,
       name,
       inviteOpenId: ctx.msg.senderId,
+      toolId,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -269,6 +269,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
         channel: deps.channel,
         name,
         inviteOpenIds,
+        toolId,
         description: `自动绑定 ${toolId === 'codex' ? 'Codex' : 'Claude Code'} 会话 ${thread.threadId}`,
       });
     } catch (err) {

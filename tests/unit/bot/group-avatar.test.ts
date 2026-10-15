@@ -1,0 +1,43 @@
+import { describe, expect, it, vi } from 'vitest';
+import { createBoundChat } from '../../../src/bot/group';
+import { sessionGroupAvatar } from '../../../src/bot/group-avatar';
+import { GROUP_AVATAR_IMAGES } from '../../../src/bot/group-avatar-images';
+
+function channel() {
+  const image = vi.fn(async (_params: unknown) => ({ image_key: 'img_avatar' }));
+  const create = vi.fn(async (_params: unknown) => ({ code: 0, data: { chat_id: 'oc_created' } }));
+  const api = { rawClient: { im: { v1: { image: { create: image }, chat: { create } } } } };
+  return { api: api as never, image, create };
+}
+
+describe('session group avatars', () => {
+  it.each(['codex', 'claude'] as const)('uses the bound %s tool for the group avatar', async toolId => {
+    const h = channel();
+    await createBoundChat({ channel: h.api, name: 'AA same name', toolId, inviteOpenId: 'ou_owner' });
+    expect(h.image).toHaveBeenCalledWith({ data: { image_type: 'avatar',
+      image: Buffer.from(GROUP_AVATAR_IMAGES[toolId], 'base64') } });
+    expect(h.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      name: 'AA same name', avatar: 'img_avatar', owner_id: 'ou_owner',
+    }) }));
+  });
+
+  it('shares concurrent uploads per tool and isolates application channels', async () => {
+    const a = channel(), b = channel();
+    await Promise.all([sessionGroupAvatar(a.api, 'codex'), sessionGroupAvatar(a.api, 'codex')]);
+    expect(a.image).toHaveBeenCalledTimes(1);
+    await sessionGroupAvatar(a.api, 'claude');
+    expect(a.image).toHaveBeenCalledTimes(2);
+    await sessionGroupAvatar(b.api, 'codex');
+    expect(b.image).toHaveBeenCalledTimes(1);
+  });
+
+  it('continues group creation after upload failure and retries the next time', async () => {
+    const h = channel();
+    h.image.mockRejectedValueOnce(new Error('missing im:resource'));
+    await expect(createBoundChat({ channel: h.api, name: 'AA task', toolId: 'claude', inviteOpenId: 'ou_owner' }))
+      .resolves.toMatchObject({ chatId: 'oc_created' });
+    expect(h.create.mock.calls[0]?.[0]).not.toHaveProperty('data.avatar');
+    await sessionGroupAvatar(h.api, 'claude');
+    expect(h.image).toHaveBeenCalledTimes(2);
+  });
+});

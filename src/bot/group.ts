@@ -1,4 +1,7 @@
 import type { LarkChannel } from '@larksuite/channel';
+import type { AgentKind } from '../config/profile-schema';
+import { sessionGroupAvatar } from './group-avatar';
+import { log } from '../core/logger';
 
 export interface CreateBoundChatOptions {
   channel: LarkChannel;
@@ -8,6 +11,8 @@ export interface CreateBoundChatOptions {
   /** Human owner of the group. Defaults to the first invited user. */
   ownerOpenId?: string;
   description?: string;
+  /** Immutable execution tool selected for this session group. */
+  toolId?: AgentKind;
 }
 
 export interface CreatedChat {
@@ -39,6 +44,11 @@ export async function createBoundChat(opts: CreateBoundChatOptions): Promise<Cre
   ].filter(Boolean))];
   if (inviteUserIds.length === 0) throw new Error('at least one invite open_id is required');
   const ownerOpenId = opts.ownerOpenId ?? inviteUserIds[0]!;
+  const avatar = opts.toolId ? await sessionGroupAvatar(channel, opts.toolId).catch(error => {
+    // An optional decoration must not prevent the user from creating a session.
+    log.warn('group-avatar', 'upload-failed', { toolId: opts.toolId, error: String(error) });
+    return undefined;
+  }) : undefined;
   const response = await channel.rawClient.im.v1.chat.create({
     params: { user_id_type: 'open_id' },
     data: {
@@ -48,6 +58,7 @@ export async function createBoundChat(opts: CreateBoundChatOptions): Promise<Cre
       chat_type: 'private',
       owner_id: ownerOpenId,
       user_id_list: inviteUserIds,
+      ...(avatar ? { avatar } : {}),
     },
   });
   const chatId = response.data?.chat_id;
