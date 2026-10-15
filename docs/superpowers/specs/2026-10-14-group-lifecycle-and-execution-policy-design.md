@@ -4,6 +4,8 @@
 
 状态：延期参考。用户已明确本次只实现个人会话的 Codex / Claude Code 工具选择与 AA 自动建群；当前设计见 `2026-10-14-multi-tool-personal-sessions-design.md`。本文件中的 FF/同事群/受限环境不纳入本次。
 
+2026-10-15：用户重新启动辅助群设计，并改为入群后私聊所有者选择关联已有会话、群回答仅保留停止/刷新按钮。当前讨论稿见 `2026-10-15-auxiliary-group-session-link-design.md`；本文保留为前期参考。
+
 ## 1. 已确认需求
 
 - 使用现有「Lennox飞书助手」，App ID 为 `cli_aa36351590381bcd`。
