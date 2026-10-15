@@ -51,6 +51,7 @@ import {
   recoverLegacyLarkCliSourceOverlay,
 } from '../lark-cli/legacy-source-overlay';
 import { validateAppCredentials } from '../utils/feishu-auth';
+import { loadRuntimeEnv } from '../config/runtime-env';
 
 export interface ResolveProfileRuntimeOptions {
   config?: string;
@@ -124,6 +125,7 @@ export async function resolveProfileRuntime(
     throw new Error('active profile is required');
   }
   profile ??= 'claude';
+  await loadRuntimeEnv(profile, rootDir);
   let appPaths = resolveAppPaths({ rootDir, profile });
   const configPath = opts.config ?? appPaths.configFile;
 

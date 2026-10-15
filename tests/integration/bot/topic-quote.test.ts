@@ -64,12 +64,21 @@ const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   sdkMock.channel = undefined;
   sdkMock.createLarkChannel.mockClear();
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
 });
 
 describe('topic message quote handling', () => {
+  it.each(['0', '1'])('applies the same explicit Feishu proxy choice to HTTP and WebSocket (%s)', async choice => {
+    vi.stubEnv('LARK_CHANNEL_FEISHU_USE_PROXY', choice);
+    const h = await createHarness(); await startTestBridge(h);
+    const options = (sdkMock.createLarkChannel.mock.calls as unknown[][])[0]?.[0] as { respectProxyEnv?: boolean; httpInstance?: unknown };
+    expect(options.respectProxyEnv).toBe(choice === '1');
+    expect(options.httpInstance === undefined).toBe(choice === '1');
+    expect(h.agent.runOptions).toHaveLength(0);
+  });
   it('does not quote the topic root when a user directly mentions the bot inside the topic', async () => {
     const h = await createHarness();
 

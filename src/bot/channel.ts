@@ -348,14 +348,12 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     // 8s handshake timeout (replaces hardcoded 15s). Fast-fail + fast-retry
     // beats slow-fail in unstable networks.
     handshakeTimeoutMs: 8_000,
-    // Feishu is directly reachable on this host. Axios honors HTTP(S)_PROXY
-    // by default even when the channel SDK does not, so use a dedicated
-    // proxy-disabled instance for every Feishu REST call. This is scoped to
-    // Feishu; agent subprocesses still inherit the process proxy environment.
-    httpInstance: createDirectLarkHttpInstance(LARK_HTTP_TIMEOUT_MS),
-    // WebSocket proxy support is opt-in in the channel SDK. Keep it disabled
-    // as the matching half of the direct Feishu route.
-    respectProxyEnv: false,
+    // Default to direct Feishu traffic; deployments that require a proxy opt
+    // in explicitly for both HTTP and WebSocket. Agent subprocess proxy
+    // settings remain independent.
+    httpInstance: process.env.LARK_CHANNEL_FEISHU_USE_PROXY === '1' ? undefined : createDirectLarkHttpInstance(LARK_HTTP_TIMEOUT_MS),
+    // WebSocket and HTTP use the same explicit proxy choice.
+    respectProxyEnv: process.env.LARK_CHANNEL_FEISHU_USE_PROXY === '1',
   };
 
   const channel = createLarkChannel(opts);

@@ -436,7 +436,7 @@ export function createRuntimeAgent(
       useQueueForExistingThreads: true,
     });
   }
-  return new ClaudeAdapter({ larkChannel });
+  return new ClaudeAdapter({ larkChannel, binary: process.env.LARK_CHANNEL_CLAUDE_BIN });
 }
 
 /**

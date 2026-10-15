@@ -7,6 +7,7 @@ import { createLarkChannel } from '@larksuite/channel';
 import { resolveAppPaths } from '../../config/app-paths';
 import { loadRootConfig, readActiveProfile, runtimeProfileConfig } from '../../config/profile-store';
 import { resolveAppSecret } from '../../config/secret-resolver';
+import { loadRuntimeEnv } from '../../config/runtime-env';
 import { createDirectLarkHttpInstance } from '../../platform/lark-http';
 import { ToolBindingStore } from '../../tools/bindings';
 import { DEFAULT_A2A_PORT, defaultAlias, endpointForAlias, loadA2AConfig, mintKey, saveA2AConfig, select10Address, setAlias, validSlug } from '../../a2a/config';
@@ -15,6 +16,7 @@ export interface A2AOptions { profile?: string; config?: string; namespace?: str
 export async function runA2A(action: 'configure' | 'list' | 'enable' | 'disable' | 'alias' | 'grant' | 'revoke', target: string | undefined, options: A2AOptions): Promise<void> {
   const rootDir = options.config ? dirname(resolve(options.config)) : undefined;
   const profile = options.profile ?? await readActiveProfile(rootDir) ?? 'codex';
+  await loadRuntimeEnv(profile, rootDir);
   const paths = resolveAppPaths({ rootDir, profile }), root = await loadRootConfig(paths.configFile);
   if (!root?.profiles[profile]) throw new Error(`profile not found: ${profile}`);
   const bindings = new ToolBindingStore(join(paths.profileDir, 'tool-bindings.json')); await bindings.load();
@@ -65,7 +67,8 @@ export async function runA2A(action: 'configure' | 'list' | 'enable' | 'disable'
       const cfg = runtimeProfileConfig(root, profile), appSecret = await resolveAppSecret(cfg, paths);
       const channel = createLarkChannel({ appId: cfg.accounts.app.id, appSecret,
         domain: cfg.accounts.app.tenant === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn',
-        httpInstance: createDirectLarkHttpInstance(30_000), respectProxyEnv: false });
+        httpInstance: process.env.LARK_CHANNEL_FEISHU_USE_PROXY === '1' ? undefined : createDirectLarkHttpInstance(30_000),
+        respectProxyEnv: process.env.LARK_CHANNEL_FEISHU_USE_PROXY === '1' });
       const info = await channel.getAppInfo({ userIdType: 'open_id' });
       if (!info.ownerId) throw new Error('无法确认当前飞书 CLI 所有者，未签发密钥');
       issued = mintKey(options.name, info.ownerId, options.owner ? 'owner' : 'member'); endpoint.keys.push(issued.key);

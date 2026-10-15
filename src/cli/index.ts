@@ -26,6 +26,8 @@ import {
 import { runStart } from './commands/start';
 import { runWorker, workerService } from './commands/worker';
 import { runA2A, type A2AOptions } from './commands/a2a';
+import { runDoctor } from '../setup/checks';
+import { runSetup } from './commands/setup';
 
 const program = new Command();
 
@@ -33,6 +35,17 @@ program
   .name('lark-channel-bridge')
   .description('Bridge Feishu/Lark messenger with local CLI coding agents')
   .version(pkg.version, '-v, --version');
+
+program.command('doctor').description('Read-only installation/runtime checks; never runs model tasks or restarts services')
+  .option('--agents <selection>', 'auto, codex, claude, or both', 'auto')
+  .option('--profile <name>', 'profile to check').option('-c, --config <path>', 'config path')
+  .option('--workspace <path>', 'project directory').option('--runtime', 'require login, configuration and selected execution services')
+  .option('--network', 'verify Feishu credentials/owner over the network (no messages)').option('--json', 'structured, redacted result')
+  .action(runDoctor);
+
+program.command('setup').description('Bind lark-cli for an existing profile, without starting bridge/worker')
+  .requiredOption('--profile <name>', 'existing profile name').option('-c, --config <path>', 'config path')
+  .action(runSetup);
 
 // === process-level commands (work directly on bridge processes) ===
 

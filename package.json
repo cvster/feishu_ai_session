@@ -10,12 +10,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zarazhangrui/feishu-claude-code-bridge.git"
+    "url": "git+https://github.com/cvster/CodexFeishu.git"
   },
   "bugs": {
-    "url": "https://github.com/zarazhangrui/feishu-claude-code-bridge/issues"
+    "url": "https://github.com/cvster/CodexFeishu/issues"
   },
-  "homepage": "https://github.com/zarazhangrui/feishu-claude-code-bridge#readme",
+  "homepage": "https://github.com/cvster/CodexFeishu#readme",
   "bin": {
     "lark-channel-bridge": "./bin/lark-channel-bridge.mjs"
   },
@@ -45,7 +45,7 @@
     "test:process": "vitest run tests/process --passWithNoTests",
     "ci:local": "git diff --check && pnpm test && pnpm typecheck && pnpm build",
     "ci:platform": "pnpm test && pnpm typecheck && pnpm build",
-    "prepare": "npm run build",
+    "install:guided": "node tools/install.mjs",
     "prepublishOnly": "pnpm typecheck && pnpm build"
   },
   "dependencies": {

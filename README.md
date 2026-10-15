@@ -8,6 +8,7 @@
 
 本仓库包含个人工作群、AA 会话自动建群、共享 FF 辅助会话、折叠回复和独立 Claude worker 等定制功能。使用本仓库版本请按下文从源码构建；公开 npm 包不保证包含这些改动。
 
+- [完整安装配置指引](docs/INSTALL.md)：一键安装、二选一/双工具、版本检查、登录、writer/worker、后台环境及验收。
 - [飞书权限申请清单](docs/FEISHU_PERMISSIONS.md)：权限标识、申请用途、事件订阅与验收步骤。
 - [详细配置与排错](README.zh.md)：权限模式、访问控制、会话与日志等进阶说明。
 - [多服务目录说明](docs/MONOREPO.md)：飞书桥接、共享 Codex core 与独立 Web 服务的边界。
@@ -39,7 +40,29 @@ Claude 独立 worker 的系统服务和重启恢复目前以 Linux 为主要验�
 
 ## 安装与首次启动
 
-### 1. 下载和构建
+### 推荐：一键安装
+
+先安装 Node 24（含 npm）和 Git，然后：
+
+```bash
+git clone https://github.com/cvster/CodexFeishu.git
+cd CodexFeishu
+bash install.sh --agents codex --install-clis
+# Claude 单独使用：--agents claude；两个都用：--agents both
+```
+
+Windows 使用 `powershell -ExecutionPolicy Bypass -File .\install.ps1 --agents codex --install-clis`。脚本在用户目录准备固定 pnpm 和所选 CLI，执行依赖安装、版本/能力检查、类型检查、测试、构建；不自动登录或启动服务。Node/Git 未安装时明确提示，不通过 sudo 替换系统工具。
+
+安装后按 [完整指引](docs/INSTALL.md) 登录、创建 profile、绑定飞书 CLI、启动所需执行服务并发布应用。检查命令：
+
+```bash
+node bin/lark-channel-bridge.mjs doctor --agents codex
+node bin/lark-channel-bridge.mjs doctor --profile my-bot --agents codex --runtime --network
+```
+
+Codex 和 Claude 至少一个，也可以同时存在。支持基线为 Codex 0.159.2、Claude 2.1.261、飞书 CLI 1.0.97；仍须通过功能检查。后台和前台可共用 `profiles/<profile>/runtime.env`，示例见 [环境模板](config/runtime.env.example)，Linux/macOS 必须 `chmod 600`。所选工具决定检查项，不因另一工具缺失报错。
+
+### 手动安装：下载和构建
 
 在计划长期保留的目录安装，不要把后台服务指向 `npx` 临时缓存。
 

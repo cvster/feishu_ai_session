@@ -52,10 +52,9 @@
 | 应用权限标识 | 何时需要 |
 | --- | --- |
 | `im:chat:operate_as_owner` | 机器人创建群后将群主交给人类，但仍需管理其创建的群时；不是任意群的管理权 |
-| `im:chat:delete` | 使用解散个人工作群的管理功能时。不是辅助群退出的必要权限；接口还校验群主 / 创建者身份 |
 | `im:chat.members:read` | 开启 FF 群成员私聊调用时必需：接收及执行前校验真实发送者仍在来源群内；也用于 CLI 查询群成员列表 |
 
-群管理权限不能代替群内角色校验。尤其解散群，机器人须是群主，或是创建者且具有 `im:chat:operate_as_owner`；不能管理旧机器人或他人创建的任意群。见 [解散群](https://open.feishu.cn/document/server-docs/group/chat/delete)、[群成员列表](https://open.feishu.cn/document/server-docs/group/chat-member/get)。
+群管理权限不能代替群内角色校验，不能管理旧机器人或他人创建的任意群。本版归档保留飞书群，由用户自行解散；归档不需要申请 `im:chat:delete`。见 [群成员列表](https://open.feishu.cn/document/server-docs/group/chat-member/get)。
 
 ### 可复制的常规组合
 

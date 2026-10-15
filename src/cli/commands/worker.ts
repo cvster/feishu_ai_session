@@ -9,6 +9,7 @@ import { configureLogger } from '../../core/logger';
 import { startWorkerServer } from '../../worker/server';
 import { WorkerClient } from '../../worker/client';
 import { getMaxConcurrentRuns } from '../../config/schema';
+import { loadRuntimeEnv } from '../../config/runtime-env';
 
 interface WorkerOptions { profile?: string; config?: string }
 const quote = (value: string) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
@@ -34,6 +35,7 @@ WantedBy=default.target
 async function workerContext(options: WorkerOptions) {
   const rootDir = options.config ? dirname(resolve(options.config)) : undefined;
   const profile = options.profile ?? await readActiveProfile(rootDir) ?? 'codex';
+  await loadRuntimeEnv(profile, rootDir);
   const paths = resolveAppPaths({ profile, rootDir });
   const config = await loadRootConfig(paths.configFile);
   const selected = config?.profiles[profile];
