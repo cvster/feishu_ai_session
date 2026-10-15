@@ -24,13 +24,13 @@ export interface RunCardRenderOptions extends RunControlIcons {
 }
 
 export function renderCard(state: RunState, options: RunCardRenderOptions = {}): object {
-  const elements: object[] = [];
+  const elements: object[] = options.auxiliary ? auxiliaryContent(state) : [];
 
-  if (state.reasoning.content) {
+  if (!options.auxiliary && state.reasoning.content) {
     elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
   }
 
-  for (const group of groupBlocks(state.blocks)) {
+  for (const group of options.auxiliary ? [] : groupBlocks(state.blocks)) {
     if (group.kind === 'text') {
       if (group.content.trim()) {
         elements.push(markdown(group.content));
@@ -70,6 +70,49 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     },
     body: { elements },
   };
+}
+
+/** One visible answer; retain earlier commentary and full output behind a native toggle. */
+function auxiliaryContent(state: RunState): object[] {
+  const groups = [...groupBlocks(state.blocks)];
+  const answer = [...groups].reverse().find(g => g.kind === 'text' && g.content.trim());
+  const content = answer?.kind === 'text' ? answer.content.trim() : '';
+  const long = Array.from(content).length > 200 || content.split('\n').length > 5 || /```|~~~/.test(content);
+  const elements: object[] = [];
+  if (content) {
+    elements.push(long ? {
+      tag: 'div', text: { tag: 'plain_text', content: auxiliaryPreview(content), lines: 5 },
+    } : markdown(content));
+  }
+  const details: object[] = [];
+  for (const group of groups) {
+    if (group.kind === 'text') {
+      if (group.content.trim() && (group !== answer || long)) details.push(markdown(group.content));
+    } else {
+      // Always fold tools, including the latest running tool, inside the detail area.
+      details.push(...(group.tools.length >= COLLAPSE_TOOL_THRESHOLD
+        ? [collapsedToolSummary(group.tools, state.terminal !== 'running')]
+        : group.tools.map(tool => toolPanel(tool, false))));
+    }
+  }
+  if (details.length) elements.push({
+    tag: 'collapsible_panel', expanded: false,
+    header: panelHeader('查看详细说明（点击展开 / 收起）'),
+    border: { color: 'grey', corner_radius: '5px' },
+    vertical_spacing: '8px', padding: '8px', elements: details,
+  });
+  return elements;
+}
+
+function auxiliaryPreview(content: string): string {
+  // Keep fenced code and incomplete Markdown out of the compact plain-text preview.
+  const opening = content.split(/```|~~~/, 1)[0]!.split(/\n\s*\n/, 1)[0]!.split('\n').slice(0, 5).join('\n')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^(?:#{1,6}\s+|>\s?)/gm, '').replace(/\*\*|__|~~|`/g, '').trim();
+  if (!opening) return '回复包含代码或详细内容，请展开查看。';
+  const chars = Array.from(opening);
+  return chars.length > 200 ? `${chars.slice(0, 199).join('').trimEnd()}…` : opening;
 }
 
 function* groupBlocks(blocks: Block[]): Generator<Group> {
