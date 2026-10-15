@@ -45,7 +45,7 @@ describe('Codex desktop turn sync', () => {
     } finally { await handle.stop(); await catalog.flush(); }
   });
 
-  it.each([['oc_a', 'oc_b'], ['oc_group', 'oc_dm:ffdm_private']])('keeps shared FF replies isolated between %s and %s after restart', async (scopeA, scopeB) => {
+  it.each([['oc_a', 'oc_b'], ['oc_group', 'oc_dm:ffdm_private'], ['oc_group', 'oc_ffowner']])('keeps shared FF replies isolated between %s and %s after restart', async (scopeA, scopeB) => {
     const dir = await mkdtemp(join(tmpdir(), 'codex-shared-ff-')); cleanup.push(dir);
     const catalog = new SessionCatalog(join(dir, 'catalog.json'));
     for (const scopeId of [scopeA, scopeB]) catalog.upsertActive({ scopeId, agentId: 'codex', cwdRealpath: dir, policyFingerprint: scopeId, threadId: 'shared' });
@@ -57,7 +57,8 @@ describe('Codex desktop turn sync', () => {
       const turn = externalTurn(`turn_${group}`, 'completed', 'same', `answer ${group}`); turn.items[0]!.clientId = `client_${group}`; turns.push(turn);
     }
     const controls = controlsForCodex();
-    controls.auxiliary = { isAuxiliary: () => true, isActive: () => true, trackRun: async () => {} } as any;
+    controls.auxiliary = { isAuxiliary: (scope: string) => scope !== 'oc_ffowner', isActive: () => true, trackRun: async () => {} } as any;
+    controls.toolBindings = { get: (scope: string) => scope === 'oc_ffowner' ? { auxiliaryWorkgroup: true } : undefined } as any;
     const channel = createFakeChannel();
     const deps = { channel: channel as unknown as LarkChannel, controls, sessionCatalog: catalog, profileStateDir: dir, intervalMs: 60_000,
       submissionStore: submissions, reader: { readThread: async () => ({ id: 'shared', turns }), stop: async () => {} } };

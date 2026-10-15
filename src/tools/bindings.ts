@@ -11,6 +11,8 @@ export interface LinkedSession {
 }
 
 export interface ToolBinding {
+  /** Personal owner workgroup for an FF session; never an auxiliary source. */
+  auxiliaryWorkgroup?: boolean;
   /** Canonical auxiliary binding; chat aliases retain their own routing scope. */
   sharedScope?: string;
   linkedSource?: LinkedSession;

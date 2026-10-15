@@ -19,9 +19,15 @@ import { handleCardAction } from '../../../src/card/dispatcher';
 import { PendingQueue } from '../../../src/bot/pending-queue';
 import type { ChatModeCache } from '../../../src/bot/chat-mode-cache';
 import { ActiveRuns } from '../../../src/bot/active-runs';
+import { syncAaSessionGroupsOnce } from '../../../src/bot/aa-session-groups';
 
 const roots: string[] = [];
-afterEach(async () => { vi.useRealTimers(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
+const flushes: (() => Promise<unknown>)[] = [];
+afterEach(async () => {
+  vi.useRealTimers();
+  await Promise.all(flushes.splice(0).map(flush => flush()));
+  await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true })));
+});
 const sourceId = '11111111-1111-4111-8111-111111111111';
 const freshId = '22222222-2222-4222-8222-222222222222';
 const joined: BotAddedEvent = { chatId: 'oc_aux', operator: { openId: 'ou_owner' } };
@@ -57,6 +63,7 @@ async function harness(toolId: 'codex' | 'claude' = 'claude') {
   const deps = { path: join(root, 'aux.json'), appId: 'cli_bot', channel, tools, bindings, sessions, catalog, workspaces,
     ownerId: () => 'ou_owner', refreshOwner: vi.fn(async () => {}), cancelPending };
   const groups = new AuxiliaryGroups(deps); await groups.load();
+  flushes.push(() => Promise.all([groups.flush(), bindings.flush(), catalog.flush(), sessions.flush(), workspaces.flush()]));
   function value(i = 0) { return cards.at(-1).body.elements.filter((e: any) => e.tag === 'button')[i].behaviors[0].value; }
   function event(payload = value(), actor = 'ou_owner', chatId = 'oc_dm'): CardActionEvent {
     return { chatId, messageId: 'om_card', operator: { openId: actor }, action: { value: payload } } as CardActionEvent;
@@ -67,6 +74,55 @@ async function harness(toolId: 'codex' | 'claude' = 'claude') {
 }
 
 describe('auxiliary owner linking and lifecycle', () => {
+  it.each(['codex', 'claude'] as const)('creates one personal workgroup for a shared %s FF without recursive linking or archival', async toolId => {
+    const h = await harness(toolId); await h.activate(); await h.activate('oc_aux_2');
+    expect(h.groups.personalGroupSessions(toolId, h.home)).toEqual([]);
+    const tool = h.tools.get(toolId);
+    const original = (await tool.listSessions())[0]!;
+    vi.mocked(tool.listSessions).mockResolvedValue([original, { ...original, nativeId: freshId, name: 'FF-原会话' }]);
+    const chats = [{ id: 'oc_original', name: '个人工作群' }, { id: 'oc_aux', name: '辅助群' }, { id: 'oc_aux_2', name: '辅助群2' }];
+    vi.mocked(h.channel.listChats).mockImplementation(async () => [...chats]);
+    const create = vi.fn(async ({ data }: any) => {
+      chats.push({ id: 'oc_ffowner', name: data.name });
+      return { code: 0, data: { chat_id: 'oc_ffowner' } };
+    });
+    Object.assign(h.channel.rawClient.im.v1.chat, { create });
+    h.catalog.upsertActive({ scopeId: 'oc_aux', agentId: toolId, sourceId: h.home, botAppId: 'cli_bot',
+      cwdRealpath: h.cwd, policyFingerprint: 'aux', ...(toolId === 'codex' ? { threadId: freshId } : { sessionId: freshId }) });
+    const profileConfig = createDefaultProfileConfig({ agentKind: toolId, codex: { binaryPath: 'codex' },
+      accounts: { app: { id: 'cli_bot', secret: 's', tenant: 'feishu' } }, access: { allowedChats: ['*'], admins: ['ou_admin'] } });
+    const controls = { profileConfig, cfg: profileConfig, botOwnerId: 'ou_owner', ownerRefreshState: 'ok',
+      auxiliary: h.groups, toolRegistry: h.tools, toolBindings: h.bindings } as unknown as Controls;
+    const sync = () => syncAaSessionGroupsOnce({ channel: h.channel, controls, sessionCatalog: h.catalog,
+      workspaces: h.workspaces, profileStateDir: h.root });
+    await sync(); expect(create).not.toHaveBeenCalled();
+    h.bindings.set('oc_aux', { ...h.bindings.get('oc_aux')!, nativeId: freshId, nativeCreated: true });
+    await sync(); await sync();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]![0].data).toMatchObject({ name: 'FF-原会话', owner_id: 'ou_owner', user_id_list: ['ou_owner'] });
+    expect(h.bindings.get('oc_ffowner')).toMatchObject({ auxiliaryWorkgroup: true, nativeId: freshId, nativeCreated: true });
+    expect(h.bindings.get('oc_ffowner')?.linkedSource).toBeUndefined();
+    expect(h.groups.isAuxiliary('oc_ffowner')).toBe(false);
+    expect(h.catalog.entries().find(e => e.scopeId === 'oc_aux')?.status).toBe('active');
+    await h.groups.joined({ ...joined, chatId: 'oc_ffowner' });
+    expect(h.groups.get('oc_ffowner')).toBeUndefined();
+    // Metadata prevents FF -> FF even after the native session is renamed AA.
+    vi.mocked(tool.listSessions).mockResolvedValue([{ ...original, nativeId: freshId, name: 'AA-renamed-FF' }]);
+    await sync(); expect(create).toHaveBeenCalledTimes(1);
+    await h.groups.joined({ ...joined, chatId: 'oc_aux_3' }); await h.groups.action(h.event());
+    expect(h.cards.at(-1).body.elements.some((e: any) => e.text?.content?.includes(' · '))).toBe(false);
+    await h.groups.leave('oc_aux', 'ou_owner', async () => {});
+    await h.groups.leave('oc_aux_2', 'ou_owner', async () => {});
+    expect(h.archive).not.toHaveBeenCalled();
+    expect(h.bindings.isArchived(toolId, h.home, freshId)).toBe(false);
+    expect(JSON.stringify(h.send.mock.calls.at(-1))).toContain('FF 个人工作群继续使用原 FF 会话');
+    const restored = new ToolBindingStore(join(h.root, 'bindings.json')); await restored.load();
+    expect(restored.get('oc_ffowner')?.auxiliaryWorkgroup).toBe(true);
+    const restoredGroups = new AuxiliaryGroups({ ...h.deps, bindings: restored }); await restoredGroups.load();
+    controls.toolBindings = restored; controls.auxiliary = restoredGroups;
+    await sync(); expect(create).toHaveBeenCalledTimes(1);
+    await Promise.all([h.catalog.flush(), h.sessions.flush(), h.workspaces.flush(), h.groups.flush()]);
+  });
   it.each(['codex', 'claude'] as const)('only lists %s sessions bound to an existing personal workgroup', async toolId => {
     const h = await harness(toolId);
     const tool = h.tools.get(toolId);

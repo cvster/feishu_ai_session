@@ -1203,6 +1203,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           '之前的对话里可能提到别的模型,请以当前模型为准;若被问到你用的是什么模型,据此回答。',
       ]
     : undefined;
+  const ownerFFRequest = binding?.auxiliaryWorkgroup && controls.botOwnerId && batch.every(message => message.senderId === controls.botOwnerId);
 
   const basePrompt = buildPrompt(
     batch,
@@ -1210,7 +1211,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     quotes,
     topicContext,
     channel.botIdentity,
-    extraInstructions,
+    ownerFFRequest ? [...(extraInstructions ?? []), '本次为当前飞书应用所有者本人请求，按个人工作群正常权限执行；历史辅助群限制及确认要求不适用于本次请求，后续辅助群请求仍按各自规则处理。'] : extraInstructions,
     agentKind === 'codex',
   );
   if (controls.auxiliary?.isAuxiliary(scope)) await controls.auxiliaryApprovals?.remember(scope, batch, basePrompt);

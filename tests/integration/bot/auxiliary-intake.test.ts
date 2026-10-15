@@ -19,6 +19,7 @@ vi.mock('../../../src/bot/codex-turn-sync', () => ({ startCodexTurnSync: async (
 }) }));
 vi.mock('../../../src/bot/codex-user-input', () => ({ startCodexUserInput: async () => ({ stop: async () => {} }) }));
 import { startChannel } from '../../../src/bot/channel';
+import { commandSessionCatalogIdentity } from '../../../src/bot/session-catalog-identity';
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const f of cleanups.splice(0).reverse()) await f(); });
 const originalId = '11111111-1111-4111-8111-111111111111';
@@ -62,8 +63,10 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
     await beforeSend({ threadId: 'ff-independent', knownTurnIds: [], transport: 'rpc' });
     return { status: 'accepted' as const, submissionId: opts.runId, threadId: 'ff-independent', transport: 'rpc' as const };
   }); Object.assign(agent, { submit });
+  const catalog = new SessionCatalog(join(tmp.profile, 'catalog.json'));
+  const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   const bridge = await startChannel({ cfg: profile, controls, agent, sessions: new SessionStore(join(tmp.profile, 'sessions.json')),
-    sessionCatalog: new SessionCatalog(join(tmp.profile, 'catalog.json')), workspaces: new WorkspaceStore(join(tmp.profile, 'workspaces.json')),
+    sessionCatalog: catalog, workspaces,
     appPaths: { profileDir: tmp.profile, mediaDir: join(tmp.profile, 'media'), secretsFile: join(tmp.profile, 'secret'), keystoreSaltFile: join(tmp.profile, 'salt') },
   }); cleanups.push(() => bridge.disconnect());
   let count = 0;
@@ -71,8 +74,25 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
     await handlers.message!({ messageId: `om_${++count}`, chatId: 'oc_aux', chatType: 'group', threadId: 'topic-a', senderId: 'ou_colleague',
       content: '同事的问题', rawContentType: 'text', resources: [], mentions: [], mentionAll: false, mentionedBot: true, createTime: Date.now(), ...overrides });
   }
-  return { controls, channel, submit, message, download, history, memberGet, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
+  return { controls, channel, submit, message, download, history, memberGet, catalog, workspaces, cwd: tmp.workspace, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
 }
+it('accepts direct owner messages in the FF personal workgroup using the same FF session and normal permissions', async () => {
+  const h = await harness();
+  const original = h.controls.toolBindings!.get('oc_aux')!;
+  h.controls.toolBindings!.set('oc_ffowner', { toolId: 'codex', sourceId: original.sourceId,
+    nativeId: 'ff-independent', nativeCreated: true, name: 'FF-原会话', auxiliaryWorkgroup: true });
+  h.workspaces.setCwd('oc_ffowner', h.cwd);
+  const msg = { chatId: 'oc_ffowner', senderId: 'ou_owner', chatType: 'group' } as NormalizedMessage;
+  const identity = await commandSessionCatalogIdentity({ msg, scope: 'oc_ffowner', mode: 'group', workspaces: h.workspaces,
+    controls: h.controls, access: { ok: true, reason: 'owner' } });
+  h.catalog.upsertActive({ ...identity!, sourceId: original.sourceId, threadId: 'ff-independent', botAppId: 'cli_test' });
+  await h.message({ chatId: 'oc_ffowner', senderId: 'ou_owner', threadId: undefined, mentionedBot: false, content: '直接继续本次调试' });
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledOnce(), { timeout: 3000 });
+  expect(h.submit.mock.calls[0]![0]).toMatchObject({ threadId: 'ff-independent' });
+  expect(h.submit.mock.calls[0]![0].prompt).toContain('当前飞书应用所有者本人请求');
+  expect(h.submit.mock.calls[0]![0].prompt).toContain('直接继续本次调试');
+  expect(h.controls.auxiliary?.isAuxiliary('oc_ffowner')).toBe(false);
+});
 it('ignores non-mentions, @all and bot senders even when global mention requirement is off', async () => {
   const h = await harness(); await h.message({ mentionedBot: false }); await h.message({ mentionedBot: false, mentionAll: true });
   await h.message({ raw: { sender: { sender_type: 'app' } } });

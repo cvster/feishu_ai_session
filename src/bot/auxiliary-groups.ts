@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { BotAddedEvent, CardActionEvent, LarkChannel } from '@larksuite/channel';
 import type { AgentKind } from '../config/profile-schema';
 import type { ToolRegistry } from '../tools/types';
-import { sessionRefKey, type ToolBindingStore, type LinkedSession } from '../tools/bindings';
+import { sessionRefKey, type ToolBindingStore, type LinkedSession, type ToolBinding } from '../tools/bindings';
 import type { SessionCatalog, SessionCatalogIdentity } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
@@ -172,6 +172,11 @@ export class AuxiliaryGroups {
       this.sourceKey(r.source) === this.sourceKey(row.source) &&
       (r.status === 'active' || (r.status === 'leaving' && !r.archivedNative)));
   }
+  private hasPersonalWorkgroup(row: AuxiliaryGroup): boolean {
+    const binding = this.deps.bindings.get(row.chatId);
+    return !!binding?.nativeId && this.deps.bindings.entries().some(([scope, b]) => b.auxiliaryWorkgroup &&
+      b.toolId === binding.toolId && b.sourceId === binding.sourceId && b.nativeId === binding.nativeId && !this.deps.catalog?.isScopeArchived(scope));
+  }
   /** Upgrade old per-chat FF bindings without deleting or merging native transcripts. */
   private async migrateSharedBindings(): Promise<void> {
     const buckets = new Map<string, AuxiliaryGroup[]>();
@@ -318,8 +323,20 @@ export class AuxiliaryGroups {
     for (const row of rows) await this.notify(row);
   }
   isAuxiliaryNative(toolId: AgentKind, sourceId: string, nativeId: string): boolean {
-    return this.deps.bindings.entries().some(([, b]) => b.linkedSource && b.toolId === toolId && b.sourceId === sourceId && b.nativeId === nativeId) ||
+    return this.deps.bindings.entries().some(([, b]) => (b.linkedSource || b.auxiliaryWorkgroup) && b.toolId === toolId && b.sourceId === sourceId && b.nativeId === nativeId) ||
       !!this.deps.catalog?.entries().some(e => this.isAuxiliary(e.scopeId) && e.agentId === toolId && (!e.sourceId || e.sourceId === sourceId) && (e.threadId ?? e.sessionId) === nativeId);
+  }
+  /** Only materialized, active FF sessions may get an owner workgroup. */
+  personalGroupSessions(toolId: AgentKind, sourceId: string) {
+    const sessions = new Map<string, { nativeId: string; name: string; cwd: string; model?: string; reasoningEffort?: ToolBinding['reasoningEffort'] }>();
+    for (const row of Object.values(this.records)) {
+      if (row.status !== 'active' || row.ownerId !== this.deps.ownerId() || !row.cwd) continue;
+      const b = this.deps.bindings.get(row.chatId);
+      if (!b?.sharedScope || !b.nativeCreated || !b.nativeId || b.nativeId === row.source?.nativeId || b.toolId !== toolId || b.sourceId !== sourceId) continue;
+      sessions.set(b.nativeId, { nativeId: b.nativeId, name: b.name || auxiliarySessionName(row.source!.nativeId), cwd: row.cwd,
+        model: b.model, reasoningEffort: b.reasoningEffort });
+    }
+    return [...sessions.values()];
   }
   private button(label: string, choice: Choice): object {
     for (const [key, value] of this.choices) if (value.expires < Date.now()) this.choices.delete(key);
@@ -347,7 +364,7 @@ export class AuxiliaryGroups {
       const chatIds = new Set(chats.chats.map(chat => chat.id));
       const personalSessions = new Set(this.deps.bindings.entries()
         .filter(([scope, binding]) => !scope.includes(':') && chatIds.has(scope) && !this.isAuxiliary(scope) &&
-          !binding.linkedSource && !binding.sharedScope && !this.deps.catalog?.isScopeArchived(scope) &&
+          !binding.linkedSource && !binding.sharedScope && !binding.auxiliaryWorkgroup && !this.deps.catalog?.isScopeArchived(scope) &&
           binding.toolId === toolId && binding.sourceId === tool.sourceId)
         .map(([, binding]) => binding.nativeId));
       const sessions = (await tool.listSessions()).filter(s => personalSessions.has(s.nativeId) && !s.archived && !s.name?.startsWith('FF-') && !this.isAuxiliaryNative(toolId, tool.sourceId, s.nativeId) &&
@@ -487,7 +504,7 @@ export class AuxiliaryGroups {
       await this.deps.cancelPending(chatId); await stop();
       const binding = this.deps.bindings.get(chatId);
       if (!row.archivedNative && binding) {
-        const sharedElsewhere = this.references(row).some(peer => peer.chatId !== chatId);
+        const sharedElsewhere = this.references(row).some(peer => peer.chatId !== chatId) || this.hasPersonalWorkgroup(row);
         const ids = new Set(this.deps.catalog?.entries().filter(e => e.scopeId === chatId && e.status === 'active')
           .map(e => e.threadId ?? e.sessionId).filter((x): x is string => !!x));
         if (binding.nativeCreated && binding.nativeId) ids.add(binding.nativeId);
@@ -515,7 +532,7 @@ export class AuxiliaryGroups {
       this.deps.sessions.remove(chatId); this.deps.workspaces.removeCwd(chatId);
       await Promise.all([this.deps.sessions.flush(), this.deps.workspaces.flush()]);
       row.status = 'archived'; delete row.running; await this.save();
-      await this.deps.channel.send(row.ownerId, { text: `已退出「${row.name}」。${this.references(row).length ? '其他关联群继续共用 FF 辅助会话。' : 'FF 辅助会话已归档。'}原会话保留。` });
+      await this.deps.channel.send(row.ownerId, { text: `已退出「${row.name}」。${this.hasPersonalWorkgroup(row) ? 'FF 个人工作群继续使用原 FF 会话。' : this.references(row).length ? '其他关联群继续共用 FF 辅助会话。' : 'FF 辅助会话已归档。'}原会话保留。` });
     });
   }
 }

@@ -412,7 +412,8 @@ async function syncThreadSnapshot(
       const delivery = stored.deliveries[scope];
       if (!isScopeActive(scope)) continue;
       if (delivery?.status === 'skipped') continue;
-      if (controls?.auxiliary?.isAuxiliary(scope) && !stored.replyTargets?.[scope] && !(cliScopes.size === 1 && cliScopes.has(scope))) continue;
+      if ((controls?.auxiliary?.isAuxiliary(scope) || controls?.toolBindings?.get(scope)?.auxiliaryWorkgroup) &&
+          !stored.replyTargets?.[scope] && !(cliScopes.size === 1 && cliScopes.has(scope))) continue;
       try {
         await syncTurnToScope(channel, store, snapshot.id, turn, stored, scope, nowMs,
           bindings.find((entry) => entry.scopeId === scope)?.cwdRealpath, icons, false, controls,
