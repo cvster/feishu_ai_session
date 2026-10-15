@@ -45,14 +45,14 @@ describe('Codex desktop turn sync', () => {
     } finally { await handle.stop(); await catalog.flush(); }
   });
 
-  it('shares FF history while sending each answer only to its originating group, including after restart', async () => {
+  it.each([['oc_a', 'oc_b'], ['oc_group', 'oc_dm:ffdm_private']])('keeps shared FF replies isolated between %s and %s after restart', async (scopeA, scopeB) => {
     const dir = await mkdtemp(join(tmpdir(), 'codex-shared-ff-')); cleanup.push(dir);
     const catalog = new SessionCatalog(join(dir, 'catalog.json'));
-    for (const scopeId of ['oc_a', 'oc_b']) catalog.upsertActive({ scopeId, agentId: 'codex', cwdRealpath: dir, policyFingerprint: scopeId, threadId: 'shared' });
+    for (const scopeId of [scopeA, scopeB]) catalog.upsertActive({ scopeId, agentId: 'codex', cwdRealpath: dir, policyFingerprint: scopeId, threadId: 'shared' });
     const submissions = new CodexSubmissionStore(join(dir, 'outbox.json')); await submissions.load();
     const turns: CodexThreadSnapshot['turns'] = [];
-    for (const group of ['a', 'b']) {
-      await submissions.prepare({ id: group, scope: `oc_${group}`, messages: [{ messageId: `m_${group}` } as any], status: 'accepted',
+    for (const [group, scope] of [['a', scopeA], ['b', scopeB]] as const) {
+      await submissions.prepare({ id: group, scope: scope!, messages: [{ messageId: `m_${group}` } as any], status: 'accepted',
         createdAtMs: 1, updatedAtMs: 1, threadId: 'shared', clientUserMessageId: `client_${group}`, prompt: 'same', replyTo: `m_${group}` });
       const turn = externalTurn(`turn_${group}`, 'completed', 'same', `answer ${group}`); turn.items[0]!.clientId = `client_${group}`; turns.push(turn);
     }
@@ -64,7 +64,7 @@ describe('Codex desktop turn sync', () => {
     let sync = await startCodexTurnSync(deps);
     try {
       await sync.runNow();
-      expect(channel.sent.map(m => [m.chatId, (m.options as { replyTo?: string })?.replyTo])).toEqual([['oc_a', 'm_a'], ['oc_b', 'm_b']]);
+      expect(channel.sent.map(m => [m.chatId, (m.options as { replyTo?: string })?.replyTo])).toEqual([[scopeA!.split(':')[0], 'm_a'], [scopeB!.split(':')[0], 'm_b']]);
       await sync.stop(); sync = await startCodexTurnSync(deps); await sync.runNow(); expect(channel.sent).toHaveLength(2);
     } finally { await sync.stop(); await catalog.flush(); }
   });

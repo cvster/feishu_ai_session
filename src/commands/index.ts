@@ -316,7 +316,7 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
     return true;
   }
   const auxiliary = ctx.controls.auxiliary;
-  if (ctx.msg.chatType !== 'p2p' && auxiliary?.isAuxiliary(ctx.msg.chatId)) {
+  if (ctx.msg.chatType !== 'p2p' && auxiliary?.isAuxiliary(ctx.scope)) {
     if (raw === '退出') {
       if (ctx.msg.senderId !== ctx.controls.botOwnerId) { await reply(ctx, '仅所有者可以退出辅助群。'); return true; }
       try { await auxiliary.leave(ctx.msg.chatId, ctx.msg.senderId, () => handleStop('', ctx, true)); }
@@ -350,7 +350,7 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
     await handleNew('chat setup', ctx);
     return true;
   }
-  if (auxiliary?.isAuxiliary(ctx.msg.chatId) && !['/stop', '/refresh'].includes(cmd)) return true;
+  if (auxiliary?.isAuxiliary(ctx.scope) && !['/stop', '/refresh'].includes(cmd)) return true;
   const h = handlers[cmd];
   if (!h) return false;
   if (
@@ -388,7 +388,7 @@ export async function runCommandHandler(
     await handleNew('chat setup', ctx);
     return true;
   }
-  if (ctx.controls.auxiliary?.isAuxiliary(ctx.msg.chatId) && !['stop', 'refresh'].includes(name)) return true;
+  if (ctx.controls.auxiliary?.isAuxiliary(ctx.scope) && !['stop', 'refresh'].includes(name)) return true;
   const h = handlers[`/${name}`];
   if (!h) return false;
   if (
@@ -1688,6 +1688,9 @@ async function handleRefresh(_args: string, ctx: CommandContext): Promise<void> 
       return;
     }
   }
+  if (ctx.controls.auxiliary?.privateRequest?.(ctx.scope)) {
+    await ctx.controls.codexReplySync?.runNow(); await ctx.controls.claudeReplySync?.runNow(); return;
+  }
   const codex = ctx.controls.profileConfig.agentKind === 'codex'
     ? ctx.controls.profileConfig.codex
     : undefined;
@@ -1775,8 +1778,9 @@ function formatOwnerState(ctx: CommandContext): string {
 
 async function handleStop(args: string, ctx: CommandContext, strict = false): Promise<void> {
   const auxiliary = ctx.controls.auxiliary;
-  if (!strict && auxiliary?.isAuxiliary(ctx.msg.chatId) &&
-    (!auxiliary.canStop(ctx.msg.chatId, ctx.msg.senderId, auxiliary.get(ctx.msg.chatId)?.running?.id) || args.trim())) return;
+  if (!strict && !auxiliary?.privateRequest?.(ctx.scope) && auxiliary?.isAuxiliary(ctx.scope) &&
+    (!auxiliary.canStop(ctx.scope, ctx.msg.senderId, auxiliary.get(ctx.scope)?.running?.id) || args.trim())) return;
+  if (auxiliary?.privateRequest?.(ctx.scope) && (args.trim() || auxiliary.privateRequest(ctx.scope)?.actorId !== ctx.msg.senderId)) return;
   const targetScope = args.trim();
   if (targetScope && !canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok) {
     await reply(ctx, '❌ 指定 scope 停止任务仅管理员可用。');

@@ -1,5 +1,6 @@
 import { auxiliaryLinkError } from './auxiliary-membership';
 import { AuxiliaryGroups } from './auxiliary-groups';
+import { parsePrivateFFInput } from './auxiliary-private';
 import { NativeSessionLocks } from '../tools/locks';
 import { sessionRefKey } from '../tools/bindings';
 import { createToolRegistry } from '../tools/runtime';
@@ -378,7 +379,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       });
       try {
         const drain = async () => {
-          const resolvedMode = await chatModeCache.resolve(channel, firstMsg.chatId);
+          const resolvedMode = controls.auxiliary?.privateRequest?.(scope) ? 'p2p' : await chatModeCache.resolve(channel, firstMsg.chatId);
           // Feishu/Lark converted topic groups may still resolve as `group` from
           // the chat info API/cache, while message events already carry threadId.
           // Treat threadId as authoritative for IM messages so scope and replies
@@ -391,8 +392,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
               threadId: firstMsg.threadId,
             });
           }
-          const requests = controls.auxiliary?.isAuxiliary(firstMsg.chatId)
-            ? controls.auxiliary.splitRequests(firstMsg.chatId, batch) : [batch];
+          const requests = controls.auxiliary?.isAuxiliary(scope)
+            ? controls.auxiliary.splitRequests(scope, batch) : [batch];
           for (const requestBatch of requests) {
             if (disconnecting) break;
             await runAgentBatch({
@@ -415,7 +416,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             });
           }
         };
-        if (controls.auxiliary?.isAuxiliary(firstMsg.chatId)) await controls.auxiliary.withRun(firstMsg.chatId, drain);
+        if (controls.auxiliary?.isAuxiliary(scope)) await controls.auxiliary.withRun(scope, drain);
         else await drain();
       } catch (err) {
         log.fail('flush', err);
@@ -643,8 +644,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         }
       },
       renderOptions: job => ({ ...controls.runControlIcons,
-        ...(controls.auxiliary?.isAuxiliary(job.options.delivery?.chatId ?? '') ? { auxiliary: true, auxiliaryRunId: job.id } : {}),
-        ...(callbackAuth && job.options.delivery && !controls.auxiliary?.isAuxiliary(job.options.delivery.chatId) ? { signCallback: action => callbackAuth.sign({
+        ...(controls.auxiliary?.isAuxiliary(job.options.delivery?.scope ?? '') ? { auxiliary: true, auxiliaryRunId: job.id, auxiliaryScope: job.options.delivery?.scope, privateRequestId: controls.auxiliary?.privateRequest?.(job.options.delivery?.scope ?? '')?.requestId } : {}),
+        ...(callbackAuth && job.options.delivery && !controls.auxiliary?.isAuxiliary(job.options.delivery.scope) ? { signCallback: action => callbackAuth.sign({
           runId: job.id, scope: job.options.delivery!.scope, chatId: job.options.delivery!.chatId,
           operatorOpenId: job.options.delivery!.operatorOpenId, action,
           policyFingerprint: job.options.delivery!.policyFingerprint, ttlMs: 24 * 60 * 60 * 1000,
@@ -805,14 +806,36 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     workspaces,
     activeRuns,
     pending,
-    msg,
+    msg: incomingMessage,
     controls: rootControls,
     chatModeCache,
     logThreadModeOverride,
     executor: primaryExecutor,
     pool,
   } = deps;
+  let msg = incomingMessage;
   const auxiliary = rootControls.auxiliary;
+  let privateScope: string | undefined;
+  let privateAction: 'ask' | 'stop' | 'refresh' = 'ask';
+  if (msg.chatType === 'p2p' && auxiliary) {
+    try {
+      const input = parsePrivateFFInput(msg.content);
+      if (input) {
+        const raw = msg.raw as { sender?: { sender_type?: string }; event?: { sender?: { sender_type?: string } } } | undefined;
+        const kind = raw?.sender?.sender_type ?? raw?.event?.sender?.sender_type;
+        if (kind === 'app' || kind === 'bot' || msg.senderId === channel.botIdentity?.openId) return;
+        const accepted = await auxiliary.acceptPrivate(input, msg.chatId, msg.senderId, msg.messageId);
+        privateScope = accepted.scope; privateAction = input.action ?? 'ask';
+        if (accepted.duplicate && privateAction === 'ask') {
+          await channel.send(msg.chatId, { text: `request_id=${input.request_id} 已使用，不会重复执行。请查看原私聊请求的回复，或使用 refresh。` }, { replyTo: msg.messageId }); return;
+        }
+        msg = { ...msg, threadId: undefined, content: privateAction === 'ask' ? input.question! : `/${privateAction}` };
+        if (privateAction === 'ask') await auxiliary.noteRequest(privateScope, msg.messageId, msg.senderId);
+      }
+    } catch (error) {
+      await channel.send(msg.chatId, { text: `FF 私聊调用未受理：${error instanceof Error ? error.message : String(error)}` }, { replyTo: msg.messageId }); return;
+    }
+  }
   const auxiliaryGroup = msg.chatType !== 'p2p' ? auxiliary?.get(msg.chatId) : undefined;
   if (auxiliaryGroup) {
     const raw = msg.raw as { sender?: { sender_type?: string }; event?: { sender?: { sender_type?: string } } } | undefined;
@@ -827,7 +850,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
-  const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
+  const resolvedMode = privateScope ? 'p2p' : await chatModeCache.resolve(channel, msg.chatId);
   // Feishu delivers a sizable fraction of topic-group message events without a
   // `thread_id` (notably the message that opens a new topic). We route topic
   // replies (`replyInThread`) and isolate per-topic session scope off it, so a
@@ -862,9 +885,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       threadId,
     });
   }
-  const scope = !auxiliaryGroup && chatMode === 'topic' && threadId
+  const scope = privateScope ?? (!auxiliaryGroup && chatMode === 'topic' && threadId
     ? `${msg.chatId}:${threadId}`
-    : msg.chatId;
+    : msg.chatId);
   const toolId = toolForScope(rootControls, scope);
   const controls = controlsForTool(rootControls, toolId, scope);
   const tool = rootControls.toolRegistry?.get(toolId);
@@ -885,7 +908,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   });
 
   const accessDecision =
-    msg.chatType === 'p2p'
+    privateScope ? { ok: true, reason: 'allowed-chat' as const } : msg.chatType === 'p2p'
       ? canUseDm(controls.profileConfig, controls, msg.senderId)
       : canUseGroup(controls.profileConfig, controls, msg.chatId, msg.senderId);
   if (!accessDecision.ok) {
@@ -929,7 +952,12 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     log.info('intake', 'solo-chat-no-mention-allowed', { scope, chatType: msg.chatType });
   }
 
-  const handled = await tryHandleCommand({
+  if (privateScope && privateAction === 'refresh') {
+    await controls.codexReplySync?.runNow(); await controls.claudeReplySync?.runNow();
+    await channel.send(msg.chatId, { text: `request_id=${auxiliary?.privateRequest?.(privateScope)?.requestId} 已请求刷新原回复；不会重新执行。` }, { replyTo: msg.messageId }); return;
+  }
+  if (privateScope && privateAction === 'stop') await auxiliary!.cancelPrivate(privateScope);
+  const handled = privateScope && privateAction === 'ask' ? false : await tryHandleCommand({
     channel,
     msg: emsg,
     scope,
@@ -950,9 +978,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     runExecutor: executor,
     processPool: pool,
     controls,
-    dmGroupCreationOnly: true,
+    dmGroupCreationOnly: !privateScope,
   });
   if (handled) {
+    if (privateScope && privateAction === 'stop') await channel.send(msg.chatId, { text: `request_id=${auxiliary?.privateRequest?.(privateScope)?.requestId} 已取消待处理输入，并请求停止本次任务。` }, { replyTo: msg.messageId });
     const dropped = controls.codexSubmissions ? [] : pending.cancel(scope);
     if (dropped.length) await controls.workerInbox?.reject(scope, dropped);
     log.info('intake', 'command', { scope, droppedPending: dropped.length });
@@ -977,6 +1006,8 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   if (activeRuns.newRunsPaused()) return; // durable pending will resume on reconnect
   const size = pending.push(scope, emsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+  if (privateScope) void channel.send(msg.chatId, { text: `request_id=${auxiliary?.privateRequest?.(privateScope)?.requestId} · queued` }, { replyTo: msg.messageId })
+    .catch(error => log.warn('auxiliary', 'private-ack-failed', { error: String(error) }));
 }
 
 interface RunBatchDeps {
@@ -1032,8 +1063,20 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
-  if (controls.auxiliary?.isAuxiliary(chatId) && !controls.auxiliary.isActive(chatId)) return;
-  const auxiliaryGeneration = controls.auxiliary?.get(chatId)?.generation;
+  if (controls.auxiliary?.isAuxiliary(scope) && !controls.auxiliary.isActive(scope)) return;
+  const privateRequest = controls.auxiliary?.privateRequest?.(scope);
+  if (privateRequest) {
+    let allowed = false;
+    try { allowed = !privateRequest.cancelled && batch.every(m => m.senderId === privateRequest.actorId && m.chatId === privateRequest.deliveryChatId) &&
+      await controls.auxiliary!.validatePrivate(scope, firstMsg.senderId, chatId); } catch { /* Membership failures fail closed. */ }
+    if (!allowed) {
+      for (const record of controls.codexSubmissions?.records() ?? []) if (record.scope === scope && record.status === 'pending')
+        await controls.codexSubmissions!.mark(record.id, { status: 'rejected', error: 'FF 私聊授权已失效' }, ['pending']);
+      await controls.workerInbox?.reject(scope, batch);
+      await channel.send(chatId, { text: `request_id=${privateRequest.requestId} 未执行：私聊入口或群成员资格已失效。` }, { replyTo: lastMsg.messageId }); return;
+    }
+  }
+  const auxiliaryGeneration = controls.auxiliary?.get(scope)?.generation;
   const runTraceId = getLogContext()?.traceId;
 
   const resourceItems = batch.flatMap((m) =>
@@ -1144,8 +1187,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     extraInstructions,
     agentKind === 'codex',
   );
-  const prompt = controls.auxiliary?.isAuxiliary(chatId)
-    ? await controls.auxiliary.wrapPrompt(chatId, basePrompt, batch.map(message => message.senderId)) : basePrompt;
+  const prompt = controls.auxiliary?.isAuxiliary(scope)
+    ? await controls.auxiliary.wrapPrompt(scope, basePrompt, batch.map(message => message.senderId)) : basePrompt;
   log.info('prompt', 'built', {
     promptChars: prompt.length,
     quotes: quotes.length,
@@ -1174,20 +1217,20 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   });
 
   const accessDecision =
-    firstMsg.chatType === 'p2p'
+    privateRequest ? { ok: true, reason: 'allowed-chat' as const } : firstMsg.chatType === 'p2p'
       ? canUseDm(controls.profileConfig, controls, firstMsg.senderId)
       : canUseGroup(controls.profileConfig, controls, firstMsg.chatId, firstMsg.senderId);
   const scopeContext: ScopeContext = {
     source: 'im',
     chatId,
     actorId: firstMsg.senderId,
-    ...(threadId && !controls.auxiliary?.isAuxiliary(chatId) ? { threadId } : {}),
+    ...(threadId && !controls.auxiliary?.isAuxiliary(scope) ? { threadId } : {}),
   };
   const capability =
     controls.profileConfig.agentKind === 'codex'
       ? codexCapability(controls.profileConfig)
       : claudeCapability(controls.profileConfig);
-  if (controls.auxiliary?.isActive(chatId)) await controls.auxiliary.prepareScope(chatId,
+  if (controls.auxiliary?.isActive(scope)) await controls.auxiliary.prepareScope(scope,
     await commandSessionCatalogIdentity({ msg: firstMsg, scope, mode, workspaces, controls, access: accessDecision }));
   const flowInput = {
     scopeId: scope,
@@ -1201,8 +1244,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     sessionCatalog,
     workspaces,
     executor,
-    checkSessionArchived: controls.auxiliary?.isAuxiliary(chatId) || controls.codexReplySync?.isScopeArchived
-      ? async () => (controls.auxiliary?.isAuxiliary(chatId) && (!controls.auxiliary.isActive(chatId) || controls.auxiliary.get(chatId)?.generation !== auxiliaryGeneration)) ||
+    checkSessionArchived: controls.auxiliary?.isAuxiliary(scope) || controls.codexReplySync?.isScopeArchived
+      ? async () => (controls.auxiliary?.isAuxiliary(scope) && (!controls.auxiliary.isActive(scope) || controls.auxiliary.privateRequest?.(scope)?.cancelled === true || controls.auxiliary.get(scope)?.generation !== auxiliaryGeneration)) ||
         await controls.codexReplySync?.isScopeArchived?.(scope) || false
       : undefined,
     now: Date.now(),
@@ -1257,7 +1300,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   let runCodexThreadId: string | undefined;
   let runCodexTurnId: string | undefined;
   const recordSession = (evt: AgentEvent): void => {
-    if (controls.auxiliary?.isAuxiliary(chatId) && !controls.auxiliary.isActive(chatId)) return;
+    if (controls.auxiliary?.isAuxiliary(scope) && !controls.auxiliary.isActive(scope)) return;
     if (agent instanceof DurableClaudeAdapter && (handle.interrupted || handle.detached)) return;
     if (evt.type === 'user_input') {
       controls.codexUserInput?.accept(evt.prompt, handle.run.runId,
@@ -1342,7 +1385,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     log.info('flush', 'idle-watchdog', { idleTimeoutMs });
   }
 
-  const replyMode = controls.auxiliary?.isAuxiliary(chatId) ? 'card' : getMessageReplyMode(controls.cfg);
+  const replyMode = controls.auxiliary?.isAuxiliary(scope) ? 'card' : getMessageReplyMode(controls.cfg);
   log.info('flush', 'reply-mode', { mode: replyMode });
   const cotMessages = getCotMessages(controls.cfg);
   const cotEnabled = cotMessages !== 'off';
@@ -1354,11 +1397,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     if (getShowToolCalls(controls.cfg)) return state;
     return { ...state, blocks: state.blocks.filter((b) => b.kind !== 'tool') };
   };
-  if (controls.auxiliary?.isActive(chatId)) await controls.auxiliary.trackRun(chatId, execution.handle.run.runId, lastMsg.messageId, true, firstMsg.senderId);
-  const cardRenderOptions = callbackAuth && !controls.auxiliary?.isAuxiliary(chatId)
+  if (controls.auxiliary?.isActive(scope)) await controls.auxiliary.trackRun(scope, execution.handle.run.runId, lastMsg.messageId, true, firstMsg.senderId);
+  const cardRenderOptions = callbackAuth && !controls.auxiliary?.isAuxiliary(scope)
     ? {
         ...controls.runControlIcons,
-        ...(controls.auxiliary?.isActive(chatId) ? { auxiliaryRunId: execution.handle.run.runId } : {}),
+        ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope, privateRequestId: privateRequest?.requestId } : {}),
         signCallback: (action: string) =>
           callbackAuth.sign({
             runId: execution.runId,
@@ -1370,7 +1413,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             ttlMs: 24 * 60 * 60 * 1000,
           }),
       }
-    : { ...controls.runControlIcons, ...(controls.auxiliary?.isActive(chatId) ? { auxiliaryRunId: execution.handle.run.runId } : {}) };
+    : { ...controls.runControlIcons, ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope, privateRequestId: privateRequest?.requestId } : {}) };
 
   // For non-card modes Claude's output doesn't surface visually until either
   // a first streamed token (markdown mode) or the whole run ends (text mode).
@@ -1713,7 +1756,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } catch (err) {
     log.fail('stream', err);
   } finally {
-    await controls.auxiliary?.trackRun(chatId, execution.handle.run.runId, lastMsg.messageId, false);
+    await controls.auxiliary?.trackRun(scope, execution.handle.run.runId, lastMsg.messageId, false);
     if (handle.interrupted && runCodexThreadId && runCodexTurnId) {
       controls.codexUserInput?.endTurn(runCodexThreadId, runCodexTurnId);
     }

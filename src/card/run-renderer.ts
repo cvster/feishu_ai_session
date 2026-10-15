@@ -51,6 +51,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     elements.push(noteMd('_（未返回内容）_'));
   }
 
+  if (options.privateRequestId) elements.unshift(noteMd(`request_id=${options.privateRequestId} · ${state.terminal === 'running' ? 'running' : state.terminal}`));
   const footerStart = elements.length;
   if (state.terminal === 'running') {
     const status = renderColoredRunStatus(state);
@@ -276,6 +277,7 @@ function controlButtonRow(options: RunCardRenderOptions): object {
     flex_mode: 'none',
     horizontal_spacing: 'small',
     columns: buttons.map((button) => {
+      if (options.auxiliaryScope) button.behaviors[0].value.auxiliaryScope = options.auxiliaryScope;
       const action = button.behaviors[0].value.cmd as RunButtonAction;
       const imageKey = options.buttonImageKeys?.[action];
       return {

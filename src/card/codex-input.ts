@@ -2,7 +2,7 @@ import type { CodexInputRequest, CodexInputAnswers } from '../session/codex-user
 
 export type InputCardStatus = 'waiting' | 'checking' | 'unavailable' | 'submitting' | 'submitted' | 'resolved' | 'disconnected' | 'unconfirmed';
 
-export function codexInputCard(request: CodexInputRequest, token: string, status: InputCardStatus): object {
+export function codexInputCard(request: CodexInputRequest, token: string, status: InputCardStatus, auxiliaryScope?: string): object {
   const secret = request.questions.some((q) => q.isSecret);
   const enabled = status === 'waiting' && !secret;
   const notice = status === 'submitted' ? request.kind === 'async' ? '✅ 回答已补充给当前任务' : '✅ 回答已发送；若多端同时回答，以 Codex 首次接收的答案为准'
@@ -49,7 +49,7 @@ export function codexInputCard(request: CodexInputRequest, token: string, status
   if (enabled) {
     inputs.push({ tag: 'button', name: 'codex_input_submit', type: 'primary',
       text: { tag: 'plain_text', content: '提交回答' }, form_action_type: 'submit',
-      behaviors: [{ type: 'callback', value: { __codex_input: token } }] });
+      behaviors: [{ type: 'callback', value: { __codex_input: token, ...(auxiliaryScope ? { auxiliaryScope } : {}) } }] });
     elements.push({ tag: 'form', name: 'codex_input_form', elements: inputs });
   } else elements.push(...inputs);
   return { schema: '2.0', config: { summary: { content: notice } }, body: { elements } };

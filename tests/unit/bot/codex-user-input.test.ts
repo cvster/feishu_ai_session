@@ -40,13 +40,25 @@ describe('Codex user input lifecycle', () => {
           readThreadStatus: vi.fn(async () => ({ type: liveStatus, activeFlags: [] })), ...writer };
       } });
     handles.push(handle);
-    return { handle, channel, dir, disconnect: () => onDisconnect?.() };
+    return { handle, channel, dir, controls, entries, disconnect: () => onDisconnect?.() };
   }
   const prompt = (): CodexInputPrompt => ({ requestId: 7, request: {
     threadId: 'thread', turnId: 'turn', itemId: 'item', isBlocking: true,
     questions: [{ id: 'q', header: '选择', question: '用哪个？', isOther: true, isSecret: false,
       options: [{ label: '选项 A', description: '推荐' }, { label: '选项 B', description: '兼容' }] }],
   }, respond: vi.fn(async () => true) });
+  it('routes FF native questions only to the matching private request scope', async () => {
+    const h = await setup();
+    h.entries.push({ status: 'active', agentId: 'codex', threadId: 'thread', scopeId: 'oc_dm:ffdm_request', botAppId: 'cli_ours' });
+    h.controls.auxiliary = { isAuxiliary: () => true, isActive: () => true, privateRequest: (scope: string) => scope.includes('ffdm') ? {} : undefined } as any;
+    h.controls.codexSubmissions = { records: () => [{ threadId: 'thread', turnId: 'turn', scope: 'oc_dm:ffdm_request', replyTo: 'om_question' }] } as any;
+    h.handle.accept(prompt(), 'stdio');
+    await vi.waitFor(() => expect(h.channel.sent).toHaveLength(1));
+    expect(h.channel.sent[0]?.chatId).toBe('oc_dm');
+    expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_question' });
+    const card = JSON.stringify(h.channel.sent[0]?.content);
+    expect(card).not.toContain('oc_group');
+  });
   async function delivery(dir: string) {
     let result: { token: string; messageId: string; sequence: number } | undefined;
     await vi.waitFor(async () => {

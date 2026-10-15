@@ -53,7 +53,7 @@
 | --- | --- |
 | `im:chat:operate_as_owner` | 机器人创建群后将群主交给人类，但仍需管理其创建的群时；不是任意群的管理权 |
 | `im:chat:delete` | 使用解散个人工作群的管理功能时。不是辅助群退出的必要权限；接口还校验群主 / 创建者身份 |
-| `im:chat.members:read` | 要通过 CLI 查询群成员列表时；当前辅助关联已不使用旧成员检查接口 |
+| `im:chat.members:read` | 开启 FF 群成员私聊调用时必需：接收及执行前校验真实发送者仍在来源群内；也用于 CLI 查询群成员列表 |
 
 群管理权限不能代替群内角色校验。尤其解散群，机器人须是群主，或是创建者且具有 `im:chat:operate_as_owner`；不能管理旧机器人或他人创建的任意群。见 [解散群](https://open.feishu.cn/document/server-docs/group/chat/delete)、[群成员列表](https://open.feishu.cn/document/server-docs/group/chat-member/get)。
 
@@ -144,3 +144,10 @@ im:chat.members:write_only
 本仓库已修复辅助群关联时使用旧 `members/is_in_chat` 导致的 400：现在用 `chat.get` 和 `im:chat:read` 校验机器人在群内，不必为该旧接口额外申请一组旧权限。进群事件仍需要单独的事件权限与订阅。
 
 新申请优先使用表中的细粒度 scope。旧应用若已有 `im:chat`、`im:message` 等较宽权限，不必仅为匹配本文重复申请；具体接口通常列有多个可替代 scope，需分别核对。迁移时逐项验证后再移除旧权限。
+
+
+## FF 私聊调用的调用方配置
+
+桥接机器人增加应用权限 `im:chat.members:read` 并发布后，所有者才可完整使用群成员私聊调用。机器人原有私聊接收、发送权限继续使用，应用可用范围须包含相关同事。成员列表查询失败时拒绝调用，不降级为仅凭群 ID 放行。
+
+同事的 agent 使用自己的飞书 CLI 应用及用户授权，以 `--as user` 发送和读取与目标机器人的私聊，不能使用本项目机器人的 app secret 或冒充本项目 `--as bot`。调用方的 CLI 应用还需要相应用户消息发送、读取权限及用户授权（CLI `+messages-send` 文档要求 `im:message.send_as_user` 和 `im:message`；读消息按调用方接口申请）。若使用 `contact +search-bot` 发现机器人，调用方还需用户权限 `search:bot`；可按机器人名称和来源群 ID 搜索，取得该用户可用的机器人 open_id 及私聊 chat_id。调用方根据入口中的机器人信息解析自己的可用私聊入口，不直接复用其他应用的用户/机器人 open_id。

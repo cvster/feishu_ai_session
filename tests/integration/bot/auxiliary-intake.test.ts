@@ -22,7 +22,7 @@ import { startChannel } from '../../../src/bot/channel';
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const f of cleanups.splice(0).reverse()) await f(); });
 const originalId = '11111111-1111-4111-8111-111111111111';
-async function harness(status: 'pending' | 'active' = 'active', twoGroups = false) {
+async function harness(status: 'pending' | 'active' = 'active', twoGroups = false, allowPrivate = false) {
   const tmp = await createTmpProfile('aux-intake-'); cleanups.push(() => tmp.cleanup());
   const home = join(tmp.profile, 'codex-home'); await mkdir(home);
   const history = join(home, `${originalId}.jsonl`); await writeFile(history, 'source');
@@ -35,9 +35,9 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
   }
   await bindings.flush();
   await writeFile(join(tmp.profile, 'auxiliary-groups.json'), JSON.stringify({ version: 1, appId: 'cli_test', groups: {
-    oc_aux: { chatId: 'oc_aux', name: '讨论', generation: 'generation', ownerId: 'ou_owner', status, notified: true,
+    oc_aux: { chatId: 'oc_aux', name: '讨论', generation: 'generation', ownerId: 'ou_owner', status, notified: true, allowPrivate, privateBindingId: 'private-entry',
       ...(status === 'active' ? { source, cwd: tmp.workspace } : {}) },
-    ...(twoGroups ? { oc_aux_2: { chatId: 'oc_aux_2', name: '第二群', generation: 'generation-b', ownerId: 'ou_owner', status, notified: true, source, cwd: tmp.workspace } } : {}),
+    ...(twoGroups ? { oc_aux_2: { chatId: 'oc_aux_2', name: '第二群', generation: 'generation-b', ownerId: 'ou_owner', status, notified: true, allowPrivate, privateBindingId: 'private-entry', source, cwd: tmp.workspace } } : {}),
   } }));
   const channel = createFakeChannel(); const handlers: { message?: (m: NormalizedMessage) => Promise<void> } = {};
   const download = vi.fn(async () => { throw new Error('must not download'); });
@@ -47,6 +47,9 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
     listChats: async () => [], getChatInfo: async () => ({ name: '讨论' }),
     addReaction: async () => 'reaction', removeReaction: async () => {}, downloadResourceToFile: download,
   });
+  const memberGet = vi.fn(async () => ({ code: 0, data: { items: [{ member_id: 'ou_colleague' }, { member_id: 'ou_owner' }] } }));
+  Object.assign(channel.rawClient.im.v1.chat, { get: async () => ({ code: 0, data: { chat_mode: 'group' } }) });
+  Object.assign(channel.rawClient.im.v1, { chatMembers: { get: memberGet } });
   const profile = createDefaultProfileConfig({ agentKind: 'codex', accounts: { app: { id: 'cli_test', secret: 's', tenant: 'feishu' } },
     codex: { binaryPath: 'codex', codexHome: home }, access: { allowedChats: [], allowedUsers: ['ou_owner'], requireMentionInGroup: false },
     preferences: { messageReply: 'card' },
@@ -68,7 +71,7 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
     await handlers.message!({ messageId: `om_${++count}`, chatId: 'oc_aux', chatType: 'group', threadId: 'topic-a', senderId: 'ou_colleague',
       content: '同事的问题', rawContentType: 'text', resources: [], mentions: [], mentionAll: false, mentionedBot: true, createTime: Date.now(), ...overrides });
   }
-  return { controls, channel, submit, message, download, history };
+  return { controls, channel, submit, message, download, history, memberGet };
 }
 it('ignores non-mentions, @all and bot senders even when global mention requirement is off', async () => {
   const h = await harness(); await h.message({ mentionedBot: false }); await h.message({ mentionedBot: false, mentionAll: true });
@@ -139,4 +142,52 @@ it('queues simultaneous group requests against one shared FF native conversation
   expect(JSON.parse(h.submit.mock.calls[1]?.[0].prompt).context.chat_id).toBe('oc_aux_2');
   expect(h.controls.codexSubmissions?.records().map(r => r.scope).sort()).toEqual(['oc_aux', 'oc_aux_2']);
   expect(h.controls.toolBindings?.get('oc_aux')?.nativeId).toBe(h.controls.toolBindings?.get('oc_aux_2')?.nativeId);
+});
+
+
+function privateInput(overrides: Record<string, unknown> = {}) {
+  return JSON.stringify({ protocol: 'ff-dm-v1', bot_app_id: 'cli_test', group_id: 'oc_aux', binding_id: 'private-entry',
+    request_id: 'debug-1', question: '只在私聊调试', ...overrides });
+}
+it('routes a coworker private request through the durable FF pipeline without opening ordinary DM access', async () => {
+  const h = await harness('active', false, true);
+  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, mentionedBot: false, content: privateInput() });
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
+  const prompt = JSON.parse(h.submit.mock.calls[0]?.[0].prompt);
+  expect(prompt.context).toMatchObject({ chat_id: 'oc_dm', request_id: 'debug-1', channel: 'p2p', actor: 'member' });
+  expect(prompt.rules.permissions).toContain('本机只读'); expect(prompt.rules.delivery).toContain('禁止发送到任何群');
+  const record = h.controls.codexSubmissions!.records()[0]!;
+  expect(record.scope).toMatch(/^oc_dm:ffdm_/); expect(record.messages[0]?.chatId).toBe('oc_dm');
+  expect(record.replyInThread).not.toBe(true);
+  expect(h.controls.toolBindings?.get(record.scope)?.sharedScope).toBe(h.controls.toolBindings?.get('oc_aux')?.sharedScope);
+  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, content: '普通私聊不应进入FF' });
+  expect(h.submit).toHaveBeenCalledTimes(1);
+  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, content: privateInput() });
+  expect(h.submit).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(h.channel.sent)).toContain('不会重复执行');
+  expect(h.channel.sent.every(m => m.chatId === 'oc_dm')).toBe(true);
+});
+it('rejects disabled entries, outsider identities and bot callers without submitting or resolving attachments', async () => {
+  const off = await harness(); await off.message({ chatId: 'oc_dm', chatType: 'p2p', content: privateInput() });
+  expect(off.submit).not.toHaveBeenCalled();
+  const h = await harness('active', false, true);
+  await h.message({ chatId: 'oc_dm', chatType: 'p2p', senderId: 'ou_outsider', content: privateInput() });
+  await h.message({ chatId: 'oc_dm', chatType: 'p2p', raw: { sender: { sender_type: 'app' } }, content: privateInput() });
+  expect(h.submit).not.toHaveBeenCalled(); expect(h.download).not.toHaveBeenCalled();
+});
+it('rechecks membership before queue execution and keeps commands inside question data', async () => {
+  const h = await harness('active', false, true);
+  h.memberGet.mockResolvedValueOnce({ code: 0, data: { items: [{ member_id: 'ou_colleague' }] } })
+    .mockResolvedValue({ code: 0, data: { items: [] } });
+  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, content: privateInput({ question: '/cd /etc' }) });
+  await vi.waitFor(() => expect(h.controls.codexSubmissions!.records()[0]?.status).toBe('rejected'), { timeout: 3000 });
+  expect(h.submit).not.toHaveBeenCalled();
+});
+it('does not execute a private request stopped while it is still queued', async () => {
+  const h = await harness('active', false, true);
+  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, content: privateInput() });
+  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, content: privateInput({ action: 'stop' }) });
+  expect(h.submit).not.toHaveBeenCalled();
+  expect(h.controls.codexSubmissions!.records()[0]?.status).toBe('rejected');
+  expect(JSON.stringify(h.channel.sent)).toContain('已取消待处理输入');
 });

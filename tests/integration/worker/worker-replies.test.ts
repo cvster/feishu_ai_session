@@ -11,21 +11,24 @@ import { SessionStore } from '../../../src/session/store';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import type { Controls } from '../../../src/commands';
 
-async function repliesFixture(mode: 'card' | 'markdown' | 'text' = 'card') {
+async function repliesFixture(mode: 'card' | 'markdown' | 'text' = 'card', privateFF = false) {
   const h = await fixture();
+  const scope = privateFF ? 'oc_private:ffdm_request' : 'oc_group';
+  if (privateFF) h.options.delivery = { ...h.options.delivery!, scope, chatId: 'oc_private', replyTo: 'om_private' };
   const bindings = new ToolBindingStore(join(h.dir, 'bindings.json')); await bindings.load();
-  bindings.set('oc_group', { toolId: 'claude', sourceId: 'local-claude', nativeId: 'native', nativeCreated: false }); await bindings.flush();
+  bindings.set(scope, { toolId: 'claude', sourceId: 'local-claude', nativeId: 'native', nativeCreated: false }); await bindings.flush();
   const catalog = new SessionCatalog(join(h.dir, 'catalog.json')); await catalog.load();
   const sessions = new SessionStore(join(h.dir, 'sessions.json')); await sessions.load();
   const profile = createDefaultProfileConfig({ agentKind: 'codex', codex: { binaryPath: 'codex', inheritCodexHome: true }, accounts: { app: { id: 'cli_test', secret: 'test', tenant: 'feishu' } } });
   const controls = { profileConfig: profile, toolBindings: bindings, cfg: { preferences: { messageReply: mode, messageReplyMigrated: true } } } as unknown as Controls;
-  const reply = vi.fn(async () => ({ code: 0, data: { message_id: 'om_reply' } }));
+  if (privateFF) controls.auxiliary = { isAuxiliary: (id: string) => id === scope, isActive: () => true, trackRun: async () => {} } as any;
+  const reply = vi.fn(async (..._args: unknown[]) => ({ code: 0, data: { message_id: 'om_reply' } }));
   const patch = vi.fn(async () => ({ code: 0 }));
   const channel = { createCard: vi.fn(async () => ({ cardId: 'card_stable' })), updateCardById: vi.fn(async () => {}),
     rawClient: { im: { v1: { message: { reply, patch } } } } } as unknown as LarkChannel;
   const activeRuns = new ActiveRuns();
   const statePath = join(h.dir, 'replies.json');
-  const start = () => startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath, intervalMs: 60_000 });
+  const start = () => startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath, intervalMs: 60_000, renderOptions: () => privateFF ? { auxiliary: true, auxiliaryScope: scope, privateRequestId: 'debug-1' } : {} });
   const job = await h.client.submit({ requestKey: 'message-one', options: h.options });
   await vi.waitFor(async () => expect((await h.client.snapshot(job.id)).events.length).toBeGreaterThan(1));
   return { ...h, job, bindings, catalog, sessions, activeRuns, channel, reply, patch, statePath, start };
@@ -90,4 +93,19 @@ it('never replies to an archived group and fails closed beyond the ambiguous-sen
   const third = await h.start();
   try { await third.runNow(); expect(h.reply).toHaveBeenCalledOnce(); }
   finally { await third.stop(); await h.sessions.flush(); }
+});
+
+it('delivers a private Claude FF result only as a reply to its private request, including after restart', async () => {
+  const h = await repliesFixture('markdown', true); const first = await h.start();
+  try {
+    await first.runNow();
+    expect(h.reply).toHaveBeenCalledOnce();
+    expect(h.reply.mock.calls[0]?.[0]).toMatchObject({ path: { message_id: 'om_private' }, data: { msg_type: 'interactive' } });
+    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('request_id=debug-1');
+    await first.stop(); h.finish();
+    await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('completed'));
+    const recovered = await h.start();
+    try { await recovered.runNow(); expect(h.reply).toHaveBeenCalledOnce(); }
+    finally { await recovered.stop(); }
+  } finally { await first.stop(); await h.catalog.flush(); await h.sessions.flush(); }
 });
