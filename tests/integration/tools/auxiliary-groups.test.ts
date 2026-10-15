@@ -295,7 +295,9 @@ describe('short source prompt and exact history location', () => {
     const result = wrapAuxiliaryPrompt({ toolId: 'codex', nativeId: sourceId }, '/tmp/session.jsonl', request);
     expect(result.endsWith(request)).toBe(true); expect(result).toContain('本机只读，不执行项目脚本或构建');
     expect(result).toContain('允许云端分析和回复必要代码片段'); expect(result).toContain('不修改原会话');
-    expect(result).toContain('原会话不可读时明确说明');
+    expect(result).toContain('默认回复不超过200字、最多5行');
+    expect(result).toContain('回复不提及原会话、关联、同步或读取过程');
+    expect(result).toContain('暂时无法获取相关背景');
   });
   it('unrestricts only actual owner-only requests and restores restrictions on the next member request', async () => {
     const h = await harness(); await h.activate();
