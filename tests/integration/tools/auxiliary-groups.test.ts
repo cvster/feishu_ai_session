@@ -40,6 +40,7 @@ async function harness(toolId: 'codex' | 'claude' = 'claude') {
     get: vi.fn(async () => ({ code: 0, data: { name: '项目讨论', chat_mode: 'group' as const } })),
   }, chatMembers: { get: vi.fn(async () => ({ code: 0, data: { items: [{ member_id: 'ou_member' }, { member_id: 'ou_owner' }] } })), delete: leave, isInChat: vi.fn(async () => ({ code: 0, data: { is_in_chat: true } })) } } } }, getChatMode: vi.fn(async () => 'p2p'),
     createCard: vi.fn(async (card: object) => { cards.push(card); return { cardId: `card-${cards.length}` }; }), send,
+    listChats: vi.fn(async () => [{ id: 'oc_original', name: '个人工作群' }]),
   } as unknown as LarkChannel;
   const tools = new ToolRegistry(); const agent = new FakeAgentAdapter({ id: toolId, events: [] });
   const archive = vi.fn(async () => {}); Object.assign(agent, { archiveThread: archive });
@@ -66,6 +67,38 @@ async function harness(toolId: 'codex' | 'claude' = 'claude') {
 }
 
 describe('auxiliary owner linking and lifecycle', () => {
+  it.each(['codex', 'claude'] as const)('only lists %s sessions bound to an existing personal workgroup', async toolId => {
+    const h = await harness(toolId);
+    const tool = h.tools.get(toolId);
+    const original = (await tool.listSessions())[0]!;
+    const excluded = ['unbound', 'missing-group', 'topic', 'archived-group', 'other-source', 'auxiliary'];
+    vi.mocked(tool.listSessions).mockResolvedValue([original, ...excluded.map(nativeId => ({ ...original, nativeId, name: nativeId }))]);
+    const bind = (scope: string, nativeId: string) => h.bindings.set(scope, { toolId, sourceId: h.home, nativeId });
+    bind('oc_missing', 'missing-group');
+    bind('oc_original:thread', 'topic');
+    bind('oc_archived', 'archived-group'); h.catalog.archiveScope('oc_archived', 'archived-group');
+    h.bindings.set('oc_other', { toolId, sourceId: '/other/source', nativeId: 'other-source' });
+    h.bindings.set('oc_ff', { toolId, sourceId: h.home, nativeId: 'auxiliary',
+      linkedSource: { toolId, sourceId: h.home, nativeId: sourceId, historyPath: h.history } });
+    vi.mocked(h.channel.listChats).mockResolvedValue(['oc_original', 'oc_archived', 'oc_other', 'oc_ff'].map(id => ({ id, name: id })));
+    await h.groups.joined(joined); await h.groups.action(h.event());
+    const labels = h.cards.at(-1).body.elements.filter((e: any) => e.tag === 'button').map((e: any) => e.text.content);
+    expect(labels.filter((label: string) => label.includes(' · '))).toEqual([`原会话 · ${h.cwd}`]);
+    expect(JSON.stringify(h.cards.at(-1))).toContain('仅显示已有个人工作群对应的会话');
+  });
+  it('explains an empty list when personal workgroups no longer exist', async () => {
+    const h = await harness(); vi.mocked(h.channel.listChats).mockResolvedValue([]);
+    await h.groups.joined(joined); await h.groups.action(h.event());
+    expect(JSON.stringify(h.cards.at(-1))).toContain('暂无可关联的个人工作群会话');
+    expect(h.cards.at(-1).body.elements.some((e: any) => e.text?.content?.includes(' · '))).toBe(false);
+  });
+  it('does not show history sessions when the current group list cannot be fetched', async () => {
+    const h = await harness(); vi.mocked(h.channel.listChats).mockRejectedValue(new Error('unavailable'));
+    await h.groups.joined(joined);
+    await expect(h.groups.action(h.event())).rejects.toThrow('暂时无法获取个人工作群');
+    expect(h.groups.get('oc_aux')?.status).toBe('pending');
+    expect(h.cards).toHaveLength(1);
+  });
   it.each(['codex', 'claude'] as const)('links %s privately to an independent FF binding and inherits cwd/model', async tool => {
     const h = await harness(tool); await h.activate();
     expect(h.groups.get('oc_aux')).toMatchObject({ status: 'active', source: { toolId: tool, nativeId: sourceId, historyPath: h.history } });
