@@ -113,6 +113,7 @@ import { applyLarkCliIdentityPolicy, hasStructuredLarkCliUserAuth } from '../lar
 
 export interface Controls {
   auxiliary?: import('../bot/auxiliary-groups').AuxiliaryGroups;
+  auxiliaryApprovals?: import('../bot/auxiliary-approvals').AuxiliaryApprovals;
   toolRegistry?: ToolRegistry;
   toolBindings?: ToolBindingStore;
   defaultToolId?: import('../config/profile-schema').AgentKind;

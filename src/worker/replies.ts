@@ -93,6 +93,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     for (const row of snapshot.events) state = reduce(state, row.event);
     state = updateRunRuntime(state, { nowMs: Date.now(), processRunning: isJobActive(snapshot.job) });
     if (!getShowToolCalls(deps.controls.cfg)) state = { ...state, blocks: state.blocks.filter(block => block.kind !== 'tool') };
+    if (deps.controls.auxiliaryApprovals) state = await deps.controls.auxiliaryApprovals.review(target.scope, job.id, target.replyTo, state);
     const lastEvent = snapshot.events.at(-1)?.seq ?? 0;
     const finished = !isJobActive(snapshot.job);
     let delivery = deliveries[job.id];

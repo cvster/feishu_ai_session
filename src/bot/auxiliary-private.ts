@@ -59,7 +59,7 @@ export function privateFFAnnouncement(appId: string, groupId: string, bindingId:
     `先用 contact +search-bot，--as user，--query 使用机器人名称，--chat-ids 使用 ${groupId}，解析当前用户可用的机器人 open_id 和私聊 chat_id。多条候选时先确认目标，不自动选第一条。不要复用其他应用的 open_id。\n` +
     '发送使用 im +messages-send --as user，目标为搜索结果的私聊 --chat-id，或机器人的 --user-id；用 --content - 从 stdin 传入 {"text":"完整 JSON 请求"}。读取使用 im +chat-messages-list --as user，从返回的私聊 chat_id 获取最新回复。group_id 仅定位来源，绝不能作为发送目标。\n' +
     `每次私聊发送一条完整 JSON：\n${example}\n\n` +
-    '在同一私聊中读取带有对应 request_id 的回答；回复到原请求的卡片为结果，卡片更新为完成后再继续。' +
+    '在同一私聊中读取带有对应 request_id 的回答；回复到原请求的卡片为结果，状态 waiting_approval 表示等待所有者确认，应继续等待后续同编号回复；状态 done 为完成，denied 为拒绝。' +
     '需要停止或刷新时，保留全部入口字段及原 request_id，将 action 改为 stop 或 refresh。超时先查询原私聊，不要换编号自动重试。' +
     '不要向群里发送问题、调试过程或结果。若未安装飞书 CLI 或未登录，请先引导我完成配置和用户授权。\n\n' +
     '仅本群当前成员可以调用，权限与群内提问一致。私聊与群内共用 FF 上下文；调试消息不显示在群内，但会进入共享历史。';

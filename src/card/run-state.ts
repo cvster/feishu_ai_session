@@ -31,6 +31,8 @@ export interface RunState {
   footer: FooterStatus;
   terminal: Terminal;
   errorMsg?: string;
+  /** A finished provider turn may be paused for a separate owner decision. */
+  permissionApproval?: 'pending' | 'approved' | 'denied' | 'expired' | 'unknown';
   /** Set when terminal === 'idle_timeout' — how long claude was idle before
    * the watchdog gave up (so the message can say "N 分钟无响应"). */
   idleTimeoutMinutes?: number;

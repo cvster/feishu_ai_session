@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { NormalizedMessage } from '@larksuite/channel';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
@@ -71,7 +71,7 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
     await handlers.message!({ messageId: `om_${++count}`, chatId: 'oc_aux', chatType: 'group', threadId: 'topic-a', senderId: 'ou_colleague',
       content: '同事的问题', rawContentType: 'text', resources: [], mentions: [], mentionAll: false, mentionedBot: true, createTime: Date.now(), ...overrides });
   }
-  return { controls, channel, submit, message, download, history, memberGet };
+  return { controls, channel, submit, message, download, history, memberGet, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
 }
 it('ignores non-mentions, @all and bot senders even when global mention requirement is off', async () => {
   const h = await harness(); await h.message({ mentionedBot: false }); await h.message({ mentionedBot: false, mentionAll: true });
@@ -190,4 +190,33 @@ it('does not execute a private request stopped while it is still queued', async 
   expect(h.submit).not.toHaveBeenCalled();
   expect(h.controls.codexSubmissions!.records()[0]?.status).toBe('rejected');
   expect(JSON.stringify(h.channel.sent)).toContain('已取消待处理输入');
+});
+
+it.each([false, true])('continues an approved FF request through the durable queue without granting neighboring messages (private=%s)', async privateEntry => {
+  const h = await harness('active', false, true);
+  const original = privateEntry ? { chatId: 'oc_dm', chatType: 'p2p' as const, threadId: undefined, mentionedBot: false, content: privateInput() } : { content: '请在本机构建项目' };
+  await h.message(original);
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
+  const initial = h.controls.codexSubmissions!.records()[0]!;
+  const approvalText = JSON.stringify({ type: 'ff_permission_request', action: '本机执行 pnpm build', reason: '本机构建受限' });
+  await h.controls.auxiliaryApprovals!.review(initial.scope, 'turn-needs-approval', initial.replyTo,
+    { blocks: [{ kind: 'text', content: approvalText, streaming: false }], terminal: 'done', reasoning: { content: '', active: false }, footer: null });
+  const ledger = JSON.parse(await readFile(h.approvalsPath, 'utf8'));
+  const approval = Object.values(ledger.approvals)[0] as any;
+  const click = { chatId: privateEntry ? 'oc_owner_dm' : 'oc_aux', messageId: approval.cardMessageId,
+    operator: { openId: 'ou_owner' }, action: { value: { cmd: 'auxiliary.approval', id: approval.id, decision: 'approve' } } };
+  const originalMode = (h.channel as any).getChatMode;
+  if (privateEntry) (h.channel as any).getChatMode = async () => 'p2p';
+  await h.controls.auxiliaryApprovals!.action(click as any);
+  if (!privateEntry) await h.message({ content: '同事紧跟着的新问题' });
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(privateEntry ? 2 : 3), { timeout: 4000 });
+  const continued = JSON.parse(h.submit.mock.calls[1]![0].prompt);
+  expect(continued.context.actor).toBe('member');
+  expect(continued.context.approval).toEqual({ id: approval.id, action: '本机执行 pnpm build', ownerId: 'ou_owner' });
+  expect(continued.context.chat_id).toBe(privateEntry ? 'oc_dm' : 'oc_aux');
+  expect(continued.rules.permissions).toContain('其余操作仍受限');
+  if (!privateEntry) expect(JSON.parse(h.submit.mock.calls[2]![0].prompt).context.approval).toBeUndefined();
+  await h.controls.auxiliaryApprovals!.action(click as any);
+  expect(h.submit).toHaveBeenCalledTimes(privateEntry ? 2 : 3);
+  (h.channel as any).getChatMode = originalMode;
 });

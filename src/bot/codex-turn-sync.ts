@@ -511,17 +511,17 @@ async function syncTurnToScope(
     store.dirty = true;
     await store.flush();
   }
-  const renderState = (runtime: { firstSeenAtMs: number; lastActivityAtMs: number; checkedAtMs: number }) => {
+  const renderState = async (runtime: { firstSeenAtMs: number; lastActivityAtMs: number; checkedAtMs: number }) => {
     const state = codexTurnRunState(turn, runtime);
     if (state.terminal === 'running' && waitingForInput) state.footer = 'waiting_input';
     if (projectCwd) state.projectName = projectNameFromCwd(projectCwd);
     if (controls && !getShowToolCalls(controls.cfg)) state.blocks = state.blocks.filter((block) => block.kind !== 'tool');
-    return state;
+    return controls?.auxiliaryApprovals ? await controls.auxiliaryApprovals.review(scope, turn.id, stored.replyTargets?.[scope]?.replyTo, state) : state;
   };
 
   if (!delivery) {
     if (!isActive()) return;
-    const state = renderState({
+    const state = await renderState({
       firstSeenAtMs: nowMs,
       lastActivityAtMs: nowMs,
       checkedAtMs: nowMs,
@@ -594,7 +594,7 @@ async function syncTurnToScope(
   // after Feishu accepts the update, a restart will never reuse that sequence.
   await store.flush();
   if (!isActive()) return;
-  const state = renderState({
+  const state = await renderState({
     firstSeenAtMs: delivery.firstSeenAtMs,
     lastActivityAtMs: delivery.lastActivityAtMs,
     checkedAtMs: nowMs,

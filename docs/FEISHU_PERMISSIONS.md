@@ -151,3 +151,8 @@ im:chat.members:write_only
 桥接机器人增加应用权限 `im:chat.members:read` 并发布后，所有者才可完整使用群成员私聊调用。机器人原有私聊接收、发送权限继续使用，应用可用范围须包含相关同事。成员列表查询失败时拒绝调用，不降级为仅凭群 ID 放行。
 
 同事的 agent 使用自己的飞书 CLI 应用及用户授权，以 `--as user` 发送和读取与目标机器人的私聊，不能使用本项目机器人的 app secret 或冒充本项目 `--as bot`。调用方的 CLI 应用还需要相应用户消息发送、读取权限及用户授权（CLI `+messages-send` 文档要求 `im:message.send_as_user` 和 `im:message`；读消息按调用方接口申请）。若使用 `contact +search-bot` 发现机器人，调用方还需用户权限 `search:bot`；可按机器人名称和来源群 ID 搜索，取得该用户可用的机器人 open_id 及私聊 chat_id。调用方根据入口中的机器人信息解析自己的可用私聊入口，不直接复用其他应用的用户/机器人 open_id。
+
+
+## FF 受限操作确认
+
+确认使用现有机器人消息与 CardKit 交互能力：发送机器人消息、`cardkit:card:write`、`card.action.trigger` 回调，以及识别应用所有者的应用信息权限。群内卡片使用真实所有者 open_id 的 @；私聊调用的确认卡发到所有者私聊。无需另申请原生飞书审批权限。确认只能对辅助提示词规则中的具体操作放宽，平台缺失 scope、账号授权或系统文件权限仍需实际开通。

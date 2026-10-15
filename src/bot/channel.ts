@@ -1,4 +1,5 @@
 import { auxiliaryLinkError } from './auxiliary-membership';
+import { AuxiliaryApprovals } from './auxiliary-approvals';
 import { AuxiliaryGroups } from './auxiliary-groups';
 import { parsePrivateFFInput } from './auxiliary-private';
 import { NativeSessionLocks } from '../tools/locks';
@@ -393,7 +394,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             });
           }
           const requests = controls.auxiliary?.isAuxiliary(scope)
-            ? controls.auxiliary.splitRequests(scope, batch) : [batch];
+            ? controls.auxiliary.splitRequests(scope, batch, message => controls.auxiliaryApprovals?.batchKey(scope, message.messageId) ?? '') : [batch];
           for (const requestBatch of requests) {
             if (disconnecting) break;
             await runAgentBatch({
@@ -444,6 +445,27 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       },
     });
     await controls.auxiliary.load();
+    controls.auxiliaryApprovals = new AuxiliaryApprovals({
+      path: join(deps.appPaths.profileDir, 'ff-approvals.json'), channel, auxiliary: controls.auxiliary,
+      bindings: controls.toolBindings, ownerId: () => controls.botOwnerId,
+      resume: async approval => {
+        const msg: NormalizedMessage = { ...approval.message, messageId: approval.receiptMessageId!,
+          senderId: approval.actorId, createTime: Date.now(), resources: [], mentions: [], mentionAll: false,
+          mentionedBot: true, rawContentType: 'text', raw: undefined,
+          content: `继续此前请求：${approval.text}\n本次仅执行已确认操作：${approval.action}。不要重复已完成的动作。` };
+        const id = toolForScope(controls, approval.scope);
+        if (id === 'codex' && controls.codexSubmissions) {
+          const current = controls.toolBindings?.get(approval.scope)?.nativeId;
+          if (!await controls.codexSubmissions.receive(approval.scope, msg, current)) return;
+        } else if (controls.toolRegistry?.get(id).agent instanceof DurableClaudeAdapter && controls.workerInbox) {
+          if (!await controls.workerInbox.receive(approval.scope, msg)) return;
+          controls.workerInbox.markQueued(approval.scope, msg);
+        }
+        await controls.auxiliary!.noteRequest(approval.scope, msg.messageId, msg.senderId);
+        pending.push(approval.scope, msg);
+      },
+    });
+    await controls.auxiliaryApprovals.load();
   }
 
   // Counter for stdout reconnect escalation; reset on `reconnected`.
@@ -475,6 +497,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
     },
     cardAction: async (evt) => {
+      try { if (await controls.auxiliaryApprovals?.action(evt)) return; }
+      catch (error) { await channel.send(evt.operator.openId, { text: `权限确认处理未完成：${auxiliaryLinkError(error)}。请查看原请求状态；不会自动重复执行。` }); return; }
       try { if (await controls.auxiliary?.action(evt)) return; }
       catch (error) { await channel.send(evt.operator.openId, { text: `辅助群关联未完成：${auxiliaryLinkError(error)} 可私聊发送 /aux 重新选择。` }); return; }
       await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
@@ -574,6 +598,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
   });
   await ownerRefresh.start();
+  await controls.auxiliaryApprovals?.recover();
   await controls.auxiliary?.recover().catch(error => log.warn('auxiliary', 'recovery-failed', { error: String(error) }));
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
   const aaSessionGroupSync =
@@ -726,6 +751,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         workspaces.flush(),
         controls.toolBindings?.flush(),
         controls.workerInbox?.flush(),
+        controls.auxiliaryApprovals?.flush(),
         submissions?.flush(),
       ]);
       for (const [idx, result] of flushResults.entries()) {
@@ -1187,8 +1213,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     extraInstructions,
     agentKind === 'codex',
   );
+  if (controls.auxiliary?.isAuxiliary(scope)) await controls.auxiliaryApprovals?.remember(scope, batch, basePrompt);
+  const approval = controls.auxiliaryApprovals?.grant(scope, batch.map(message => message.messageId), batch.map(message => message.senderId));
   const prompt = controls.auxiliary?.isAuxiliary(scope)
-    ? await controls.auxiliary.wrapPrompt(scope, basePrompt, batch.map(message => message.senderId)) : basePrompt;
+    ? await controls.auxiliary.wrapPrompt(scope, basePrompt, batch.map(message => message.senderId), approval ? { id: approval.id, action: approval.action, ownerId: approval.ownerId } : undefined) : basePrompt;
   log.info('prompt', 'built', {
     promptChars: prompt.length,
     quotes: quotes.length,
@@ -1388,7 +1416,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const replyMode = controls.auxiliary?.isAuxiliary(scope) ? 'card' : getMessageReplyMode(controls.cfg);
   log.info('flush', 'reply-mode', { mode: replyMode });
   const cotMessages = getCotMessages(controls.cfg);
-  const cotEnabled = cotMessages !== 'off';
+  const cotEnabled = !controls.auxiliary?.isAuxiliary(scope) && cotMessages !== 'off';
 
   // Re-read prefs on every flush so toggling /config mid-stream takes
   // effect immediately. Cheap object lookups, no allocation when on.
@@ -1398,6 +1426,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     return { ...state, blocks: state.blocks.filter((b) => b.kind !== 'tool') };
   };
   if (controls.auxiliary?.isActive(scope)) await controls.auxiliary.trackRun(scope, execution.handle.run.runId, lastMsg.messageId, true, firstMsg.senderId);
+  const reviewState = async (state: RunState): Promise<RunState> => controls.auxiliaryApprovals
+    ? await controls.auxiliaryApprovals.review(scope, execution.handle.run.runId, lastMsg.messageId, state) : state;
   const cardRenderOptions = callbackAuth && !controls.auxiliary?.isAuxiliary(scope)
     ? {
         ...controls.runControlIcons,
@@ -1502,9 +1532,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         idleTimeoutMs,
         recordSession,
         async (state) => {
-          latestState = state;
+          latestState = await reviewState(state);
           if (cardCtrl) {
-            await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
+            await cardCtrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
           }
         },
       );
@@ -1544,7 +1574,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         fallback: async (state) => {
           await channel.send(
             chatId,
-            { card: renderCard(filterForPrefs(state), cardRenderOptions) },
+            { card: renderCard(filterForPrefs(await reviewState(state)), cardRenderOptions) },
             sendOpts,
           );
         },
