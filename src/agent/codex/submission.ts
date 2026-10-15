@@ -32,6 +32,10 @@ export async function submitCodexMessage(options: CodexSubmitOptions,
   try {
     const threadId = options.threadId ?? await history.createIdleThread({ ...options, cwd: options.cwd, sandbox: options.sandbox ?? 'danger-full-access' });
     const snapshot = await history.readThread(threadId);
+    // thread/start holds the new thread's writer lease in this owned process.
+    // Release it before the shared daemon resumes or the CLI queues input.
+    // Existing-thread history reads do not own that writer lease.
+    if (!options.threadId) await history.stop();
     let connected = false;
     if (shared) {
       try { await shared.connect(); connected = true; }

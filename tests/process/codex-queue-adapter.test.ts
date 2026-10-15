@@ -34,6 +34,25 @@ describe('CodexAdapter native queue mode', () => {
     expect(requests).not.toContain('turn/interrupt'); expect(requests).not.toContain('thread/queue/delete');
   });
 
+  it.each(['rpc', 'cli'] as const)('releases the fresh-thread creator before handing off to %s', async transport => {
+    const fake = await createQueueCodex('inProgress', true); cleanup.push(fake.dir);
+    const adapter = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir, codexHome: fake.dir,
+      ...(transport === 'rpc' ? { appServerRemote: 'unix://' } : {}) });
+    const prepared: string[] = [];
+    const result = await adapter.submit({ runId: 'fresh-accept', cwd: fake.dir, prompt: 'first group message',
+      model: 'gpt-6.1-sol', reasoningEffort: 'high' }, async value => { prepared.push(value.threadId); });
+    expect(result).toMatchObject({ status: 'accepted', transport, threadId: 'thread-existing' });
+    expect(prepared).toEqual(['thread-existing']);
+    expect(await readFile(join(fake.dir, 'creator-released.txt'), 'utf8')).toBe('released');
+    expect(JSON.parse(await readFile(join(fake.dir, 'state.json'), 'utf8')).prompt).toBe('first group message');
+    const methods = (await readFile(join(fake.dir, 'requests.jsonl'), 'utf8')).trim().split('\n')
+      .map(line => JSON.parse(line).method);
+    expect(methods.filter(method => method === 'thread/start')).toHaveLength(1);
+    expect(methods).not.toContain('turn/start');
+    expect(methods).not.toContain('turn/interrupt');
+    expect(methods).not.toContain('thread/queue/delete');
+  });
+
   it('creates/materializes idle first-thread history then queues, without starting a bridge-owned turn', async () => {
     const fake = await createQueueCodex(); cleanup.push(fake.dir);
     const run = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir }).run({
@@ -245,7 +264,7 @@ async function createQueueCodex(
   const path = process.platform === 'win32' ? join(dir, 'codex.cmd') : scriptPath;
   const script = `#!/usr/bin/env node
 import { createInterface } from 'node:readline';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { Duplex } from 'node:stream';
 import WebSocket from ${JSON.stringify(pathToFileURL(createRequire(import.meta.url).resolve('ws')).href)};
 const { WebSocketServer } = WebSocket;
@@ -253,9 +272,19 @@ const args = process.argv.slice(2);
 const statePath = ${JSON.stringify(statePath)};
 const rolloutPath = ${JSON.stringify(join(dir, 'rollout.jsonl'))};
 const settingsPath = ${JSON.stringify(join(dir, 'settings.json'))};
+const creatorLease = ${JSON.stringify(join(dir, 'creator-lease'))};
+let ownsCreatorLease = false;
+process.on('SIGTERM', () => process.exit(0));
+process.on('exit', () => {
+  if (ownsCreatorLease) {
+    rmSync(creatorLease, { force: true });
+    writeFileSync(${JSON.stringify(join(dir, 'creator-released.txt'))}, 'released');
+  }
+});
 let queuedReads = 0;
 let terminalWritten = false;
 if (args[0] === 'queue') {
+  if (existsSync(creatorLease)) { console.error('thread thread-existing already has an active writer'); process.exit(9); }
   if (existsSync(${JSON.stringify(join(dir, 'started.txt'))}) && !existsSync(${JSON.stringify(join(dir, 'materialized.txt'))})) process.exit(7);
   const prompt = args[args.indexOf('--message') + 1];
   writeFileSync(statePath, JSON.stringify({ prompt }));
@@ -282,6 +311,8 @@ function handle(req) {
     return;
   }
   if (req.method === 'thread/start') {
+    ownsCreatorLease = true;
+    writeFileSync(creatorLease, String(process.pid));
     writeFileSync(${JSON.stringify(join(dir, 'started.txt'))}, 'idle');
     send({ id: req.id, result: { thread: { id: 'thread-existing' } } }); return;
   }
@@ -307,10 +338,22 @@ function handle(req) {
   }
   if (req.method === 'thread/resume') {
     if (args[1] !== 'proxy') process.exit(6);
+    if (existsSync(creatorLease)) {
+      send({ id: req.id, error: { code: -32600, message: 'thread thread-existing already has an active writer' } }); return;
+    }
     loaded = true;
     writeFileSync(${JSON.stringify(join(dir, 'resumed.txt'))}, args[1]);
     send({ id: req.id, result: {} });
     return;
+  }
+  if (req.method === 'thread/queue/list') { send({ id: req.id, result: { data: [] } }); return; }
+  if (req.method === 'thread/queue/add') {
+    if (existsSync(creatorLease)) {
+      send({ id: req.id, error: { code: -32600, message: 'thread thread-existing already has an active writer' } }); return;
+    }
+    writeFileSync(statePath, JSON.stringify({ prompt: req.params.input[0].text }));
+    send({ id: req.id, result: { queuedSubmission: { id: 'queue-rpc', input: req.params.input,
+      clientUserMessageId: req.params.clientUserMessageId } } }); return;
   }
   if (req.method !== 'thread/read') return;
   if (existsSync(${JSON.stringify(join(dir, 'started.txt'))}) && req.params.includeTurns) writeFileSync(${JSON.stringify(join(dir, 'materialized.txt'))}, 'ready');
