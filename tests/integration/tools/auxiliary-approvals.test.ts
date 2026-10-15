@@ -18,7 +18,7 @@ import { ActiveRuns } from '../../../src/bot/active-runs';
 import { initialState, type RunState } from '../../../src/card/run-state';
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
-const requestText = JSON.stringify({ type: 'ff_permission_request', action: '在本机项目执行 pnpm build', reason: '本机构建受辅助权限限制' });
+const requestText = JSON.stringify({ type: 'ff_permission_request', action: '修改本机项目源码 src/main.ts', reason: '修改本机项目源码受辅助权限限制' });
 const state = (): RunState => ({ ...initialState, terminal: 'done', blocks: [{ kind: 'text', content: requestText, streaming: false }] });
 async function setup(privateRequest = false, toolId: 'codex' | 'claude' = 'codex') {
   const dir = await mkdtemp(join(tmpdir(), 'ff-approval-')); dirs.push(dir);
@@ -46,9 +46,9 @@ async function setup(privateRequest = false, toolId: 'codex' | 'claude' = 'codex
     sessions: new SessionStore(join(dir, 'sessions')), workspaces: new WorkspaceStore(join(dir, 'workspaces')),
     ownerId: () => owner, refreshOwner: async () => {}, cancelPending: async () => {} }); await auxiliary.load();
   const scope = privateRequest ? (await auxiliary.acceptPrivate({ protocol: 'ff-dm-v1', bot_app_id: 'cli_bot', group_id: 'oc_group',
-    binding_id: 'entry', request_id: 'debug-1', question: '请构建' }, 'oc_memberdm', 'ou_member', 'om_question')).scope : 'oc_group';
+    binding_id: 'entry', request_id: 'debug-1', question: '请修改源码' }, 'oc_memberdm', 'ou_member', 'om_question')).scope : 'oc_group';
   const message = { messageId: 'om_question', chatId: privateRequest ? 'oc_memberdm' : 'oc_group', chatType: privateRequest ? 'p2p' : 'group',
-    senderId: 'ou_member', content: '请构建', resources: [], mentions: [], mentionAll: false, mentionedBot: true, createTime: 1, rawContentType: 'text' } as NormalizedMessage;
+    senderId: 'ou_member', content: '请修改源码', resources: [], mentions: [], mentionAll: false, mentionedBot: true, createTime: 1, rawContentType: 'text' } as NormalizedMessage;
   const resume = vi.fn(async (_r: unknown) => {});
   const deps = { path, channel, auxiliary, bindings, ownerId: () => owner, resume, now: () => now };
   const approvals = new AuxiliaryApprovals(deps); await approvals.load(); await approvals.remember(scope, [message], message.content);
@@ -79,7 +79,7 @@ it('only accepts the real owner on the original card and resumes once for duplic
   const click = await h.event(); await Promise.all([h.approvals.action(click), h.approvals.action(click)]);
   expect(h.resume).toHaveBeenCalledOnce(); expect(h.send).toHaveBeenCalledOnce();
   const r = await h.approval(); expect(r.status).toBe('resumed');
-  expect(h.approvals.grant(h.scope, [r.receiptMessageId], ['ou_member'])?.action).toContain('pnpm build');
+  expect(h.approvals.grant(h.scope, [r.receiptMessageId], ['ou_member'])?.action).toContain('src/main.ts');
   expect(h.approvals.grant(h.scope, ['om_other'], ['ou_member'])).toBeUndefined();
   expect(h.approvals.grant(h.scope, [r.receiptMessageId], ['ou_intruder'])).toBeUndefined();
   expect(h.approvals.grant('oc_other', [r.receiptMessageId], ['ou_member'])).toBeUndefined();
@@ -91,7 +91,7 @@ it('sends private entry approvals only to the owner and keeps continuation in th
   expect(h.send.mock.calls[0]?.[0]).toBe('oc_memberdm');
   const r = await h.approval(); const grant = h.approvals.grant(h.scope, [r.receiptMessageId], ['ou_member'])!;
   const prompt = JSON.parse(await h.auxiliary.wrapPrompt(h.scope, '继续', ['ou_member'], { id: grant.id, action: grant.action, ownerId: grant.ownerId }));
-  expect(prompt.context).toMatchObject({ actor: 'member', chat_id: 'oc_memberdm', approval: { action: '在本机项目执行 pnpm build' } });
+  expect(prompt.context).toMatchObject({ actor: 'member', chat_id: 'oc_memberdm', approval: { action: '修改本机项目源码 src/main.ts' } });
   expect(prompt.rules.permissions).toContain('仅对context.approval.action'); expect(prompt.rules.permissions).toContain('其余操作仍受限');
   expect(prompt.mode).toBe('full');
 });
@@ -139,8 +139,8 @@ it('separates an approved continuation from ordinary messages by the same actor'
 });
 it('parses only explicit complete permission requests, including JSON fences', () => {
   expect(parseApprovalRequest('权限不足')).toBeUndefined(); expect(parseApprovalRequest('{"type":"ff_permission_request"}')).toBeUndefined();
-  expect(parseApprovalRequest('先说明进度。\n' + requestText)?.action).toContain('pnpm build');
-  expect(parseApprovalRequest('```json\n' + requestText + '\n```')?.action).toContain('pnpm build');
+  expect(parseApprovalRequest('先说明进度。\n' + requestText)?.action).toContain('src/main.ts');
+  expect(parseApprovalRequest('```json\n' + requestText + '\n```')?.action).toContain('src/main.ts');
 });
 
 it('turns a completed Codex permission response into an owner card instead of exposing control JSON', async () => {
@@ -149,13 +149,13 @@ it('turns a completed Codex permission response into an owner card instead of ex
   catalog.upsertActive({ scopeId: h.scope, agentId: 'codex', cwdRealpath: h.dir, policyFingerprint: 'p', threadId: 'ff-native' });
   const submissions = new CodexSubmissionStore(join(h.dir, 'submissions')); await submissions.load();
   await submissions.prepare({ id: 's1', scope: h.scope, messages: [h.message], status: 'accepted', createdAtMs: 1, updatedAtMs: 1,
-    threadId: 'ff-native', clientUserMessageId: 'client-approval', prompt: '请构建', replyTo: 'om_question' });
+    threadId: 'ff-native', clientUserMessageId: 'client-approval', prompt: '请修改源码', replyTo: 'om_question' });
   await catalog.flush();
   const profile = createDefaultProfileConfig({ agentKind: 'codex', codex: { binaryPath: 'codex' }, accounts: { app: { id: 'cli_bot', secret: 's', tenant: 'feishu' } } });
   const sync = await startCodexTurnSync({ channel: h.channel, sessionCatalog: catalog, profileStateDir: h.dir, intervalMs: 60_000,
     controls: { profileConfig: profile, cfg: profile, auxiliary: h.auxiliary, auxiliaryApprovals: h.approvals } as any, submissionStore: submissions,
     reader: { readThread: async () => ({ id: 'ff-native', turns: [{ id: 'turn-needs-approval', status: 'completed', items: [
-      { type: 'userMessage', id: 'u', clientId: 'client-approval', content: [{ type: 'inputText', text: '请构建' }] },
+      { type: 'userMessage', id: 'u', clientId: 'client-approval', content: [{ type: 'inputText', text: '请修改源码' }] },
       { type: 'agentMessage', id: 'a', text: requestText },
     ] }] }), stop: async () => {} } });
   try {

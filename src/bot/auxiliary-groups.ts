@@ -162,7 +162,7 @@ export class AuxiliaryGroups {
   }
   private async publishPrivate(row: AuxiliaryGroup): Promise<void> {
     if (!row.allowPrivate || !row.privateBindingId) return;
-    await this.deps.channel.send(row.chatId, { text: privateFFAnnouncement(this.deps.appId, row.chatId, row.privateBindingId, row.name, this.deps.channel.botIdentity?.name) });
+    await this.deps.channel.send(row.chatId, { markdown: privateFFAnnouncement(this.deps.appId, row.chatId, row.privateBindingId, row.name, this.deps.channel.botIdentity?.name) });
   }
   isAuxiliary(chatId: string): boolean { return !!this.get(chatId); }
   private sourceKey(source: LinkedSession): string { return sessionRefKey(source.toolId, source.sourceId, source.nativeId); }
@@ -513,9 +513,9 @@ export function wrapAuxiliaryPrompt(source: Pick<LinkedSession, 'toolId' | 'nati
   ownerRequest = false, context: { chatId?: string; requestId?: string; actorId?: string; approval?: AuxiliaryGrant; mode: 'full' | 'brief' } = { mode: 'full' }): string {
   const full = context.mode === 'full';
   const permissions = ownerRequest
-    ? '本次为所有者本人请求，按正常权限执行，不受辅助群只读、执行及源码外传限制；授权仅限本次请求。'
-    : full ? '本次按辅助群限制处理，历史放权不适用。本机只读，不执行项目脚本或构建；可在外部机器执行，脚本和产物可部署，其他源码及源码包不得外传。允许云端分析和回复必要代码片段。'
-      : '历史放权不适用。本机只读、不运行项目脚本或构建；外部可执行，脚本和产物可部署，其他源码及源码包不得外传；允许必要代码片段和云端分析。';
+    ? '本次为所有者本人请求，按正常权限执行，不受辅助群源码修改、执行及源码外传限制；授权仅限本次请求。'
+    : full ? '本次按辅助群限制处理，历史放权不适用。本机可运行调试、检查、测试及所需脚本/构建，允许生成调试产物，不修改项目源码；可在外部机器执行，脚本和产物可部署，其他源码及源码包不得外传。允许云端分析和回复必要代码片段。'
+      : '历史放权不适用。本机可运行调试、检查、测试及所需脚本/构建，不修改项目源码；外部可执行，脚本和产物可部署，其他源码及源码包不得外传；允许必要代码片段和云端分析。';
   return JSON.stringify({
     type: 'ff_request', version: 1, mode: context.mode,
     context: { chat_id: context.chatId, identity: 'bot', actor: ownerRequest ? 'owner' : 'member', ...(context.approval ? { approval: context.approval } : {}),

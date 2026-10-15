@@ -54,13 +54,18 @@ export async function auxiliaryUserIsMember(channel: LarkChannel, chatId: string
 export function privateFFAnnouncement(appId: string, groupId: string, bindingId: string, name: string, botName = '本群机器人'): string {
   const example = JSON.stringify({ protocol: 'ff-dm-v1', bot_app_id: appId, group_id: groupId,
     binding_id: bindingId, request_id: '<每次问题生成唯一编号>', action: 'ask', question: '<我的问题>' }, null, 2);
-  return `「${name}」已开放机器人私聊问答。复制以下内容给你的 agent：\n\n` +
-    `请通过飞书 CLI，以我本人的用户身份私聊「${botName}」（app_id=${appId}）。\n` +
+  const instructions = `如果你需要向「${botName}」询问本项目的问题或执行调试检查任务，可通过飞书 CLI，以我本人的用户身份私聊「${botName}」（app_id=${appId}）。\n` +
     `先用 contact +search-bot，--as user，--query 使用机器人名称，--chat-ids 使用 ${groupId}，解析当前用户可用的机器人 open_id 和私聊 chat_id。多条候选时先确认目标，不自动选第一条。不要复用其他应用的 open_id。\n` +
     '发送使用 im +messages-send --as user，目标为搜索结果的私聊 --chat-id，或机器人的 --user-id；用 --content - 从 stdin 传入 {"text":"完整 JSON 请求"}。读取使用 im +chat-messages-list --as user，从返回的私聊 chat_id 获取最新回复。group_id 仅定位来源，绝不能作为发送目标。\n' +
     `每次私聊发送一条完整 JSON：\n${example}\n\n` +
     '在同一私聊中读取带有对应 request_id 的回答；回复到原请求的卡片为结果，状态 waiting_approval 表示等待所有者确认，应继续等待后续同编号回复；状态 done 为完成，denied 为拒绝。' +
     '需要停止或刷新时，保留全部入口字段及原 request_id，将 action 改为 stop 或 refresh。超时先查询原私聊，不要换编号自动重试。' +
-    '不要向群里发送问题、调试过程或结果。若未安装飞书 CLI 或未登录，请先引导我完成配置和用户授权。\n\n' +
+    '不要向群里发送问题、调试过程或结果。若未安装飞书 CLI 或未登录，请先引导我完成配置和用户授权。';
+  // Keep all agent instructions in one copyable block, even if a bot name contains backticks.
+  const fence = '`'.repeat(Math.max(3, ...Array.from(instructions.matchAll(/`+/g), m => m[0].length + 1)));
+  const displayName = name.replace(/[\\`*_{}\[\]()<>#~|]/g, '\\$&').replace(/[\r\n]+/g, ' ');
+  const displayBotName = botName.replace(/[\\`*_{}\[\]()<>#~|]/g, '\\$&').replace(/[\r\n]+/g, ' ');
+  return `「${displayName}」已开放机器人私聊问答。如果要让你的 agent 向「${displayBotName}」询问问题或执行调试检查任务，可复制以下代码块中的内容给你的 agent：\n\n` +
+    `${fence}text\n${instructions}\n${fence}\n\n` +
     '仅本群当前成员可以调用，权限与群内提问一致。私聊与群内共用 FF 上下文；调试消息不显示在群内，但会进入共享历史。';
 }

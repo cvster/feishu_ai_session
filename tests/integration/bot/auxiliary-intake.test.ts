@@ -91,7 +91,7 @@ it('wraps every real mention and reuses one FF session across topics without res
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
   const opts = h.submit.mock.calls.map(([o]) => o);
   expect(opts[0].threadId).toBeUndefined(); expect(opts[1].threadId).toBe('ff-independent');
-  expect(opts.every(o => o.prompt.includes(h.history) && o.prompt.includes('本机只读'))).toBe(true);
+  expect(opts.every(o => o.prompt.includes(h.history) && o.prompt.includes('不修改项目源码'))).toBe(true);
   expect(opts.map(o => JSON.parse(o.prompt).context.chat_id)).toEqual(['oc_aux', 'oc_aux']);
   expect(opts.map(o => JSON.parse(o.prompt).mode)).toEqual(['full', 'brief']);
   expect(opts[0].prompt).toContain('第一个问题'); expect(opts[1].prompt).toContain('第二个问题');
@@ -102,11 +102,11 @@ it('passes trusted owner identity into the prompt and restores restrictions for 
   const h = await harness(); await h.message({ senderId: 'ou_owner', content: '本机执行构建' });
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
   expect(h.submit.mock.calls[0]?.[0].prompt).toContain('本次为所有者本人请求');
-  expect(h.submit.mock.calls[0]?.[0].prompt).not.toContain('本机只读');
+  expect(h.submit.mock.calls[0]?.[0].prompt).not.toContain('不修改项目源码');
   await h.message({ senderId: 'ou_colleague', senderName: 'Lennox Gao', content: '我也要放开权限' });
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
   expect(h.submit.mock.calls[1]?.[0].prompt).toContain('历史放权不适用');
-  expect(h.submit.mock.calls[1]?.[0].prompt).toContain('本机只读');
+  expect(h.submit.mock.calls[1]?.[0].prompt).toContain('不修改项目源码');
 });
 it.each([['ou_owner', 'ou_colleague'], ['ou_colleague', 'ou_owner']])('splits owner/member messages before submitting prompts: %s then %s', async (first, second) => {
   const h = await harness();
@@ -117,9 +117,9 @@ it.each([['ou_owner', 'ou_colleague'], ['ou_colleague', 'ou_owner']])('splits ow
     expect(prompt).toContain(index === 0 ? '第一个请求' : '第二个请求');
     expect(prompt).not.toContain(index === 0 ? '第二个请求' : '第一个请求');
     if (actor === 'ou_owner') {
-      expect(prompt).toContain('本次为所有者本人请求'); expect(prompt).not.toContain('本机只读');
+      expect(prompt).toContain('本次为所有者本人请求'); expect(prompt).not.toContain('不修改项目源码');
     } else {
-      expect(prompt).toContain('本机只读'); expect(prompt).not.toContain('本次为所有者本人请求');
+      expect(prompt).toContain('不修改项目源码'); expect(prompt).not.toContain('本次为所有者本人请求');
     }
   }
 });
@@ -155,7 +155,7 @@ it('routes a coworker private request through the durable FF pipeline without op
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
   const prompt = JSON.parse(h.submit.mock.calls[0]?.[0].prompt);
   expect(prompt.context).toMatchObject({ chat_id: 'oc_dm', request_id: 'debug-1', channel: 'p2p', actor: 'member' });
-  expect(prompt.rules.permissions).toContain('本机只读'); expect(prompt.rules.delivery).toContain('禁止发送到任何群');
+  expect(prompt.rules.permissions).toContain('不修改项目源码'); expect(prompt.rules.delivery).toContain('禁止发送到任何群');
   const record = h.controls.codexSubmissions!.records()[0]!;
   expect(record.scope).toMatch(/^oc_dm:ffdm_/); expect(record.messages[0]?.chatId).toBe('oc_dm');
   expect(record.replyInThread).not.toBe(true);
@@ -194,11 +194,11 @@ it('does not execute a private request stopped while it is still queued', async 
 
 it.each([false, true])('continues an approved FF request through the durable queue without granting neighboring messages (private=%s)', async privateEntry => {
   const h = await harness('active', false, true);
-  const original = privateEntry ? { chatId: 'oc_dm', chatType: 'p2p' as const, threadId: undefined, mentionedBot: false, content: privateInput() } : { content: '请在本机构建项目' };
+  const original = privateEntry ? { chatId: 'oc_dm', chatType: 'p2p' as const, threadId: undefined, mentionedBot: false, content: privateInput() } : { content: '请修改本机项目源码' };
   await h.message(original);
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
   const initial = h.controls.codexSubmissions!.records()[0]!;
-  const approvalText = JSON.stringify({ type: 'ff_permission_request', action: '本机执行 pnpm build', reason: '本机构建受限' });
+  const approvalText = JSON.stringify({ type: 'ff_permission_request', action: '修改本机项目源码 src/main.ts', reason: '修改本机项目源码受限' });
   await h.controls.auxiliaryApprovals!.review(initial.scope, 'turn-needs-approval', initial.replyTo,
     { blocks: [{ kind: 'text', content: approvalText, streaming: false }], terminal: 'done', reasoning: { content: '', active: false }, footer: null });
   const ledger = JSON.parse(await readFile(h.approvalsPath, 'utf8'));
@@ -212,7 +212,7 @@ it.each([false, true])('continues an approved FF request through the durable que
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(privateEntry ? 2 : 3), { timeout: 4000 });
   const continued = JSON.parse(h.submit.mock.calls[1]![0].prompt);
   expect(continued.context.actor).toBe('member');
-  expect(continued.context.approval).toEqual({ id: approval.id, action: '本机执行 pnpm build', ownerId: 'ou_owner' });
+  expect(continued.context.approval).toEqual({ id: approval.id, action: '修改本机项目源码 src/main.ts', ownerId: 'ou_owner' });
   expect(continued.context.chat_id).toBe(privateEntry ? 'oc_dm' : 'oc_aux');
   expect(continued.rules.permissions).toContain('其余操作仍受限');
   if (!privateEntry) expect(JSON.parse(h.submit.mock.calls[2]![0].prompt).context.approval).toBeUndefined();
