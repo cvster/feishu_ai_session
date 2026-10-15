@@ -26,9 +26,11 @@ describe('RunExecutor policy runtime options', () => {
     const activeRuns = new ActiveRuns(); const pool = new ProcessPool(() => 1); const calls: string[] = [];
     const agent: any = { id: 'codex', displayName: 'test', isAvailable: async () => true,
       run: () => { throw new Error('Legacy observer must not start'); },
-      submit: async (opts: any, beforeSend: any) => { calls.push(opts.prompt); await beforeSend({ threadId: 't1', knownTurnIds: [] });
+      submit: async (opts: any, beforeSend: any) => {
+        expect(opts).toMatchObject({ sessionName: 'AA-蓝图', sandbox: 'workspace-write' });
+        calls.push(opts.prompt); await beforeSend({ threadId: 't1', knownTurnIds: [] });
         return { status: 'accepted', submissionId: opts.runId, threadId: 't1', transport: 'rpc', queueId: opts.runId }; } };
-    const executor = new RunExecutor({ agent, pool, activeRuns, now: () => 1000 });
+    const executor = new RunExecutor({ agent, pool, activeRuns, now: () => 1000, sessionNameForScope: () => 'AA-蓝图' });
     await executor.submitMessage({ scopeId: 'g', policy: policy() }, async () => {});
     await executor.submitMessage({ scopeId: 'g', policy: policy({ prompt: 'second' }) }, async () => {});
     expect(calls).toEqual(['hello', 'second']); expect(activeRuns.scopes()).toEqual([]);

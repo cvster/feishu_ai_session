@@ -112,6 +112,7 @@ export class RunExecutor {
       };
       validate();
       const opts = { runId: input.submissionId ?? this.createRunId(), prompt: input.policy.prompt,
+        sessionName: this.sessionNameForScope?.(input.scopeId),
         cwd: input.policy.cwdRealpath, threadId: input.threadId, model: input.model,
         reasoningEffort: input.reasoningEffort, images: input.images, attachmentPaths: input.attachmentPaths, sandbox: input.policy.sandbox };
       await this.agent.prepareRun?.(opts);

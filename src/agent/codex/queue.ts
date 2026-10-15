@@ -108,10 +108,12 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
       const codexHome = options.codexHome ?? options.env?.CODEX_HOME ?? process.env.CODEX_HOME ??
         (options.inheritCodexHome ? join(homedir(), '.codex') : join(options.profileStateDir, 'codex-home'));
       const sharedEndpointAvailable = Boolean(await resolveSharedCodexEndpoint({ remote, codexHome }));
-      if ((options.model || options.reasoningEffort) && sharedEndpointAvailable) {
+      if (sharedEndpointAvailable) {
         await settingsClient.updateThreadSettings(options.threadId, {
           model: options.model,
           reasoningEffort: options.reasoningEffort,
+          cwd: options.cwd,
+          sandbox: options.sandbox,
         });
         log.info('agent', 'queue-settings-updated', {
           threadId: options.threadId,

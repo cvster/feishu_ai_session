@@ -5,7 +5,7 @@ import WebSocket from 'ws';
 import { nextCodexForkName } from './fork-name';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createPersistedCodexThread } from './lifecycle';
+import { createPersistedCodexThread, type PersistedThreadOptions } from './lifecycle';
 import type { CodexSubmissionInput, QueuedCodexSubmission } from './submission';
 import { reconcileCodexThreadSnapshot } from './turn-status';
 import { parseCodexInputRequest, type CodexInputPrompt, type CodexRequestId } from './user-input';
@@ -315,7 +315,8 @@ export class CodexThreadReader {
 
   async updateThreadSettings(
     threadId: string,
-    settings: { model?: string; reasoningEffort?: string },
+    settings: { model?: string; reasoningEffort?: string; cwd?: string;
+      sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access' },
   ): Promise<void> {
     if (!this.options.sharedServer) throw new Error('Thread settings require the shared Codex daemon');
     await this.ensureStarted();
@@ -323,6 +324,11 @@ export class CodexThreadReader {
       threadId,
       ...(settings.model ? { model: settings.model } : {}),
       ...(settings.reasoningEffort ? { effort: settings.reasoningEffort } : {}),
+      ...(settings.cwd ? { cwd: settings.cwd } : {}),
+      ...(settings.sandbox ? { approvalPolicy: 'never', sandboxPolicy:
+        settings.sandbox === 'danger-full-access' ? { type: 'dangerFullAccess' } :
+        settings.sandbox === 'read-only' ? { type: 'readOnly', networkAccess: false } :
+        { type: 'workspaceWrite', writableRoots: settings.cwd ? [settings.cwd] : [], networkAccess: false } } : {}),
     };
     try {
       await this.request('thread/settings/update', params);
@@ -330,7 +336,10 @@ export class CodexThreadReader {
       if (!(error instanceof Error) || !error.message.startsWith('thread not found:')) throw error;
       // Load dormant history only in the SAME writer daemon. Never fall back
       // to resuming through the read-only/embedded server and competing with App.
-      await this.request('thread/resume', { threadId });
+      await this.request('thread/resume', { threadId,
+        ...(settings.sandbox ? { approvalPolicy: 'never', sandbox: settings.sandbox } : {}),
+        ...(settings.cwd ? { cwd: settings.cwd } : {}),
+      });
       await this.request('thread/settings/update', params);
     }
   }
@@ -377,7 +386,7 @@ export class CodexThreadReader {
   }
 
   /** Create idle persisted history only. Task execution belongs to the writer. */
-  async createIdleThread(options: { cwd: string; sandbox: string; model?: string; reasoningEffort?: string; developerInstructions?: string }): Promise<string> {
+  async createIdleThread(options: PersistedThreadOptions): Promise<string> {
     return createPersistedCodexThread({ request: (method, params) => this.rpc(method, params) }, options);
   }
 

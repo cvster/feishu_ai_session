@@ -34,19 +34,26 @@ describe('CodexAdapter native queue mode', () => {
     expect(requests).not.toContain('turn/interrupt'); expect(requests).not.toContain('thread/queue/delete');
   });
 
-  it.each(['rpc', 'cli'] as const)('releases the fresh-thread creator before handing off to %s', async transport => {
+  it.each(['rpc', 'cli'] as const)('creates in the shared writer for RPC and releases the owned creator for CLI (%s)', async transport => {
     const fake = await createQueueCodex('inProgress', true); cleanup.push(fake.dir);
     const adapter = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir, codexHome: fake.dir,
       ...(transport === 'rpc' ? { appServerRemote: 'unix://' } : {}) });
     const prepared: string[] = [];
     const result = await adapter.submit({ runId: 'fresh-accept', cwd: fake.dir, prompt: 'first group message',
-      model: 'gpt-6.1-sol', reasoningEffort: 'high' }, async value => { prepared.push(value.threadId); });
+      model: 'gpt-6.1-sol', reasoningEffort: 'high', sessionName: 'AA-蓝图' }, async value => { prepared.push(value.threadId); });
     expect(result).toMatchObject({ status: 'accepted', transport, threadId: 'thread-existing' });
     expect(prepared).toEqual(['thread-existing']);
-    expect(await readFile(join(fake.dir, 'creator-released.txt'), 'utf8')).toBe('released');
+    if (transport === 'cli') expect(await readFile(join(fake.dir, 'creator-released.txt'), 'utf8')).toBe('released');
+    else await expect(readFile(join(fake.dir, 'creator-released.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
     expect(JSON.parse(await readFile(join(fake.dir, 'state.json'), 'utf8')).prompt).toBe('first group message');
-    const methods = (await readFile(join(fake.dir, 'requests.jsonl'), 'utf8')).trim().split('\n')
-      .map(line => JSON.parse(line).method);
+    const requests = (await readFile(join(fake.dir, 'requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const methods = requests.map(r => r.method);
+    expect(requests.find(r => r.method === 'thread/start')).toMatchObject({
+      transport: transport === 'rpc' ? 'shared' : 'owned',
+      params: { approvalPolicy: 'never', sandbox: 'danger-full-access', threadSource: 'user' },
+    });
+    expect(requests.find(r => r.method === 'thread/name/set').params.name).toBe('AA-蓝图');
+    if (transport === 'rpc') expect(methods).not.toContain('thread/resume');
     expect(methods.filter(method => method === 'thread/start')).toHaveLength(1);
     expect(methods).not.toContain('turn/start');
     expect(methods).not.toContain('turn/interrupt');
@@ -139,6 +146,8 @@ describe('CodexAdapter native queue mode', () => {
     expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'normal' });
     expect(JSON.parse(await readFile(join(fake.dir, 'settings.json'), 'utf8'))).toEqual({
       threadId: 'thread-existing', model: 'gpt-6-sol', effort: 'high',
+      cwd: fake.dir, approvalPolicy: 'never',
+      sandboxPolicy: { type: 'workspaceWrite', writableRoots: [fake.dir], networkAccess: false },
     });
   });
 
@@ -305,14 +314,15 @@ let socket;
 let loaded = ${JSON.stringify(!startUnloaded)};
 const send = value => socket ? socket.send(JSON.stringify(value)) : console.log(JSON.stringify(value));
 function handle(req) {
-  appendFileSync(${JSON.stringify(join(dir, 'requests.jsonl'))}, JSON.stringify(req) + '\\n');
+  appendFileSync(${JSON.stringify(join(dir, 'requests.jsonl'))}, JSON.stringify({ ...req, transport: args[1] === 'proxy' ? 'shared' : 'owned' }) + '\\n');
   if (req.method === 'initialize') {
     send({ id: req.id, result: { userAgent: 'fake' } });
     return;
   }
   if (req.method === 'thread/start') {
-    ownsCreatorLease = true;
-    writeFileSync(creatorLease, String(process.pid));
+    loaded = true;
+    ownsCreatorLease = args[1] !== 'proxy';
+    if (ownsCreatorLease) writeFileSync(creatorLease, String(process.pid));
     writeFileSync(${JSON.stringify(join(dir, 'started.txt'))}, 'idle');
     send({ id: req.id, result: { thread: { id: 'thread-existing' } } }); return;
   }

@@ -30,20 +30,23 @@ export async function submitCodexMessage(options: CodexSubmitOptions,
   const remote = await resolveSharedCodexEndpoint({ remote: options.remote ?? env.CODEX_QUEUE_REMOTE, codexHome: home });
   const shared = remote ? new CodexThreadReader({ ...base, sharedServer: true, passive: true, remote }) : undefined;
   try {
-    const threadId = options.threadId ?? await history.createIdleThread({ ...options, cwd: options.cwd, sandbox: options.sandbox ?? 'danger-full-access' });
-    const snapshot = await history.readThread(threadId);
-    // thread/start holds the new thread's writer lease in this owned process.
-    // Release it before the shared daemon resumes or the CLI queues input.
-    // Existing-thread history reads do not own that writer lease.
-    if (!options.threadId) await history.stop();
     let connected = false;
     if (shared) {
       try { await shared.connect(); connected = true; }
       catch (error) { log.warn('agent', 'submission-shared-unavailable', { message: String(error) }); }
     }
-    if ((options.model || options.reasoningEffort) && connected) {
-      await shared!.updateThreadSettings(threadId, { model: options.model, reasoningEffort: options.reasoningEffort });
-    } else if (options.model || options.reasoningEffort) {
+    // Create in Desktop's writer so its clients receive thread/started, and
+    // no independent creator lease or default-policy cold resume is needed.
+    // Never retry creation elsewhere after an ambiguous thread/start result.
+    const creator = connected ? shared! : history;
+    const threadId = options.threadId ?? await creator.createIdleThread({ ...options, cwd: options.cwd,
+      sandbox: options.sandbox ?? 'danger-full-access', name: options.sessionName, threadSource: 'user' });
+    const snapshot = await creator.readThread(threadId);
+    if (!options.threadId && !connected) await history.stop();
+    if (connected) {
+      await shared!.updateThreadSettings(threadId, { model: options.model, reasoningEffort: options.reasoningEffort,
+        cwd: options.cwd, sandbox: options.sandbox });
+    } else if (options.model || options.reasoningEffort || options.sandbox) {
       log.warn('agent', 'queue-settings-unavailable', { threadId,
         message: 'No public shared endpoint; queued input uses writer settings' });
     }

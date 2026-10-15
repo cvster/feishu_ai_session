@@ -5,6 +5,36 @@ import { CodexThreadReader } from '../../packages/codex-core/src/thread-client';
 import { submitCodexInput } from '../../packages/codex-core/src/submission';
 
 describe('public shared queue RPC', () => {
+  it.each(['read-only', 'workspace-write', 'danger-full-access'] as const)(
+    'preserves %s permissions on a cold resume and on subsequent turns without a model override', async sandbox => {
+      const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');
+      const address = server.address(); if (!address || typeof address === 'string') throw new Error('No address');
+      const requests: any[] = []; let loaded = false;
+      server.on('connection', socket => socket.on('message', bytes => {
+        const message = JSON.parse(bytes.toString()); requests.push(message);
+        if (message.id === undefined) return;
+        if (message.method === 'thread/resume') loaded = true;
+        socket.send(JSON.stringify(message.method === 'thread/settings/update' && !loaded
+          ? { id: message.id, error: { code: -32600, message: 'thread not found: dormant' } }
+          : { id: message.id, result: {} }));
+      }));
+      const reader = new CodexThreadReader({ binary: 'unused', profileStateDir: '.', sharedServer: true,
+        passive: true, remote: `ws://127.0.0.1:${address.port}` });
+      try {
+        await reader.updateThreadSettings('dormant', { sandbox, cwd: '/repo' });
+        await reader.updateThreadSettings('dormant', { sandbox, cwd: '/repo' });
+        expect(requests.filter(r => r.method === 'thread/resume').map(r => r.params))
+          .toEqual([{ threadId: 'dormant', approvalPolicy: 'never', sandbox, cwd: '/repo' }]);
+        const policy = sandbox === 'danger-full-access' ? { type: 'dangerFullAccess' }
+          : sandbox === 'read-only' ? { type: 'readOnly', networkAccess: false }
+          : { type: 'workspaceWrite', writableRoots: ['/repo'], networkAccess: false };
+        for (const r of requests.filter(r => r.method === 'thread/settings/update')) {
+          expect(r.params).toEqual({ threadId: 'dormant', cwd: '/repo', approvalPolicy: 'never', sandboxPolicy: policy });
+        }
+        expect(requests.some(r => ['turn/start', 'turn/interrupt', 'thread/queue/add'].includes(r.method))).toBe(false);
+      } finally { await reader.stop(); server.close(); }
+    });
+
   it.each(['interrupted', 'completed', 'active', 'failed-start'])('handles a new message after %s without resending input', async previous => {
     const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');
     const address = server.address(); if (!address || typeof address === 'string') throw new Error('No address');
