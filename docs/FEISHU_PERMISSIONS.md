@@ -42,7 +42,7 @@
 
 | 应用权限标识 | 用途 | 对应官方文档 |
 | --- | --- | --- |
-| `im:chat:create` | 从私聊创建个人工作群、为 AA 会话自动建群 | [创建群](https://open.feishu.cn/document/server-docs/group/chat/create) |
+| `im:chat:create` | 从私聊创建个人工作群、为 AA 会话自动建群、辅助群成员请求创建私聊群 | [创建群](https://open.feishu.cn/document/server-docs/group/chat/create) |
 | `im:chat:update` | 修改绑定群的名称、头像等可管理信息 | [更新群信息](https://open.feishu.cn/document/server-docs/group/chat/update-2) |
 | `im:chat.members:bot_access` | 订阅机器人入群事件，触发私聊关联流程 | [机器人进群](https://open.feishu.cn/document/server-docs/group/chat-member/event/added-2) |
 | `im:chat.members:write_only` | 所有者要求退出辅助群时，将当前应用机器人自身移出群 | [移出群成员](https://open.feishu.cn/document/server-docs/group/chat-member/delete) |
@@ -52,7 +52,7 @@
 | 应用权限标识 | 何时需要 |
 | --- | --- |
 | `im:chat:operate_as_owner` | 机器人创建群后将群主交给人类，但仍需管理其创建的群时；不是任意群的管理权 |
-| `im:chat.members:read` | 开启 FF 群成员私聊调用时必需：接收及执行前校验真实发送者仍在来源群内；也用于 CLI 查询群成员列表 |
+| `im:chat.members:read` | 创建或复用 FF 私聊群时核验来源群成员资格和私聊群成员完整性；也用于 CLI 查询群成员列表 |
 
 群管理权限不能代替群内角色校验，不能管理旧机器人或他人创建的任意群。本版归档保留飞书群，由用户自行解散；归档不需要申请 `im:chat:delete`。见 [群成员列表](https://open.feishu.cn/document/server-docs/group/chat-member/get)。
 
@@ -145,13 +145,13 @@ im:chat.members:write_only
 新申请优先使用表中的细粒度 scope。旧应用若已有 `im:chat`、`im:message` 等较宽权限，不必仅为匹配本文重复申请；具体接口通常列有多个可替代 scope，需分别核对。迁移时逐项验证后再移除旧权限。
 
 
-## FF 私聊调用的调用方配置
+## FF 私聊群
 
-桥接机器人增加应用权限 `im:chat.members:read` 并发布后，所有者才可完整使用群成员私聊调用。机器人原有私聊接收、发送权限继续使用，应用可用范围须包含相关同事。成员列表查询失败时拒绝调用，不降级为仅凭群 ID 放行。
+成员在已关联辅助群中 `@机器人 私聊`，复用现有建群接口，创建包含请求者、应用所有者和机器人的私有群。桥接应用需要 `im:chat:create`、`im:chat:read`、`im:chat.members:read`，以及现有群 @ 消息接收和机器人发送权限。创建群时通过 `user_id_list` 邀请成员，不额外调用加人接口；退出仍使用 `im:chat.members:write_only`。应用可用范围须包含相关成员及所有者；平台权限需实际发布生效。
 
-同事的 agent 使用自己的飞书 CLI 应用及用户授权，以 `--as user` 发送和读取与目标机器人的私聊，不能使用本项目机器人的 app secret 或冒充本项目 `--as bot`。调用方的 CLI 应用还需要相应用户消息发送、读取权限及用户授权（CLI `+messages-send` 文档要求 `im:message.send_as_user` 和 `im:message`；读消息按调用方接口申请）。若使用 `contact +search-bot` 发现机器人，调用方还需用户权限 `search:bot`；可按机器人名称和来源群 ID 搜索，取得该用户可用的机器人 open_id 及私聊 chat_id。调用方根据入口中的机器人信息解析自己的可用私聊入口，不直接复用其他应用的用户/机器人 open_id。
+创建前核验请求者仍是来源群成员，创建后或复用已有私聊群时核验成员完整；查询失败不按群 ID 直接放行。旧 `ff-dm-v1`、`/ff` 私聊问答已停用，同事无需为此配置机器人搜索或额外用户 CLI 授权。其他 agent 若通过飞书群发送消息，仍须使用各自真实用户身份及相应群消息权限；也可使用独立的 A2A 接口。
 
 
 ## FF 受限操作确认
 
-确认使用现有机器人消息与 CardKit 交互能力：发送机器人消息、`cardkit:card:write`、`card.action.trigger` 回调，以及识别应用所有者的应用信息权限。群内卡片使用真实所有者 open_id 的 @；私聊调用的确认卡发到所有者私聊。无需另申请原生飞书审批权限。确认只能对辅助提示词规则中的具体操作放宽，平台缺失 scope、账号授权或系统文件权限仍需实际开通。
+确认使用现有机器人消息与 CardKit 交互能力：发送机器人消息、`cardkit:card:write`、`card.action.trigger` 回调，以及识别应用所有者的应用信息权限。辅助群及私聊群的卡片使用真实所有者 open_id 的 @；A2A API 调用的确认卡发到所有者私聊。无需另申请原生飞书审批权限。确认只能对辅助提示词规则中的具体操作放宽，平台缺失 scope、账号授权或系统文件权限仍需实际开通。

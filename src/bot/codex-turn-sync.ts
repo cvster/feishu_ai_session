@@ -493,7 +493,7 @@ async function syncTurnToScope(
   if (!target) return;
   if (controls?.auxiliary?.isAuxiliary(scope)) {
     if (!controls.auxiliary.isActive(scope)) return;
-    icons = { ...icons, auxiliary: true, auxiliaryRunId: turn.id, auxiliaryScope: scope, privateRequestId: controls.auxiliary.privateRequest?.(scope)?.requestId };
+    icons = { ...icons, auxiliary: true, auxiliaryRunId: turn.id, auxiliaryScope: scope };
     await controls.auxiliary.trackRun(scope, turn.id, stored.replyTargets?.[scope]?.replyTo, !isCodexTurnTerminal(turn.status));
   }
   const waitingForInput = controls?.codexUserInput?.isWaiting(threadId, turn.id) ?? false;

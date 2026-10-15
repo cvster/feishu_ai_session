@@ -50,6 +50,8 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   const value = deps.evt.action.value;
   if (!value || typeof value !== 'object') return;
   const payload = value as Record<string, unknown>;
+  // Retired DM cards cannot redirect controls to another scope.
+  if (typeof payload.auxiliaryScope === 'string' && payload.auxiliaryScope !== deps.evt.chatId) return;
 
   const operatorId = deps.evt.operator.openId;
   const chatId = deps.evt.chatId;
@@ -69,12 +71,9 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   // and can skip the chat allowlist for DMs.
   const { scope, threadId, mode } = await resolveScope(deps);
 
-  const privateRequest = deps.controls.auxiliary?.privateRequest?.(scope);
-  const privateAllowed = privateRequest ? await deps.controls.auxiliary!.validatePrivate(scope, operatorId, chatId).catch(() => false) : false;
-  const accessDecision =
-    privateRequest ? { ok: privateAllowed, reason: 'allowed-chat' as const } : mode === 'p2p'
-      ? canUseDm(deps.controls.profileConfig, deps.controls, operatorId)
-      : canUseGroup(deps.controls.profileConfig, deps.controls, chatId, operatorId);
+  const accessDecision = mode === 'p2p'
+    ? canUseDm(deps.controls.profileConfig, deps.controls, operatorId)
+    : canUseGroup(deps.controls.profileConfig, deps.controls, chatId, operatorId);
   if (!accessDecision.ok) {
     log.info('cardAction', 'skip-not-allowed-user', {
       operator: operatorId.slice(-6),
@@ -85,7 +84,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
 
   if (deps.controls.auxiliary?.isAuxiliary(scope)) {
     const action = typeof payload.cmd === 'string' ? payload.cmd : '';
-    if (!deps.controls.auxiliary.isActive(scope) || !['stop', 'refresh'].includes(action) && !(privateRequest && typeof payload.__codex_input === 'string')) return;
+    if (!deps.controls.auxiliary.isActive(scope) || !['stop', 'refresh'].includes(action)) return;
     if (action === 'stop' && !deps.controls.auxiliary.canStop(scope, operatorId, payload.auxiliaryRunId)) return;
   }
   if (LEGACY_CLAUDE_CALLBACK_MARKER in payload) {
@@ -176,9 +175,6 @@ async function resolveScope(
   deps: CardDispatchDeps,
 ): Promise<{ scope: string; threadId: string | undefined; mode: 'p2p' | 'group' | 'topic' }> {
   const chatId = deps.evt.chatId;
-  const payload = deps.evt.action.value as Record<string, unknown> | undefined;
-  const privateScope = typeof payload?.auxiliaryScope === 'string' ? payload.auxiliaryScope : '';
-  if (privateScope && deps.controls.auxiliary?.privateRequest?.(privateScope)) return { scope: privateScope, threadId: undefined, mode: 'p2p' };
   if (deps.controls.auxiliary?.isAuxiliary(chatId)) return { scope: chatId, threadId: undefined, mode: 'group' };
   const mode = await deps.chatModeCache.resolve(deps.channel, chatId);
   if (mode !== 'topic') {

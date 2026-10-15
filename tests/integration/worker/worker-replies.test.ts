@@ -13,7 +13,7 @@ import type { Controls } from '../../../src/commands';
 
 async function repliesFixture(mode: 'card' | 'markdown' | 'text' = 'card', privateFF = false) {
   const h = await fixture();
-  const scope = privateFF ? 'oc_private:ffdm_request' : 'oc_group';
+  const scope = privateFF ? 'oc_private' : 'oc_group';
   if (privateFF) h.options.delivery = { ...h.options.delivery!, scope, chatId: 'oc_private', replyTo: 'om_private' };
   const bindings = new ToolBindingStore(join(h.dir, 'bindings.json')); await bindings.load();
   bindings.set(scope, { toolId: 'claude', sourceId: 'local-claude', nativeId: 'native', nativeCreated: false }); await bindings.flush();
@@ -28,7 +28,7 @@ async function repliesFixture(mode: 'card' | 'markdown' | 'text' = 'card', priva
     rawClient: { im: { v1: { message: { reply, patch } } } } } as unknown as LarkChannel;
   const activeRuns = new ActiveRuns();
   const statePath = join(h.dir, 'replies.json');
-  const start = () => startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath, intervalMs: 60_000, renderOptions: () => privateFF ? { auxiliary: true, auxiliaryScope: scope, privateRequestId: 'debug-1' } : {} });
+  const start = () => startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath, intervalMs: 60_000, renderOptions: () => privateFF ? { auxiliary: true, auxiliaryScope: scope } : {} });
   const job = await h.client.submit({ requestKey: 'message-one', options: h.options });
   await vi.waitFor(async () => expect((await h.client.snapshot(job.id)).events.length).toBeGreaterThan(1));
   return { ...h, job, bindings, catalog, sessions, activeRuns, channel, reply, patch, statePath, start };
@@ -101,7 +101,7 @@ it('delivers a private Claude FF result only as a reply to its private request, 
     await first.runNow();
     expect(h.reply).toHaveBeenCalledOnce();
     expect(h.reply.mock.calls[0]?.[0]).toMatchObject({ path: { message_id: 'om_private' }, data: { msg_type: 'interactive' } });
-    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('request_id=debug-1');
+    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).not.toContain('request_id=');
     await first.stop(); h.finish();
     await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('completed'));
     const recovered = await h.start();

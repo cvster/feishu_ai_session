@@ -14,7 +14,6 @@ export interface RunControlIcons {
   auxiliary?: boolean;
   auxiliaryRunId?: string;
   auxiliaryScope?: string;
-  privateRequestId?: string;
   forkIconKey?: string;
   buttonImageKeys?: Partial<Record<RunButtonAction, string>>;
 }

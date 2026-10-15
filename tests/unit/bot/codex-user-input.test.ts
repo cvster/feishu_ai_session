@@ -47,14 +47,14 @@ describe('Codex user input lifecycle', () => {
     questions: [{ id: 'q', header: '选择', question: '用哪个？', isOther: true, isSecret: false,
       options: [{ label: '选项 A', description: '推荐' }, { label: '选项 B', description: '兼容' }] }],
   }, respond: vi.fn(async () => true) });
-  it('routes FF native questions only to the matching private request scope', async () => {
+  it('routes FF native questions only to the matching private group', async () => {
     const h = await setup();
-    h.entries.push({ status: 'active', agentId: 'codex', threadId: 'thread', scopeId: 'oc_dm:ffdm_request', botAppId: 'cli_ours' });
-    h.controls.auxiliary = { isAuxiliary: () => true, isActive: () => true, privateRequest: (scope: string) => scope.includes('ffdm') ? {} : undefined } as any;
-    h.controls.codexSubmissions = { records: () => [{ threadId: 'thread', turnId: 'turn', scope: 'oc_dm:ffdm_request', replyTo: 'om_question' }] } as any;
+    h.entries.push({ status: 'active', agentId: 'codex', threadId: 'thread', scopeId: 'oc_privategroup', botAppId: 'cli_ours' });
+    h.controls.auxiliary = { isAuxiliary: () => true, isActive: () => true,  } as any;
+    h.controls.codexSubmissions = { records: () => [{ threadId: 'thread', turnId: 'turn', scope: 'oc_privategroup', replyTo: 'om_question' }] } as any;
     h.handle.accept(prompt(), 'stdio');
     await vi.waitFor(() => expect(h.channel.sent).toHaveLength(1));
-    expect(h.channel.sent[0]?.chatId).toBe('oc_dm');
+    expect(h.channel.sent[0]?.chatId).toBe('oc_privategroup');
     expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_question' });
     const card = JSON.stringify(h.channel.sent[0]?.content);
     expect(card).not.toContain('oc_group');

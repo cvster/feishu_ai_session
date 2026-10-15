@@ -90,7 +90,7 @@ export async function startCodexUserInput(deps: CodexInputDeps): Promise<CodexIn
       await persist(); // sequence reserved before remote update
       try {
         await deps.channel.updateCardById(delivery.cardId,
-          codexInputCard(record.request, delivery.token, pushedStatus, deps.controls.auxiliary?.privateRequest?.(delivery.scope) ? delivery.scope : undefined), delivery.sequence);
+          codexInputCard(record.request, delivery.token, pushedStatus), delivery.sequence);
         delivery.lastStatus = pushedStatus;
       } catch (err) { log.fail('codex-input', err, { step: 'update' }); }
     }
@@ -215,7 +215,7 @@ export async function startCodexUserInput(deps: CodexInputDeps): Promise<CodexIn
             const chatId = entry.scopeId.split(':')[0]!;
             const pushedStatus = displayStatus(record);
             const sent = await sendManagedCard(deps.channel, chatId,
-              codexInputCard(record.request, token, pushedStatus, deps.controls.auxiliary?.privateRequest?.(entry.scopeId) ? entry.scopeId : undefined), ownTarget);
+              codexInputCard(record.request, token, pushedStatus), ownTarget);
             record.deliveries.push({ scope: entry.scopeId, token, ...sent, sequence: 0, lastStatus: pushedStatus });
             await persist();
           }

@@ -11,6 +11,8 @@ export interface CreateBoundChatOptions {
   /** Human owner of the group. Defaults to the first invited user. */
   ownerOpenId?: string;
   description?: string;
+  /** Feishu create-chat idempotency key, persisted by the caller when needed. */
+  uuid?: string;
   /** Immutable execution tool selected for this session group. */
   toolId?: AgentKind;
 }
@@ -65,7 +67,7 @@ async function createTrackedChat(opts: CreateBoundChatOptions): Promise<CreatedC
     return undefined;
   }) : undefined;
   const response = await channel.rawClient.im.v1.chat.create({
-    params: { user_id_type: 'open_id' },
+    params: { user_id_type: 'open_id', ...(opts.uuid ? { uuid: opts.uuid } : {}) },
     data: {
       name,
       description,
@@ -77,7 +79,7 @@ async function createTrackedChat(opts: CreateBoundChatOptions): Promise<CreatedC
     },
   });
   const chatId = response.data?.chat_id;
-  if (!chatId) throw new Error(`Feishu returned no chat_id (${response.code ?? 'unknown'}): ${response.msg ?? 'unknown error'}`);
+  if (response.code || !chatId) throw new Error(`Feishu chat creation failed (${response.code ?? 'unknown'}): ${response.msg ?? 'missing chat_id'}`);
   bridgeCreatedChats.add(chatId);
   return { chatId, name };
 }

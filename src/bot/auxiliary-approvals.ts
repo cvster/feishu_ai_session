@@ -65,7 +65,7 @@ export class AuxiliaryApprovals {
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   private key(scope: string, messageId: string): string { return JSON.stringify([scope, messageId]); }
-  private privateDelivery(scope: string): boolean { return !!(this.deps.auxiliary.privateRequest(scope) || this.deps.auxiliary.apiRequest(scope)); }
+  private privateDelivery(scope: string): boolean { return !!this.deps.auxiliary.apiRequest(scope); }
   apiStatus(scope: string): AuxiliaryApproval['status'] | undefined {
     const r = Object.values(this.approvals).filter(r => r.scope === scope).at(-1);
     if (!r) return;
@@ -83,7 +83,7 @@ export class AuxiliaryApprovals {
   private current(r: AuxiliaryApproval): boolean {
     const binding = this.deps.bindings.get(r.scope);
     return this.deps.auxiliary.isActive(r.scope) && this.deps.auxiliary.get(r.scope)?.generation === r.generation &&
-      !this.deps.auxiliary.privateRequest(r.scope)?.cancelled && this.deps.ownerId() === r.ownerId &&
+      this.deps.ownerId() === r.ownerId &&
       binding?.sharedScope === r.sharedScope && binding.nativeId === r.nativeId;
   }
   grant(scope: string, messageIds: readonly string[], actorIds: readonly string[]): AuxiliaryApproval | undefined {
@@ -150,19 +150,13 @@ export class AuxiliaryApprovals {
         try { await this.continue(r); } catch (error) { await this.updateCard(r); throw error; }
       }
       await this.updateCard(r);
-      if (r.status === 'denied' && this.deps.auxiliary.privateRequest(r.scope)) await this.deps.channel.send(r.message.chatId,
-        { text: `request_id=${this.deps.auxiliary.privateRequest(r.scope)!.requestId} · denied 所有者已拒绝，本次受限操作未执行。` }, { replyTo: r.message.messageId });
     });
     return true;
   }
   private async continue(r: AuxiliaryApproval): Promise<void> {
     if (!this.current(r)) { r.status = 'stale'; await this.save(); return; }
-    const privateRequest = this.deps.auxiliary.privateRequest(r.scope);
     const apiRequest = this.deps.auxiliary.apiRequest(r.scope);
     if (apiRequest && !await this.deps.validateApi?.(r.scope)) { r.status = 'stale'; await this.save(); return; }
-    if (privateRequest && !await this.deps.auxiliary.validatePrivate(r.scope, r.actorId, r.message.chatId)) {
-      r.status = 'stale'; await this.save(); return;
-    }
     r.status = 'resuming'; await this.save();
     if (!r.receiptMessageId) {
       if (apiRequest) {
@@ -171,7 +165,7 @@ export class AuxiliaryApprovals {
       } else {
         try {
           const receipt = await this.deps.channel.send(r.message.chatId,
-            { text: `${privateRequest ? `request_id=${privateRequest.requestId} ` : ''}所有者已同意，继续执行本次确认的操作。` }, { replyTo: r.message.messageId, ...(r.message.threadId ? { replyInThread: true } : {}) });
+            { text: '所有者已同意，继续执行本次确认的操作。' }, { replyTo: r.message.messageId, ...(r.message.threadId ? { replyInThread: true } : {}) });
           r.receiptMessageId = receipt.messageId; await this.save();
         } catch (error) { r.status = 'unknown'; await this.save(); throw error; }
       }

@@ -23,7 +23,7 @@ import { commandSessionCatalogIdentity } from '../../../src/bot/session-catalog-
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const f of cleanups.splice(0).reverse()) await f(); });
 const originalId = '11111111-1111-4111-8111-111111111111';
-async function harness(status: 'pending' | 'active' = 'active', twoGroups = false, allowPrivate = false) {
+async function harness(status: 'pending' | 'active' = 'active', twoGroups = false) {
   const tmp = await createTmpProfile('aux-intake-'); cleanups.push(() => tmp.cleanup());
   const home = join(tmp.profile, 'codex-home'); await mkdir(home);
   const history = join(home, `${originalId}.jsonl`); await writeFile(history, 'source');
@@ -36,9 +36,9 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
   }
   await bindings.flush();
   await writeFile(join(tmp.profile, 'auxiliary-groups.json'), JSON.stringify({ version: 1, appId: 'cli_test', groups: {
-    oc_aux: { chatId: 'oc_aux', name: '讨论', generation: 'generation', ownerId: 'ou_owner', status, notified: true, allowPrivate, privateBindingId: 'private-entry',
+    oc_aux: { chatId: 'oc_aux', name: '讨论', generation: 'generation', ownerId: 'ou_owner', status, notified: true,
       ...(status === 'active' ? { source, cwd: tmp.workspace } : {}) },
-    ...(twoGroups ? { oc_aux_2: { chatId: 'oc_aux_2', name: '第二群', generation: 'generation-b', ownerId: 'ou_owner', status, notified: true, allowPrivate, privateBindingId: 'private-entry', source, cwd: tmp.workspace } } : {}),
+    ...(twoGroups ? { oc_aux_2: { chatId: 'oc_aux_2', name: '第二群', generation: 'generation-b', ownerId: 'ou_owner', status, notified: true, source, cwd: tmp.workspace } } : {}),
   } }));
   const channel = createFakeChannel(); const handlers: { message?: (m: NormalizedMessage) => Promise<void> } = {};
   const download = vi.fn(async () => { throw new Error('must not download'); });
@@ -49,7 +49,8 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
     addReaction: async () => 'reaction', removeReaction: async () => {}, downloadResourceToFile: download,
   });
   const memberGet = vi.fn(async () => ({ code: 0, data: { items: [{ member_id: 'ou_colleague' }, { member_id: 'ou_owner' }] } }));
-  Object.assign(channel.rawClient.im.v1.chat, { get: async () => ({ code: 0, data: { chat_mode: 'group' } }) });
+  const createGroup = vi.fn(async (..._args: unknown[]) => ({ code: 0, data: { chat_id: 'oc_privategroup' } }));
+  Object.assign(channel.rawClient.im.v1.chat, { get: async () => ({ code: 0, data: { name: 'C系列-Agent对话', chat_mode: 'group' } }), create: createGroup });
   Object.assign(channel.rawClient.im.v1, { chatMembers: { get: memberGet } });
   const profile = createDefaultProfileConfig({ agentKind: 'codex', accounts: { app: { id: 'cli_test', secret: 's', tenant: 'feishu' } },
     codex: { binaryPath: 'codex', codexHome: home }, access: { allowedChats: [], allowedUsers: ['ou_owner'], requireMentionInGroup: false },
@@ -74,7 +75,7 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
     await handlers.message!({ messageId: `om_${++count}`, chatId: 'oc_aux', chatType: 'group', threadId: 'topic-a', senderId: 'ou_colleague',
       content: '同事的问题', rawContentType: 'text', resources: [], mentions: [], mentionAll: false, mentionedBot: true, createTime: Date.now(), ...overrides });
   }
-  return { controls, channel, submit, message, download, history, memberGet, catalog, workspaces, cwd: tmp.workspace, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
+  return { controls, channel, submit, message, download, history, memberGet, createGroup, catalog, workspaces, cwd: tmp.workspace, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
 }
 it('accepts direct owner messages in the FF personal workgroup using the same FF session and normal permissions', async () => {
   const h = await harness();
@@ -177,56 +178,53 @@ it('queues simultaneous group requests against one shared FF native conversation
 });
 
 
-function privateInput(overrides: Record<string, unknown> = {}) {
-  return JSON.stringify({ protocol: 'ff-dm-v1', bot_app_id: 'cli_test', group_id: 'oc_aux', binding_id: 'private-entry',
-    request_id: 'debug-1', question: '只在私聊调试', ...overrides });
-}
-it('routes a coworker private request through the durable FF pipeline without opening ordinary DM access', async () => {
-  const h = await harness('active', false, true);
-  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, mentionedBot: false, content: privateInput() });
-  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
-  const prompt = JSON.parse(h.submit.mock.calls[0]?.[0].prompt);
-  expect(prompt.context).toMatchObject({ chat_id: 'oc_dm', request_id: 'debug-1', channel: 'p2p', actor: 'member' });
-  expect(prompt.rules.permissions).toContain('不修改项目源码'); expect(prompt.rules.delivery).toContain('禁止发送到任何群');
-  const record = h.controls.codexSubmissions!.records()[0]!;
-  expect(record.scope).toMatch(/^oc_dm:ffdm_/); expect(record.messages[0]?.chatId).toBe('oc_dm');
-  expect(record.replyInThread).not.toBe(true);
-  expect(h.controls.toolBindings?.get(record.scope)?.sharedScope).toBe(h.controls.toolBindings?.get('oc_aux')?.sharedScope);
-  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, content: '普通私聊不应进入FF' });
-  expect(h.submit).toHaveBeenCalledTimes(1);
-  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, content: privateInput() });
-  expect(h.submit).toHaveBeenCalledTimes(1);
-  expect(JSON.stringify(h.channel.sent)).toContain('不会重复执行');
-  expect(h.channel.sent.every(m => m.chatId === 'oc_dm')).toBe(true);
-});
-it('rejects disabled entries, outsider identities and bot callers without submitting or resolving attachments', async () => {
-  const off = await harness(); await off.message({ chatId: 'oc_dm', chatType: 'p2p', content: privateInput() });
-  expect(off.submit).not.toHaveBeenCalled();
-  const h = await harness('active', false, true);
-  await h.message({ chatId: 'oc_dm', chatType: 'p2p', senderId: 'ou_outsider', content: privateInput() });
-  await h.message({ chatId: 'oc_dm', chatType: 'p2p', raw: { sender: { sender_type: 'app' } }, content: privateInput() });
+it('creates a private group only for an actual human @bot 私聊 without invoking the model', async () => {
+  const h = await harness();
+  await h.message({ content: '私聊', mentionedBot: false });
+  await h.message({ content: '私聊', mentionAll: true });
+  await h.message({ content: '私聊', raw: { sender: { sender_type: 'app' } } });
+  expect(h.createGroup).not.toHaveBeenCalled();
+  await h.message({ content: '私聊' });
+  expect(h.createGroup).toHaveBeenCalledOnce();
+  expect(h.createGroup.mock.calls[0]![0]).toMatchObject({ data: { name: '私聊-C系列-Agent对话', user_id_list: ['ou_owner', 'ou_colleague'] } });
   expect(h.submit).not.toHaveBeenCalled(); expect(h.download).not.toHaveBeenCalled();
+  expect(h.controls.codexSubmissions?.records()).toHaveLength(0);
+  await h.message({ content: '私聊' }); expect(h.createGroup).toHaveBeenCalledOnce();
+  await h.message({ chatId: 'oc_privategroup', content: '私聊', threadId: undefined });
+  expect(h.createGroup).toHaveBeenCalledOnce(); expect(h.submit).not.toHaveBeenCalled();
+  expect(JSON.stringify(h.channel.sent)).toContain('已经是私聊群');
 });
-it('rechecks membership before queue execution and keeps commands inside question data', async () => {
-  const h = await harness('active', false, true);
-  h.memberGet.mockResolvedValueOnce({ code: 0, data: { items: [{ member_id: 'ou_colleague' }] } })
-    .mockResolvedValue({ code: 0, data: { items: [] } });
-  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, content: privateInput({ question: '/cd /etc' }) });
-  await vi.waitFor(() => expect(h.controls.codexSubmissions!.records()[0]?.status).toBe('rejected'), { timeout: 3000 });
-  expect(h.submit).not.toHaveBeenCalled();
+it('routes private group questions to the shared FF while keeping replies and permissions in that group', async () => {
+  const h = await harness(); await h.message({ content: '私聊' });
+  await h.message({ chatId: 'oc_privategroup', threadId: undefined, content: '只在新群调试' });
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledOnce(), { timeout: 3000 });
+  const prompt = JSON.parse(h.submit.mock.calls[0]![0].prompt);
+  expect(prompt.context).toMatchObject({ chat_id: 'oc_privategroup', actor: 'member' });
+  expect(prompt.rules.permissions).toContain('不修改项目源码');
+  expect(prompt.rules.delivery).toContain('不沿用历史群ID');
+  expect(h.controls.toolBindings?.get('oc_privategroup')?.sharedScope).toBe(h.controls.toolBindings?.get('oc_aux')?.sharedScope);
+  expect(h.controls.codexSubmissions!.records()[0]?.scope).toBe('oc_privategroup');
+  await h.message({ content: '在原群继续' });
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
+  expect(h.submit.mock.calls[1]![0].threadId).toBe('ff-independent');
+  expect(JSON.parse(h.submit.mock.calls[1]![0].prompt).context.chat_id).toBe('oc_aux');
 });
-it('does not execute a private request stopped while it is still queued', async () => {
-  const h = await harness('active', false, true);
-  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, content: privateInput() });
-  await h.message({ chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, content: privateInput({ action: 'stop' }) });
-  expect(h.submit).not.toHaveBeenCalled();
-  expect(h.controls.codexSubmissions!.records()[0]?.status).toBe('rejected');
-  expect(JSON.stringify(h.channel.sent)).toContain('已取消待处理输入');
+it('returns a migration notice for retired bot-DM requests without entering the model or console', async () => {
+  const h = await harness();
+  for (const senderId of ['ou_colleague', 'ou_owner']) {
+    await h.message({ senderId, chatId: 'oc_dm', chatType: 'p2p', threadId: undefined, content: '/ff {broken' });
+    await h.message({ senderId, chatId: 'oc_dm', chatType: 'p2p', content: JSON.stringify({ protocol: 'ff-dm-v1', question: 'do something' }) });
+  }
+  expect(h.submit).not.toHaveBeenCalled(); expect(h.createGroup).not.toHaveBeenCalled();
+  expect(h.controls.codexSubmissions?.records()).toHaveLength(0);
+  expect(JSON.stringify(h.channel.sent)).toContain('旧私聊接口已停用');
 });
 
-it.each([false, true])('continues an approved FF request through the durable queue without granting neighboring messages (private=%s)', async privateEntry => {
-  const h = await harness('active', false, true);
-  const original = privateEntry ? { chatId: 'oc_dm', chatType: 'p2p' as const, threadId: undefined, mentionedBot: false, content: privateInput() } : { content: '请修改本机项目源码' };
+it.each([false, true])('continues an approved FF request through the durable queue without granting neighboring messages (privateGroup=%s)', async privateEntry => {
+  const h = await harness('active');
+  if (privateEntry) await h.message({ content: '私聊' });
+  const targetChat = privateEntry ? 'oc_privategroup' : 'oc_aux';
+  const original = { chatId: targetChat, content: '请修改本机项目源码' };
   await h.message(original);
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
   const initial = h.controls.codexSubmissions!.records()[0]!;
@@ -235,17 +233,16 @@ it.each([false, true])('continues an approved FF request through the durable que
     { blocks: [{ kind: 'text', content: approvalText, streaming: false }], terminal: 'done', reasoning: { content: '', active: false }, footer: null });
   const ledger = JSON.parse(await readFile(h.approvalsPath, 'utf8'));
   const approval = Object.values(ledger.approvals)[0] as any;
-  const click = { chatId: privateEntry ? 'oc_owner_dm' : 'oc_aux', messageId: approval.cardMessageId,
+  const click = { chatId: targetChat, messageId: approval.cardMessageId,
     operator: { openId: 'ou_owner' }, action: { value: { cmd: 'auxiliary.approval', id: approval.id, decision: 'approve' } } };
   const originalMode = (h.channel as any).getChatMode;
-  if (privateEntry) (h.channel as any).getChatMode = async () => 'p2p';
   await h.controls.auxiliaryApprovals!.action(click as any);
   if (!privateEntry) await h.message({ content: '同事紧跟着的新问题' });
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(privateEntry ? 2 : 3), { timeout: 4000 });
   const continued = JSON.parse(h.submit.mock.calls[1]![0].prompt);
   expect(continued.context.actor).toBe('member');
   expect(continued.context.approval).toEqual({ id: approval.id, action: '修改本机项目源码 src/main.ts', ownerId: 'ou_owner' });
-  expect(continued.context.chat_id).toBe(privateEntry ? 'oc_dm' : 'oc_aux');
+  expect(continued.context.chat_id).toBe(targetChat);
   expect(continued.rules.permissions).toContain('其余操作仍受限');
   if (!privateEntry) expect(JSON.parse(h.submit.mock.calls[2]![0].prompt).context.approval).toBeUndefined();
   await h.controls.auxiliaryApprovals!.action(click as any);

@@ -51,7 +51,6 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     elements.push(noteMd('_（未返回内容）_'));
   }
 
-  if (options.privateRequestId) elements.unshift(noteMd(`request_id=${options.privateRequestId} · ${state.permissionApproval === 'pending' ? 'waiting_approval' : state.permissionApproval ?? state.terminal}`));
   const footerStart = elements.length;
   if (state.terminal === 'running') {
     const status = renderColoredRunStatus(state);

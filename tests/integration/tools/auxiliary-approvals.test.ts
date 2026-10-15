@@ -20,7 +20,7 @@ const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 const requestText = JSON.stringify({ type: 'ff_permission_request', action: '修改本机项目源码 src/main.ts', reason: '修改本机项目源码受辅助权限限制' });
 const state = (): RunState => ({ ...initialState, terminal: 'done', blocks: [{ kind: 'text', content: requestText, streaming: false }] });
-async function setup(privateRequest = false, toolId: 'codex' | 'claude' = 'codex') {
+async function setup(privateGroup = false, toolId: 'codex' | 'claude' = 'codex') {
   const dir = await mkdtemp(join(tmpdir(), 'ff-approval-')); dirs.push(dir);
   const path = join(dir, 'approvals.json'); const source = { toolId, sourceId: dir,
     nativeId: '11111111-1111-4111-8111-111111111111', historyPath: join(dir, 'history') }; await writeFile(source.historyPath, 'source');
@@ -28,8 +28,7 @@ async function setup(privateRequest = false, toolId: 'codex' | 'claude' = 'codex
   bindings.set('aux_shared', { toolId, sourceId: dir, nativeId: 'ff-native', nativeCreated: true, linkedSource: source, name: 'FF-test' });
   bindings.linkAuxiliary('oc_group', 'aux_shared'); await bindings.flush();
   const groupsPath = join(dir, 'groups'); await writeFile(groupsPath, JSON.stringify({ version: 1, appId: 'cli_bot', groups: {
-    oc_group: { chatId: 'oc_group', name: '测试群', generation: 'g1', ownerId: 'ou_owner', status: 'active', source, cwd: dir,
-      allowPrivate: true, privateBindingId: 'entry' },
+    oc_group: { chatId: 'oc_group', name: '测试群', generation: 'g1', ownerId: 'ou_owner', status: 'active', source, cwd: dir },
   } }));
   let now = 1000; let owner = 'ou_owner'; let sent = 0;
   const cards: object[] = [];
@@ -38,23 +37,23 @@ async function setup(privateRequest = false, toolId: 'codex' | 'claude' = 'codex
   const update = vi.fn(async (..._args: unknown[]) => {});
   const channel = { botIdentity: { openId: 'ou_bot' }, createCard: vi.fn(async (card: object) => { cards.push(card); return { cardId: `card${cards.length}` }; }),
     send, updateCardById: update, getChatMode: async () => 'p2p', rawClient: { im: { v1: {
-      chat: { get: async () => ({ code: 0, data: { chat_mode: 'group' } }) },
+      chat: { get: async () => ({ code: 0, data: { chat_mode: 'group', name: '测试群' } }), create: async () => ({ code: 0, data: { chat_id: 'oc_privategroup' } }) },
       chatMembers: { get: async () => ({ code: 0, data: { items: [{ member_id: 'ou_member' }, { member_id: 'ou_owner' }] } }) },
       message: { create },
     } } } } as unknown as LarkChannel;
   const auxiliary = new AuxiliaryGroups({ path: groupsPath, appId: 'cli_bot', channel, bindings, tools: new ToolRegistry(),
     sessions: new SessionStore(join(dir, 'sessions')), workspaces: new WorkspaceStore(join(dir, 'workspaces')),
     ownerId: () => owner, refreshOwner: async () => {}, cancelPending: async () => {} }); await auxiliary.load();
-  const scope = privateRequest ? (await auxiliary.acceptPrivate({ protocol: 'ff-dm-v1', bot_app_id: 'cli_bot', group_id: 'oc_group',
-    binding_id: 'entry', request_id: 'debug-1', question: '请修改源码' }, 'oc_memberdm', 'ou_member', 'om_question')).scope : 'oc_group';
-  const message = { messageId: 'om_question', chatId: privateRequest ? 'oc_memberdm' : 'oc_group', chatType: privateRequest ? 'p2p' : 'group',
+  const scope = privateGroup ? (await auxiliary.createPrivateGroup('oc_group', 'ou_member')).chatId : 'oc_group';
+  send.mockClear();
+  const message = { messageId: 'om_question', chatId: scope, chatType: 'group',
     senderId: 'ou_member', content: '请修改源码', resources: [], mentions: [], mentionAll: false, mentionedBot: true, createTime: 1, rawContentType: 'text' } as NormalizedMessage;
   const resume = vi.fn(async (_r: unknown) => {});
   const deps = { path, channel, auxiliary, bindings, ownerId: () => owner, resume, now: () => now };
   const approvals = new AuxiliaryApprovals(deps); await approvals.load(); await approvals.remember(scope, [message], message.content);
   const read = async () => JSON.parse(await readFile(path, 'utf8'));
   async function approval() { return Object.values((await read()).approvals)[0] as any; }
-  async function event(decision = 'approve', actor = 'ou_owner', messageId = 'om_approval', chatId = privateRequest ? 'oc_ownerdm' : 'oc_group'): Promise<CardActionEvent> {
+  async function event(decision = 'approve', actor = 'ou_owner', messageId = 'om_approval', chatId = scope): Promise<CardActionEvent> {
     return { messageId, chatId, operator: { openId: actor }, action: { value: { cmd: 'auxiliary.approval', id: (await approval()).id, decision } } } as CardActionEvent;
   }
   return { dir, deps, auxiliary, bindings, approvals, scope, message, resume, channel, create, send, update, cards, read, approval, event,
@@ -84,18 +83,18 @@ it('only accepts the real owner on the original card and resumes once for duplic
   expect(h.approvals.grant(h.scope, [r.receiptMessageId], ['ou_intruder'])).toBeUndefined();
   expect(h.approvals.grant('oc_other', [r.receiptMessageId], ['ou_member'])).toBeUndefined();
 });
-it('sends private entry approvals only to the owner and keeps continuation in the requester DM', async () => {
+it('posts private-group confirmations in that group and continues only there', async () => {
   const h = await setup(true); await h.approvals.review(h.scope, 'run', 'om_question', state());
-  expect(h.create.mock.calls[0]?.[0]).toMatchObject({ params: { receive_id_type: 'open_id' }, data: { receive_id: 'ou_owner' } });
+  expect(h.create.mock.calls[0]?.[0]).toMatchObject({ params: { receive_id_type: 'chat_id' }, data: { receive_id: 'oc_privategroup' } });
   await h.approvals.action(await h.event());
-  expect(h.send.mock.calls[0]?.[0]).toBe('oc_memberdm');
+  expect(h.send.mock.calls[0]?.[0]).toBe('oc_privategroup');
   const r = await h.approval(); const grant = h.approvals.grant(h.scope, [r.receiptMessageId], ['ou_member'])!;
   const prompt = JSON.parse(await h.auxiliary.wrapPrompt(h.scope, '继续', ['ou_member'], { id: grant.id, action: grant.action, ownerId: grant.ownerId }));
-  expect(prompt.context).toMatchObject({ actor: 'member', chat_id: 'oc_memberdm', approval: { action: '修改本机项目源码 src/main.ts' } });
+  expect(prompt.context).toMatchObject({ actor: 'member', chat_id: 'oc_privategroup', approval: { action: '修改本机项目源码 src/main.ts' } });
   expect(prompt.rules.permissions).toContain('仅对context.approval.action'); expect(prompt.rules.permissions).toContain('其余操作仍受限');
   expect(prompt.mode).toBe('full');
 });
-it('rejects a denial, expired card, changed owner, changed FF or revoked private entry', async () => {
+it('rejects a denial, expired card, changed owner, changed FF or archived private group', async () => {
   const denied = await setup(); await denied.approvals.review(denied.scope, 'run', 'om_question', state());
   await denied.approvals.action(await denied.event('deny')); await denied.approvals.action(await denied.event());
   expect(denied.resume).not.toHaveBeenCalled(); expect((await denied.approval()).status).toBe('denied');
@@ -107,7 +106,7 @@ it('rejects a denial, expired card, changed owner, changed FF or revoked private
   const changed = await setup(); await changed.approvals.review(changed.scope, 'run', 'om_question', state()); changed.owner('ou_new');
   await changed.approvals.action(await changed.event()); expect(changed.resume).not.toHaveBeenCalled();
   const revoked = await setup(true); await revoked.approvals.review(revoked.scope, 'run', 'om_question', state());
-  revoked.auxiliary.get('oc_group')!.allowPrivate = false;
+  revoked.auxiliary.get(revoked.scope)!.status = 'archived';
   await revoked.approvals.action(await revoked.event()); expect((await revoked.approval()).status).toBe('stale');
 });
 it('accepts pending callbacks after restart with the same persisted card identity', async () => {
@@ -177,12 +176,12 @@ it.each([false, true])('routes a completed Claude permission response to the cor
   const publisher = await startWorkerReplies({ adapter: { client: { sourceId: h.dir, list: async () => [job], snapshot: async () => snapshot } } as any,
     channel: h.channel, controls: { profileConfig: profile, cfg: profile, toolBindings: h.bindings, auxiliary: h.auxiliary, auxiliaryApprovals: h.approvals } as any,
     sessions, catalog, activeRuns: new ActiveRuns(), statePath: join(h.dir, 'replies'), intervalMs: 60_000,
-    renderOptions: () => ({ auxiliary: true, ...(privateEntry ? { privateRequestId: 'debug-1' } : {}) }) });
+    renderOptions: () => ({ auxiliary: true }) });
   try {
-    await publisher.runNow(); expect(h.create.mock.calls[0]?.[0]).toMatchObject({ data: { receive_id: privateEntry ? 'ou_owner' : 'oc_group' } });
+    await publisher.runNow(); expect(h.create.mock.calls[0]?.[0]).toMatchObject({ data: { receive_id: privateEntry ? 'oc_privategroup' : 'oc_group' } });
     expect(reply.mock.calls[0]?.[0]).toMatchObject({ path: { message_id: 'om_question' } });
     expect(h.cards).toHaveLength(2); expect(JSON.stringify(h.cards[1])).not.toContain('ff_permission_request');
-    if (privateEntry) expect(JSON.stringify(h.cards[1])).toContain('waiting_approval');
+    if (privateEntry) expect(JSON.stringify(h.cards[0])).toContain('<at id=ou_owner></at>');
     await h.approvals.action(await h.event()); expect(h.resume).toHaveBeenCalledOnce();
   } finally { await publisher.stop(); await catalog.flush(); await sessions.flush(); }
 });

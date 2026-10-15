@@ -1,7 +1,7 @@
 import { auxiliaryLinkError } from './auxiliary-membership';
 import { AuxiliaryApprovals } from './auxiliary-approvals';
 import { AuxiliaryGroups } from './auxiliary-groups';
-import { parsePrivateFFInput } from './auxiliary-private';
+import { isRetiredPrivateInput } from './auxiliary-private';
 import { startA2AServer } from '../a2a/server';
 import { createA2ARunner } from '../a2a/runner';
 import { NativeSessionLocks } from '../tools/locks';
@@ -381,7 +381,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       });
       try {
         const drain = async () => {
-          const resolvedMode = controls.auxiliary?.privateRequest?.(scope) ? 'p2p' : await chatModeCache.resolve(channel, firstMsg.chatId);
+          const resolvedMode = await chatModeCache.resolve(channel, firstMsg.chatId);
           // Feishu/Lark converted topic groups may still resolve as `group` from
           // the chat info API/cache, while message events already carry threadId.
           // Treat threadId as authoritative for IM messages so scope and replies
@@ -675,7 +675,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         }
       },
       renderOptions: job => ({ ...controls.runControlIcons,
-        ...(controls.auxiliary?.isAuxiliary(job.options.delivery?.scope ?? '') ? { auxiliary: true, auxiliaryRunId: job.id, auxiliaryScope: job.options.delivery?.scope, privateRequestId: controls.auxiliary?.privateRequest?.(job.options.delivery?.scope ?? '')?.requestId } : {}),
+        ...(controls.auxiliary?.isAuxiliary(job.options.delivery?.scope ?? '') ? { auxiliary: true, auxiliaryRunId: job.id, auxiliaryScope: job.options.delivery?.scope } : {}),
         ...(callbackAuth && job.options.delivery && !controls.auxiliary?.isAuxiliary(job.options.delivery.scope) ? { signCallback: action => callbackAuth.sign({
           runId: job.id, scope: job.options.delivery!.scope, chatId: job.options.delivery!.chatId,
           operatorOpenId: job.options.delivery!.operatorOpenId, action,
@@ -857,37 +857,24 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     executor: primaryExecutor,
     pool,
   } = deps;
-  let msg = incomingMessage;
+  const msg = incomingMessage;
   if (msg.chatType !== 'p2p' && sessionCatalog?.isScopeArchived(msg.chatId)) return;
   const auxiliary = rootControls.auxiliary;
-  let privateScope: string | undefined;
-  let privateAction: 'ask' | 'stop' | 'refresh' = 'ask';
-  if (msg.chatType === 'p2p' && auxiliary) {
-    try {
-      const input = parsePrivateFFInput(msg.content);
-      if (input) {
-        const raw = msg.raw as { sender?: { sender_type?: string }; event?: { sender?: { sender_type?: string } } } | undefined;
-        const kind = raw?.sender?.sender_type ?? raw?.event?.sender?.sender_type;
-        if (kind === 'app' || kind === 'bot' || msg.senderId === channel.botIdentity?.openId) return;
-        const accepted = await auxiliary.acceptPrivate(input, msg.chatId, msg.senderId, msg.messageId);
-        privateScope = accepted.scope; privateAction = input.action ?? 'ask';
-        if (accepted.duplicate && privateAction === 'ask') {
-          await channel.send(msg.chatId, { text: `request_id=${input.request_id} 已使用，不会重复执行。请查看原私聊请求的回复，或使用 refresh。` }, { replyTo: msg.messageId }); return;
-        }
-        msg = { ...msg, threadId: undefined, content: privateAction === 'ask' ? input.question! : `/${privateAction}` };
-        if (privateAction === 'ask') await auxiliary.noteRequest(privateScope, msg.messageId, msg.senderId);
-      }
-    } catch (error) {
-      await channel.send(msg.chatId, { text: `FF 私聊调用未受理：${error instanceof Error ? error.message : String(error)}` }, { replyTo: msg.messageId }); return;
-    }
+  if (msg.chatType === 'p2p' && isRetiredPrivateInput(msg.content)) {
+    const raw = msg.raw as { sender?: { sender_type?: string }; event?: { sender?: { sender_type?: string } } } | undefined;
+    const senderType = raw?.sender?.sender_type ?? raw?.event?.sender?.sender_type;
+    if (senderType !== 'app' && senderType !== 'bot' && msg.senderId !== channel.botIdentity?.openId)
+      await channel.send(msg.chatId, { text: '旧私聊接口已停用。请在已关联的辅助群中 @我发送“私聊”，创建私聊群后提问。' }, { replyTo: msg.messageId });
+    return;
   }
   const auxiliaryGroup = msg.chatType !== 'p2p' ? auxiliary?.get(msg.chatId) : undefined;
   if (auxiliaryGroup) {
     const raw = msg.raw as { sender?: { sender_type?: string }; event?: { sender?: { sender_type?: string } } } | undefined;
     const senderType = raw?.sender?.sender_type ?? raw?.event?.sender?.sender_type;
     if (!msg.mentionedBot || msg.mentionAll || senderType === 'app' || senderType === 'bot' || msg.senderId === channel.botIdentity?.openId) return;
-    if (auxiliaryGroup.status !== 'active' && !(msg.content.trim() === '退出' && msg.senderId === auxiliaryGroup.ownerId)) {
-      await channel.send(msg.chatId, { text: '辅助群尚未完成关联，或正在退出。请所有者私聊发送 /aux。' }, { replyTo: msg.messageId });
+    if (!auxiliary!.isActive(msg.chatId) && !(msg.content.trim() === '退出' && msg.senderId === auxiliaryGroup.ownerId)) {
+      await channel.send(msg.chatId, { text: auxiliaryGroup.privateGroup ? '私聊群暂未准备完成或已失效，请回辅助群重新 @我发送“私聊”，或联系所有者检查。'
+        : '辅助群尚未完成关联，或正在退出。请所有者私聊发送 /aux。' }, { replyTo: msg.messageId });
       return;
     }
     await auxiliary!.noteRequest(msg.chatId, msg.messageId, msg.senderId);
@@ -895,7 +882,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
-  const resolvedMode = privateScope ? 'p2p' : await chatModeCache.resolve(channel, msg.chatId);
+  const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
   // Feishu delivers a sizable fraction of topic-group message events without a
   // `thread_id` (notably the message that opens a new topic). We route topic
   // replies (`replyInThread`) and isolate per-topic session scope off it, so a
@@ -930,9 +917,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       threadId,
     });
   }
-  const scope = privateScope ?? (!auxiliaryGroup && chatMode === 'topic' && threadId
+  const scope = !auxiliaryGroup && chatMode === 'topic' && threadId
     ? `${msg.chatId}:${threadId}`
-    : msg.chatId);
+    : msg.chatId;
   if (msg.chatType !== 'p2p' && sessionCatalog?.isScopeArchived(scope)) return;
   const toolId = toolForScope(rootControls, scope);
   const controls = controlsForTool(rootControls, toolId, scope);
@@ -954,7 +941,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   });
 
   const accessDecision =
-    privateScope ? { ok: true, reason: 'allowed-chat' as const } : msg.chatType === 'p2p'
+    msg.chatType === 'p2p'
       ? canUseDm(controls.profileConfig, controls, msg.senderId)
       : canUseGroup(controls.profileConfig, controls, msg.chatId, msg.senderId);
   if (!accessDecision.ok) {
@@ -998,12 +985,20 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     log.info('intake', 'solo-chat-no-mention-allowed', { scope, chatType: msg.chatType });
   }
 
-  if (privateScope && privateAction === 'refresh') {
-    await controls.codexReplySync?.runNow(); await controls.claudeReplySync?.runNow();
-    await channel.send(msg.chatId, { text: `request_id=${auxiliary?.privateRequest?.(privateScope)?.requestId} 已请求刷新原回复；不会重新执行。` }, { replyTo: msg.messageId }); return;
+  if (auxiliaryGroup && msg.content.trim() === '私聊') {
+    try {
+      if (auxiliaryGroup.privateGroup) {
+        await channel.send(msg.chatId, { text: '这里已经是私聊群，请直接 @我提问。' }, { replyTo: msg.messageId });
+      } else {
+        const group = await auxiliary!.createPrivateGroup(msg.chatId, msg.senderId);
+        await channel.send(msg.chatId, { text: `私聊群已准备好：${group.name}\nhttps://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(group.chatId)}` }, { replyTo: msg.messageId });
+      }
+    } catch (error) {
+      await channel.send(msg.chatId, { text: `私聊群创建未完成：${error instanceof Error ? error.message : String(error)}` }, { replyTo: msg.messageId });
+    }
+    return;
   }
-  if (privateScope && privateAction === 'stop') await auxiliary!.cancelPrivate(privateScope);
-  const handled = privateScope && privateAction === 'ask' ? false : await tryHandleCommand({
+  const handled = await tryHandleCommand({
     channel,
     msg: emsg,
     scope,
@@ -1025,10 +1020,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     runExecutor: executor,
     processPool: pool,
     controls,
-    dmGroupCreationOnly: !privateScope,
+    dmGroupCreationOnly: true,
   });
   if (handled) {
-    if (privateScope && privateAction === 'stop') await channel.send(msg.chatId, { text: `request_id=${auxiliary?.privateRequest?.(privateScope)?.requestId} 已取消待处理输入，并请求停止本次任务。` }, { replyTo: msg.messageId });
     const dropped = controls.codexSubmissions ? [] : pending.cancel(scope);
     if (dropped.length) await controls.workerInbox?.reject(scope, dropped);
     log.info('intake', 'command', { scope, droppedPending: dropped.length });
@@ -1053,8 +1047,6 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   if (activeRuns.newRunsPaused()) return; // durable pending will resume on reconnect
   const size = pending.push(scope, emsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
-  if (privateScope) void channel.send(msg.chatId, { text: `request_id=${auxiliary?.privateRequest?.(privateScope)?.requestId} · queued` }, { replyTo: msg.messageId })
-    .catch(error => log.warn('auxiliary', 'private-ack-failed', { error: String(error) }));
 }
 
 interface RunBatchDeps {
@@ -1112,18 +1104,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
   if (controls.auxiliary?.isAuxiliary(scope) && !controls.auxiliary.isActive(scope)) return;
-  const privateRequest = controls.auxiliary?.privateRequest?.(scope);
-  if (privateRequest) {
-    let allowed = false;
-    try { allowed = !privateRequest.cancelled && batch.every(m => m.senderId === privateRequest.actorId && m.chatId === privateRequest.deliveryChatId) &&
-      await controls.auxiliary!.validatePrivate(scope, firstMsg.senderId, chatId); } catch { /* Membership failures fail closed. */ }
-    if (!allowed) {
-      for (const record of controls.codexSubmissions?.records() ?? []) if (record.scope === scope && record.status === 'pending')
-        await controls.codexSubmissions!.mark(record.id, { status: 'rejected', error: 'FF 私聊授权已失效' }, ['pending']);
-      await controls.workerInbox?.reject(scope, batch);
-      await channel.send(chatId, { text: `request_id=${privateRequest.requestId} 未执行：私聊入口或群成员资格已失效。` }, { replyTo: lastMsg.messageId }); return;
-    }
-  }
   const auxiliaryGeneration = controls.auxiliary?.get(scope)?.generation;
   const runTraceId = getLogContext()?.traceId;
 
@@ -1268,7 +1248,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   });
 
   const accessDecision =
-    privateRequest ? { ok: true, reason: 'allowed-chat' as const } : firstMsg.chatType === 'p2p'
+    firstMsg.chatType === 'p2p'
       ? canUseDm(controls.profileConfig, controls, firstMsg.senderId)
       : canUseGroup(controls.profileConfig, controls, firstMsg.chatId, firstMsg.senderId);
   const scopeContext: ScopeContext = {
@@ -1296,7 +1276,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     workspaces,
     executor,
     checkSessionArchived: controls.auxiliary?.isAuxiliary(scope) || controls.codexReplySync?.isScopeArchived
-      ? async () => (controls.auxiliary?.isAuxiliary(scope) && (!controls.auxiliary.isActive(scope) || controls.auxiliary.privateRequest?.(scope)?.cancelled === true || controls.auxiliary.get(scope)?.generation !== auxiliaryGeneration)) ||
+      ? async () => (controls.auxiliary?.isAuxiliary(scope) && (!controls.auxiliary.isActive(scope) || controls.auxiliary.get(scope)?.generation !== auxiliaryGeneration)) ||
         await controls.codexReplySync?.isScopeArchived?.(scope) || false
       : undefined,
     now: Date.now(),
@@ -1454,7 +1434,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const cardRenderOptions = callbackAuth && !controls.auxiliary?.isAuxiliary(scope)
     ? {
         ...controls.runControlIcons,
-        ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope, privateRequestId: privateRequest?.requestId } : {}),
+        ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope } : {}),
         signCallback: (action: string) =>
           callbackAuth.sign({
             runId: execution.runId,
@@ -1466,7 +1446,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             ttlMs: 24 * 60 * 60 * 1000,
           }),
       }
-    : { ...controls.runControlIcons, ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope, privateRequestId: privateRequest?.requestId } : {}) };
+    : { ...controls.runControlIcons, ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope } : {}) };
 
   // For non-card modes Claude's output doesn't surface visually until either
   // a first streamed token (markdown mode) or the whole run ends (text mode).
