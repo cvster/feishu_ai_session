@@ -381,7 +381,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         // the chat info API/cache, while message events already carry threadId.
         // Treat threadId as authoritative for IM messages so scope and replies
         // stay isolated per topic.
-        const mode = firstMsg.threadId ? 'topic' : resolvedMode;
         if (firstMsg.threadId && resolvedMode !== 'topic') {
           chatModeCache.invalidate(firstMsg.chatId);
           logThreadModeOverride({
@@ -390,24 +389,29 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             threadId: firstMsg.threadId,
           });
         }
-        await runAgentBatch({
-          channel,
-          executor,
-          sessions,
-          sessionCatalog,
-          workspaces,
-          media,
-          batch,
-          controls,
-          cotClient,
-          callbackAuth,
-          activePolicyFingerprints,
-          lastRunModelByScope,
-          streamDeliveryFailures,
-          agent,
-          scope,
-          mode,
-        });
+        const requests = controls.auxiliary?.isAuxiliary(firstMsg.chatId)
+          ? controls.auxiliary.splitRequests(firstMsg.chatId, batch) : [batch];
+        for (const requestBatch of requests) {
+          if (disconnecting) break;
+          await runAgentBatch({
+            channel,
+            executor,
+            sessions,
+            sessionCatalog,
+            workspaces,
+            media,
+            batch: requestBatch,
+            controls,
+            cotClient,
+            callbackAuth,
+            activePolicyFingerprints,
+            lastRunModelByScope,
+            streamDeliveryFailures,
+            agent,
+            scope,
+            mode: requestBatch[0]?.threadId ? 'topic' : resolvedMode,
+          });
+        }
       } catch (err) {
         log.fail('flush', err);
       } finally {
@@ -1136,7 +1140,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     agentKind === 'codex',
   );
   const prompt = controls.auxiliary?.isAuxiliary(chatId)
-    ? await controls.auxiliary.wrapPrompt(chatId, basePrompt) : basePrompt;
+    ? await controls.auxiliary.wrapPrompt(chatId, basePrompt, batch.map(message => message.senderId)) : basePrompt;
   log.info('prompt', 'built', {
     promptChars: prompt.length,
     quotes: quotes.length,

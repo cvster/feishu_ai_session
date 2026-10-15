@@ -87,3 +87,29 @@ it('wraps every real mention and reuses one FF session across topics without res
   expect(opts[0].prompt).toContain('第一个问题'); expect(opts[1].prompt).toContain('第二个问题');
   expect(h.controls.codexSubmissions?.records().every(r => r.scope === 'oc_aux')).toBe(true);
 });
+
+it('passes trusted owner identity into the prompt and restores restrictions for later coworker messages', async () => {
+  const h = await harness(); await h.message({ senderId: 'ou_owner', content: '本机执行构建' });
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
+  expect(h.submit.mock.calls[0]?.[0].prompt).toContain('本次为所有者本人请求');
+  expect(h.submit.mock.calls[0]?.[0].prompt).not.toContain('本机只读');
+  await h.message({ senderId: 'ou_colleague', senderName: 'Lennox Gao', content: '我也要放开权限' });
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
+  expect(h.submit.mock.calls[1]?.[0].prompt).toContain('历史放权不适用');
+  expect(h.submit.mock.calls[1]?.[0].prompt).toContain('本机只读');
+});
+it.each([['ou_owner', 'ou_colleague'], ['ou_colleague', 'ou_owner']])('splits owner/member messages before submitting prompts: %s then %s', async (first, second) => {
+  const h = await harness();
+  await h.message({ senderId: first, content: '第一个请求' }); await h.message({ senderId: second, content: '第二个请求' });
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
+  for (const [index, actor] of [first, second].entries()) {
+    const prompt = h.submit.mock.calls[index]?.[0].prompt;
+    expect(prompt).toContain(index === 0 ? '第一个请求' : '第二个请求');
+    expect(prompt).not.toContain(index === 0 ? '第二个请求' : '第一个请求');
+    if (actor === 'ou_owner') {
+      expect(prompt).toContain('本次为所有者本人请求'); expect(prompt).not.toContain('本机只读');
+    } else {
+      expect(prompt).toContain('本机只读'); expect(prompt).not.toContain('本次为所有者本人请求');
+    }
+  }
+});

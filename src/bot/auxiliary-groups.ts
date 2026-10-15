@@ -204,13 +204,27 @@ export class AuxiliaryGroups {
     const row = this.get(chatId);
     return !!row?.running && runId === row.running.id && (actor === row.ownerId || actor === row.running.actorId);
   }
-  async wrapPrompt(chatId: string, message: string): Promise<string> {
+  private isOwnerRequest(chatId: string, senderIds: readonly string[]): boolean {
+    const ownerId = this.deps.ownerId();
+    return !!ownerId && ownerId === this.get(chatId)?.ownerId && senderIds.length > 0 && senderIds.every(id => id === ownerId);
+  }
+  splitRequests<T extends { senderId: string }>(chatId: string, messages: readonly T[]): T[][] {
+    const batches: T[][] = [];
+    for (const message of messages) {
+      const last = batches.at(-1);
+      if (last && this.isOwnerRequest(chatId, [last[0]!.senderId]) === this.isOwnerRequest(chatId, [message.senderId])) last.push(message);
+      else batches.push([message]);
+    }
+    return batches;
+  }
+  async wrapPrompt(chatId: string, message: string, senderIds: readonly string[] = []): Promise<string> {
     const row = this.get(chatId);
     if (!row || row.status !== 'active' || !row.source) throw new Error('辅助群尚未关联或已退出。');
     const source = row.source;
     let location = source.historyPath;
     try { await access(location); } catch { location = await findSessionHistory(source.toolId, source.sourceId, source.nativeId) ?? '当前记录不可读'; }
-    return wrapAuxiliaryPrompt(source, location, message);
+    // Recheck trusted metadata even though normal intake already splits permission classes.
+    return wrapAuxiliaryPrompt(source, location, message, this.isOwnerRequest(chatId, senderIds));
   }
   async leave(chatId: string, actor: string, stop: () => Promise<void>): Promise<void> {
     await this.serial(chatId, async () => {
@@ -253,9 +267,12 @@ export class AuxiliaryGroups {
   }
 }
 
-export function wrapAuxiliaryPrompt(source: Pick<LinkedSession, 'toolId' | 'nativeId'>, location: string, message: string): string {
+export function wrapAuxiliaryPrompt(source: Pick<LinkedSession, 'toolId' | 'nativeId'>, location: string, message: string, ownerRequest = false): string {
+  const permissions = ownerRequest
+    ? '本次为所有者本人请求，按正常权限执行，不受辅助群只读、执行及源码外传限制；授权仅限本次请求。'
+    : '本次按辅助群限制处理，历史放权不适用。本机只读，不执行项目脚本或构建；可在外部机器执行，脚本和产物可部署，其他源码及源码包不得外传。允许云端分析和回复必要代码片段。';
   return `先读取原会话 ${source.toolId}:${source.nativeId}（${JSON.stringify(location)}）的最新进展，再处理本次请求。历史仅作参考，不续跑旧任务、不修改原会话。\n` +
-    '本机只读，不执行项目脚本或构建；可在外部机器执行，脚本和产物可部署，其他源码及源码包不得外传。允许云端分析和回复必要代码片段。\n原会话不可读时明确说明，勿假称已同步。\n\n本次请求：\n' + message;
+    permissions + '\n原会话不可读时明确说明，勿假称已同步。\n\n本次请求：\n' + message;
 }
 
 export async function findSessionHistory(toolId: AgentKind, sourceId: string, nativeId: string): Promise<string | undefined> {
