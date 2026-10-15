@@ -497,6 +497,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
     },
     cardAction: async (evt) => {
+      if (sessionCatalog?.isScopeArchived(evt.chatId)) return;
       try { if (await controls.auxiliaryApprovals?.action(evt)) return; }
       catch (error) { await channel.send(evt.operator.openId, { text: `权限确认处理未完成：${auxiliaryLinkError(error)}。请查看原请求状态；不会自动重复执行。` }); return; }
       try { if (await controls.auxiliary?.action(evt)) return; }
@@ -840,6 +841,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     pool,
   } = deps;
   let msg = incomingMessage;
+  if (msg.chatType !== 'p2p' && sessionCatalog?.isScopeArchived(msg.chatId)) return;
   const auxiliary = rootControls.auxiliary;
   let privateScope: string | undefined;
   let privateAction: 'ask' | 'stop' | 'refresh' = 'ask';
@@ -914,6 +916,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const scope = privateScope ?? (!auxiliaryGroup && chatMode === 'topic' && threadId
     ? `${msg.chatId}:${threadId}`
     : msg.chatId);
+  if (msg.chatType !== 'p2p' && sessionCatalog?.isScopeArchived(scope)) return;
   const toolId = toolForScope(rootControls, scope);
   const controls = controlsForTool(rootControls, toolId, scope);
   const tool = rootControls.toolRegistry?.get(toolId);
@@ -993,6 +996,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     agent,
     activeRuns,
     sessionCatalog,
+    pending,
     sessionCatalogIdentity: await commandSessionCatalogIdentity({
       msg: emsg,
       scope,
@@ -1086,6 +1090,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const firstMsg = batch[0];
   const lastMsg = batch[batch.length - 1];
   if (!firstMsg || !lastMsg) return;
+  if (firstMsg.chatType !== 'p2p' && (sessionCatalog?.isScopeArchived(firstMsg.chatId) || sessionCatalog?.isScopeArchived(scope))) return;
 
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;

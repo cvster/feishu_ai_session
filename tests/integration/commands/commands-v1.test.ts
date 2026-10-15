@@ -8,6 +8,7 @@ import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/con
 import { createRootConfig, loadRootConfig, saveRootConfig } from '../../../src/config/profile-store.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { SessionCatalog, type SessionCatalogIdentity } from '../../../src/session/catalog.js';
+import { PendingQueue } from '../../../src/bot/pending-queue';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
 import { CodexThreadReader } from '../../../src/session/codex-thread-reader.js';
 import { CodexSubmissionStore } from '../../../src/session/codex-submissions.js';
@@ -28,6 +29,7 @@ interface RunOverrides {
   sessionCatalogIdentity?: SessionCatalogIdentity;
   dmGroupCreationOnly?: boolean;
   codexHistoryProvider?: CommandContext['codexHistoryProvider'];
+  pending?: PendingQueue;
 }
 
 interface Harness {
@@ -147,7 +149,7 @@ describe('Bridge command contracts', () => {
     expect(panel).toContain('panel.sessions');
   });
 
-  it('creates a work group for an existing Codex session and later archives it before dissolving the group', async () => {
+  it('creates a work group for an existing Codex session and archives it while retaining the group', async () => {
     const h = await createHarness();
     h.controls.profileConfig.agentKind = 'codex';
     h.controls.profileConfig.codex = { binaryPath: 'codex', inheritCodexHome: true };
@@ -182,12 +184,17 @@ describe('Bridge command contracts', () => {
     await expect(h.run('/panel groups')).resolves.toBe(true);
     const groupsCard = JSON.stringify(lastContent(h.channel));
     const groupToken = extractActionToken(groupsCard, 'panel.group');
+    await h.run(`/panel group-finish ${groupToken}`);
+    const groupConfirmation = JSON.stringify(lastContent(h.channel));
+    expect(groupConfirmation.match(/"tag":"button"/g)).toHaveLength(1);
+    expect(groupConfirmation).toContain('"type":"danger"');
+    expect(groupConfirmation).not.toContain('归档并解散');
     await expect(h.run(`/panel group-finish-confirm ${groupToken}`)).resolves.toBe(true);
 
     expect(h.agent.archivedThreads).toContain('thread-existing');
     expect(h.sessionCatalog.entries().find((entry) => entry.threadId === 'thread-existing')?.status)
       .toBe('archived');
-    expect(h.channel.rawClient.requests).toContainEqual({
+    expect(h.channel.rawClient.requests).not.toContainEqual({
       method: 'im.v1.chat.delete',
       params: { path: { chat_id: 'oc_fake_1' } },
     });
@@ -369,7 +376,7 @@ describe('Bridge command contracts', () => {
     expect(h.workspaces.cwdFor('oc_fake_1')).toBe(await realpath(target));
   });
 
-  it('lets a non-admin group member archive the Codex thread and dissolve the group', async () => {
+  it('offers one red archive button and makes legacy confirm archive without dissolving', async () => {
     const h = await createHarness();
     h.controls.profileConfig.agentKind = 'codex';
     const cwd = await realpath(h.tmp.workspace);
@@ -387,7 +394,10 @@ describe('Bridge command contracts', () => {
     ).resolves.toBe(true);
     const confirmationCard = JSON.stringify(lastContent(h.channel));
     expect(confirmationCard).toContain('finish.archive');
-    expect(confirmationCard).toContain('finish.confirm');
+    expect(confirmationCard).not.toContain('finish.confirm');
+    const buttons = (lastContent(h.channel) as any).card.body.elements.filter((e: any) => e.tag === 'button');
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]).toMatchObject({ type: 'danger', text: { content: '归档' } });
     expect(h.channel.rawClient.requests).not.toContainEqual(
       expect.objectContaining({ method: 'im.v1.chat.delete' }),
     );
@@ -403,14 +413,14 @@ describe('Bridge command contracts', () => {
     expect(h.agent.archivedThreads).toEqual(['thread-1']);
     expect(h.sessionCatalog.activeFor(identity)).toBeUndefined();
     expect(h.sessions.getRaw('chat-1')).toBeUndefined();
-    expect(h.workspaces.cwdFor('chat-1')).toBeUndefined();
-    expect(h.channel.rawClient.requests).toContainEqual({
+    expect(h.workspaces.cwdFor('chat-1')).toBe(cwd);
+    expect(h.channel.rawClient.requests).not.toContainEqual({
       method: 'im.v1.chat.delete',
       params: { path: { chat_id: 'chat-1' } },
     });
   });
 
-  it('explains 232017 after archiving and preserves the group workspace on deletion failure', async () => {
+  it('never calls group deletion even when the bot lacks deletion permission', async () => {
     const h = await createHarness();
     h.controls.profileConfig.agentKind = 'codex';
     const cwd = await realpath(h.tmp.workspace);
@@ -427,7 +437,8 @@ describe('Bridge command contracts', () => {
     expect(h.workspaces.cwdFor('chat-1')).toBe(cwd);
     expect(lastMarkdown(h.channel)).toContain('Codex 会话已归档');
     expect(h.sessionCatalog.isScopeArchived('chat-1')).toBe(true);
-    expect(lastMarkdown(h.channel)).toContain('im:chat:operate_as_owner');
+    expect(lastMarkdown(h.channel)).toContain('请自行在飞书中操作');
+    expect(h.channel.rawClient.im.v1.chat.delete).not.toHaveBeenCalled();
   });
 
   it('can archive the Codex thread while retaining the group and workspace', async () => {
@@ -456,7 +467,24 @@ describe('Bridge command contracts', () => {
     expect(h.channel.rawClient.requests).not.toContainEqual(
       expect.objectContaining({ method: 'im.v1.chat.delete' }),
     );
-    expect(lastMarkdown(h.channel)).toContain('群和工作目录已保留');
+    expect(lastMarkdown(h.channel)).toContain('群和会话历史已保留');
+  });
+
+  it('persists group archival before the first session and cancels only that group queued input', async () => {
+    const h = await createHarness(); h.controls.profileConfig.agentKind = 'codex';
+    const queue = new PendingQueue(60_000, async () => {});
+    for (const scope of ['chat-1', 'chat-1:topic', 'chat-other']) queue.push(scope, message('queued', { chatId: scope, senderId: 'ou-owner' }));
+    try {
+      await h.run('/finish archive', { chatMode: 'group', pending: queue });
+      expect(h.sessionCatalog.isScopeArchived('chat-1')).toBe(true);
+      expect(h.sessionCatalog.isScopeArchived('chat-1:topic')).toBe(true);
+      expect(queue.snapshot().map(e => e.scope)).toEqual(['chat-other']);
+      const restored = new SessionCatalog(join(h.tmp.profile, 'sessions.catalog.json')); await restored.load();
+      expect(restored.isScopeArchived('chat-1')).toBe(true);
+      expect(h.agent.archivedThreads).toEqual([]);
+      expect(h.channel.rawClient.requests.some(r => r.method === 'im.v1.chat.delete')).toBe(false);
+      expect(lastMarkdown(h.channel)).toContain('后续消息不再响应');
+    } finally { queue.cancelAll(); }
   });
 
   it('scopes named workspaces by profile, scope, and owner', async () => {
@@ -896,6 +924,7 @@ async function createHarness(): Promise<Harness> {
       workspaces,
       agent,
       activeRuns,
+      pending: overrides.pending,
       controls,
       formValue: overrides.formValue,
       fromCardAction: overrides.fromCardAction,

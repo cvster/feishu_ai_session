@@ -131,6 +131,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
       }),
       workspaces: deps.workspaces,
       activeRuns: deps.activeRuns,
+      pending: deps.pending,
       agent: deps.agent,
       processPool: deps.processPool,
       runExecutor: deps.runExecutor,

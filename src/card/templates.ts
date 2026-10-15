@@ -116,7 +116,7 @@ export function newChatWorkspaceCard(
     tag: 'markdown',
     content:
       '💡 需要调整工作目录时，请打开任务控制台并选择“工作目录”。\n\n' +
-      '任务全部完成后，可发送“终止任务”，或点击下面的按钮归档会话并解散群。',
+      '任务全部完成后，可发送“终止任务”归档会话；归档后不再响应，如需解散群，请自行在飞书中操作。',
   });
   elements.push({
     tag: 'button',
@@ -235,34 +235,20 @@ export function finishTaskConfirmationCard(agentKind: 'codex' | 'claude' = 'code
   const toolName = agentKind === 'codex' ? 'Codex' : 'Claude Code';
   return {
     schema: '2.0',
-    config: { summary: { content: `确认终止 ${toolName} 任务` } },
+    config: { summary: { content: `归档 ${toolName} 工作群` } },
     body: {
       elements: [
         {
           tag: 'markdown',
           content:
-            '⚠️ **请选择终止方式**\n\n' +
-            `- **仅终止会话**：停止运行并归档当前 ${toolName} 会话，保留群和工作目录；后续消息不会自动新建会话。\n` +
-            '- **归档并解散群**：永久解散当前飞书群，原会话历史保留。',
+            `归档后停止当前 ${toolName} 会话，本群后续消息不再响应。\n\n` +
+            '群和会话历史保留；如需解散群，请自行在飞书中操作。',
         },
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: '仅终止会话（保留群）' },
-          type: 'primary',
-          behaviors: [{ type: 'callback', value: { cmd: 'finish.archive' } }],
-        },
-        {
-          tag: 'button',
-          text: { tag: 'plain_text', content: '归档并解散群（保留记录）' },
+          text: { tag: 'plain_text', content: '归档' },
           type: 'danger',
-          // Keep finish.confirm compatible with confirmation cards that were
-          // already delivered before the two-option UI was introduced.
-          behaviors: [{ type: 'callback', value: { cmd: 'finish.confirm' } }],
-        },
-        {
-          tag: 'button',
-          text: { tag: 'plain_text', content: '返回任务控制台' },
-          behaviors: [{ type: 'callback', value: { cmd: 'panel' } }],
+          behaviors: [{ type: 'callback', value: { cmd: 'finish.archive' } }],
         },
       ],
     },
@@ -290,7 +276,7 @@ export function managedGroupsCard(entries: ManagedGroupCardEntry[], page: number
   const elements: object[] = [
     {
       tag: 'markdown',
-      content: '👥 **工作群管理**\n\n选择一个群查看其绑定会话，并执行归档或解散操作。解散群不会删除原生会话记录。',
+      content: '👥 **工作群管理**\n\n选择一个群查看其绑定会话并归档。归档后不再响应，群需自行解散，会话历史保留。',
     },
     { tag: 'hr' },
   ];
@@ -362,12 +348,11 @@ export function managedGroupDetailCard(entry: ManagedGroupCardEntry): object {
             `👥 **${escapeMd(entry.name)}**\n\n` +
             `🔗 会话：${entry.threadId ? `\`${entry.threadId}\`` : '尚未建立'}\n` +
             `📁 目录：\`${escapeCode(entry.cwd ?? '(未设置)')}\`\n\n` +
-            '归档并解散后，群会永久删除，原生会话历史仍保留；桥接不会自动为已归档会话重新建群。',
+            '归档后本群不再响应，原生会话历史保留；如需解散群，请自行在飞书中操作。',
         },
         { tag: 'hr' },
         cardKitButtonRow([
-          { text: '归档并解散（保留记录）', value: { cmd: 'panel.group-finish', arg: entry.token }, style: 'danger' },
-          { text: '返回工作群', value: { cmd: 'panel.groups', arg: '0' } },
+          { text: '归档', value: { cmd: 'panel.group-finish', arg: entry.token }, style: 'danger' },
         ]),
       ],
     },
@@ -380,7 +365,7 @@ export function panelConfirmationCard(input: {
   confirmText: string;
   confirmCmd: string;
   token: string;
-  backCmd: string;
+  backCmd?: string;
 }): object {
   return {
     schema: '2.0',
@@ -391,7 +376,7 @@ export function panelConfirmationCard(input: {
         { tag: 'hr' },
         cardKitButtonRow([
           { text: input.confirmText, value: { cmd: input.confirmCmd, arg: input.token }, style: 'danger' },
-          { text: '取消', value: { cmd: input.backCmd, arg: input.token } },
+          ...(input.backCmd ? [{ text: '取消', value: { cmd: input.backCmd, arg: input.token } }] : []),
         ]),
       ],
     },
@@ -596,7 +581,7 @@ export function helpCard(agentName = 'Agent'): object {
         '- `/config` — 调整偏好、访问控制和 lark-cli 身份策略',
         '- `/status` — 当前状态',
         '- `/stop` — 结束当前正在跑的任务（也可点卡片底部“停止”按钮）',
-        '- “终止任务”或 `/finish` — 归档当前工具会话，可选择保留或解散群',
+        '- “终止任务”或 `/finish` — 归档当前工作群并停止响应，群需自行解散',
         '- `/stop comment:<scopeHash>` — 管理员停止云文档评论任务',
         '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',
         '- `/timeout comment:<scopeHash> N` — 管理员设置云文档评论任务探活',

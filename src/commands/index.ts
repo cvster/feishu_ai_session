@@ -107,7 +107,7 @@ import type { RunExecutor } from '../runtime/run-executor';
 import { RunRejected } from '../runtime/errors';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
-import { createBoundChat, defaultChatName, describeChatDeletionError, dissolveChat, isDefaultChatName, renameChat } from '../bot/group';
+import { createBoundChat, defaultChatName, isDefaultChatName, renameChat } from '../bot/group';
 import { fetchKnownChats, type KnownChat } from '../bot/lark-info';
 import { applyLarkCliIdentityPolicy, hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
 
@@ -179,6 +179,7 @@ export interface CommandContext {
   workspaces: WorkspaceStore;
   agent: AgentAdapter;
   activeRuns: ActiveRuns;
+  pending?: import('../bot/pending-queue').PendingQueue;
   processPool?: ProcessPool;
   runExecutor?: RunExecutor;
   controls: Controls;
@@ -582,12 +583,11 @@ async function handlePanel(args: string, ctx: CommandContext): Promise<void> {
     const target = panelCandidate(ctx, arg, 'group');
     if (!target) return reply(ctx, '此工作群操作已过期，请刷新“工作群”后重试。');
     await showPanelCard(ctx, panelConfirmationCard({
-      title: `归档并解散 ${target.name}`,
-      description: '飞书群将永久解散；绑定的会话只会归档，不会删除，可稍后再次创建群继续。',
-      confirmText: '确认归档并解散',
+      title: `归档 ${target.name}`,
+      description: '归档后本群不再响应，会话历史保留。如需解散群，请自行在飞书中操作。',
+      confirmText: '归档',
       confirmCmd: 'panel.group-finish-confirm',
       token: arg,
-      backCmd: 'panel.group',
     }));
     return;
   }
@@ -903,23 +903,11 @@ async function finishPanelGroup(ctx: CommandContext, token: string): Promise<voi
     }
     ctx.sessionCatalog?.archiveCodexThread(target.threadId);
   }
-  try {
-    await dissolveChat(ctx.channel, target.chatId);
-  } catch (err) {
-    await ctx.sessionCatalog?.flush();
-    await reply(ctx, `⚠️ 会话已归档并保留，但群解散失败：${errorText(err)}`);
-    return;
-  }
-  ctx.sessions.remove(target.chatId);
-  ctx.workspaces.removeCwd(target.chatId);
-  ctx.controls.knownChats = (ctx.controls.knownChats ?? []).filter((chat) => chat.id !== target.chatId);
-  await saveAccessConfig(ctx, (current) => ({
-    ...current,
-    allowedChats: current.allowedChats.filter((chatId) => chatId !== target.chatId),
-  }));
-  await Promise.all([ctx.sessions.flush(), ctx.workspaces.flush(), ctx.sessionCatalog?.flush()]);
+  await archiveGroupInput(ctx, target.chatId, target.threadId ?? binding?.nativeId ?? `pending-${toolId}`);
   panelCandidates.delete(token);
-  await reply(ctx, `✓ 已归档会话并解散 **${target.name}**；原会话记录已保留。`);
+  const notice = `✓ 已归档工作群「${target.name}」，后续消息不再响应。群和会话历史已保留，如需解散群，请自行在飞书中操作。`;
+  await ctx.channel.send(target.chatId, { text: notice });
+  await reply(ctx, notice);
 }
 
 async function handleNewChat(
@@ -1845,6 +1833,21 @@ async function handleStop(args: string, ctx: CommandContext, strict = false): Pr
   // render loop will mark the card as interrupted and re-render.
 }
 
+async function archiveGroupInput(ctx: CommandContext, chatId: string, nativeId: string): Promise<void> {
+  const matches = (scope: string) => scope === chatId || scope.startsWith(`${chatId}:`);
+  const scopes = new Set([chatId, ...(ctx.sessionCatalog?.entries() ?? []).filter(e => matches(e.scopeId)).map(e => e.scopeId),
+    ...(ctx.pending?.snapshot() ?? []).filter(e => matches(e.scope)).map(e => e.scope)]);
+  for (const scope of scopes) {
+    ctx.sessionCatalog?.archiveScope(scope, nativeId);
+    ctx.sessions.remove(scope);
+    ctx.pending?.cancel(scope);
+    await ctx.controls.workerInbox?.rejectScope(scope);
+  }
+  for (const r of ctx.controls.codexSubmissions?.records() ?? []) if (matches(r.scope) && r.status === 'pending')
+    await ctx.controls.codexSubmissions!.mark(r.id, { status: 'rejected', error: '工作群已归档' }, ['pending']);
+  await Promise.all([ctx.sessions.flush(), ctx.sessionCatalog?.flush()]);
+}
+
 async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
   const toolName = ctx.controls.toolRegistry?.get(ctx.controls.profileConfig.agentKind).label ??
     (ctx.controls.profileConfig.agentKind === 'codex' ? 'Codex' : 'Claude Code');
@@ -1871,12 +1874,10 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
   const groupScopes = ctx.activeRuns
     .scopes()
     .filter((scope) => scope === ctx.msg.chatId || scope.startsWith(`${ctx.msg.chatId}:`));
-  const shouldDissolve = action === 'confirm';
+  // Legacy finish.confirm cards also archive only; never dissolve a group.
   await reply(
     ctx,
-    shouldDissolve
-      ? `⏳ 正在停止任务、归档 ${toolName} 会话并解散本群…`
-      : `⏳ 正在停止任务并归档当前 ${toolName} 会话…`,
+    `⏳ 正在停止任务并归档当前 ${toolName} 会话…`,
   );
   await ctx.activeRuns.stopScopes(groupScopes);
   if (ctx.controls.profileConfig.agentKind === 'claude' && groupScopes.length === 0) await ctx.controls.claudeReplySync?.stopScope(ctx.scope);
@@ -1913,44 +1914,10 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
     else ctx.sessionCatalog.archiveActive({ ...ctx.sessionCatalogIdentity, now: Date.now() });
     await ctx.sessionCatalog.flush();
   }
-  ctx.sessions.remove(ctx.scope);
-  await ctx.sessions.flush();
-
-  if (!shouldDissolve) {
-    log.info('command', 'finish', {
-      chatId: ctx.msg.chatId,
-      threadId: catalogEntry?.threadId,
-      stoppedRuns: groupScopes.length,
-      dissolved: false,
-    });
-    await reply(ctx, `✓ 当前 ${toolName} 会话已在桥接中归档，群和工作目录已保留，历史不会删除。后续消息不会自动开启新会话或创建群。`);
-    return;
-  }
-
-  try {
-    await dissolveChat(ctx.channel, ctx.msg.chatId);
-    ctx.workspaces.removeCwd(ctx.msg.chatId);
-    ctx.controls.knownChats = (ctx.controls.knownChats ?? []).filter(
-      (chat) => chat.id !== ctx.msg.chatId,
-    );
-    await saveAccessConfig(ctx, (current) => ({
-      ...current,
-      allowedChats: current.allowedChats.filter((chatId) => chatId !== ctx.msg.chatId),
-    }));
-    await ctx.workspaces.flush();
-    log.info('command', 'finish', {
-      chatId: ctx.msg.chatId,
-      threadId: catalogEntry?.threadId,
-      stoppedRuns: groupScopes.length,
-      dissolved: true,
-    });
-  } catch (err) {
-    log.fail('command', err, { cmd: 'finish', step: 'dissolve-chat' });
-    await reply(
-      ctx,
-      `⚠️ ${toolName} 会话已归档，但群解散失败：${describeChatDeletionError(err)}`,
-    );
-  }
+  const binding = ctx.controls.toolBindings?.get(ctx.scope);
+  await archiveGroupInput(ctx, ctx.msg.chatId, catalogEntry?.threadId ?? catalogEntry?.sessionId ?? binding?.nativeId ?? `pending-${ctx.controls.profileConfig.agentKind}`);
+  log.info('command', 'finish', { chatId: ctx.msg.chatId, threadId: catalogEntry?.threadId, stoppedRuns: groupScopes.length });
+  await reply(ctx, `✓ 当前 ${toolName} 会话已归档，后续消息不再响应。群和会话历史已保留，如需解散群，请自行在飞书中操作。`);
 }
 
 async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {

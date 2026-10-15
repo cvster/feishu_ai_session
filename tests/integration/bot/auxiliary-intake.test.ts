@@ -99,6 +99,18 @@ it('ignores non-mentions, @all and bot senders even when global mention requirem
   await h.message({ senderId: 'ou_bot' });
   expect(h.controls.codexSubmissions?.records()).toHaveLength(0); expect(h.submit).not.toHaveBeenCalled(); expect(h.download).not.toHaveBeenCalled();
 });
+it('silently ignores later messages, commands and attachments after the group is archived', async () => {
+  const h = await harness(); h.catalog.archiveScope('oc_aux', 'archived');
+  const sent = h.channel.sent.length;
+  await h.message({ content: '继续处理' });
+  await h.message({ content: '/new' });
+  await h.message({ content: '/status', threadId: undefined });
+  await h.message({ resources: [{ type: 'file', fileKey: 'file' }] as any });
+  expect(h.channel.sent).toHaveLength(sent);
+  expect(h.submit).not.toHaveBeenCalled();
+  expect(h.download).not.toHaveBeenCalled();
+  expect(h.controls.codexSubmissions?.records()).toHaveLength(0);
+});
 it('keeps pending group requests out of model and attachment handling', async () => {
   const h = await harness('pending'); await h.message({ resources: [{ type: 'file', fileKey: 'file' }] as any });
   expect(h.submit).not.toHaveBeenCalled(); expect(h.download).not.toHaveBeenCalled();
