@@ -51,6 +51,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     elements.push(noteMd('_（未返回内容）_'));
   }
 
+  const footerStart = elements.length;
   if (state.terminal === 'running') {
     const status = renderColoredRunStatus(state);
     if (status) elements.push(noteMd(status));
@@ -60,6 +61,13 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     const status = renderColoredRunStatus(state);
     if (status) elements.push(noteMd(status));
     elements.push(controlButtonRow(options.auxiliary ? { ...options, showStopButton: false } : options));
+  }
+  if (options.auxiliary && state.terminal !== 'running') {
+    const footer = elements.splice(footerStart);
+    const details = elements.find(element => (element as { tag?: string }).tag === 'collapsible_panel') as
+      { elements: object[] } | undefined;
+    if (details) details.elements.push(...footer);
+    else elements.push(auxiliaryDetails(footer));
   }
 
   return {
@@ -95,13 +103,17 @@ function auxiliaryContent(state: RunState): object[] {
         : group.tools.map(tool => toolPanel(tool, false))));
     }
   }
-  if (details.length) elements.push({
+  if (details.length) elements.push(auxiliaryDetails(details));
+  return elements;
+}
+
+function auxiliaryDetails(elements: object[]): object {
+  return {
     tag: 'collapsible_panel', expanded: false,
     header: panelHeader('查看详细说明（点击展开 / 收起）'),
     border: { color: 'grey', corner_radius: '5px' },
-    vertical_spacing: '8px', padding: '8px', elements: details,
-  });
-  return elements;
+    vertical_spacing: '8px', padding: '8px', elements,
+  };
 }
 
 function auxiliaryPreview(content: string): string {

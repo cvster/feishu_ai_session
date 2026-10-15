@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { renderCard } from '../../../src/card/run-renderer';
-import { initialState, markInterrupted, reduce } from '../../../src/card/run-state';
+import { initialState, markInterrupted, markIdleTimeout, reduce, startRunRuntime, updateRunRuntime } from '../../../src/card/run-state';
 function callbacks(value: unknown): Record<string, unknown>[] {
   if (!value || typeof value !== 'object') return [];
   const row = value as Record<string, unknown>;
@@ -66,4 +66,27 @@ it('folds code and multiline answers without truncating their full content', () 
 it('does not add an empty details panel to a concise answer or a thinking-only update', () => {
   expect(body(reduce(initialState, { type: 'text', delta: '已完成。' })).some(e => e.tag === 'collapsible_panel')).toBe(false);
   expect(body(reduce(initialState, { type: 'thinking', delta: 'internal reasoning' })).some(e => e.tag === 'collapsible_panel')).toBe(false);
+});
+it.each(['done', 'error', 'interrupted', 'idle_timeout'] as const)('folds status and controls after %s and keeps them visible while running', terminal => {
+  for (const detailed of [false, true]) {
+    let running = startRunRuntime(initialState, 1_000);
+    running = reduce(running, { type: 'text', delta: detailed ? '详细回答。'.repeat(100) : '简短回答。' });
+    running = updateRunRuntime(running, { nowMs: 2_000 });
+    const visible = body(running);
+    expect(visible.some(e => e.tag === 'column_set')).toBe(true);
+    expect(visible.some(e => e.content?.includes('运行中'))).toBe(true);
+    const finished = terminal === 'interrupted' ? markInterrupted(running)
+      : terminal === 'idle_timeout' ? markIdleTimeout(running, 5)
+      : reduce(running, terminal === 'done' ? { type: 'done', terminationReason: 'normal' }
+        : { type: 'error', message: 'visible failure', terminationReason: 'failed' });
+    const elements = body(finished);
+    const panels = elements.filter(e => e.tag === 'collapsible_panel');
+    expect(panels).toHaveLength(1);
+    expect(panels[0]!.expanded).toBe(false);
+    expect(elements.some(e => e.tag === 'column_set')).toBe(false);
+    expect(elements.some(e => e.content?.includes('最近更新'))).toBe(false);
+    expect(JSON.stringify(panels[0])).toContain('最近更新');
+    expect(callbacks(panels[0]).map(v => v.cmd)).toEqual(['stop', 'refresh']);
+    expect(body(finished, false).some(e => e.tag === 'column_set')).toBe(true);
+  }
 });
