@@ -89,6 +89,7 @@ it('wraps every real mention and reuses one FF session across topics without res
   const opts = h.submit.mock.calls.map(([o]) => o);
   expect(opts[0].threadId).toBeUndefined(); expect(opts[1].threadId).toBe('ff-independent');
   expect(opts.every(o => o.prompt.includes(h.history) && o.prompt.includes('本机只读'))).toBe(true);
+  expect(opts.every(o => o.prompt.startsWith('本次飞书群 chat_id="oc_aux"。'))).toBe(true);
   expect(opts[0].prompt).toContain('第一个问题'); expect(opts[1].prompt).toContain('第二个问题');
   expect(h.controls.codexSubmissions?.records().every(r => r.scope === 'oc_aux')).toBe(true);
 });
@@ -133,6 +134,8 @@ it('queues simultaneous group requests against one shared FF native conversation
   expect(h.submit.mock.calls[0]?.[0].threadId).toBeUndefined();
   expect(h.submit.mock.calls[1]?.[0].threadId).toBe('ff-independent');
   expect(h.submit.mock.calls.map(([opts]) => opts.sessionName)).toEqual(['FF-原会话', 'FF-原会话']);
+  expect(h.submit.mock.calls[0]?.[0].prompt).toMatch(/^本次飞书群 chat_id="oc_aux"。/);
+  expect(h.submit.mock.calls[1]?.[0].prompt).toMatch(/^本次飞书群 chat_id="oc_aux_2"。/);
   expect(h.controls.codexSubmissions?.records().map(r => r.scope).sort()).toEqual(['oc_aux', 'oc_aux_2']);
   expect(h.controls.toolBindings?.get('oc_aux')?.nativeId).toBe(h.controls.toolBindings?.get('oc_aux_2')?.nativeId);
 });

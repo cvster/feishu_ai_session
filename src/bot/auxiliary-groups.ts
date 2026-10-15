@@ -337,7 +337,9 @@ export class AuxiliaryGroups {
     let location = source.historyPath;
     try { await access(location); } catch { location = await findSessionHistory(source.toolId, source.sourceId, source.nativeId) ?? '当前记录不可读'; }
     // Recheck trusted metadata even though normal intake already splits permission classes.
-    return wrapAuxiliaryPrompt(source, location, message, this.isOwnerRequest(chatId, senderIds));
+    const destination = `本次飞书群 chat_id=${JSON.stringify(row.chatId)}。用户要求发到本群时使用此ID，不沿用历史群ID、不再索要群链接或ID。` +
+      `向本群发送文件使用 lark-cli im +messages-send --as bot --chat-id ${JSON.stringify(row.chatId)} --file ./文件名（在文件所在目录执行）；遵守本次外传限制，仅发送成功后确认已发送。\n`;
+    return destination + wrapAuxiliaryPrompt(source, location, message, this.isOwnerRequest(chatId, senderIds));
   }
   async leave(chatId: string, actor: string, stop: () => Promise<void>): Promise<void> {
     await this.serial(`source:${this.get(chatId)?.source ? this.sourceKey(this.get(chatId)!.source!) : chatId}`, async () => {
