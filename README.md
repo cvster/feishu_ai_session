@@ -1,389 +1,267 @@
-# lark-channel-bridge
+# CodexFeishu · 飞书 AI 助手桥接
 
-A lightweight bot that bridges Feishu / Lark messenger with your local Claude Code or Codex CLI. Run one command, scan a QR code to bind a PersonalAgent app, and talk to your local coding agent from chat.
+将飞书 / Lark 群聊接入本机 Codex 和 Claude Code。私聊机器人创建或管理会话，在工作群中提问、处理图片和文件、执行项目任务；也可以把机器人加入已有协作群，关联一个已有会话作为背景。
 
-[中文 README](./README.zh.md)
+本项目基于原始 GitHub 项目 [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge)（原名 `feishu-claude-code-bridge`） 二次开发，保留原项目的版权与许可证说明。
 
-Shared core and independent Feishu/web services: [monorepo guide](./docs/MONOREPO.md).
+**本项目开发者：Lennox Gao。** 使用过程中有问题、建议或需求，欢迎联系 Lennox Gao。
 
-For a product walkthrough, see the [Feishu document](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e).
+本仓库包含个人工作群、AA 会话自动建群、共享 FF 辅助会话、折叠回复和独立 Claude worker 等定制功能。使用本仓库版本请按下文从源码构建；公开 npm 包不保证包含这些改动。
 
-## What it does
+- [飞书权限申请清单](docs/FEISHU_PERMISSIONS.md)：权限标识、申请用途、事件订阅与验收步骤。
+- [详细配置与排错](README.zh.md)：权限模式、访问控制、会话与日志等进阶说明。
+- [多服务目录说明](docs/MONOREPO.md)：飞书桥接、共享 Codex core 与独立 Web 服务的边界。
 
-- Forwards Feishu / Lark messages to local Claude Code or Codex CLI. Send a DM directly, or `@bot` in a group.
-- **Streaming card**: text replies and tool calls update on one Lark card in real time.
-- **COT process messages**: optionally send a process message with agent progress text and tool calls, then send the final answer separately.
-- **Session continuity**: each chat, topic, or document comment thread keeps its own session.
-- **Unified Codex reply sync**: Feishu submits input; one app-server snapshot synchronizer delivers replies from both Desktop and Feishu turns. Each bound chat/thread/turn has one persistent card, checked every two seconds and reused by refresh and restart. Desktop input is echoed; Feishu input is not. Initial history is skipped except the configured creation-time replay. Existing duplicate cards are not automatically recalled.
-- **Clean Codex input**: ordinary Lark text is sent to Codex unchanged. Bridge rules are installed once when the thread is created, and only quotes, files, cards, or other rich cases add a compact context block.
-- **Codex input questions**: `requestUserInput` prompts become Feishu forms with multiple questions, choices and custom text. Answers respond to the original RPC, not a new chat turn. Blocking prompts show a waiting status and pause the idle watchdog; nonblocking prompts keep running. Desktop answers/turn completion close the form; reconnect reuses its card. Secret input stays on Desktop. Desktop/existing-thread prompts require the shared writer app-server (optionally `CODEX_QUEUE_REMOTE`); history polling cannot retrieve pending requests from a private Desktop server. No competing resume fallback is used. Fresh bridge runs answer through their original stdio connection.
-- **Queueing and batching**: messages sent in quick succession are handled together; messages sent during a run are queued for the next turn, while commands like `/new`, `/cd`, `/ws use`, and `/stop` can interrupt the current task.
-- **Multiple workspaces**: use `/cd` to switch the current project, and `/ws` to save and reuse common project directories.
-- **Images and files**: send them to the bot directly, and the bridge downloads them locally for the agent.
-- **Interactive cards**: `/help`, `/ws list`, and `/status` return cards with clickable buttons.
+## 主要功能
 
-## Prerequisites
+- 给Codex或者Claude会话创建个人飞书工作群，每个群对应一个会话，在群里发消息等同于ai会话中聊天。
+- 一个机器人同时支持 Codex 和 Claude Code，创建工作群时选择工具与项目目录。
+- 以 `AA` 开头的已有会话可自动创建同名的飞书工作群。
+- 把机器人加入开放协作群后，由所有者在私聊选择关联ai会话，创建 `FF-{原会话名}` 辅助会话。辅助群只响应真实 `@机器人` 的消息；同事可提问，回答仅回到提问群。
+- 辅助群默认简短回复，不提及来源会话和内部读取过程。长正文、代码和工具记录默认折叠；结束后的状态与按钮也放入折叠区。
+- Codex 通过原生队列提交、统一同步桌面与飞书回复；Claude 由独立 worker 执行。桥接重启后可继续同步已有结果。
 
-- Node.js **>= 20.12.0**
-- At least one local agent installed and logged in:
-  - Claude Code: `claude`, see https://docs.anthropic.com/en/docs/claude-code/quickstart
-  - Codex CLI: `codex`, see https://developers.openai.com/codex/cli
-- A Feishu / Lark **PersonalAgent** app. The first-run QR wizard can create and bind one for you.
+## 环境要求
 
-## Install
+| 项目      | 要求                                               |
+| ------- | ------------------------------------------------ |
+| Node.js | `>= 20.12.0`；本机部署已验证 Node 24                     |
+| pnpm    | `10.33.0`，以 `package.json` 的 `packageManager` 为准 |
+| 编程助手    | 至少一个已安装并登录的 `codex` 或 `claude`；需要两个工具时分别登录       |
+| 飞书应用    | 启用机器人能力，配置权限、事件与回调，并发布应用版本                       |
+| 飞书 CLI  | `lark-cli`；首次交互启动会检查安装及当前 profile 的应用绑定          |
+| 部署账户    | 可读写会话状态目录，并能访问对应项目、CLI 登录信息和网络                   |
 
-```bash
-npm i -g lark-channel-bridge
-# or
-pnpm add -g lark-channel-bridge
-```
+Codex 的发送、队列与选项交互依赖兼容的原生接口；桌面已有任务的问询需要可访问的公开共享 app-server，可按环境配置 `CODEX_QUEUE_REMOTE`。只安装 CLI 并不保证桌面私有连接上的交互可用。详见 [Codex 任务生命周期](docs/CODEX_TASK_LIFECYCLE.md)。
 
-## First run
+Claude 独立 worker 的系统服务和重启恢复目前以 Linux 为主要验证环境。不要把桥接重启保活理解为 worker、Codex writer 或主机重启也能保活。
 
-```bash
-lark-channel-bridge run
-```
+## 安装与首次启动
 
-The first run opens a QR-code wizard:
+### 1. 下载和构建
 
-1. A QR code renders in your terminal.
-2. Scan it with the Feishu / Lark app.
-3. Pick or create a PersonalAgent app.
-4. If prompted, choose which agent to initialize.
-5. Config is written to `~/.lark-channel/config.json`.
-
-You do not need to choose a project directory up front. The bridge creates a profile-managed default working directory; after startup, send `/cd <path>` in Feishu / Lark to switch to a real project.
-
-If you already have a PersonalAgent app, pass `--app-id` during initialization to skip app creation. The command prompts for the App Secret.
+在计划长期保留的目录安装，不要把后台服务指向 `npx` 临时缓存。
 
 ```bash
-lark-channel-bridge run --app-id cli_xxx
-# or initialize and start the background service directly
-lark-channel-bridge start --app-id cli_xxx
-```
-
-For Lark global apps, add `--tenant lark`.
-
-## Background service
-
-Use `run` for first-run setup and foreground debugging. After the bot can send and receive messages, stop the foreground process with `Ctrl-C`, then use an OS-managed service for background operation:
-
-```bash
-lark-channel-bridge start
-lark-channel-bridge status
-lark-channel-bridge stop
-```
-
-Install globally before using service commands. The daemon's launchd plist / systemd unit / Windows task records the bridge CLI path; if that path comes from an npm temp cache through `npx`, the daemon can break when the cache is cleaned. `run` is fine through `npx` as a one-shot foreground process.
-
-Service commands install a per-profile service:
-
-```bash
-lark-channel-bridge start [--profile <name>]
-lark-channel-bridge stop [--profile <name>]
-lark-channel-bridge restart [--profile <name>]
-lark-channel-bridge status [--profile <name>]
-lark-channel-bridge unregister [--profile <name>]
-```
-
-Platform mapping:
-- **macOS**: launchd user agent `ai.lark-channel-bridge.bot.<profile>`
-- **Linux**: systemd user unit `lark-channel-bridge.bot.<profile>.service`
-- **Windows**: Task Scheduler task `LarkChannelBridge.Bot.<profile>`, launched through a `.cmd` wrapper
-
-Daemon logs are under `~/.lark-channel/profiles/<profile>/logs/daemon/`.
-
-### Codex and Claude Code in one bot
-
-The DM creation card lets you choose **Codex** (default) or **Claude Code** and a working directory. Each group keeps its selected tool through resets, directory changes, and restarts. Commands without a tool field retain the profile default. Install and authenticate both CLIs locally; an unavailable tool or failed resume never falls back to another tool.
-
-Every minute, named `AA` sessions from either tool are imported into groups using their original native ID and cwd. Claude discovery reads main-session JSONL `custom-title` metadata from `CLAUDE_CONFIG_DIR` or `~/.claude`; subagents and prompt previews are excluded. Name a CLI session with `/rename AA-project`. Sessions already bound by proactive creation are not imported again.
-
-Bindings use `(tool, local source, native ID)`. Same-name sessions create separate groups with a tool suffix and, if needed, a numeric suffix. The DM session browser lists both tools. Claude group requests resume with the original ID and stream replies; existing Codex Desktop mirroring remains. External Claude terminal output is not mirrored in this phase.
-
-Claude resume uses a conservative Linux `/proc` check: a Claude process still running in the same cwd blocks the request. End the original terminal session before continuing in the group. Platforms without an occupation probe refuse resume; the probe cannot prevent an external terminal from starting immediately afterward. Native-session leases also prevent concurrent writers within the bridge. Claude archival is bridge-only, preserves transcripts, and prevents automatic group recreation. Per-profile `tool-bindings.json` persists tool choices and archive state; existing catalog bindings migrate on startup.
-
-### Independent Claude worker and bridge restarts
-
-Claude IM work-group tasks execute in a separate worker. On Linux, after configuring the profile:
-
-```bash
-lark-channel-bridge worker start --profile lennox-codex
-lark-channel-bridge worker status --profile lennox-codex
-```
-
-The independent `lark-channel-worker.<profile>.service` owns Claude processes. Starting an existing worker is idempotent; routine bridge restarts never restart it. Missing or mismatched workers fail explicitly, with no inline execution fallback. `worker run --profile <profile>` supports independent supervisors; end-to-end recovery is currently validated on Linux.
-
-The worker persists acceptance before spawning, journals output under `execution-worker/jobs`, deduplicates requests, and owns idle timeouts. The bridge persists input before debounce in `claude-inbox.json`, reconciles worker receipts, and resumes pending messages without replaying explicitly cancelled input. `worker-replies.json` preserves reply IDs and card sequences. After a bridge restart, replies update the original card/post; text mode remains final-only. Separate CoT bubbles are not emitted in worker mode.
-
-Initial Feishu replies use stable UUIDs. Ambiguous sends retry only within the API's one-hour deduplication window; after 55 minutes, automatic resend pauses for manual reconciliation while the journal retains the output. [Feishu SDK UUID documentation](https://larksuite.github.io/oapi-sdk-java/com/lark/oapi/service/im/v1/model/CreateMessageReqBody.Builder.html)
-
-This protects **bridge restarts**, not worker/host restarts. `worker stop` stops active Claude tasks. On worker restart, persisted completed results remain deliverable; uncertain tasks are reported and never automatically rerun or rolled back. Worker account source and concurrency are read at startup; upgrade the worker separately from bridge deployments. This phase covers IM work groups, not comment-reply recovery or external Claude terminal mirroring.
-
-### Multiple profiles: separate bots
-
-By default, the bridge starts with the currently selected profile. Use `profile use <name>` to change it. Each profile keeps its own app credentials, sessions, working directories, and logs. Create multiple profiles only when you need to connect multiple PersonalAgent apps, or run Claude and Codex as separate bots:
-
-```bash
-lark-channel-bridge start --profile claude --agent claude
-lark-channel-bridge start --profile codex --agent codex
-```
-
-For example, to restart only the Codex bot:
-
-```bash
-lark-channel-bridge restart --profile codex
-lark-channel-bridge status --profile codex
-```
-
-## Commands
-
-### Host CLI
-
-```text
-lark-channel-bridge run [--profile <name>] [--agent claude|codex] [--workspace <path>] [-c <config>]
-lark-channel-bridge migrate [--profile <name>] [--agent claude|codex]
-lark-channel-bridge ps
-lark-channel-bridge kill <id|#>
-lark-channel-bridge --help
-```
-
-`profile use <name>` changes the profile used by later default starts. Use these profile management commands when running separate Claude / Codex bots, connecting multiple PersonalAgent apps, or doing scripted deployment:
-
-```bash
-lark-channel-bridge profile create claude --agent claude
-lark-channel-bridge profile create codex --agent codex
-lark-channel-bridge profile list
-lark-channel-bridge profile use <name>
-lark-channel-bridge profile remove <name>
-lark-channel-bridge profile remove <name> --purge --yes
-lark-channel-bridge profile export <name> [--output ./profile.json] [--force]
-lark-channel-bridge profile export <name> --include-secrets --yes
-```
-
-`profile remove` archives local state by default, including the active profile. If other profiles remain, the bridge switches to the next one; if it was the last profile, the root config is cleared so the same name can be created again. `--purge --yes` permanently deletes local state. `profile export` redacts app secrets by default; `--include-secrets --yes` includes sensitive config.
-
-If a profile was created with the wrong agent kind, stop or unregister any matching background service first, then run `profile remove <name>` and recreate it with the intended `--agent`.
-
-### Slash commands inside Feishu / Lark
-
-| Command | Effect |
-|---|---|
-| `/new`, `/reset` | Clear the current session |
-| `/cd <path>` | Switch working directory and reset the session |
-| `/ws list` | List named workspaces |
-| `/ws save <name>` | Save the current working directory as a named workspace |
-| `/ws use <name>` | Switch to a named workspace |
-| `/ws remove <name>` | Delete a named workspace |
-| `/resume` | Resume compatible history for the same agent, working directory, and permission mode |
-| `/status` | Show profile, agent, working directory, session, lark-cli identity, and run state |
-| `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
-| `/invite user @name` | Allow a user to use the bot in DMs |
-| `/invite admin @name` | Add an access-control admin |
-| `/invite group` | Allow the current group to use the bot |
-| `/invite all group` | Allow all groups the bot has joined |
-| `/remove user @name`, `/remove admin @name`, `/remove group` | Remove access entries |
-| `/stop` | Stop the current run, including the card stop button |
-| `/timeout [N\|off\|default]` | Set or clear the current session idle watchdog |
-| `/ps` | List local bridge processes |
-| `/exit <id\|#>` | Stop a bridge process |
-| `/reconnect` | Force a WebSocket reconnect |
-| `/doctor [description]` | Run low-sensitive diagnostics |
-| `/help` | Help card |
-
-DMs do not require an @ mention. Groups and topic groups require `@bot` by default; `@all` is ignored. Cloud-doc comments in supported document types run when the bot is mentioned.
-
-## Reply Display and COT
-
-`/config` controls three presentation settings:
-
-- **Message reply mode**: `message card` streams the final reply; `plain text` sends once after the run finishes.
-- **Tool-call display**: controls whether tool blocks appear in the final card / markdown reply.
-- **COT process message**: `off` sends only the final reply; `brief` first sends a COT message with agent progress text and tool summaries; `detailed` also includes tool args and truncated output.
-
-When COT is enabled, the bridge splits the process view and final answer into two messages. The COT message is for tracing what the agent did; the final answer is still generated from the agent's raw text, without heuristic bridge-side filtering. If an agent emits final-answer text as ordinary stream text, that text can also appear in the COT process message.
-
-## lark-cli identity policy
-
-Each profile uses a profile-local lark-cli directory at `~/.lark-channel/profiles/<profile>/lark-cli`. The agent process receives `LARKSUITE_CLI_CONFIG_DIR` for that directory, so personal authorization in one profile is not shared with another profile.
-
-The default policy is `bot-only`: lark-cli uses the app/bot identity and does not access personal resources. When a user authorizes personal resources such as calendar, mail, or drive, the current profile can switch to `user-default`, which keeps app identity available and also allows the authorized user identity. Owner/admin users can inspect or change this policy in `/config`; `/status` shows the current summary as `lark-cli: app` or `lark-cli: user-ready`.
-
-## Working directories
-
-Each profile may define a default working directory through `workspaces.default`. New profiles may be created with `--workspace <path>`; if omitted, the bridge creates a profile-managed default working directory.
-
-This is a profile-field snippet. Do not replace the whole `config.json` with it; edit the matching profile's `workspaces` field.
-
-```json
-{
-  "workspaces": {
-    "default": "/Users/me/.lark-channel-workspaces/claude/default"
-  }
-}
-```
-
-The bridge checks that a selected directory exists, is a directory, and is not an overly broad location such as `/`, the home root, a system directory, or a temp root. The working directory is only the current directory for an agent run. It is not a filesystem sandbox; actual file access still depends on the local agent process and its permission mode.
-
-## Permission modes
-
-The recommended user-facing profile config is `permissions.defaultAccess` and `permissions.maxAccess`. New profiles default to `full` for both values so the bridge can keep local tools, authorization flows, file writes, and other agent features fully usable. To tighten a profile, set one or both values to `workspace` or `read-only`; stricter modes can limit local tool execution, login/authorization flows, file writes, and similar capabilities.
-
-This is a profile-field snippet. Do not replace the whole `config.json` with it; edit the matching profile's `permissions` field.
-
-```json
-{
-  "permissions": {
-    "defaultAccess": "full",
-    "maxAccess": "full"
-  }
-}
-```
-
-Mode mapping:
-
-| Bridge access | Claude permission mode | Codex mode |
-|---|---|---|
-| `full` | `bypassPermissions` | `danger-full-access` |
-| `workspace` | `acceptEdits` | `workspace-write` |
-| `read-only` | `plan` | `read-only` |
-
-The legacy `sandbox` field is still readable for old configs. After the bridge saves the profile, it migrates that setting to canonical `permissions`.
-
-## Data directories
-
-| Path | Content |
-|---|---|
-| `~/.lark-channel/config.json` | Root config with profiles and active profile |
-| `~/.lark-channel/active-profile` | Last selected profile |
-| `~/.lark-channel/profiles/<profile>/sessions.json` | Session state |
-| `~/.lark-channel/profiles/<profile>/sessions.json.catalog.json` | Agent-aware session catalog |
-| `~/.lark-channel/profiles/<profile>/codex-turn-sync.json` | Unified Codex reply cursors, card IDs and update sequences (v2 migrates old state) |
-| `~/.lark-channel/profiles/<profile>/workspaces.json` | Current and named workspace bindings |
-| `~/.lark-channel/profiles/<profile>/secrets.enc` | Profile-local encrypted secrets |
-| `~/.lark-channel/profiles/<profile>/lark-cli/` | Profile-local lark-cli directory |
-| `~/.lark-channel/profiles/<profile>/media/` | Attachment cache |
-| `~/.lark-channel/profiles/<profile>/logs/` | Structured run logs |
-| `~/.lark-channel/registry/processes.json` | Local process registry |
-| `~/.lark-channel/registry/locks/` | Profile and app locks |
-
-Set `LARK_CHANNEL_HOME=/path/to/state` to move all local bridge state. `LARK_CHANNEL_LOG_DAYS` overrides log retention.
-
-## Access control
-
-**Chat access is private by default: out of the box, only *you* can use the bot in DMs and groups.** "You" = whoever created / owns the Feishu app (the person who scanned the QR to set it up). The bot figures out who the app owner is automatically from Feishu, so **solo chat use needs zero configuration** — you can DM it and `@`-mention it in any group, and everyone else's chat messages are silently ignored (no "permission denied" reply, which would only confirm the bot exists). Cloud-doc comments are document-scoped; see below.
-
-To let other people or groups in, add them to one of three lists:
-
-| List | Controls | Add | Remove |
-|------|----------|-----|--------|
-| **Allowed users** | who can DM the bot | `/invite user @them` | `/remove user @them` |
-| **Allowed chats** | which groups the bot answers in (for **everyone** in them) | `/invite group` (current group) / `/invite all group` (every group the bot is in) | `/remove group` (current group) |
-| **Admins** | who can change settings, and use the bot in any group | `/invite admin @them` | `/remove admin @them` |
-
-> `/invite` and `/remove` can only be run by **you (the creator) and admins**. The `@` in the command points at the *target person* (not the bot) — the bot resolves the mention to their identity, so you never deal with raw IDs.
-
-### Two identities that bypass everything
-
-- **You (the creator)**: subject to no list at all — DMs, any group, every command. You **can never lock yourself out**: even if the lists get messed up, DM the bot and send `/config` to get back in. Transfer the app's ownership in the Feishu console and the bot follows the new owner automatically.
-- **Admins**: can DM, run management commands like `/config`, and **bypass the allowed-chats list** — the bot answers them in any group, listed or not. Good for teammates who co-maintain the bot.
-
-### Common setups
-
-- **Just me** → nothing to do; this is the default.
-- **Let a teammate DM the bot** → `/invite user @them`
-- **Open a work group to everyone in it** → send `/invite group` inside that group
-- **First-time setup, onboard every group the bot is already in** → `/invite all group` pulls them all into the list at once; trim with `/remove group` afterwards
-- **Add a co-admin** → `/invite admin @them`
-
-### Worth knowing
-
-- Changes take effect on the **next message** — no restart needed.
-- **In groups you must `@` the bot first** (DMs don't need it). That's a separate toggle (`/config` → "require @ in groups"), independent of the lists above.
-- Strangers get pure silence — no reply at all. The one exception: if someone `@`-mentions the bot in a group that hasn't been opened up, the bot posts a friendly one-liner telling them an admin can run `/invite group` to enable it.
-- Cloud-doc comments are document-scoped: anyone who can comment in a supported document and mention the bot can trigger a reply.
-
-### Advanced: editing the config file directly
-
-If you'd rather not do it inside Feishu, `/invite` and `/config` write the matching profile's `access` field in `~/.lark-channel/config.json`. Empty lists mean nobody from that list, not open access. This is a profile-field snippet; do not replace the whole `config.json` with it:
-
-```json
-{
-  "schemaVersion": 2,
-  "profiles": {
-    "claude": {
-      "agentKind": "claude",
-      "access": {
-        "allowedUsers": ["ou_xxxxxxxxxxxxx"],
-        "allowedChats": ["oc_xxxxxxxxxxxxx"],
-        "admins": ["ou_xxxxxxxxxxxxx"],
-        "requireMentionInGroup": true
-      }
-    }
-  }
-}
-```
-
-`allowedUsers` / `admins` take user `open_id`s; `allowedChats` takes group `chat_id`s. The easiest way to find an ID by hand: have the person message the bot (or `@` it in the group), then check the active profile's log:
-
-```bash
-grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y%m%d).jsonl | tail -5
-```
-
-Each line carries `chatId` (group / DM id) and `senderId` (user `open_id`). After a manual edit, **restart the bridge** or send `/reconnect` from an allowed admin context to apply it. For day-to-day tweaks `/invite` / `/config` are easier; direct edits are mainly for deployment scripts that pre-seed access.
-
-## Cloud-doc comments
-
-Cloud-doc comments do not need a separate workspace binding or document allowlist. In supported document comments, mention the bot and the bridge replies in the same thread. Comment runs reuse the document session key and fall back to the user home directory when no document cwd was previously recorded.
-
-## FAQ
-
-**The bot stays silent or the local CLI never replies.** Usually the local `claude` or `codex` CLI is not logged in, or the current session points to a working directory that no longer exists. Send `/status` to inspect; `/new` often fixes it by starting a fresh session.
-
-**The agent subprocess looks frozen (card stuck on the last frame).** The bridge supports an idle watchdog: if the agent emits nothing for N minutes, the process is killed and the card is annotated with the auto-termination reason. Disabled by default. Enable with `/config` globally, or `/timeout 10` for the current session; `/timeout off` disables it for the session; `/timeout default` clears the session override.
-
-**The agent says it cannot see an image I sent.** Upgrade to the latest version. Releases before 0.1.0 had a filename-dedup bug.
-
-## Testing and CI
-
-Local checks:
-
-```bash
-pnpm test
+git clone https://github.com/cvster/CodexFeishu.git
+cd CodexFeishu
+
+corepack enable
+corepack prepare pnpm@10.33.0 --activate
+pnpm install --frozen-lockfile
 pnpm typecheck
+pnpm test
 pnpm build
 ```
 
-`pnpm test` includes unit, integration, and process-level adapter tests. CI runs on macOS, Ubuntu, and Windows with `pnpm install --frozen-lockfile`, `pnpm test`, `pnpm typecheck`, and `pnpm build`.
+`pnpm build` 生成根目录 `dist/` 的飞书桥接产物，同时准备共享 core 产物；不会启动或部署 Web 服务。
 
-## Optional telemetry
+### 2. 创建机器人配置
 
-By default the bridge reports **nothing**: no metrics, no logs leave your machine, and it pulls in zero telemetry dependencies. The hook below is inert unless you opt in.
-
-To wire up your own monitoring, point an environment variable at a module that default-exports (or exports `createAdapter`) an `AdapterFactory`:
+下面的 `my-bot` 是自定义 profile 名，`/absolute/path/to/project` 请替换为本机真实项目目录。
 
 ```bash
-LARK_CHANNEL_TELEMETRY_MODULE=your-telemetry-package lark-channel-bridge start
+node bin/lark-channel-bridge.mjs profile create my-bot \
+  --agent codex \
+  --workspace /absolute/path/to/project
+
+node bin/lark-channel-bridge.mjs profile use my-bot
 ```
 
-That module receives every `log.*` event plus error/metric hooks and forwards them wherever you like. The interface is exported from the package root:
+不传 App ID 时进入扫码向导。如果已有飞书应用，可使用：
 
-```ts
-import type { AdapterFactory, TelemetryAdapter, TelemetryEvent } from 'lark-channel-bridge';
-
-const createAdapter: AdapterFactory = (meta) => ({
-  emit(event) {/* ship event */},
-  recordError(err, ctx) {/* ship exception */},
-  recordMetric(name, value, tags) {/* ship metric */},
-  flush(timeoutMs) {/* drain buffered events */},
-});
-export default createAdapter;
+```bash
+node bin/lark-channel-bridge.mjs profile create my-bot \
+  --agent codex \
+  --app-id cli_xxx \
+  --workspace /absolute/path/to/project
 ```
 
-A missing module, a bad factory, or a throwing adapter all degrade to noop — telemetry can never stop the bridge from starting or break logging.
+按提示交互输入 App Secret；不要把 Secret 写入命令历史或提交到仓库。Lark 国际版加 `--tenant lark`。应用权限与事件订阅按 [权限清单](docs/FEISHU_PERMISSIONS.md) 配置，修改后需发布生效。
 
-## License
+### 3. 启动 Claude worker 与桥接
 
-[MIT](./LICENSE)
+需要在工作群中使用 Claude 时，先启动该 profile 的 worker。只使用 Codex 可跳过 worker 两条命令。
 
-<img src="./assets/feedback-group-qr.png" alt="Feedback group QR code" width="360">
+```bash
+node bin/lark-channel-bridge.mjs worker start --profile my-bot
+node bin/lark-channel-bridge.mjs worker status --profile my-bot
+
+node bin/lark-channel-bridge.mjs run --profile my-bot
+```
+
+`run` 用于前台调试。首次启动会检查 `lark-cli`；无交互的系统服务不会自动安装缺失的 CLI，可预先运行 `npm install -g @larksuite/cli`。桥接会为 profile 绑定对应应用，agent 内的 CLI 自动使用该 profile，默认应用机器人身份。
+
+确认日志显示机器人已连接后，私聊它发送“新建会话”。完成前台验证后按 `Ctrl-C` 退出，再启动后台服务。
+
+## 主要用法
+
+### 个人工作群（含 AA 会话群）
+
+AA 会话群就是个人工作群，不作为单独的群类型。个人工作群可以从私聊控制台创建，也可以由 `AA` 前缀会话自动建群；两者适用相同的工作群功能与权限规则。本文仅区分个人工作群和 FF 辅助群。
+
+1. 私聊机器人发送“新建会话”或“控制台”。本版私聊主要用于会话与工作群管理。
+2. 在卡片中选择 **Codex** 或 **Claude Code**，填写工作群名和本机项目目录。
+3. 创建后进入对应群提问；需要 @ 的群请真实选择并 @ 机器人。
+4. 在普通工作群中用 `/cd`、`/ws`、`/config` 等命令调整目录或偏好。群创建后工具固定，不会因重启或重置切换引擎。
+
+桌面 / CLI 中正式名称以 `AA` 开头的会话会被定期发现并创建工作群，沿用原会话 ID 与工作目录。例如 Claude 可通过 `/rename AA-项目名` 设置正式名称。已绑定的会话不重复建群；同名但不同工具、数据源或 ID 的会话分别处理。
+
+### 把机器人加入已有协作群
+
+1. 由应用所有者把机器人拉入目标群。
+2. 机器人私聊所有者：选择工具，再选择要关联的已有会话。
+3. 辅助群继承来源会话的项目目录；首次真实 @ 时创建或复用 `FF-{原会话名}`。
+4. 群成员真实 `@机器人` 后提问。未 @、`@所有人` 或其他机器人消息不处理。
+
+同一来源按 **工具 + 本地数据源 + 原生会话 ID** 区分。多个群关联同一来源时，共用一个 FF 历史上下文，因此不要把需要互相隔离的讨论绑定到同一来源；回答仍只发送到提问群。原会话仅作为背景读取，不被续跑或修改。最新进展在每次提问时读取，没有后台主动同步任务。
+
+通知失败、旧卡片过期或桥接重启后，所有者私聊发送 `/aux`，或点击控制台“待关联辅助群”重新选择。
+
+辅助群保留「停止」「刷新」两个按钮：运行时在外侧，结束后与状态一起收进详情区。长回答默认收起，点“查看详细说明”展开。默认回复不超过 200 字、5 行；明确要求详情时可给完整内容。提示词约束属于软限制，不保证模型输出一定满足字数或隐私表达要求。
+
+所有者在辅助群真实 `@机器人 退出` 后，停止并撤销本群请求、让机器人退群；其他关联群继续使用 FF，最后一个群退出才归档 FF。原会话和历史文件保留。更换关联时先退出，再重新邀请。
+
+### 图片和文件
+
+群成员可在提问时附带图片、文件或引用消息。桥接将附件下载到本机后交给 agent。
+
+要求机器人“把脚本发到本群”时，每次请求已注入当前 `chat_id` 和文件发送指引，使用当前应用的机器人身份，不需要再向用户索要群链接。同一个 FF 被多个群复用时，也以本次请求的群 ID 为准。文件成功发送后才应报告已发送。
+
+云文档评论是按需功能：云文档评论按文档权限生效，支持的文档中 @ 机器人可在原评论线程回复；需另外配置评论权限和事件，详见权限清单。
+
+### 常用指令
+
+以下工作群命令用于个人工作群；辅助群只提供停止、刷新和所有者退出。私聊使用控制台与 `/aux`。
+
+| 指令                                    | 用途                       |
+| ------------------------------------- | ------------------------ |
+| “新建会话” / “控制台”                        | 私聊创建、关联或管理会话群            |
+| `/aux`                                | 私聊重新获取待关联辅助群卡片           |
+| `/status`                             | 查看当前 profile、工具、目录与状态    |
+| `/new`、`/reset`                       | 重置当前个人工作群会话              |
+| `/cd /absolute/path`                  | 切换项目目录                   |
+| `/ws list`、`/ws save 名称`、`/ws use 名称` | 查看、保存和切换工作空间             |
+| `/resume`                             | 选择兼容的已有会话                |
+| `/config`                             | 修改模型、展示、访问及 CLI 身份偏好     |
+| `/stop`                               | 停止本群当前响应；共享 FF 不停止其他群的任务 |
+| `/refresh`                            | 刷新已有回复状态，不重跑任务           |
+| `/timeout 10`、`/timeout off`          | 设置或关闭个人工作群空闲超时           |
+| `/invite group`、`/invite user @同事`    | 管理员在个人工作群开放群或用户访问        |
+| `/doctor`                             | 查看诊断报告                   |
+| `/help`                               | 查看帮助                     |
+
+### 执行权限
+
+普通 profile 的 `permissions.defaultAccess` 与 `maxAccess` 默认均为 `full`；可配置为 `workspace` 或 `read-only`。这些执行权限与飞书 OpenAPI scope 是两回事。
+
+辅助群提示词整体采用 JSON，将可信的 `context` / `rules`、来源入口和 `user_input` 分字段保存。同一个 FF 每 10 次请求为一轮：第 1 次完整，其余 9 次精简；合并的一批消息计一次。计数持久化，重启继续；新原生 FF 或尚未创建成功时先发完整规则。每次仍携带当前群 ID、来源读取入口和当前发送者权限。JSON 用于避免文本拼接混淆，不能保证阻止模型越狱，也不代替执行权限控制。
+
+辅助群的默认限制是：本机项目只读、不执行本机项目脚本或构建；可在外部机器执行，脚本和产物可部署，其他源码及源码包不外传。应用所有者本人发送的请求依据真实 open\_id 在本次提示词中放宽限制；同事后续请求重新附加限制，不依靠姓名判断身份。
+
+旧版 `sandbox` 字段仍可读取；保存 profile 后迁移到 `permissions`，新配置请使用 `permissions`。
+
+这是模型行为约束，不是独立沙箱、只读挂载或文件外传拦截。详情见 [权限与访问控制](README.zh.md#权限模式)。
+
+## 部署为后台服务
+
+在上述固定安装目录执行：
+
+```bash
+node bin/lark-channel-bridge.mjs start --profile my-bot
+node bin/lark-channel-bridge.mjs status --profile my-bot
+```
+
+每个 profile 有独立服务。服务记录当前 Node 和 CLI 入口的绝对路径。更换安装目录或 Node 路径后，应从新路径重新执行 `start` 注册服务。
+
+| 平台      | 桥接服务                                                 |
+| ------- | ---------------------------------------------------- |
+| Linux   | 用户级 systemd：`lark-channel-bridge.bot.my-bot.service` |
+| macOS   | launchd：`ai.lark-channel-bridge.bot.my-bot`          |
+| Windows | 计划任务：`LarkChannelBridge.Bot.my-bot`                  |
+
+Linux Claude worker 使用独立的 `lark-channel-worker.my-bot.service`，启动命令见前文。需要退出登录后继续运行时，可由管理员为部署账户配置 systemd linger。
+
+```bash
+# 日常只重启飞书桥接
+node bin/lark-channel-bridge.mjs restart --profile my-bot
+
+# 查看状态或停止桥接
+node bin/lark-channel-bridge.mjs status --profile my-bot
+node bin/lark-channel-bridge.mjs stop --profile my-bot
+```
+
+`worker stop` 会停止 Claude 任务，不属于普通桥接重启步骤；也不要连带重启 Codex Desktop、共享 writer/app-server 或 Web 服务。
+
+## 升级、回滚与部署目录
+
+### 从源码升级
+
+升级前保存当前可回滚的构建产物和服务文件。不要把未提交代码、配置、密钥、运行账本或日志放进部署提交。
+
+```bash
+cd /path/to/CodexFeishu
+git pull --ff-only
+pnpm install --frozen-lockfile
+pnpm test
+pnpm typecheck
+pnpm build
+
+node bin/lark-channel-bridge.mjs restart --profile my-bot
+node bin/lark-channel-bridge.mjs status --profile my-bot
+# 若启用了 Claude，仅核对 worker，不重启它
+node bin/lark-channel-bridge.mjs worker status --profile my-bot
+```
+
+部署前检查版本、依赖与构建；部署后检查服务健康和 WebSocket 连接。无需把读取任务列表或等待全部任务结束作为日常桥接重启的前置条件。
+
+源码和运行目录分开时，将已验证的 `dist/` 部署到固定运行目录，并保留对应的 `bin/`、`package.json`、锁文件、生产依赖及许可证。仅在依赖一致时直接替换 `dist/`；依赖有变化时按对应版本安装依赖。采用临时目录校验、备份及替换产物后，只重启目标桥接服务。回滚恢复上一版构建，不用旧备份覆盖当前会话、消息队列和回复账本。
+
+本次维护机器的路径为：
+
+| 路径                                             | 用途                   |
+| ---------------------------------------------- | -------------------- |
+| `/home/pc/code/CodexFeishu`                    | 项目源码                 |
+| `/home/pc/lark-coding-agent-bridge`            | 已部署运行目录              |
+| `/home/pc/.lark-channel/profiles/lennox-codex` | 当前 profile 的会话、绑定和日志 |
+
+其他部署者应使用自己的路径、profile 和飞书应用，无需沿用这些本机名称。
+
+## 配置、数据与排错
+
+默认数据根目录为 `~/.lark-channel`，可通过 `LARK_CHANNEL_HOME` 设置。所有运行状态与代码目录分开保存。
+
+| 路径（相对于数据根目录）                               | 内容                      |
+| ------------------------------------------ | ----------------------- |
+| `config.json`                              | 所有 profile 的配置          |
+| `profiles/<profile>/secrets.enc`           | 应用凭据                    |
+| `profiles/<profile>/lark-cli/`             | profile 隔离的飞书 CLI 身份与授权 |
+| `profiles/<profile>/sessions.json*`        | 会话状态、目录索引与归档            |
+| `profiles/<profile>/tool-bindings.json`    | 工具与共享 FF 绑定             |
+| `profiles/<profile>/auxiliary-groups.json` | 辅助群关联和生命周期              |
+| `profiles/<profile>/codex-turn-sync.json`  | Codex 回复卡片、游标与更新序号      |
+| `profiles/<profile>/execution-worker/`     | Claude worker 收据与输出日志   |
+| `profiles/<profile>/logs/`                 | 桥接日志与 `daemon/` 服务日志    |
+
+常见问题：
+
+- **群里不响应**：检查应用已发布、可用范围包含用户、机器人在群内、真实 @ 和访问名单；辅助群还需所有者完成关联。
+- **辅助群未收到关联卡片**：检查机器人进群事件，私聊发送 `/aux` 获取待办。
+- **Axios 400 / 权限不足**：查看业务错误码与缺失 scope，按 [权限清单](docs/FEISHU_PERMISSIONS.md) 补齐并发布。不要只根据 HTTP 400 猜测原因。
+- **CLI 身份或文件发送失败**：核对当前 profile 的应用绑定；本地文件使用相对于当前目录的路径，不要改绑到他人的应用或读取密钥来绕过。
+- **Claude 执行失败**：确认 `claude` 已登录、worker 正常，数据源和应用与桥接一致。已有同目录 Claude 终端占用会阻止恢复，不会自动切换工具。
+- **卡片长时间不更新**：检查桥接服务与日志；使用刷新查看现有结果，避免因发送确认不明而反复提交同一任务。
+
+```bash
+node bin/lark-channel-bridge.mjs --help
+node bin/lark-channel-bridge.mjs profile list
+node bin/lark-channel-bridge.mjs status --profile my-bot
+# Linux 服务日志文件
+tail -n 60 ~/.lark-channel/profiles/my-bot/logs/daemon/daemon-stderr.log
+```
+
+## 开发与许可证
+
+从仓库根目录运行 `pnpm test`、`pnpm typecheck`、`pnpm build`。本次只维护文档时，检查命令是否存在、相对链接及 Markdown 格式即可。
+
+飞书桥接与 `packages/codex-core` 使用 [MIT](LICENSE)。独立的 `apps/web-app` 保留自身 GPLv3 许可证、依赖和部署流程；更新飞书桥接不会自动更新该 Web 服务。详见 [目录与许可证边界](docs/MONOREPO.md)。

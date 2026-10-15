@@ -46,8 +46,9 @@ to `apps/web-app/README.md`. Apply its overrides and build its UI independently.
 The Feishu npm package does not include the GPL web adapter.
 
 This code change does not move or update either running deployment. Deployment is a
-separate operation: back up service configs, check bound active tasks and OS/logs,
-then update only the intended service. Never restart a shared Codex writer daemon
+separate operation: back up artifacts and service configs, verify dependencies and OS/service health,
+then update only the intended service. Do not inspect task lists as a routine
+bridge restart gate, and leave the independent Claude worker running. Never restart a shared Codex writer daemon
 as part of an adapter update. Do not copy credentials or runtime databases into Git.
 
 ## Compatibility retained
