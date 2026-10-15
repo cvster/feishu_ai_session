@@ -64,9 +64,12 @@ describe('owner refresh', () => {
 
     await controller.start();
     expect(controls.botOwnerId).toBe('ou_first');
+    expect(isCreator(controls, 'ou_first')).toBe(true);
 
     await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
     expect(controls.botOwnerId).toBe('ou_second');
+    expect(isCreator(controls, 'ou_first')).toBe(false);
+    expect(isCreator(controls, 'ou_second')).toBe(true);
     expect(source.calls).toBe(2);
 
     controller.stop();
