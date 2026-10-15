@@ -139,7 +139,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
       .map((entry) => nativeId(entry)!),
   );
   const candidates = latestVersionSessions(history).filter(
-    (thread) => isAaSession(thread) && !boundThreadIds.has(thread.threadId) &&
+    (thread) => isAaSession(thread) && !deps.controls.auxiliary?.isAuxiliaryNative(toolId, sourceId, thread.threadId) && !boundThreadIds.has(thread.threadId) &&
       !deps.controls.toolBindings?.hasNativeBinding(toolId, sourceId, thread.threadId, knownChatIds) &&
       !isArchived(thread.threadId),
   );

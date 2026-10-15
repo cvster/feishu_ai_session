@@ -4,6 +4,7 @@ export { accessPolicyDigest } from './fingerprint';
 export type OwnerRefreshState = 'ok' | 'failed' | 'unknown';
 
 export interface RuntimeControls {
+  auxiliary?: { isActive(chatId: string): boolean };
   botOwnerId?: string;
   ownerRefreshState: OwnerRefreshState;
   ownerRefreshedAt?: number;
@@ -48,6 +49,7 @@ export function canUseGroup(
 ): AccessDecision {
   if (isCreator(controls, senderId)) return allow('owner');
   if (profile.access.admins.includes(senderId)) return allow('allowed-admin');
+  if (controls.auxiliary?.isActive(chatId)) return allow('allowed-chat');
   if (profile.access.allowedChats.includes('*')) return allow('allowed-chat');
   if (profile.access.allowedChats.includes(chatId)) return allow('allowed-chat');
   return deny('denied-chat');

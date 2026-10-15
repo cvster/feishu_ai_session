@@ -1,3 +1,4 @@
+import { AuxiliaryGroups } from './auxiliary-groups';
 import { NativeSessionLocks } from '../tools/locks';
 import { sessionRefKey } from '../tools/bindings';
 import { createToolRegistry } from '../tools/runtime';
@@ -419,10 +420,28 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     void task.finally(() => batchTasks.delete(task)).catch(() => {});
   });
 
+  if (deps.appPaths?.profileDir && controls.toolRegistry && controls.toolBindings) {
+    controls.auxiliary = new AuxiliaryGroups({
+      path: join(deps.appPaths.profileDir, 'auxiliary-groups.json'), appId: cfg.accounts.app.id,
+      channel, tools: controls.toolRegistry, bindings: controls.toolBindings, sessions, catalog: sessionCatalog, workspaces,
+      ownerId: () => controls.botOwnerId, refreshOwner: () => controls.refreshOwner(channel),
+      cancelPending: async chatId => {
+        const dropped = pending.cancel(chatId);
+        if (dropped.length) await controls.workerInbox?.reject(chatId, dropped);
+        const remaining = controls.workerInbox?.available().filter(e => e.scope === chatId).map(e => e.message) ?? [];
+        if (remaining.length) await controls.workerInbox?.reject(chatId, remaining);
+        for (const r of controls.codexSubmissions?.records() ?? []) if (r.scope === chatId && r.status === 'pending')
+          await controls.codexSubmissions!.mark(r.id, { status: 'rejected', error: '辅助群正在退出' }, ['pending']);
+      },
+    });
+    await controls.auxiliary.load();
+  }
+
   // Counter for stdout reconnect escalation; reset on `reconnected`.
   let consecutiveReconnects = 0;
 
   channel.on({
+    botAdded: evt => { void controls.auxiliary?.joined(evt).catch(error => log.warn('auxiliary', 'join-failed', { error: String(error) })); },
     message: async (msg) => {
       if (disconnecting) return;
       await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
@@ -447,6 +466,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
     },
     cardAction: async (evt) => {
+      try { if (await controls.auxiliary?.action(evt)) return; }
+      catch (error) { await channel.send(evt.operator.openId, { text: `辅助群关联未完成：${String(error)}` }); return; }
       await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
         await handleCardAction({
           channel,
@@ -544,6 +565,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
   });
   await ownerRefresh.start();
+  await controls.auxiliary?.recover().catch(error => log.warn('auxiliary', 'recovery-failed', { error: String(error) }));
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
   const aaSessionGroupSync =
     sessionCatalog && deps.appPaths?.profileDir
@@ -605,7 +627,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         for (const entry of pending.snapshot()) if (controls.toolBindings?.get(entry.scope)?.toolId === 'claude' && !busy.has(entry.scope) && !activeRuns.get(entry.scope)) pending.unblock(entry.scope);
         for (const entry of controls.workerInbox?.available() ?? []) {
           const binding = controls.toolBindings?.get(entry.scope);
-          if (binding?.toolId !== 'claude' || binding.sourceId !== claudeTool.client.sourceId || sessionCatalog.isScopeArchived(entry.scope)) {
+          if ((controls.auxiliary?.isAuxiliary(entry.scope) && !controls.auxiliary.isActive(entry.scope)) || binding?.toolId !== 'claude' || binding.sourceId !== claudeTool.client.sourceId || sessionCatalog.isScopeArchived(entry.scope)) {
             await controls.workerInbox?.reject(entry.scope, [entry.message]); continue;
           }
           if (busy.has(entry.scope) || activeRuns.get(entry.scope)) continue;
@@ -613,7 +635,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         }
       },
       renderOptions: job => ({ ...controls.runControlIcons,
-        ...(callbackAuth && job.options.delivery ? { signCallback: action => callbackAuth.sign({
+        ...(controls.auxiliary?.isAuxiliary(job.options.delivery?.chatId ?? '') ? { auxiliary: true, auxiliaryRunId: job.id } : {}),
+        ...(callbackAuth && job.options.delivery && !controls.auxiliary?.isAuxiliary(job.options.delivery.chatId) ? { signCallback: action => callbackAuth.sign({
           runId: job.id, scope: job.options.delivery!.scope, chatId: job.options.delivery!.chatId,
           operatorOpenId: job.options.delivery!.operatorOpenId, action,
           policyFingerprint: job.options.delivery!.policyFingerprint, ttlMs: 24 * 60 * 60 * 1000,
@@ -625,6 +648,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
 
   for (const record of submissions?.records() ?? []) {
     if (record.status !== 'pending') continue;
+    if (controls.auxiliary?.isAuxiliary(record.scope) && !controls.auxiliary.isActive(record.scope)) {
+      await submissions!.mark(record.id, { status: 'rejected', error: '辅助群未启用' }, ['pending']); continue;
+    }
     for (const message of record.messages) pending.push(record.scope, message);
   }
 
@@ -672,6 +698,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       if (submissions) await Promise.allSettled([...batchTasks]);
       await workerReplies?.stop();
       controls.claudeReplySync = undefined;
+      await controls.auxiliary?.flush();
       ownerRefresh.stop();
       knownChatsRefresh.stop();
       aaSessionGroupSync?.stop();
@@ -777,6 +804,18 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     executor: primaryExecutor,
     pool,
   } = deps;
+  const auxiliary = rootControls.auxiliary;
+  const auxiliaryGroup = msg.chatType !== 'p2p' ? auxiliary?.get(msg.chatId) : undefined;
+  if (auxiliaryGroup) {
+    const raw = msg.raw as { sender?: { sender_type?: string }; event?: { sender?: { sender_type?: string } } } | undefined;
+    const senderType = raw?.sender?.sender_type ?? raw?.event?.sender?.sender_type;
+    if (!msg.mentionedBot || msg.mentionAll || senderType === 'app' || senderType === 'bot' || msg.senderId === channel.botIdentity?.openId) return;
+    if (auxiliaryGroup.status !== 'active' && !(msg.content.trim() === '退出' && msg.senderId === auxiliaryGroup.ownerId)) {
+      await channel.send(msg.chatId, { text: '辅助群尚未完成关联，或正在退出。请所有者私聊发送 /aux。' }, { replyTo: msg.messageId });
+      return;
+    }
+    await auxiliary!.noteRequest(msg.chatId, msg.messageId, msg.senderId);
+  }
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
@@ -815,7 +854,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       threadId,
     });
   }
-  const scope = chatMode === 'topic' && threadId
+  const scope = !auxiliaryGroup && chatMode === 'topic' && threadId
     ? `${msg.chatId}:${threadId}`
     : msg.chatId;
   const toolId = toolForScope(rootControls, scope);
@@ -985,6 +1024,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
+  if (controls.auxiliary?.isAuxiliary(chatId) && !controls.auxiliary.isActive(chatId)) return;
   const runTraceId = getLogContext()?.traceId;
 
   const resourceItems = batch.flatMap((m) =>
@@ -1086,7 +1126,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       ]
     : undefined;
 
-  const prompt = buildPrompt(
+  const basePrompt = buildPrompt(
     batch,
     attachments,
     quotes,
@@ -1095,6 +1135,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     extraInstructions,
     agentKind === 'codex',
   );
+  const prompt = controls.auxiliary?.isAuxiliary(chatId)
+    ? await controls.auxiliary.wrapPrompt(chatId, basePrompt) : basePrompt;
   log.info('prompt', 'built', {
     promptChars: prompt.length,
     quotes: quotes.length,
@@ -1130,7 +1172,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     source: 'im',
     chatId,
     actorId: firstMsg.senderId,
-    ...(threadId ? { threadId } : {}),
+    ...(threadId && !controls.auxiliary?.isAuxiliary(chatId) ? { threadId } : {}),
   };
   const capability =
     controls.profileConfig.agentKind === 'codex'
@@ -1148,8 +1190,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     sessionCatalog,
     workspaces,
     executor,
-    checkSessionArchived: controls.codexReplySync?.isScopeArchived
-      ? () => controls.codexReplySync!.isScopeArchived!(scope)
+    checkSessionArchived: controls.auxiliary?.isAuxiliary(chatId) || controls.codexReplySync?.isScopeArchived
+      ? async () => (controls.auxiliary?.isAuxiliary(chatId) && !controls.auxiliary.isActive(chatId)) ||
+        await controls.codexReplySync?.isScopeArchived?.(scope) || false
       : undefined,
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
@@ -1203,6 +1246,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   let runCodexThreadId: string | undefined;
   let runCodexTurnId: string | undefined;
   const recordSession = (evt: AgentEvent): void => {
+    if (controls.auxiliary?.isAuxiliary(chatId) && !controls.auxiliary.isActive(chatId)) return;
     if (agent instanceof DurableClaudeAdapter && (handle.interrupted || handle.detached)) return;
     if (evt.type === 'user_input') {
       controls.codexUserInput?.accept(evt.prompt, handle.run.runId,
@@ -1287,7 +1331,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     log.info('flush', 'idle-watchdog', { idleTimeoutMs });
   }
 
-  const replyMode = getMessageReplyMode(controls.cfg);
+  const replyMode = controls.auxiliary?.isAuxiliary(chatId) ? 'card' : getMessageReplyMode(controls.cfg);
   log.info('flush', 'reply-mode', { mode: replyMode });
   const cotMessages = getCotMessages(controls.cfg);
   const cotEnabled = cotMessages !== 'off';
@@ -1299,9 +1343,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     if (getShowToolCalls(controls.cfg)) return state;
     return { ...state, blocks: state.blocks.filter((b) => b.kind !== 'tool') };
   };
-  const cardRenderOptions = callbackAuth
+  if (controls.auxiliary?.isActive(chatId)) await controls.auxiliary.trackRun(chatId, execution.handle.run.runId, lastMsg.messageId, true, firstMsg.senderId);
+  const cardRenderOptions = callbackAuth && !controls.auxiliary?.isAuxiliary(chatId)
     ? {
         ...controls.runControlIcons,
+        ...(controls.auxiliary?.isActive(chatId) ? { auxiliaryRunId: execution.handle.run.runId } : {}),
         signCallback: (action: string) =>
           callbackAuth.sign({
             runId: execution.runId,
@@ -1313,7 +1359,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             ttlMs: 24 * 60 * 60 * 1000,
           }),
       }
-    : { ...controls.runControlIcons };
+    : { ...controls.runControlIcons, ...(controls.auxiliary?.isActive(chatId) ? { auxiliaryRunId: execution.handle.run.runId } : {}) };
 
   // For non-card modes Claude's output doesn't surface visually until either
   // a first streamed token (markdown mode) or the whole run ends (text mode).
@@ -1656,6 +1702,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } catch (err) {
     log.fail('stream', err);
   } finally {
+    await controls.auxiliary?.trackRun(chatId, execution.handle.run.runId, lastMsg.messageId, false);
     if (handle.interrupted && runCodexThreadId && runCodexTurnId) {
       controls.codexUserInput?.endTurn(runCodexThreadId, runCodexTurnId);
     }

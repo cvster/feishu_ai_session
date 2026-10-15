@@ -35,7 +35,22 @@ export async function isSoloUserBotChat(channel: LarkChannel, chatId: string): P
  * Create a private group chat with the bot (as creator) and one user. Returns
  * the new chat_id. Requires `im:chat` scope on the bot.
  */
+const bridgeCreatedChats = new Set<string>();
+const creatingChats = new Set<Promise<unknown>>();
+
+/** Join events can precede the REST response; wait for existing creations. */
+export async function waitForBridgeGroupCreation(chatId: string): Promise<boolean> {
+  await Promise.allSettled([...creatingChats]);
+  return bridgeCreatedChats.has(chatId);
+}
+
 export async function createBoundChat(opts: CreateBoundChatOptions): Promise<CreatedChat> {
+  const task = createTrackedChat(opts);
+  creatingChats.add(task);
+  try { return await task; } finally { creatingChats.delete(task); }
+}
+
+async function createTrackedChat(opts: CreateBoundChatOptions): Promise<CreatedChat> {
   const { channel, name, description } = opts;
   const inviteUserIds = [...new Set([
     ...(opts.ownerOpenId ? [opts.ownerOpenId] : []),
@@ -63,6 +78,7 @@ export async function createBoundChat(opts: CreateBoundChatOptions): Promise<Cre
   });
   const chatId = response.data?.chat_id;
   if (!chatId) throw new Error(`Feishu returned no chat_id (${response.code ?? 'unknown'}): ${response.msg ?? 'unknown error'}`);
+  bridgeCreatedChats.add(chatId);
   return { chatId, name };
 }
 

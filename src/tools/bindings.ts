@@ -3,7 +3,15 @@ import type { AgentKind } from '../config/profile-schema';
 import type { SessionCatalog } from '../session/catalog';
 import { writeFileAtomic } from '../platform/atomic-write';
 
+export interface LinkedSession {
+  toolId: AgentKind;
+  sourceId: string;
+  nativeId: string;
+  historyPath: string;
+}
+
 export interface ToolBinding {
+  linkedSource?: LinkedSession;
   toolId: AgentKind;
   sourceId: string;
   name?: string;
@@ -30,21 +38,29 @@ export class ToolBindingStore {
       for (const [scope, b] of Object.entries(raw.bindings)) {
         const value = b as ToolBinding;
         if (!value || !['codex', 'claude'].includes(value.toolId) || typeof value.sourceId !== 'string') throw new Error('Invalid tool binding');
+        if (value.linkedSource && (!['codex', 'claude'].includes(value.linkedSource.toolId) ||
+          ![value.linkedSource.sourceId, value.linkedSource.nativeId, value.linkedSource.historyPath].every(v => typeof v === 'string' && v.length > 0))) throw new Error('Invalid linked source');
         this.bindings[scope] = value;
       }
       if (!raw.archived.every((k: unknown) => typeof k === 'string')) throw new Error('Invalid tool archives');
       this.archived = new Set(raw.archived);
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
   }
+  entries(): [string, ToolBinding][] { return structuredClone(Object.entries(this.bindings)); }
   get(scope: string): ToolBinding | undefined {
     const b = this.bindings[scope] ?? this.bindings[scope.split(':')[0]!];
-    return b ? { ...b } : undefined;
+    return b ? structuredClone(b) : undefined;
   }
   set(scope: string, binding: ToolBinding): void {
     const previous = this.get(scope);
     if (previous && (previous.toolId !== binding.toolId || previous.sourceId !== binding.sourceId)) throw new Error('会话创建后不能切换执行工具');
     this.bindings[scope] = { ...binding };
     this.persist();
+  }
+  /** A fresh invitation may choose another tool after the previous FF lifecycle ended. */
+  releaseAuxiliary(scope: string): void {
+    if (!this.bindings[scope]?.linkedSource) throw new Error('不能释放个人会话绑定');
+    delete this.bindings[scope]; this.persist();
   }
   hasNativeBinding(toolId: AgentKind, sourceId: string, nativeId: string, knownChats: Set<string>): boolean {
     return Object.entries(this.bindings).some(([scope, b]) => knownChats.has(scope.split(':')[0]!) && b.toolId === toolId && b.sourceId === sourceId && b.nativeId === nativeId);

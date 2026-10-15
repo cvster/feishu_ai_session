@@ -61,6 +61,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
   }
   async function publish(job: WorkerJob): Promise<void> {
     const target = job.options.delivery!;
+    if (deps.controls.auxiliary?.isAuxiliary(target.chatId) && !deps.controls.auxiliary.isActive(target.chatId)) return;
     const observer = recovered.get(job.id);
     if (!isJobActive(job) && observer) {
       deps.activeRuns.unregister(target.scope, observer.handle.run); recovered.delete(job.id);
@@ -96,11 +97,12 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     const finished = !isJobActive(snapshot.job);
     let delivery = deliveries[job.id];
     if (!delivery) {
-      delivery = { mode: getMessageReplyMode(deps.controls.cfg), sequence: 0, lastEvent: -1, pushedAt: 0 };
+      delivery = { mode: deps.controls.auxiliary?.isAuxiliary(target.chatId) ? 'card' : getMessageReplyMode(deps.controls.cfg), sequence: 0, lastEvent: -1, pushedAt: 0 };
       deliveries[job.id] = delivery;
     }
     if (delivery.mode === 'text' && !finished) return;
     if (delivery.lastEvent === lastEvent && !finished && Date.now() - delivery.pushedAt < 15_000) return;
+    if (deps.controls.auxiliary?.isAuxiliary(target.chatId)) await deps.controls.auxiliary.trackRun(target.chatId, job.id, target.replyTo, !finished, target.operatorOpenId);
     const options = deps.renderOptions?.(job) ?? {};
     const card = renderCard(state, { ...options, showStopButton: !finished });
     // CardKit updates own the stream window across reconnects; avoid its 10-minute streaming timeout.

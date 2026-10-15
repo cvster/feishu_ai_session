@@ -81,6 +81,11 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     return;
   }
 
+  if (deps.controls.auxiliary?.isAuxiliary(chatId)) {
+    const action = typeof payload.cmd === 'string' ? payload.cmd : '';
+    if (!deps.controls.auxiliary.isActive(chatId) || !['stop', 'refresh'].includes(action)) return;
+    if (action === 'stop' && !deps.controls.auxiliary.canStop(chatId, operatorId, payload.auxiliaryRunId)) return;
+  }
   if (LEGACY_CLAUDE_CALLBACK_MARKER in payload) {
     log.info('cardAction', 'skip-legacy-callback-marker', { scope });
     return;
@@ -168,6 +173,7 @@ async function resolveScope(
   deps: CardDispatchDeps,
 ): Promise<{ scope: string; threadId: string | undefined; mode: 'p2p' | 'group' | 'topic' }> {
   const chatId = deps.evt.chatId;
+  if (deps.controls.auxiliary?.isAuxiliary(chatId)) return { scope: chatId, threadId: undefined, mode: 'group' };
   const mode = await deps.chatModeCache.resolve(deps.channel, chatId);
   if (mode !== 'topic') {
     return { scope: chatId, threadId: undefined, mode };

@@ -288,7 +288,7 @@ async function syncOnce(
     }
     // Name failures must not prevent reply delivery or other thread polling.
     try {
-      const nameEntries = currentEntries(deps, threadId, liveEntries);
+      const nameEntries = currentEntries(deps, threadId, liveEntries).filter(e => !deps.controls.auxiliary?.isAuxiliary(e.scopeId.split(':')[0]!));
       if (nameEntries.length > 0) await deps.nameSync?.observe(snapshot, nameEntries,
         (scope) => currentEntries(deps, threadId, nameEntries).some((entry) => entry.scopeId === scope));
     } catch (err) {
@@ -489,10 +489,15 @@ async function syncTurnToScope(
   if (!isActive()) return;
   const target = targetFromScope(scope);
   if (!target) return;
+  if (controls?.auxiliary?.isAuxiliary(target.chatId)) {
+    if (!controls.auxiliary.isActive(target.chatId)) return;
+    icons = { ...icons, auxiliary: true, auxiliaryRunId: turn.id };
+    await controls.auxiliary.trackRun(target.chatId, turn.id, stored.replyTargets?.[scope]?.replyTo, !isCodexTurnTerminal(turn.status));
+  }
   const waitingForInput = controls?.codexUserInput?.isWaiting(threadId, turn.id) ?? false;
   const contentHash = turnContentHash(turn) + (waitingForInput ? ':waiting' : '');
   let delivery = stored.deliveries[scope];
-  const replyMode = controls ? getMessageReplyMode(controls.cfg) : 'card';
+  const replyMode = controls && !controls.auxiliary?.isAuxiliary(target.chatId) ? getMessageReplyMode(controls.cfg) : 'card';
   if (!delivery && replyMode === 'text' && !isCodexTurnTerminal(turn.status)) return;
   // Input echo is independent from answer delivery and can be filled in after
   // turn/started's empty item list. Feishu-origin inputs are already in chat.

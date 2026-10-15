@@ -112,6 +112,7 @@ import { fetchKnownChats, type KnownChat } from '../bot/lark-info';
 import { applyLarkCliIdentityPolicy, hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
 
 export interface Controls {
+  auxiliary?: import('../bot/auxiliary-groups').AuxiliaryGroups;
   toolRegistry?: ToolRegistry;
   toolBindings?: ToolBindingStore;
   defaultToolId?: import('../config/profile-schema').AgentKind;
@@ -310,6 +311,23 @@ function isAdminCommand(cmd: string): boolean {
 export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
   ctx = await routeCommandContext(ctx);
   const raw = ctx.msg.content.trim();
+  if (ctx.chatMode === 'p2p' && raw === '/aux') {
+    await ctx.controls.auxiliary?.pendingFor(ctx.msg.senderId);
+    return true;
+  }
+  const auxiliary = ctx.controls.auxiliary;
+  if (ctx.msg.chatType !== 'p2p' && auxiliary?.isAuxiliary(ctx.msg.chatId)) {
+    if (raw === '退出') {
+      if (ctx.msg.senderId !== ctx.controls.botOwnerId) { await reply(ctx, '仅所有者可以退出辅助群。'); return true; }
+      try { await auxiliary.leave(ctx.msg.chatId, ctx.msg.senderId, () => handleStop('', ctx, true)); }
+      catch (err) { await reply(ctx, `退出尚未完成：${errorText(err)}。请再次 @我发送“退出”重试。`); }
+      return true;
+    }
+    if (raw.startsWith('/') && !['/stop', '/refresh'].includes(raw)) {
+      await reply(ctx, '辅助群只提供停止、刷新；关联设置请所有者私聊机器人。');
+      return true;
+    }
+  }
   const trimmed =
     ctx.chatMode === 'p2p'
       ? (DM_TEXT_COMMANDS[raw] ?? raw)
@@ -332,6 +350,7 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
     await handleNew('chat setup', ctx);
     return true;
   }
+  if (auxiliary?.isAuxiliary(ctx.msg.chatId) && !['/stop', '/refresh'].includes(cmd)) return true;
   const h = handlers[cmd];
   if (!h) return false;
   if (
@@ -369,6 +388,7 @@ export async function runCommandHandler(
     await handleNew('chat setup', ctx);
     return true;
   }
+  if (ctx.controls.auxiliary?.isAuxiliary(ctx.msg.chatId) && !['stop', 'refresh'].includes(name)) return true;
   const h = handlers[`/${name}`];
   if (!h) return false;
   if (
@@ -514,6 +534,9 @@ async function handlePanel(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '❌ 全局会话和工作群管理仅管理员可用。');
     return;
   }
+  if (action === 'auxiliary' && ctx.chatMode === 'p2p') {
+    await ctx.controls.auxiliary?.pendingFor(ctx.msg.senderId); return;
+  }
   if (action === 'sessions') {
     await showExistingSessionsPanel(ctx, parsePanelPage(arg));
     return;
@@ -614,6 +637,7 @@ function buildTaskPanelCard(ctx: CommandContext): object {
     sessionId: catalogEntry?.threadId ?? catalogEntry?.sessionId ?? legacyEntry?.sessionId,
     activeRun: Boolean(ctx.activeRuns.get(ctx.scope)),
     groupCount: managedKnownChats(ctx, ctx.controls.knownChats ?? []).length,
+    auxiliaryAvailable: !!ctx.controls.auxiliary,
     sessionCount: ctx.sessionCatalog
       ? new Set(
           ctx.sessionCatalog.entries()
@@ -822,7 +846,7 @@ function managedKnownChats(ctx: CommandContext, chats: KnownChat[]): KnownChat[]
   const catalogScopes = new Set(
     (ctx.sessionCatalog?.entries() ?? []).map((entry) => entry.scopeId),
   );
-  return chats.filter((chat) => workspaceScopes.has(chat.id) || catalogScopes.has(chat.id));
+  return chats.filter((chat) => !ctx.controls.auxiliary?.isAuxiliary(chat.id) && (workspaceScopes.has(chat.id) || catalogScopes.has(chat.id)));
 }
 
 async function archivePanelSession(ctx: CommandContext, token: string): Promise<void> {
@@ -1749,14 +1773,24 @@ function formatOwnerState(ctx: CommandContext): string {
   return `${state} owner=${owner}${refreshed}`;
 }
 
-async function handleStop(args: string, ctx: CommandContext): Promise<void> {
+async function handleStop(args: string, ctx: CommandContext, strict = false): Promise<void> {
+  const auxiliary = ctx.controls.auxiliary;
+  if (!strict && auxiliary?.isAuxiliary(ctx.msg.chatId) &&
+    (!auxiliary.canStop(ctx.msg.chatId, ctx.msg.senderId, auxiliary.get(ctx.msg.chatId)?.running?.id) || args.trim())) return;
   const targetScope = args.trim();
   if (targetScope && !canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok) {
     await reply(ctx, '❌ 指定 scope 停止任务仅管理员可用。');
     return;
   }
   const scope = targetScope || ctx.scope;
-  let ok = ctx.activeRuns.interrupt(scope);
+  const handle = strict ? ctx.activeRuns.get(scope) : undefined;
+  let ok: boolean;
+  if (handle) {
+    handle.interrupted = true;
+    await handle.run.stop();
+    ctx.activeRuns.unregister(scope, handle.run);
+    ok = true;
+  } else ok = ctx.activeRuns.interrupt(scope);
   if (!ok && ctx.controls.claudeReplySync) ok = await ctx.controls.claudeReplySync.stopScope(scope);
   if (!ok && ctx.controls.codexSubmissions) {
     const threadId = ctx.sessionCatalog?.entries().filter(e => e.scopeId === scope && e.agentId === 'codex' && e.status === 'active')
@@ -1765,6 +1799,7 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
     if (threadId && codex?.binaryPath) {
       const remote = await resolveSharedCodexEndpoint({ remote: process.env.CODEX_QUEUE_REMOTE, codexHome: codex.codexHome });
       if (!remote) {
+        if (strict) throw new Error('没有可用的共享连接，无法确认任务已停止。');
         await reply(ctx, process.platform === 'win32'
           ? '⚠️ windows不支持桥接停止会话，请在 Codex 桌面停止任务。'
           : '⚠️ 没有可用的公开共享连接，请在 Codex 桌面停止任务。');
@@ -1774,6 +1809,7 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
         codexHome: codex.codexHome, inheritCodexHome: codex.inheritCodexHome !== false, sharedServer: true, passive: true, remote });
       try { ok = await stopCodexSubmissions(threadId, writer, () => waitForCodexIntake(scope, ctx.controls.codexSubmissions!)); }
       catch (error) {
+        if (strict) throw error;
         await reply(ctx, error instanceof CodexQueueContinuationError
           ? `⚠️ ${error.message}` : `⚠️ 停止请求未确认：${errorText(error)}`);
         if (error instanceof CodexQueueContinuationError) await ctx.controls.codexReplySync?.runNow();

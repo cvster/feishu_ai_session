@@ -59,7 +59,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   } else {
     const status = renderColoredRunStatus(state);
     if (status) elements.push(noteMd(status));
-    elements.push(controlButtonRow(options));
+    elements.push(controlButtonRow(options.auxiliary ? { ...options, showStopButton: false } : options));
   }
 
   return {
@@ -196,7 +196,7 @@ interface RunControl {
 }
 
 function stopButton(options: RunCardRenderOptions): RunControl {
-  const value: Record<string, unknown> = { cmd: 'stop' };
+  const value: Record<string, unknown> = { cmd: 'stop', ...(options.auxiliary ? { auxiliaryRunId: options.auxiliaryRunId ?? '' } : {}) };
   if (options.signCallback) {
     value.__bridge_cb = true;
     value.bridge_token = options.signCallback('stop');
@@ -204,18 +204,17 @@ function stopButton(options: RunCardRenderOptions): RunControl {
   return {
     icon: { tag: 'standard_icon', token: 'stop_outlined', color: 'red' },
     color: 'red',
-    hover_tips: { tag: 'plain_text', content: '停止当前回复' },
+    hover_tips: { tag: 'plain_text', content: options.auxiliary && options.showStopButton === false ? '本次任务已结束' : '停止当前回复' },
     behaviors: [{ type: 'callback', value }],
   };
 }
 
 function controlButtonRow(options: RunCardRenderOptions): object {
   const buttons = [
-    ...(options.showStopButton !== false ? [stopButton(options)] : []),
-    iconButton('setting_outlined', 'config', '模型与推理设置'),
+    ...(options.auxiliary || options.showStopButton !== false ? [stopButton(options)] : []),
+    ...(!options.auxiliary ? [iconButton('setting_outlined', 'config', '模型与推理设置')] : []),
     iconButton('refresh_outlined', 'refresh', '刷新会话状态', 'green'),
-    forkButton(options),
-    archiveButton(),
+    ...(!options.auxiliary ? [forkButton(options), archiveButton()] : []),
   ];
   return {
     tag: 'column_set',

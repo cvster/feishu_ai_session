@@ -30,7 +30,7 @@ export async function commandSessionCatalogIdentity(input: {
       source: 'im',
       chatId: input.msg.chatId,
       actorId: input.msg.senderId,
-      ...(input.mode === 'topic' && input.msg.threadId ? { threadId: input.msg.threadId } : {}),
+      ...(!input.controls.auxiliary?.isAuxiliary(input.msg.chatId) && input.mode === 'topic' && input.msg.threadId ? { threadId: input.msg.threadId } : {}),
     },
     attachments: [],
     prompt: '',

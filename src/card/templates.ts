@@ -149,6 +149,7 @@ export interface TaskPanelInfo {
   activeRun: boolean;
   groupCount?: number;
   sessionCount?: number;
+  auxiliaryAvailable?: boolean;
 }
 
 /** Click-first home screen for the common task and session operations. */
@@ -191,6 +192,9 @@ export function taskPanelCard(info: TaskPanelInfo): object {
           { text: '模型与推理', value: { cmd: 'config' } },
           { text: '工作目录', value: { cmd: 'ws.list' } },
         ]),
+        ...(info.chatMode === 'p2p' && info.auxiliaryAvailable ? [cardKitButtonRow([
+          { text: '待关联辅助群', value: { cmd: 'panel.auxiliary' } },
+        ])] : []),
         cardKitButtonRow([
           { text: '刷新状态', value: { cmd: 'panel.refresh' } },
           { text: '停止当前运行', value: { cmd: 'panel.stop' } },
