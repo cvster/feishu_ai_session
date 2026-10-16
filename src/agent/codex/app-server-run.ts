@@ -28,7 +28,7 @@ export interface CodexAppServerRunOptions {
   clientUserMessageId: string;
   images?: readonly string[];
   model?: string;
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  reasoningEffort?: string;
   env?: NodeJS.ProcessEnv;
   stopGraceMs: number;
 }

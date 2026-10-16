@@ -1,8 +1,8 @@
 import { afterEach, expect, it } from 'vitest';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { listZcodeModels, loadZcodeRuntimeModel } from '../../../src/agent/zcode/model-config';
+import { listZcodeModels, listZcodeModelCapabilities, loadZcodeRuntimeModel } from '../../../src/agent/zcode/model-config';
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 it('refreshes native desktop providers and models, keeps same-named models distinct, and never exposes keys', async () => {
@@ -40,4 +40,25 @@ it('keeps an explicitly selected legacy default and fails instead of returning a
   await expect(loadZcodeRuntimeModel({ dataDir })).rejects.toThrow('已移除');
   await writeFile(path, '{broken');
   await expect(listZcodeModels({ dataDir })).rejects.toThrow('无法读取');
+});
+
+it('discovers native levels in an isolated metadata process and excludes credentials and inference requests', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'zcode-capabilities-')); roots.push(root);
+  const path = join(root, 'config.json'), cli = join(root, 'cli.cjs'), calls = join(root, 'calls.jsonl');
+  const config = { model: 'p/two', provider: { p: { kind: 'openai', options: { apiKey: 'private-key', headers: { authorization: 'private-header' } }, models: { one: {}, two: {} } } } };
+  await writeFile(path, JSON.stringify(config));
+  await writeFile(cli, `
+    const fs=require('node:fs');require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+      fs.appendFileSync(${JSON.stringify(calls)},line+'\\n');const q=JSON.parse(line);
+      const models=q.params.registry.providers.flatMap(provider=>provider.models.map(model=>({ref:{providerId:provider.providerId,modelId:model.modelId},reasoning:model.modelId==='two'?{enabled:true,levels:[{value:'future',label:'Future'}],defaultLevel:'future'}:{enabled:false,levels:[]}})));
+      process.stdout.write(JSON.stringify({id:q.id,result:{workspaceState:{settings:{model:{available:models}}}}})+'\\n');
+    });`);
+  const choices = await listZcodeModelCapabilities({ binary: process.execPath, args: [cli, '--settings', path], dataDir: root });
+  expect(choices[0]?.reasoningEfforts).toBeUndefined();
+  expect(choices[1]).toMatchObject({ value: 'p/two', isDefault: true, defaultReasoningEffort: 'future', reasoningEfforts: [{ value: 'future', label: 'Future' }] });
+  const requests = await readFile(calls, 'utf8');
+  expect(requests).not.toContain('private-key'); expect(requests).not.toContain('private-header');
+  expect(requests).not.toContain('session/create'); expect(requests).not.toContain('session/send');
+  expect(requests).toContain('workspace/updateProviderRegistry');
+  expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(config);
 });

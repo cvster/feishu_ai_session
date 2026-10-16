@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { DEFAULT_MODEL, supportedModels, normalizeModelSelection, resolveModelArg, modelLabel, loadModelChoices, normalizeReasoningEffort } from '../../../src/agent/models';
+import { DEFAULT_MODEL, supportedModels, normalizeModelSelection, resolveModelArg, modelLabel, loadModelChoices, normalizeReasoningEffort, normalizeNativeModels, reasoningOptions, resolveReasoningEffort } from '../../../src/agent/models';
 import { FakeAgentAdapter } from '../../helpers/fake-agent';
 
 it.each(['codex', 'claude', 'zcode'] as const)('keeps only the default locally and preserves opaque %s native model IDs', kind => {
@@ -26,7 +26,22 @@ it('refreshes the native catalog and distinguishes deletion from discovery failu
   expect(JSON.stringify(failed)).not.toContain('do-not-display');
   expect(listModels).toHaveBeenCalledWith({ cwd: '/workspace' });
 });
-it('retains engine-specific effort syntax independently of model names', () => {
-  expect(normalizeReasoningEffort('claude', 'ultra')).toBe('high');
+it('preserves native tokens without guessing levels from tool or model names', () => {
+  expect(normalizeReasoningEffort('claude', 'native-new')).toBe('native-new');
+  expect(normalizeReasoningEffort('zcode', undefined)).toBe('default');
+  expect(resolveReasoningEffort('default')).toBeUndefined();
+  expect(resolveReasoningEffort('bad\nvalue')).toBeUndefined();
   expect(normalizeReasoningEffort('codex', 'ultra')).toBe('ultra');
+});
+
+it('retains safe per-model metadata and resolves default capability from the native default entry', async () => {
+  const metadata = { value: 'default', label: 'Native default', reasoningEfforts: [{ value: 'future', label: 'Future' }, { value: 'bad\nvalue', label: 'unsafe' }], defaultReasoningEffort: 'future', secret: 'private' };
+  const agent = Object.assign(new FakeAgentAdapter(), { listModels: async () => [metadata] });
+  const choices = await loadModelChoices(agent);
+  expect(choices.options).toHaveLength(1);
+  expect(reasoningOptions(choices.options[0]).map(option => option.value)).toEqual(['default', 'future']);
+  expect(JSON.stringify(choices)).not.toContain('private');
+  const fromDefault = await loadModelChoices(Object.assign(new FakeAgentAdapter(), { listModels: async () => [{ ...metadata, value: 'native-model', isDefault: true }] }));
+  expect(fromDefault.options[0]?.defaultReasoningEffort).toBe('future');
+  expect(normalizeNativeModels([{ value: 'no-effort', label: 'None' }])[0]?.reasoningEfforts).toBeUndefined();
 });

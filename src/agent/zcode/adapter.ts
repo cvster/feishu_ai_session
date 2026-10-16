@@ -1,6 +1,7 @@
-import { listZcodeModels, loadZcodeRuntimeModel } from './model-config';
+import { listZcodeModelCapabilities, loadZcodeRuntimeModel } from './model-config';
 import { createHash } from 'node:crypto';
 import type { AgentAdapter, AgentBotIdentity, AgentEvent, AgentRun, AgentRunOptions } from '../types';
+import { resolveReasoningEffort } from '../models';
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { checkAgentAvailability } from '../preflight';
 import { ZcodeClient, zcodeCommand, type ZcodeOptions } from './client';
@@ -19,7 +20,7 @@ export class ZcodeAdapter implements AgentAdapter {
     return checkAgentAvailability({ agentId: 'zcode', agentName: 'ZCode', command: command.binary, binaryPath: command.binary, args: [...command.args, '--version'] });
   }
   async isAvailable(): Promise<boolean> { return (await this.checkAvailability()).ok; }
-  listModels() { return listZcodeModels(this.options); }
+  listModels() { return listZcodeModelCapabilities(this.options); }
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) throw new Error('ZCode requires a project directory');
     const client = new ZcodeClient(this.options, opts.cwd);
@@ -66,6 +67,7 @@ export class ZcodeAdapter implements AgentAdapter {
       try {
         const mode = opts.accessMode === 'read-only' || opts.sandbox === 'read-only' ? 'plan' : opts.accessMode === 'workspace' || opts.sandbox === 'workspace-write' ? 'build' : 'yolo';
         const runtimeModel = await loadZcodeRuntimeModel(this.options, opts.model);
+        const effort = resolveReasoningEffort(opts.reasoningEffort);
         const modelParams = runtimeModel ? { runtimeModel } : {};
         const snapshot = opts.sessionId
           ? await client.request('session/resume', { sessionId: opts.sessionId, workspace: zcodeWorkspace(opts.cwd!), ...modelParams })
@@ -75,6 +77,10 @@ export class ZcodeAdapter implements AgentAdapter {
         if (snapshot.session?.status === 'running' || snapshot.runtime?.isRunning) throw new Error('ZCode 会话正在运行，请在原入口完成后继续。');
         push({ type: 'system', sessionId, cwd: opts.cwd });
         await client.request('session/setMode', { sessionId, mode });
+        if (effort) {
+          await client.request('session/setThoughtLevel', { sessionId, thoughtLevel: effort });
+          Object.assign(runtimeModel, { thoughtLevel: effort });
+        }
         await client.request('session/subscribe', { sessionId, deliveryKind: 'web-remote-replayable' });
         if (stopping) { push({ type: 'done', sessionId, terminationReason: 'interrupted' }); return; }
         sent = true;

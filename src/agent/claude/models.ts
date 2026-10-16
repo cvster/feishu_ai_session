@@ -28,7 +28,8 @@ export async function listClaudeModels(binary: string, cwd?: string, larkChannel
         if (value.type !== 'control_response' || value.response?.request_id !== requestId) return;
         const response = value.response;
         if (response.subtype !== 'success' || !Array.isArray(response.response?.models)) { fail(); return; }
-        resolve(response.response.models.map((model: any) => ({ value: model.value, label: model.displayName ?? model.value })));
+        resolve(response.response.models.map((model: any) => ({ value: model.value, label: model.displayName ?? model.value,
+          ...(model.supportsEffort && Array.isArray(model.supportedEffortLevels) ? { reasoningEfforts: model.supportedEffortLevels.map((value: string) => ({ value, label: value })) } : {}) })));
       });
       child.stdin!.write(JSON.stringify({ type: 'control_request', request_id: requestId, request: { subtype: 'initialize' } }) + '\n');
     });

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { configFormCard, configSavedCard, type ConfigFormOpts } from '../../../src/card/config-card';
 
 const defaults: ConfigFormOpts = {
-  modelOptions: [{ value: 'default', label: '跟随工具默认' }, { value: 'claude-opus-5-5', label: 'Opus 5.5' }],
+  modelOptions: [{ value: 'default', label: '跟随工具默认', reasoningEfforts: [{ value: 'high', label: 'High' }, { value: 'native-new', label: 'New level' }] }, { value: 'claude-opus-5-5', label: 'Opus 5.5' }],
   agentKind: 'claude', model: 'claude-opus-5-5', reasoningEffort: 'high',
   messageReply: 'card', showToolCalls: false, cotMessages: 'brief', maxConcurrentRuns: 7,
   runIdleTimeoutMinutes: 27, requireMentionInGroup: true, larkCliIdentity: 'bot-only',
@@ -22,7 +22,7 @@ describe('compact settings card', () => {
       .toEqual(['model', 'reasoning_effort']);
     const effort = form.elements!.find(element => element.name === 'reasoning_effort')!;
     expect(effort.initial_option).toBe('high');
-    expect(effort.options!.some(option => option.value === 'ultra')).toBe(agentKind === 'codex');
+    expect(effort.options!.map(option => option.value)).toEqual(['default', 'high', 'native-new']);
     const more = form.elements!.find(element => element.tag === 'collapsible_panel')!;
     expect(more.expanded).toBe(false);
     expect(more.elements).toEqual(expect.arrayContaining([
@@ -31,7 +31,7 @@ describe('compact settings card', () => {
       expect.objectContaining({ name: 'cot_messages', initial_option: 'brief' }),
       expect.objectContaining({ name: 'max_concurrent_runs', default_value: '7' }),
     ]));
-    expect(form.elements!.length).toBeLessThanOrEqual(6);
+    expect(form.elements!.length).toBeLessThanOrEqual(8);
   });
 
   it('confirms the selected CC effort in a short saved card', () => {
@@ -52,5 +52,13 @@ it('pages large native catalogs while retaining the current selection as a valid
   expect(picker.options!.length).toBeLessThanOrEqual(82);
   expect(picker.options!.some(o => o.value === picker.initial_option)).toBe(true);
   expect(picker.options!.some(o => o.value === 'model-100')).toBe(true);
-  expect(JSON.stringify(card)).toContain('config models 2');
+  expect(JSON.stringify(card)).toContain('config.models.2');
+});
+
+it('offers only native default for models without capability metadata, never guessed levels', () => {
+  const card = configFormCard({ ...defaults, model: 'claude-opus-5-5' }) as { body: { elements: Element[] } };
+  const picker = card.body.elements.find(e => e.tag === 'form')!.elements!.find(e => e.name === 'reasoning_effort')!;
+  expect(picker.initial_option).toBe('default');
+  expect(picker.options!.map(option => option.value)).toEqual(['default']);
+  expect(JSON.stringify(card)).toContain('config.preview');
 });

@@ -10,7 +10,7 @@ export interface BuildCodexArgsInput {
   ignoreRules?: boolean;
   /** Forwarded to the selected Codex transport. Omitted uses the Codex default. */
   model?: string;
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  reasoningEffort?: string;
 }
 
 export interface BuildCodexQueueArgsInput {
@@ -22,7 +22,7 @@ export interface BuildCodexQueueArgsInput {
   remote?: string;
   images?: readonly string[];
   model?: string;
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  reasoningEffort?: string;
 }
 
 /**
@@ -56,7 +56,7 @@ export function buildCodexArgs(input: BuildCodexArgsInput): string[] {
     input.sandbox,
     ...(input.model ? ['--model', input.model] : []),
     ...(input.reasoningEffort
-      ? ['-c', `model_reasoning_effort="${input.reasoningEffort}"`]
+      ? ['-c', `model_reasoning_effort=${JSON.stringify(input.reasoningEffort)}`]
       : []),
     '-c',
     'approval_policy="never"',

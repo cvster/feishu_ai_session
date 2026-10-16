@@ -23,7 +23,7 @@ describe('IM run flow', () => {
   it('resumes a CC binding with a newly advertised model and the selected effort', async () => {
     const h = await createHarness({ defaultWorkspace: true });
     h.profileConfig.preferences.model = 'provider-new-model';
-    Object.assign(h.agent, { listModels: async () => [{ value: 'provider-new-model', label: 'new native model' }] });
+    Object.assign(h.agent, { listModels: async () => [{ value: 'provider-new-model', label: 'new native model', reasoningEfforts: [{ value: 'xhigh', label: 'xhigh' }] }] });
     h.profileConfig.preferences.reasoningEffort = 'xhigh';
     h.sessions.set('chat-1', 'existing-cc-session', await realpath(h.tmp.workspace));
     const result = await startRunFlow({ scopeId: 'chat-1',
@@ -47,6 +47,21 @@ describe('IM run flow', () => {
       executor: h.executor, now: 1000 });
     expect(result).toMatchObject({ ok: false, rejectReason: { code: 'model-unavailable', userVisible: expect.stringContaining('/config') } });
     expect(h.agent.runOptions).toEqual([]);
+  });
+
+  it.each(['claude', 'codex', 'zcode'] as const)('rejects stale %s reasoning levels before spawning, and follows native default when requested', async kind => {
+    const h = await createHarness({ defaultWorkspace: true });
+    h.profileConfig.agentKind = kind; h.profileConfig.preferences.model = 'model';
+    h.profileConfig.preferences.reasoningEffort = 'deleted-level';
+    Object.assign(h.agent, { listModels: async () => [{ value: 'model', label: 'Model', reasoningEfforts: [{ value: 'new-level', label: 'New' }] }] });
+    const input = { scopeId: 'chat-1', scope: { source: 'im' as const, chatId: 'chat-1', actorId: 'ou_user' },
+      prompt: 'hello', attachments: [], access: { ok: true as const, reason: 'allowed-user' as const },
+      capability: capabilityForTool(kind, h.profileConfig), profileConfig: h.profileConfig, sessions: h.sessions, workspaces: h.workspaces, executor: h.executor, now: 1000 };
+    expect(await startRunFlow(input)).toMatchObject({ ok: false, rejectReason: { code: 'model-unavailable' } });
+    expect(h.agent.runOptions).toEqual([]);
+    h.profileConfig.preferences.reasoningEffort = 'default';
+    expect(await startRunFlow(input)).toMatchObject({ ok: true });
+    expect(h.agent.runOptions[0]?.reasoningEffort).toBeUndefined();
   });
 
   it.each(['persisted', 'external', 'unavailable'])('does not submit or create a session after archive: %s', async (mode) => {

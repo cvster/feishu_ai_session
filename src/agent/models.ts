@@ -1,9 +1,15 @@
 import type { AgentKind } from '../config/profile-schema';
-import { CODEX_STANDARD_REASONING_VALUES } from '../../packages/codex-core/src/models';
-import type { AgentAdapter, AgentRunOptions } from './types';
+import type { AgentAdapter } from './types';
 
 export const DEFAULT_MODEL = 'default';
-export interface ModelOption { value: string; label: string; unavailable?: boolean }
+export const DEFAULT_REASONING = 'default';
+export interface ReasoningOption { value: string; label: string }
+export interface ModelOption {
+  value: string; label: string; unavailable?: boolean;
+  reasoningEfforts?: ReasoningOption[];
+  defaultReasoningEffort?: string;
+  isDefault?: boolean;
+}
 /** Only the default sentinel is local. Concrete models always belong to the native tool. */
 export function supportedModels(_agentKind: AgentKind): ModelOption[] {
   return [{ value: DEFAULT_MODEL, label: '跟随工具默认模型' }];
@@ -28,8 +34,14 @@ export interface ModelChoices {
 export function normalizeNativeModels(rows: ModelOption[]): ModelOption[] {
   const result = new Map<string, ModelOption>();
   for (const row of rows) {
-    if (typeof row.value !== 'string' || !row.value || row.value === DEFAULT_MODEL || row.value.length > 512 || /[\x00-\x1f]/.test(row.value)) continue;
-    result.set(row.value, { value: row.value, label: typeof row.label === 'string' && row.label ? row.label : row.value });
+    if (typeof row.value !== 'string' || !row.value || row.value.length > 512 || /[\x00-\x1f]/.test(row.value)) continue;
+    const reasoningEfforts = Array.isArray(row.reasoningEfforts) ? [...new Map(row.reasoningEfforts
+      .filter(option => validEffort(option?.value) && option.value !== DEFAULT_REASONING)
+      .map(option => [option.value, { value: option.value, label: typeof option.label === 'string' ? option.label : option.value }])).values()] : undefined;
+    result.set(row.value, { value: row.value, label: typeof row.label === 'string' && row.label ? row.label : row.value,
+      ...(reasoningEfforts ? { reasoningEfforts } : {}),
+      ...(validEffort(row.defaultReasoningEffort) ? { defaultReasoningEffort: row.defaultReasoningEffort } : {}),
+      ...(row.isDefault ? { isDefault: true } : {}) });
   }
   return [...result.values()];
 }
@@ -37,7 +49,10 @@ export async function loadModelChoices(agent: AgentAdapter, cwd?: string, curren
   const options = supportedModels(agent.id as AgentKind);
   try {
     if (!agent.listModels) throw new Error('Native model discovery unavailable');
-    options.push(...normalizeNativeModels(await agent.listModels({ cwd })));
+    const native = normalizeNativeModels(await agent.listModels({ cwd }));
+    const defaultModel = native.find(model => model.value === DEFAULT_MODEL) ?? native.find(model => model.isDefault);
+    if (defaultModel) options[0] = { ...defaultModel, value: DEFAULT_MODEL, label: '跟随工具默认模型' };
+    options.push(...native.filter(model => model.value !== DEFAULT_MODEL));
     if (current && current !== DEFAULT_MODEL && !options.some(model => model.value === current)) {
       options.push({ value: current, label: `已不可用 · ${current}`, unavailable: true });
       return { options, available: true, notice: '已选模型已不在工具列表中；请选择其他模型，或跟随工具默认。' };
@@ -48,11 +63,17 @@ export async function loadModelChoices(agent: AgentAdapter, cwd?: string, curren
     return { options, available: false, notice: '暂时无法读取工具模型列表，保留原选择。可重新打开 /config 刷新，或选择跟随工具默认。' };
   }
 }
-type ReasoningEffort = NonNullable<AgentRunOptions['reasoningEffort']>;
-const CLAUDE_REASONING_VALUES: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
-export function supportedReasoningEfforts(agentKind: AgentKind): readonly string[] {
-  return agentKind === 'codex' ? CODEX_STANDARD_REASONING_VALUES : agentKind === 'claude' ? CLAUDE_REASONING_VALUES : [];
+/** Native levels are tokens, not free text; never guess unsupported levels. */
+function validEffort(value: unknown): value is string { return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(value); }
+export function supportedReasoningEfforts(_agentKind: AgentKind, model?: ModelOption): readonly string[] {
+  return model?.reasoningEfforts?.map(option => option.value) ?? [];
 }
-export function normalizeReasoningEffort(agentKind: AgentKind, value: string | undefined): ReasoningEffort {
-  return supportedReasoningEfforts(agentKind).includes(value ?? '') ? value as ReasoningEffort : 'high';
+export function normalizeReasoningEffort(_agentKind: AgentKind, value: string | undefined): string {
+  return validEffort(value) ? value : DEFAULT_REASONING;
+}
+export function resolveReasoningEffort(value: string | undefined): string | undefined {
+  return validEffort(value) && value !== DEFAULT_REASONING ? value : undefined;
+}
+export function reasoningOptions(model?: ModelOption): ReasoningOption[] {
+  return [{ value: DEFAULT_REASONING, label: '跟随工具默认' }, ...(model?.reasoningEfforts ?? [])];
 }

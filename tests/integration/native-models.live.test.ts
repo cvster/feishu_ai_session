@@ -13,7 +13,9 @@ it.skipIf(process.env.MODEL_DISCOVERY_LIVE !== '1')('reads all three native cata
       const models = await agent.listModels({ cwd: dir });
       expect(models.length, agent.id).toBeGreaterThan(0);
       expect(models.every(model => typeof model.value === 'string' && typeof model.label === 'string'), agent.id).toBe(true);
-      process.stdout.write(`${agent.id}: ${models.length} native models\n`);
+      const withLevels = models.filter(model => model.reasoningEfforts?.length);
+      expect(withLevels.length, `${agent.id} reasoning metadata`).toBeGreaterThan(0);
+      process.stdout.write(`${agent.id}: ${models.length} native models, ${withLevels.length} with reasoning levels\n`);
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
 }, 60000);

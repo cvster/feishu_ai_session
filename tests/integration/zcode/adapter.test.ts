@@ -89,3 +89,16 @@ it('reads fresh history and durable bridge labels through session operations wit
   expect((await h.read()).some(c => c.method === 'session/send')).toBe(false);
   expect(await provider.historyPath('../../file')).toBeUndefined();
 });
+
+it('sets the native thought level before sending and carries it in the per-turn runtime model', async () => {
+  const h = await fixture();
+  const run = h.agent.run({ runId: 'effort', cwd: h.root, prompt: 'hello', reasoningEffort: 'native-level' });
+  for await (const _event of run.events) { /* drain */ }
+  expect(await run.waitForExit(3000)).toBe(true);
+  const calls = await h.read();
+  const setIndex = calls.findIndex(c => c.method === 'session/setThoughtLevel');
+  const sendIndex = calls.findIndex(c => c.method === 'session/send');
+  expect(setIndex).toBeGreaterThan(0); expect(setIndex).toBeLessThan(sendIndex);
+  expect(calls[setIndex].params).toEqual({ sessionId: 'sess_test', thoughtLevel: 'native-level' });
+  expect(calls[sendIndex].params.runtimeModel.thoughtLevel).toBe('native-level');
+});

@@ -1,4 +1,4 @@
-import { modelLabel, normalizeReasoningEffort, supportedModels, supportedReasoningEfforts, type ModelOption } from '../agent/models';
+import { DEFAULT_REASONING, modelLabel, normalizeReasoningEffort, reasoningOptions, supportedModels, type ModelOption } from '../agent/models';
 import type { KnownChat } from '../bot/lark-info';
 import type { AgentKind, LarkCliIdentityPreset } from '../config/profile-schema';
 import type { CotMessagesMode, MessageReplyMode } from '../config/schema';
@@ -11,7 +11,7 @@ export interface ConfigFormOpts {
   modelNotice?: string;
   modelOptions?: ModelOption[];
   modelPage?: number;
-  reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  reasoningEffort: string;
   messageReply: MessageReplyMode;
   showToolCalls: boolean;
   cotMessages: CotMessagesMode;
@@ -66,6 +66,8 @@ export function configFormCard(opts: ConfigFormOpts): object {
   const page = Math.max(0, Math.min(pages - 1, Math.floor(Number.isFinite(opts.modelPage) ? opts.modelPage! : 0)));
   const modelOptions = allModels.filter(model => model.value !== 'default').slice(page * 80, (page + 1) * 80);
   for (const model of allModels) if ((model.value === 'default' || model.value === opts.model) && !modelOptions.some(m => m.value === model.value)) modelOptions.unshift(model);
+  const effortOptions = reasoningOptions(allModels.find(model => model.value === opts.model));
+  const effort = normalizeReasoningEffort(opts.agentKind, opts.reasoningEffort);
   return {
     schema: '2.0',
     config: { summary: { content: '偏好设置' } },
@@ -73,17 +75,19 @@ export function configFormCard(opts: ConfigFormOpts): object {
       elements: [
         { tag: 'markdown', content: '⚙️ **偏好设置** · 保存后下次请求生效' },
         { tag: 'column_set', flex_mode: 'flow', horizontal_spacing: 'small', columns: [
-          ...(page > 0 ? [button('models_prev', '上一页模型', `config models ${page - 1}`)] : []),
-          button('models_refresh', pages > 1 ? `刷新模型（${page + 1}/${pages}）` : '刷新模型', `config models ${page}`),
-          ...(page + 1 < pages ? [button('models_next', '下一页模型', `config models ${page + 1}`)] : []),
+          ...(page > 0 ? [button('models_prev', '上一页模型', `config.models.${page - 1}`)] : []),
+          button('models_refresh', pages > 1 ? `刷新模型（${page + 1}/${pages}）` : '刷新模型', `config.models.${page}`),
+          ...(page + 1 < pages ? [button('models_next', '下一页模型', `config.models.${page + 1}`)] : []),
         ].map(action => ({ tag: 'column', width: 'auto', elements: [action] })) },
         ...(opts.modelNotice ? [{ tag: 'markdown', content: `⚠️ ${opts.modelNotice}` }] : []),
         {
           tag: 'form', name: 'config_form', elements: [
             label('模型'),
             select('model', opts.model, modelOptions),
-            ...(supportedReasoningEfforts(opts.agentKind).length ? [label('推理强度'),
-              select('reasoning_effort', normalizeReasoningEffort(opts.agentKind, opts.reasoningEffort), supportedReasoningEfforts(opts.agentKind).map(value => ({ value, label: value })))] : []),
+            button('model_preview', '读取所选模型的推理档位', 'config.preview', true),
+            label('推理强度'),
+            select('reasoning_effort', effortOptions.some(option => option.value === effort) ? effort : DEFAULT_REASONING, effortOptions),
+            { tag: 'markdown', content: effortOptions.length > 1 ? '切换模型后，先读取该模型的档位；此操作不保存设置。' : '工具未提供该模型的可选档位，使用工具默认。切换模型后可点击上方按钮读取。' },
             collapsedPanel('更多设置', [
               label('回复方式'),
               select('message_reply', opts.messageReply, [
@@ -122,7 +126,7 @@ export function configSavedCard(opts: ConfigFormOpts): object {
   return {
     schema: '2.0', config: { summary: { content: '偏好已保存' } },
     body: { elements: [
-      { tag: 'markdown', content: `✅ **偏好已保存**\n${modelLabel(opts.agentKind, opts.model, opts.modelOptions)} · ${opts.reasoningEffort}\n下次请求生效。` },
+      { tag: 'markdown', content: `✅ **偏好已保存**\n${modelLabel(opts.agentKind, opts.model, opts.modelOptions)} · ${opts.reasoningEffort && opts.reasoningEffort !== DEFAULT_REASONING ? opts.reasoningEffort : '跟随工具默认'}\n下次请求生效。` },
       { tag: 'button', text: { tag: 'plain_text', content: '返回控制台' },
         behaviors: [{ type: 'callback', value: { cmd: 'panel' } }] },
     ] },

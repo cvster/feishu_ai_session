@@ -20,7 +20,7 @@ export interface ToolBinding {
   nativeId?: string;
   nativeCreated?: boolean;
   model?: string;
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  reasoningEffort?: string;
 }
 
 export function sessionRefKey(toolId: string, sourceId: string, nativeId: string): string {

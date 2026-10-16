@@ -144,7 +144,7 @@ export interface TaskPanelInfo {
   chatName: string;
   chatMode: 'p2p' | 'group' | 'topic';
   model: string;
-  reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  reasoningEffort: string;
   cwd?: string;
   sessionId?: string;
   activeRun: boolean;
@@ -389,7 +389,7 @@ export function newChatCreationCard(
   defaultName: string,
   defaultCwd?: string,
   model = 'gpt-5.6-sol',
-  reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' = 'high',
+  reasoningEffort: string = 'high',
   tools = [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
 ): object {
   return {

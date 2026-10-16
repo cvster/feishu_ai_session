@@ -2,7 +2,7 @@
 export const TOOL_DEFINITIONS = {
   codex: { label: 'Codex', backend: 'native-queue', nativeField: 'threadId', fork: true, reasoning: true, sessionKind: 'codex-thread', promptInjection: 'stdin-prefix', nativeHistory: false, legacyMarkers: [] },
   claude: { label: 'Claude Code', backend: 'worker', nativeField: 'sessionId', fork: false, reasoning: true, sessionKind: 'claude-session', promptInjection: 'append-system-prompt', nativeHistory: true, legacyMarkers: ['__claude_cb'] },
-  zcode: { label: 'ZCode', backend: 'worker', nativeField: 'sessionId', fork: false, reasoning: false, sessionKind: 'zcode-session', promptInjection: 'stdin-prefix', nativeHistory: false, legacyMarkers: [] },
+  zcode: { label: 'ZCode', backend: 'worker', nativeField: 'sessionId', fork: false, reasoning: true, sessionKind: 'zcode-session', promptInjection: 'stdin-prefix', nativeHistory: false, legacyMarkers: [] },
 } as const;
 export type ToolId = keyof typeof TOOL_DEFINITIONS;
 export function isToolId(value: unknown): value is ToolId {

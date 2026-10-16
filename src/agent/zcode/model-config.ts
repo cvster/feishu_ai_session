@@ -1,9 +1,9 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { zcodeStorageDir, type ZcodeOptions } from './client';
-import type { ModelOption } from '../models';
+import { ZcodeClient, zcodeStorageDir, type ZcodeOptions } from './client';
+import { normalizeNativeModels, type ModelOption } from '../models';
 
 async function readConfig(path: string, optional = false): Promise<any> {
   try { return JSON.parse(await readFile(path, 'utf8')); }
@@ -85,10 +85,14 @@ function modelEntries(config: ModelConfig) {
   }
   return rows;
 }
-export async function listZcodeModels(options: ZcodeOptions = {}): Promise<ModelOption[]> {
-  return modelEntries(await effectiveConfig(options)).map(({ providerId, modelId, provider, model }) => ({
+function modelChoices(entries: ReturnType<typeof modelEntries>): ModelOption[] {
+  return entries.map(({ providerId, modelId, provider, model }) => ({
     value: `${providerId}/${modelId}`, label: `${provider.name ?? providerId} / ${model.name ?? modelId} (${providerId})`,
+    ...(model.reasoning?.enabled ? { reasoningEfforts: nativeReasoning(model.reasoning).levels } : {}),
   }));
+}
+export async function listZcodeModels(options: ZcodeOptions = {}): Promise<ModelOption[]> {
+  return modelChoices(modelEntries(await effectiveConfig(options)));
 }
 /** Credentials are read afresh only in the worker, sent over private stdin, never in prompts or receipts. */
 export async function loadZcodeRuntimeModel(options: ZcodeOptions, selected?: string) {
@@ -98,14 +102,54 @@ export async function loadZcodeRuntimeModel(options: ZcodeOptions, selected?: st
   const ref = selected ?? configured ?? (rows[0] && `${rows[0].providerId}/${rows[0].modelId}`);
   const entry = rows.find(r => `${r.providerId}/${r.modelId}` === ref);
   if (!entry) throw new Error('ZCode 选定模型已移除或不可用，请在 /config 中重新选择');
-  const { providerId, modelId, provider, model } = entry, opts = provider.options ?? {};
-  const inputs = model.modalities?.input ?? [];
-  return { revision: randomUUID(), generatedAt: Date.now(), model: { providerId, modelId },
-    provider: { providerId, kind: provider.kind, apiFormat: provider.apiFormat, source: 'user', label: provider.name,
-      baseURL: opts.baseURL, apiKeyRequired: opts.apiKeyRequired,
-      ...(opts.apiKey ? { apiKey: { source: 'inline', value: opts.apiKey } } : {}),
-      headers: { ...provider.headers, ...opts.headers }, providerOptions: opts.providerOptions,
-      models: [{ modelId, label: model.name, contextWindow: model.limit?.context, maxOutputTokens: model.limit?.output,
-        supportsImages: inputs.includes('image'), supportsPdf: inputs.includes('pdf'), supportsVideo: inputs.includes('video'), providerOptions: model.options }],
-    } };
+  const { providerId, modelId } = entry;
+  return { revision: randomUUID(), generatedAt: Date.now(), model: { providerId, modelId }, provider: nativeProvider(entry) };
+}
+function nativeReasoning(reasoning: any) {
+  return { enabled: reasoning.enabled === true,
+    levels: reasoning.levels ?? (reasoning.variants ?? []).map((value: string) => ({ value, label: value })),
+    ...(reasoning.defaultLevel ?? reasoning.defaultVariant ? { defaultLevel: reasoning.defaultLevel ?? reasoning.defaultVariant } : {}),
+    ...(reasoning.providerOptionsByLevel ? { providerOptionsByLevel: reasoning.providerOptionsByLevel } : {}) };
+}
+function nativeProvider({ providerId, modelId, provider, model }: ReturnType<typeof modelEntries>[number], metadataOnly = false) {
+  const opts = provider.options ?? {}, inputs = model.modalities?.input ?? [];
+  return { providerId, kind: provider.kind, apiFormat: provider.apiFormat, source: 'user', label: provider.name,
+    baseURL: opts.baseURL, apiKeyRequired: metadataOnly ? false : opts.apiKeyRequired,
+    ...(!metadataOnly && opts.apiKey ? { apiKey: { source: 'inline', value: opts.apiKey } } : {}),
+    ...(!metadataOnly ? { headers: { ...provider.headers, ...opts.headers }, providerOptions: opts.providerOptions } : {}),
+    models: [{ modelId, label: model.name, contextWindow: model.limit?.context, maxOutputTokens: model.limit?.output,
+      ...(model.reasoning ? { reasoning: { ...nativeReasoning(model.reasoning), ...(metadataOnly ? { providerOptionsByLevel: undefined } : {}) } } : {}),
+      supportsImages: inputs.includes('image'), supportsPdf: inputs.includes('pdf'), supportsVideo: inputs.includes('video'),
+      ...(!metadataOnly ? { providerOptions: model.options } : {}) }],
+  };
+}
+/** An owned, isolated native process resolves capabilities. No keys, sessions, generation, or user-config writes. */
+export async function listZcodeModelCapabilities(options: ZcodeOptions = {}): Promise<ModelOption[]> {
+  const config = await effectiveConfig(options), entries = modelEntries(config);
+  const choices = modelChoices(entries);
+  if (!entries.length) return choices;
+  const root = await mkdtemp(join(tmpdir(), 'zcode-model-catalog-'));
+  // Explicit settings are already resolved above. The metadata process must not load or mutate them.
+  const args = [...(options.args ?? [])];
+  const settingsIndex = args.indexOf('--settings'); if (settingsIndex >= 0) args.splice(settingsIndex, 2);
+  const client = new ZcodeClient({ ...options, args, dataDir: join(root, 'data') }, root);
+  try {
+    const providers = new Map<string, ReturnType<typeof nativeProvider>>();
+    for (const entry of entries) {
+      const native = nativeProvider(entry, true), previous = providers.get(entry.providerId);
+      if (previous) previous.models.push(...native.models); else providers.set(entry.providerId, native);
+    }
+    const result = await client.request('workspace/updateProviderRegistry', {
+      workspace: { workspacePath: root, workspaceKey: 'bridge-model-catalog' },
+      registry: { revision: randomUUID(), generatedAt: Date.now(), providers: [...providers.values()] }, includeWorkspaceState: true,
+    }, 10_000);
+    const available = result.workspaceState?.settings?.model?.available;
+    if (!Array.isArray(available)) throw new Error('ZCode 原生模型能力格式不兼容');
+    const configured = typeof config.model === 'string' ? config.model : config.model?.main;
+    return normalizeNativeModels(choices.map((choice) => {
+      const native = available.find((row: any) => `${row.ref?.providerId}/${row.ref?.modelId}` === choice.value);
+      return { ...choice, ...(native?.reasoning?.enabled ? { reasoningEfforts: native.reasoning.levels,
+        defaultReasoningEffort: native.reasoning.defaultLevel } : {}), isDefault: choice.value === (configured ?? choices[0]?.value) };
+    }));
+  } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
 }

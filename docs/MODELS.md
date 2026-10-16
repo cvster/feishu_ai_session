@@ -1,4 +1,4 @@
-# 动态模型列表
+# 动态模型与推理档位
 
 飞书桥接不内置具体模型名单。个人工作群和 FF 会话在 `/config` 中选择模型，选择按已有的工具绑定保存，FF 继续使用共享 FF 会话的模型设置。
 
@@ -20,6 +20,22 @@
 
 进行中的任务沿用本轮已经确定的模型；配置变化在后续新请求生效。仅保存其他偏好而未提交模型字段时，不改写原模型设置。
 
+## 按模型读取推理档位
+
+每个模型的档位来自工具当前的原生元数据，不根据模型名称或桥接内置列表推测：
+
+| 工具 | 推理档位来源 | 执行方式 |
+| --- | --- | --- |
+| Codex | `model/list` 的 `supportedReasoningEfforts`、`defaultReasoningEffort` | 原生 effort 设置 |
+| Claude Code | SDK `initialize` 的 `supportsEffort`、`supportedEffortLevels` | CLI `--effort` |
+| ZCode | 当前 Agent CLI 对供应商模型配置解析后的 `reasoning.levels/defaultLevel` | 原生 `session/setThoughtLevel` 与本轮 `runtimeModel.thoughtLevel` |
+
+在 `/config` 选择模型后，点击“读取所选模型的推理档位”，再选择档位并保存。读取按钮原地更新卡片，保留其余可编辑的草稿设置，不保存偏好；档位重置为“跟随工具默认”。此选项始终存在，实际执行不传 effort 参数。工具没有提供档位元数据的模型只显示该默认项，不猜测支持 `high` 或其他档位。
+
+原生默认模型提供能力元数据时，默认模型选项也可选择相应档位。保存与提交任务前重新校验模型和档位；已移除或不支持的显式档位会阻止本次执行，提示刷新配置，不静默改档。原来已保存的显式档位保留；新配置不再自动填 `high`。
+
+ZCode 能力读取使用临时目录和独立的短生命周期 Agent CLI，仅向其临时供应商注册表传入不含密钥、请求头和执行选项的模型元数据。不创建用户会话、不提交推理、不改写桌面或独立 CLI 配置；结束后关闭该进程并删除临时目录。执行仍由长期运行的独立 ZCode worker 负责。
+
 ## ZCode 配置来源
 
 按以下顺序解析，每次读取当前文件，不使用一次性复制的供应商名单：
@@ -33,10 +49,10 @@
 
 独立 CLI 的默认选择来自 `model.main`；桌面模式跟随原生供应商推荐顺序。选择具体模型后使用其完整供应商和模型 ID，删除该模型不会触发自动替换。切换模型不会改写桌面的 UI 选择或独立 CLI 配置文件。
 
-配置和凭据仅在本机读取。模型列表、飞书卡片和 worker 收据只包含模型标识与显示名；执行凭据通过私有 stdin 传给本次 ZCode 进程，不放入提示词、群消息或仓库。
+配置和凭据仅在本机读取。模型列表、飞书卡片和 worker 收据只包含模型标识、显示名和推理能力元数据；执行凭据通过私有 stdin 传给本次 ZCode 进程，不放入提示词、群消息或仓库。
 
 ## 扩展工具
 
-`AgentAdapter.listModels({ cwd })` 是统一的动态发现接口，独立 worker 代理委托给对应原生 CLI。渲染层接收一次发现的安全投影，执行层在新任务提交前校验选择。不要在卡片、FF、A2A 或公共运行流程中新增模型白名单。
+`AgentAdapter.listModels({ cwd })` 是统一的动态发现接口，独立 worker 代理委托给对应原生 CLI。渲染层接收一次发现的安全投影，执行层在新任务提交前校验选择。模型选项携带各模型的推理档位安全投影；不要在卡片、FF、A2A 或公共运行流程中新增模型或档位白名单。
 
 原生接口参考：[Codex model/list](https://developers.openai.com/codex/app-server/#list-models-modellist)、[Claude Agent SDK 初始化实现](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/query.py)、[ZCode 供应商规则](https://github.com/zai-org/ZCode/blob/main/packages/provider/src/config/rule-data-schema.ts)。兼容性以部署的工具版本实际返回值为准。

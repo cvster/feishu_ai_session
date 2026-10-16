@@ -1,4 +1,5 @@
 import type { AgentAdapter, AgentBotIdentity, AgentEvent, AgentRun, AgentRunOptions } from '../agent/types';
+import { resolveReasoningEffort } from '../agent/models';
 import { RunRejected } from '../runtime/errors';
 import { WorkerClient, WorkerRequestError } from './client';
 import { isJobActive } from './protocol';
@@ -19,9 +20,16 @@ export class DurableAgentAdapter implements AgentAdapter {
     if (!this.cli.listModels) throw new Error('工具未提供原生模型列表');
     return this.cli.listModels(options);
   }
-  async prepareRun(): Promise<void> {
-    try { await this.client.health(); }
+  async prepareRun(options?: AgentRunOptions): Promise<void> {
+    let capabilities;
+    try { capabilities = await this.client.health(); }
     catch { throw new RunRejected('execution-worker-unavailable', `${this.displayName} 执行服务不可用，本次请求未执行。请先启动对应工具的独立 worker 服务。`); }
+    const effort = resolveReasoningEffort(options?.reasoningEffort);
+    // Old Claude workers preserve these exact tokens, but coerce unknown levels to high.
+    const legacySafe = this.id === 'claude' && ['low', 'medium', 'high', 'xhigh', 'max'].includes(effort ?? '');
+    if (effort && !legacySafe && !capabilities?.nativeReasoningEfforts) {
+      throw new RunRejected('model-unavailable', '对应 worker 版本尚不支持该原生推理档位。请单独升级该 worker，或选择跟随工具默认。');
+    }
   }
   run(options: AgentRunOptions): AgentRun {
     const requestKey = options.requestKey ?? options.runId;

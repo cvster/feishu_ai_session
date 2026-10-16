@@ -8,11 +8,14 @@ import type { AgentEvent } from '../../../src/agent/types';
 it.skipIf(process.env.ZCODE_LIVE_SMOKE !== '1')('creates, continues and reads a file through a real local ZCode session', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'bridge-zcode-live-'));
   const adapter = new ZcodeAdapter(process.env.ZCODE_LIVE_ISOLATED === '1' ? { dataDir: join(cwd, '.native-state'), modelConfigPath: join(homedir(), '.zcode/v2/provider_config.json') } : {}); expect(await adapter.isAvailable()).toBe(true);
+  const models = await adapter.listModels();
+  const effortModel = models.find(model => model.reasoningEfforts?.length);
+  expect(effortModel).toBeDefined();
   let sessionId: string | undefined;
   const token = `ZCODE_${randomUUID()}`;
   await writeFile(join(cwd, 'marker.txt'), `FILE_${token}`);
   for (const n of [1, 2, 3]) {
-    const run = adapter.run({ runId: `live-${Date.now()}-${n}`, cwd, sessionId, prompt: n === 1 ? `记住标记 ${token}，不要调用工具，只回复该标记。` : n === 2 ? '不要调用工具，回复我上轮让你记住的完整标记。' : '请使用读取工具读取当前目录 marker.txt，回复文件中的完整标记。不要修改任何文件。', accessMode: 'read-only' });
+    const run = adapter.run({ runId: `live-${Date.now()}-${n}`, cwd, sessionId, model: effortModel!.value, reasoningEffort: n === 1 ? effortModel!.reasoningEfforts![0]!.value : undefined, prompt: n === 1 ? `记住标记 ${token}，不要调用工具，只回复该标记。` : n === 2 ? '不要调用工具，回复我上轮让你记住的完整标记。' : '请使用读取工具读取当前目录 marker.txt，回复文件中的完整标记。不要修改任何文件。', accessMode: 'read-only' });
     const timer = setTimeout(() => { void run.stop(); }, 45000);
     const events: AgentEvent[] = [];
     try { for await (const event of run.events) { events.push(event); if (event.type === 'system') sessionId = event.sessionId; } }

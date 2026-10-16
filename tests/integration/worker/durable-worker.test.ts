@@ -89,3 +89,14 @@ it('keeps ZCode service selection and custom storage independent of Claude', () 
   expect(unit).toContain('Environment="LARK_CHANNEL_ZCODE_BIN=/private/zcode-cli"');
   expect(unit).not.toMatch(/CLAUDE_CONFIG_DIR|LARK_CHANNEL_CLAUDE_BIN|PartOf=|BindsTo=/);
 });
+
+it('checks worker capability without restarting it or silently coercing future effort levels', async () => {
+  const h = await fixture();
+  expect(await h.client.health()).toMatchObject({ nativeReasoningEfforts: true });
+  const health = vi.spyOn(h.client, 'health').mockResolvedValue({});
+  await expect(h.adapter.prepareRun({ ...h.options, reasoningEffort: 'xhigh' })).resolves.toBeUndefined();
+  await expect(h.adapter.prepareRun({ ...h.options, reasoningEffort: 'native-new' })).rejects.toThrow('worker 版本');
+  expect(h.calls).toHaveLength(0); expect(h.stop).not.toHaveBeenCalled();
+  health.mockResolvedValue({ nativeReasoningEfforts: true });
+  await expect(h.adapter.prepareRun({ ...h.options, reasoningEffort: 'native-new' })).resolves.toBeUndefined();
+});

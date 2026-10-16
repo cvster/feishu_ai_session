@@ -13,7 +13,7 @@ import { dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { capabilityForTool } from '../agent/capability';
 import { DEFAULT_MODEL, loadModelChoices, normalizeModelSelection, normalizeReasoningEffort,
-  supportedReasoningEfforts } from '../agent/models';
+  DEFAULT_REASONING, resolveReasoningEffort } from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import {
@@ -480,7 +480,7 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
         ctx.controls.profileConfig.agentKind,
         ctx.controls.profileConfig.preferences.model,
       ),
-      ctx.controls.profileConfig.preferences.reasoningEffort ?? 'high',
+      ctx.controls.profileConfig.preferences.reasoningEffort ?? DEFAULT_REASONING,
       ctx.controls.toolRegistry?.all().map(tool => ({ id: tool.id, label: tool.label })),
     );
     await sendManagedCard(ctx.channel, ctx.msg.chatId, card, commandReplyOptions(ctx));
@@ -633,11 +633,8 @@ function buildTaskPanelCard(ctx: CommandContext): object {
     agentKind: ctx.controls.profileConfig.agentKind,
     chatName,
     chatMode: ctx.chatMode,
-    model: normalizeModelSelection(
-      ctx.controls.profileConfig.agentKind,
-      ctx.controls.cfg.preferences?.model,
-    ),
-    reasoningEffort: ctx.controls.cfg.preferences?.reasoningEffort ?? 'high',
+    model: normalizeModelSelection(ctx.controls.profileConfig.agentKind, ctx.controls.cfg.preferences?.model),
+    reasoningEffort: ctx.controls.cfg.preferences?.reasoningEffort ?? DEFAULT_REASONING,
     cwd: effectiveWorkspaceCwd(ctx),
     sessionId: catalogEntry?.threadId ?? catalogEntry?.sessionId ?? legacyEntry?.sessionId,
     activeRun: Boolean(ctx.activeRuns.get(ctx.scope)),
@@ -964,7 +961,7 @@ async function handleNewChat(
   if (ctx.controls.toolBindings && tool) {
     ctx.controls.toolBindings.set(created.chatId, { toolId, sourceId: tool.sourceId, name: created.name, nativeId: tool.reserveSessionId?.(), nativeCreated: false,
       model: toolId === ctx.controls.profileConfig.agentKind ? ctx.controls.profileConfig.preferences.model ?? 'default' : 'default',
-      reasoningEffort: toolId === 'codex' ? ctx.controls.profileConfig.preferences.reasoningEffort ?? 'high' : undefined });
+      reasoningEffort: toolId === 'codex' ? ctx.controls.profileConfig.preferences.reasoningEffort ?? DEFAULT_REASONING : undefined });
     await ctx.controls.toolBindings.flush();
   }
   // Inherit cwd from the originating chat so the new group starts in the
@@ -2812,6 +2809,12 @@ async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
       return showConfigForm(ctx);
     case 'models':
       return showConfigForm(ctx, Number(args.trim().split(/\s+/)[1]) || 0);
+    case 'preview':
+      void (async () => {
+        await new Promise(resolve => setTimeout(resolve, FORM_SETTLE_MS));
+        await showConfigForm(ctx, 0, true);
+      })().catch(error => log.warn('command', 'config-preview-failed', { err: String(error) }));
+      return;
     case 'submit':
       return submitConfig(ctx);
     case 'cancel':
@@ -2821,7 +2824,7 @@ async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
   }
 }
 
-async function showConfigForm(ctx: CommandContext, modelPage = 0): Promise<void> {
+async function showConfigForm(ctx: CommandContext, modelPage = 0, preview = false): Promise<void> {
   await Promise.all([
     ctx.controls.refreshOwner(ctx.channel).catch(() => {}),
     fetchKnownChats(ctx.channel)
@@ -2833,21 +2836,20 @@ async function showConfigForm(ctx: CommandContext, modelPage = 0): Promise<void>
 
   const ms = getRunIdleTimeoutMs(ctx.controls.cfg);
   const access = ctx.controls.profileConfig.access;
-  const modelChoices = await loadModelChoices(ctx.agent, effectiveWorkspaceCwd(ctx), ctx.controls.cfg.preferences?.model);
+  const draft = preview ? ctx.formValue ?? {} : {};
+  const selectedModel = normalizeModelSelection(ctx.controls.profileConfig.agentKind, String(draft.model ?? ctx.controls.cfg.preferences?.model ?? DEFAULT_MODEL));
+  const modelChoices = await loadModelChoices(ctx.agent, effectiveWorkspaceCwd(ctx), selectedModel);
   const card = configFormCard({
     modelOptions: modelChoices.options, modelPage,
     agentKind: ctx.controls.profileConfig.agentKind,
-    model: normalizeModelSelection(
-      ctx.controls.profileConfig.agentKind,
-      ctx.controls.cfg.preferences?.model,
-    ),
-    reasoningEffort: normalizeReasoningEffort(ctx.controls.profileConfig.agentKind,
+    model: selectedModel,
+    reasoningEffort: preview ? DEFAULT_REASONING : normalizeReasoningEffort(ctx.controls.profileConfig.agentKind,
       ctx.controls.cfg.preferences?.reasoningEffort),
     modelNotice: modelChoices.notice,
-    messageReply: getMessageReplyMode(ctx.controls.cfg),
-    showToolCalls: getShowToolCalls(ctx.controls.cfg),
-    cotMessages: getCotMessages(ctx.controls.cfg),
-    maxConcurrentRuns: getMaxConcurrentRuns(ctx.controls.cfg),
+    messageReply: ['card', 'text', 'markdown'].includes(String(draft.message_reply)) ? draft.message_reply as MessageReplyMode : getMessageReplyMode(ctx.controls.cfg),
+    showToolCalls: draft.show_tool_calls === 'show' ? true : draft.show_tool_calls === 'hide' ? false : getShowToolCalls(ctx.controls.cfg),
+    cotMessages: ['off', 'brief', 'detailed'].includes(String(draft.cot_messages)) ? draft.cot_messages as 'off' | 'brief' | 'detailed' : getCotMessages(ctx.controls.cfg),
+    maxConcurrentRuns: Number.isFinite(Number(draft.max_concurrent_runs)) && Number(draft.max_concurrent_runs) >= 1 ? Math.min(50, Math.floor(Number(draft.max_concurrent_runs))) : getMaxConcurrentRuns(ctx.controls.cfg),
     runIdleTimeoutMinutes: ms ? Math.round(ms / 60_000) : 0,
     requireMentionInGroup: getRequireMentionInGroup(ctx.controls.cfg),
     larkCliIdentity: ctx.controls.profileConfig.larkCli.identityPreset,
@@ -2856,6 +2858,10 @@ async function showConfigForm(ctx: CommandContext, modelPage = 0): Promise<void>
     admins: access.admins,
     knownChats: ctx.controls.knownChats ?? [],
   });
+  if (preview && ctx.fromCardAction) {
+    await updateManagedCard(ctx.channel, ctx.msg.messageId, card);
+    return;
+  }
   // Settings can be opened from an answer's footer as well as the console.
   // Keep that carrier message (and its controls) intact throughout the form.
   const replyOptions = ctx.fromCardAction && ctx.chatMode !== 'topic'
@@ -2909,9 +2915,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
   const modelSelection = normalizeModelSelection(agentKind, rawModel || ctx.controls.cfg.preferences?.model);
   const model = modelSelection === DEFAULT_MODEL ? undefined : modelSelection;
   const rawReasoningEffort = String(fv.reasoning_effort ?? '').trim();
-  const reasoningEffort = normalizeReasoningEffort(agentKind,
-    supportedReasoningEfforts(agentKind).includes(rawReasoningEffort)
-      ? rawReasoningEffort : ctx.controls.cfg.preferences?.reasoningEffort);
+  const reasoningEffort = normalizeReasoningEffort(agentKind, rawReasoningEffort || ctx.controls.cfg.preferences?.reasoningEffort);
   const rawCotMessages = String(fv.cot_messages ?? '').trim();
   const cotMessages =
     rawCotMessages === 'brief'
@@ -2996,11 +3000,17 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
     let failureStep = 'config.save';
     let larkCliPolicyApplied = false;
     try {
-      if (rawModel && model) {
+      if ((rawModel && model) || resolveReasoningEffort(reasoningEffort)) {
         const choices = await loadModelChoices(ctx.agent, effectiveWorkspaceCwd(ctx));
-        if (!choices.available || !choices.options.some(option => option.value === model && !option.unavailable)) {
+        if (!choices.available || !choices.options.some(option => option.value === modelSelection && !option.unavailable)) {
           await waitForSettle();
           await showResultCardInPlace(ctx, formMsgId, configFailedCard('模型列表已变化或暂时无法读取，请重新打开 /config 刷新后选择；原设置未修改。'));
+          return;
+        }
+        const selected = choices.options.find(option => option.value === modelSelection);
+        if (resolveReasoningEffort(reasoningEffort) && !selected?.reasoningEfforts?.some(option => option.value === reasoningEffort)) {
+          await waitForSettle();
+          await showResultCardInPlace(ctx, formMsgId, configFailedCard('该模型未提供所选推理档位，请重新读取模型档位或选择跟随工具默认；原设置未修改。'));
           return;
         }
         modelOptions = choices.options;
@@ -3058,7 +3068,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
         agentKind,
         model: modelSelection,
         modelOptions,
-        reasoningEffort,
+        reasoningEffort: reasoningEffort ?? DEFAULT_REASONING,
         messageReply,
         showToolCalls,
         cotMessages,

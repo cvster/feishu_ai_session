@@ -1,3 +1,4 @@
+import { DEFAULT_MODEL, normalizeNativeModels, resolveReasoningEffort } from '../agent/models';
 import type { NativeSessionLocks } from '../tools/locks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../agent/types';
@@ -33,7 +34,7 @@ export interface SubmitRunInput {
   sessionId?: string;
   threadId?: string;
   model?: string;
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  reasoningEffort?: string;
   images?: readonly string[];
   attachmentPaths?: readonly string[];
   stopGraceMs?: number;
@@ -94,12 +95,19 @@ export class RunExecutor {
     return task;
   }
 
-  private async validateModel(options: Pick<AgentRunOptions, 'model' | 'cwd'>): Promise<void> {
-    if (!options.model || !this.agent.listModels) return;
+  private async validateModel(options: Pick<AgentRunOptions, 'model' | 'cwd' | 'reasoningEffort'>): Promise<void> {
+    const effort = resolveReasoningEffort(options.reasoningEffort);
+    if (options.reasoningEffort && options.reasoningEffort !== 'default' && !effort) throw new RunRejected('model-unavailable', '推理档位格式无效，请通过 /config 重新选择。');
+    options.reasoningEffort = effort;
+    if ((!options.model && !effort) || !this.agent.listModels) return;
     let models;
     try { models = await this.agent.listModels({ cwd: options.cwd }); }
     catch { throw new RunRejected('model-unavailable', '暂时无法确认工具模型列表，本次未执行。请重新打开 /config 刷新后重试。'); }
-    if (!models.some(model => model.value === options.model)) throw new RunRejected('model-unavailable', '已选模型已移除或不可用，本次未执行。请通过 /config 重新选择模型。');
+    models = normalizeNativeModels(models);
+    if (options.model && !models.some(model => model.value === options.model)) throw new RunRejected('model-unavailable', '已选模型已移除或不可用，本次未执行。请通过 /config 重新选择模型。');
+    const selected = options.model ? models.find(model => model.value === options.model)
+      : models.find(model => model.value === DEFAULT_MODEL) ?? models.find(model => model.isDefault);
+    if (effort && !selected?.reasoningEfforts?.some(option => option.value === effort)) throw new RunRejected('model-unavailable', '已选模型的推理档位已变化或未提供该档位，本次未执行。请通过 /config 刷新，或选择跟随工具默认。');
   }
 
   async waitForSubmissions(): Promise<void> { await Promise.allSettled([...this.submissions]); }

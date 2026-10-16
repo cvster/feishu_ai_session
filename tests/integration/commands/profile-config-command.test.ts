@@ -204,10 +204,11 @@ describe('profile-aware account and config commands', () => {
     expect(card).toContain('已选模型已不在工具列表中');
     expect(card).toContain('claude-fable-5-1');
     expect(card).toContain('reasoning_effort');
-    await h.command('/config submit', { reasoning_effort: 'xhigh' });
-    const root = await waitForRoot(h.rootDir, candidate => candidate.profiles.claude?.preferences.reasoningEffort === 'xhigh');
+    await h.command('/config submit', { max_concurrent_runs: '8' });
+    const root = await waitForRoot(h.rootDir, candidate => candidate.profiles.claude?.preferences.maxConcurrentRuns === 8);
+    await vi.advanceTimersByTimeAsync(2000);
     expect(root.profiles.claude?.preferences).toMatchObject({
-      showToolCalls: false, cotMessages: 'brief', maxConcurrentRuns: 7, messageReply: 'text',
+      showToolCalls: false, cotMessages: 'brief', maxConcurrentRuns: 8, messageReply: 'text',
     });
     expect(root.profiles.claude?.preferences.model).toBe('claude-fable-5-1');
   });
@@ -227,12 +228,44 @@ describe('profile-aware account and config commands', () => {
     expect(root.profiles.claude?.preferences.showToolCalls).not.toBe(false);
   });
 
-  it('does not persist Codex-only ultra when submitted from an old or forged CC settings card', async () => {
+  it('rejects a forged reasoning level before saving any preferences', async () => {
     vi.useFakeTimers();
     const h = await createHarness({ preferences: { reasoningEffort: 'medium' } });
     await h.command('/config submit', { reasoning_effort: 'ultra', max_concurrent_runs: '8' });
-    const root = await waitForRoot(h.rootDir, candidate => candidate.profiles.claude?.preferences.maxConcurrentRuns === 8);
+    await vi.advanceTimersByTimeAsync(2000);
+    const root = JSON.parse(await readFile(join(h.rootDir, 'config.json'), 'utf8')) as RootConfig;
     expect(root.profiles.claude?.preferences.reasoningEffort).toBe('medium');
+    expect(root.profiles.claude?.preferences.maxConcurrentRuns).not.toBe(8);
+    expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('未提供所选推理档位');
+  });
+
+  it('previews per-model levels in place while preserving the draft, then saves a newly added native level', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness();
+    h.nativeModels.push({ value: 'future-model', label: 'Future', reasoningEfforts: [{ value: 'future-level', label: 'Future level' }] });
+    const send = vi.spyOn(h.channel, 'send');
+    await h.command('/config');
+    const messageId = (await send.mock.results[0]!.value).messageId;
+    const update = vi.spyOn(h.channel, 'updateCardById');
+    await h.command('/config preview', { model: 'future-model', reasoning_effort: 'high', message_reply: 'text', max_concurrent_runs: '8' }, { messageId });
+    await vi.advanceTimersByTimeAsync(2000);
+    const preview = JSON.stringify(update.mock.calls.at(-1)?.[1]);
+    expect(preview).toContain('future-level'); expect(preview).toContain('"initial_option":"text"');
+    expect(preview).toContain('"default_value":"8"');
+    const before = JSON.parse(await readFile(join(h.rootDir, 'config.json'), 'utf8')) as RootConfig;
+    expect(before.profiles.claude?.preferences.model).toBeUndefined();
+    await h.command('/config submit', { model: 'future-model', reasoning_effort: 'future-level', message_reply: 'text' }, { messageId });
+    const saved = await waitForRoot(h.rootDir, root => root.profiles.claude?.preferences.model === 'future-model');
+    expect(saved.profiles.claude?.preferences.reasoningEffort).toBe('future-level');
+    await vi.advanceTimersByTimeAsync(2000);
+    h.nativeModels.at(-1)!.reasoningEfforts = [];
+    await h.command('/config submit', { model: 'future-model', reasoning_effort: 'future-level', max_concurrent_runs: '9' });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('未提供所选推理档位');
+    await h.command('/config submit', { model: 'future-model', reasoning_effort: 'default', max_concurrent_runs: '9' });
+    const cleared = await waitForRoot(h.rootDir, root => root.profiles.claude?.preferences.maxConcurrentRuns === 9);
+    expect(cleared.profiles.claude?.preferences.reasoningEffort).toBe('default');
+    await vi.advanceTimersByTimeAsync(2000);
   });
 
   it('keeps the current message reply mode when the config submit payload omits it', async () => {
@@ -374,7 +407,7 @@ async function createHarness(options: {
 } = {}): Promise<{
   rootDir: string;
   channel: ReturnType<typeof createFakeChannel>;
-  nativeModels: Array<{ value: string; label: string }>;
+  nativeModels: Array<import('../../../src/agent/models').ModelOption>;
   agent: FakeAgentAdapter & { listModels: ReturnType<typeof vi.fn> };
   command(content: string, formValue?: Record<string, unknown>, overrides?: CommandOverrides): Promise<boolean>;
 }> {
@@ -401,7 +434,7 @@ async function createHarness(options: {
     processId: 'proc-1',
   } satisfies Controls;
 
-  const nativeModels = ['claude-opus-4-8', 'claude-opus-5-5', 'claude-sonnet-5'].map(value => ({ value, label: value }));
+  const nativeModels = ['default', 'claude-opus-4-8', 'claude-opus-5-5', 'claude-sonnet-5'].map(value => ({ value, label: value, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'].map(value => ({ value, label: value })) }));
   const agent = Object.assign(new FakeAgentAdapter(), { listModels: vi.fn(async () => nativeModels) });
   return {
     rootDir,

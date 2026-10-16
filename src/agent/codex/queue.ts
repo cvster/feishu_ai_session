@@ -41,7 +41,7 @@ interface QueueRunOptions {
   prompt: string;
   images?: readonly string[];
   model?: string;
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  reasoningEffort?: string;
   clientUserMessageId: string;
   remote?: string;
   env?: NodeJS.ProcessEnv;

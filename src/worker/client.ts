@@ -17,9 +17,10 @@ export class WorkerClient {
     if (!result.ok) throw new WorkerRequestError(result.status, (value as { error: string }).error, (value as { retryable?: boolean }).retryable === true);
     return value as T;
   }
-  async health(): Promise<void> {
-    const value = await this.request<{ version: number; toolId: string; sourceId: string; botAppId: string }>('/health');
+  async health(): Promise<{ nativeReasoningEfforts?: boolean }> {
+    const value = await this.request<{ version: number; toolId: string; sourceId: string; botAppId: string; nativeReasoningEfforts?: boolean }>('/health');
     if (value.version !== 1 || value.toolId !== this.toolId || value.sourceId !== this.sourceId || value.botAppId !== this.botAppId) throw new Error('执行服务的工具、账户目录或飞书应用不匹配');
+    return { nativeReasoningEfforts: value.nativeReasoningEfforts };
   }
   async list(): Promise<WorkerJob[]> { await this.health(); return this.request('/jobs'); }
   async submit(input: WorkerSubmission): Promise<WorkerJob> { await this.health(); return this.request('/jobs', input); }

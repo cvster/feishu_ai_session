@@ -1,3 +1,4 @@
+import { resolveReasoningEffort } from '../agent/models';
 import { randomUUID } from 'node:crypto';
 import type { NormalizedMessage } from '@larksuite/channel';
 import type { Controls } from '../commands';
@@ -48,7 +49,7 @@ export async function submitFeishuCodex(input: StartRunFlowInput, batch: Normali
       submissionId: record.id, threadId: prepared.threadId, validateBeforeStart: validate,
       beforeSpawn: async () => { if (await input.checkSessionArchived?.()) throw new RunRejected('session-archived', '会话已归档。'); },
       model: resolveModelArg('codex', input.profileConfig.preferences.model),
-      reasoningEffort: input.profileConfig.preferences.reasoningEffort ?? 'high',
+      reasoningEffort: resolveReasoningEffort(input.profileConfig.preferences.reasoningEffort),
       images: prepared.policy.attachments.filter(a => a.kind === 'image' && a.decision === 'accepted' && a.path).map(a => a.path!),
       attachmentPaths: prepared.policy.attachments.filter(a => a.decision === 'accepted' && a.path).map(a => a.path!),
     }, async value => {

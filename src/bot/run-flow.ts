@@ -1,6 +1,6 @@
 import { toolDefinition } from '../tools/definitions';
 import type { AgentCapability } from '../agent/capability';
-import { normalizeReasoningEffort, resolveModelArg } from '../agent/models';
+import { resolveReasoningEffort, resolveModelArg } from '../agent/models';
 import type { AgentEvent } from '../agent/types';
 import type { ProfileConfig } from '../config/profile-schema';
 import type { AccessDecision } from '../policy/access';
@@ -192,8 +192,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
         input.profileConfig.agentKind,
         input.profileConfig.preferences.model,
       ),
-      reasoningEffort: normalizeReasoningEffort(input.profileConfig.agentKind,
-        input.profileConfig.preferences.reasoningEffort),
+      reasoningEffort: resolveReasoningEffort(input.profileConfig.preferences.reasoningEffort),
       images:
         input.capability.agentId === 'codex'
           ? policy.attachments

@@ -8,7 +8,10 @@ export async function readCodexModels(reader: Pick<CodexThreadReader, 'rpc'>): P
   do {
     const result = await reader.rpc('model/list', { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) });
     if (!Array.isArray(result.data)) throw new Error('Codex 模型列表格式不兼容');
-    for (const row of result.data as any[]) if (!row.hidden) models.push({ value: row.model ?? row.id, label: row.displayName ?? row.model ?? row.id });
+    for (const row of result.data as any[]) if (!row.hidden) models.push({ value: row.model ?? row.id, label: row.displayName ?? row.model ?? row.id,
+      ...(Array.isArray(row.supportedReasoningEfforts) ? { reasoningEfforts: row.supportedReasoningEfforts.map((effort: any) => ({ value: effort.reasoningEffort, label: effort.reasoningEffort })) } : {}),
+      ...(typeof row.defaultReasoningEffort === 'string' ? { defaultReasoningEffort: row.defaultReasoningEffort } : {}),
+      ...(row.isDefault ? { isDefault: true } : {}) });
     cursor = typeof result.nextCursor === 'string' && result.nextCursor ? result.nextCursor : undefined;
     if (cursor && cursors.has(cursor)) throw new Error('Codex 模型列表分页游标重复');
     if (cursor) cursors.add(cursor);

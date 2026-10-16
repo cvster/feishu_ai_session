@@ -112,7 +112,7 @@ export interface AppPreferences {
    */
   model?: string;
   /** Codex model reasoning effort. Defaults to `high` for Codex profiles. */
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  reasoningEffort?: string;
   /**
    * Whether to send a separate Lark COT process message before the final
    * answer. `brief` mirrors the lightweight tool/progress visibility from

@@ -32,3 +32,19 @@ it('queries Claude initialize without a prompt and rereads models from the same 
   for (const request of requests) expect(request).toMatchObject({ type: 'control_request', request: { subtype: 'initialize' } });
   expect(requests.some(request => request.type === 'user')).toBe(false);
 });
+
+it('reads model-specific Codex and Claude effort metadata, including native defaults and unsupported models', async () => {
+  const codex = await readCodexModels({ rpc: vi.fn(async () => ({ data: [{ model: 'native', isDefault: true, defaultReasoningEffort: 'future', supportedReasoningEfforts: [{ reasoningEffort: 'future', description: 'Native description' }] }] })) });
+  expect(codex[0]).toMatchObject({ isDefault: true, defaultReasoningEffort: 'future', reasoningEfforts: [{ value: 'future', label: 'future' }] });
+  if (process.platform === 'win32') return;
+  const dir = await mkdtemp(join(tmpdir(), 'claude-effort-')); roots.push(dir);
+  const binary = join(dir, 'claude');
+  await writeFile(binary, `#!${process.execPath}\nrequire('node:readline').createInterface({input:process.stdin}).on('line', line => {
+    const q=JSON.parse(line);process.stdout.write(JSON.stringify({type:'control_response',response:{subtype:'success',request_id:q.request_id,response:{models:[
+      {value:'default',supportsEffort:true,supportedEffortLevels:['native-new']},{value:'small',supportsEffort:false,supportedEffortLevels:['do-not-offer']}
+    ]}}})+'\\n');
+  });`, { mode: 0o700 });
+  const claude = await listClaudeModels(binary, dir);
+  expect(claude[0]?.reasoningEfforts).toEqual([{ value: 'native-new', label: 'native-new' }]);
+  expect(claude[1]?.reasoningEfforts).toBeUndefined();
+});

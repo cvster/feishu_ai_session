@@ -43,7 +43,7 @@ export interface AgentRunOptions {
   idleTimeoutMs?: number;
   threadId?: string;
   model?: string;
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  reasoningEffort?: string;
   images?: readonly string[];
   /** All accepted local attachments; submission must not silently lose files. */
   attachmentPaths?: readonly string[];
