@@ -6,5 +6,5 @@
 
 # Delivery workflow
 
-- After completing each user-requested feature or bug fix in this project, run the relevant checks, commit the related changes, and push to `codexfeishu` (`git@github.com:cvster/CodexFeishu.git`) without requiring another request. The current delivery branch is `main`.
+- After completing each user-requested feature or bug fix in this project, run the relevant checks, commit the related changes, and push to both `origin` (`ssh://git@code.tars-ai.com:2222/lennox/feishuaisession.git`) and `codexfeishu` (`git@github.com:cvster/feishu_ai_session.git`) without requiring another request. The current delivery branch is `main`.
 - Keep unrelated user changes out of the commit. Do not force-push or silently resolve a remote divergence; report a blocked push or failed verification clearly. This standing authorization does not authorize additional deployments or service restarts beyond the operational safety rules above.
