@@ -91,8 +91,8 @@ describe('Codex app-server fresh thread run', () => {
       historyMode: 'paginated',
       threadSource: 'lark-channel-bridge',
       model: 'gpt-5.6-sol',
-      developerInstructions: expect.stringContaining('lark-channel-bridge'),
     });
+    expect(requests[2]?.params).not.toHaveProperty('developerInstructions');
     expect(requests[3]?.params).toMatchObject({
       threadId: 'thread-visible',
       effort: 'high',

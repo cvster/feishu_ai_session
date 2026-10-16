@@ -80,7 +80,7 @@ describe('bot identity injection into the agent adapter', () => {
   });
 });
 
-describe('sender identity in bridge_context', () => {
+describe('compact sender context', () => {
   it('marks a bot sender via raw sender_type and injects botOpenId and mentions', async () => {
     const h = await createHarness();
     await startTestBridge(h);
@@ -100,7 +100,7 @@ describe('sender identity in bridge_context', () => {
     );
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    const context = readSection(h.agent.runOptions[0]?.prompt ?? '', 'bridge_context') as {
+    const context = readSection(h.agent.runOptions[0]?.prompt ?? '', 'lark_context') as {
       senderType?: string;
       botOpenId?: string;
       mentions?: Array<{ openId?: string; name?: string; isBot?: boolean }>;
@@ -108,48 +108,18 @@ describe('sender identity in bridge_context', () => {
     expect(context.senderType).toBe('bot');
     expect(context.botOpenId).toBe('ou_bot');
     expect(context.mentions).toEqual([
-      { openId: 'ou_bot', name: 'Bridge', isBot: true },
       { openId: 'ou_human', name: '张三', isBot: false },
     ]);
   });
 
-  it('marks a human sender via raw sender_type', async () => {
-    const h = await createHarness();
+  it.each(['codex', 'claude', 'zcode'] as const)('passes an ordinary %s message through without identity metadata', async tool => {
+    const h = await createHarness(tool);
     await startTestBridge(h);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_from_user',
-        content: '@Bridge 帮我看个问题',
-        rawSenderType: 'user',
-      }),
-    );
+    await h.channel.handlers.message?.(message({
+      messageId: 'om_human', content: '帮我看个问题', rawSenderType: 'user',
+    }));
     await waitFor(() => h.agent.runOptions.length === 1);
-
-    const context = readSection(h.agent.runOptions[0]?.prompt ?? '', 'bridge_context') as {
-      senderType?: string;
-    };
-    expect(context.senderType).toBe('user');
-  });
-
-  it('omits senderType when the raw event is unavailable', async () => {
-    const h = await createHarness();
-    await startTestBridge(h);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_no_raw',
-        content: '@Bridge 在吗',
-      }),
-    );
-    await waitFor(() => h.agent.runOptions.length === 1);
-
-    const context = readSection(h.agent.runOptions[0]?.prompt ?? '', 'bridge_context') as Record<
-      string,
-      unknown
-    >;
-    expect(context).not.toHaveProperty('senderType');
-    expect(context.botOpenId).toBe('ou_bot');
+    expect(h.agent.runOptions[0]?.prompt).toBe('帮我看个问题');
   });
 
   it('turns a mention-only message into an explicit wake-up ping', async () => {
@@ -165,11 +135,9 @@ describe('sender identity in bridge_context', () => {
     );
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    const userInput = readSection(h.agent.runOptions[0]?.prompt ?? '', 'user_input') as {
-      text: string;
-    };
-    expect(userInput.text).toContain('唤醒');
-    expect(userInput.text).toContain('没有正文');
+    const userInput = h.agent.runOptions[0]?.prompt ?? '';
+    expect(userInput).toContain('唤醒');
+    expect(userInput).toContain('没有正文');
   });
 
   it('annotates each message with its sender when a batch merges multiple senders', async () => {
@@ -196,13 +164,11 @@ describe('sender identity in bridge_context', () => {
     );
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    const userInput = readSection(h.agent.runOptions[0]?.prompt ?? '', 'user_input') as {
-      text: string;
-    };
-    expect(userInput.text).toContain('[张三 (user)]:');
-    expect(userInput.text).toContain('[HermesBot (bot)]:');
-    expect(userInput.text).toContain('这个报错怎么回事');
-    expect(userInput.text).toContain('我刚发布了 v1.2.3');
+    const userInput = h.agent.runOptions[0]?.prompt ?? '';
+    expect(userInput).toContain('[张三 (user)]:');
+    expect(userInput).toContain('[HermesBot (bot)]:');
+    expect(userInput).toContain('这个报错怎么回事');
+    expect(userInput).toContain('我刚发布了 v1.2.3');
   });
 
   it('keeps single-message batches free of sender annotations', async () => {
@@ -218,15 +184,13 @@ describe('sender identity in bridge_context', () => {
     );
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    const userInput = readSection(h.agent.runOptions[0]?.prompt ?? '', 'user_input') as {
-      text: string;
-    };
-    expect(userInput.text).not.toContain('[User (user)]:');
-    expect(userInput.text).toContain('看下这个');
+    const userInput = h.agent.runOptions[0]?.prompt ?? '';
+    expect(userInput).not.toContain('[User (user)]:');
+    expect(userInput).toContain('看下这个');
   });
 });
 
-async function createHarness(): Promise<{
+async function createHarness(agentKind: 'codex' | 'claude' | 'zcode' = 'claude'): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel & { handlers: MessageHandlerMap };
   agent: FakeAgentAdapter;
@@ -238,7 +202,8 @@ async function createHarness(): Promise<{
   const tmp = await createTmpProfile('bot-at-bot-');
   const workspace = await realpath(tmp.workspace);
   const baseProfileConfig = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind,
+    ...(agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
     accounts: {
       app: {
         id: 'cli_test',

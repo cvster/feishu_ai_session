@@ -22,7 +22,7 @@ describe('ClaudeAdapter process contract', () => {
     );
   });
 
-  it('spawns a fresh run with stream-json, verbose, permission mode, and bridge prompt args', async () => {
+  it('spawns a fresh run with stream-json, verbose, permission mode, and unmodified input', async () => {
     const fake = await createFakeClaude({
       lines: [{ type: 'result', session_id: 'sess-fresh' }],
     });
@@ -43,25 +43,20 @@ describe('ClaudeAdapter process contract', () => {
 
     expect(await realpath(record.cwd)).toBe(await realpath(fake.dir));
     expect(record.env.LARK_CHANNEL).toBe('1');
-    // The prompt goes via stdin, and the bridge system prompt via a temp file,
-    // so neither ever touches argv (which cmd.exe would mangle on Windows).
+    // The prompt goes via stdin so cmd.exe cannot interpret its contents.
     expect(record.stdin).toBe('hello');
-    expect(record.argv.slice(0, 7)).toEqual([
+    expect(record.argv).toEqual([
       '-p',
       '--output-format',
       'stream-json',
       '--verbose',
       '--permission-mode',
       'acceptEdits',
-      '--append-system-prompt-file',
     ]);
     expect(record.argv).not.toContain('hello');
-    expect(record.systemPrompt).toContain('# lark-channel-bridge');
-    expect(record.systemPrompt).toContain('__bridge_cb');
-    expect(record.systemPrompt).toContain('LARK_CHANNEL_PROFILE');
-    expect(record.systemPrompt).toContain('LARKSUITE_CLI_CONFIG_DIR');
-    expect(record.systemPrompt).not.toContain('lark-cli config bind --source lark-channel');
-    expect(record.systemPrompt).not.toContain('__claude_cb');
+    expect(record.systemPrompt).toBeNull();
+    expect(record.argv).not.toContain('--append-system-prompt');
+    expect(record.argv).not.toContain('--append-system-prompt-file');
     expect(record.argv).not.toContain('--resume');
     expect(record.argv).not.toContain('--model');
   });

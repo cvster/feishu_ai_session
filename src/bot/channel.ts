@@ -21,8 +21,7 @@ import { dirname, join } from 'node:path';
 import { capabilityForTool } from '../agent/capability';
 import { modelLabel, normalizeModelSelection, resolveModelArg } from '../agent/models';
 import {
-  buildAgentPrompt,
-  buildCodexUserPrompt,
+  buildDirectUserPrompt,
   type BridgePromptInteractiveCard,
   type BridgePromptMention,
   type BridgePromptQuotedMessage,
@@ -2241,7 +2240,7 @@ function buildPrompt(
   topicContext: QuotedContext[] = [],
   botIdentity?: { openId: string; name?: string },
   extraInstructions?: string[],
-  rawCodexInput = false,
+  nativeImages = false,
 ): string {
   const first = batch[0];
   if (!first) return '';
@@ -2272,45 +2271,23 @@ function buildPrompt(
   const interactiveCards = batch.map(toPromptInteractiveCard).filter(isDefined);
   const promptAttachments = attachments.map(toPromptAttachment);
 
-  if (rawCodexInput) {
-    return buildCodexUserPrompt({
-      userInput: userPart,
-      ...(extraInstructions?.length ? { instructions: extraInstructions } : {}),
-      ...(topicMessages.length ? { topicContext: topicMessages } : {}),
-      ...(quotedMessages.length ? { quotedMessages } : {}),
-      ...(interactiveCards.length ? { interactiveCards } : {}),
-      ...(promptAttachments.length ? { attachments: promptAttachments } : {}),
-      ...(mentions.length
-        ? {
-            mentions: mentions.filter(
-              (mention) => !botIdentity?.openId || mention.openId !== botIdentity.openId,
-            ),
-          }
-        : {}),
-    });
-  }
-
-  return buildAgentPrompt({
-    context: {
-      chatId: first.chatId,
-      chatType: first.chatType,
+  return buildDirectUserPrompt({
+    userInput: userPart,
+    nativeImages,
+    ...(batch.some(message => senderTypeOf(message) === 'bot') ? { sender: {
       senderId: first.senderId,
       ...(first.senderName ? { senderName: first.senderName } : {}),
       ...(senderType ? { senderType } : {}),
       ...(botIdentity?.openId ? { botOpenId: botIdentity.openId } : {}),
-      ...(mentions.length > 0 ? { mentions } : {}),
-      ...(first.threadId ? { threadId: first.threadId } : {}),
-      messageIds: batch.map((m) => m.messageId),
-      source: 'im',
-    },
-    ...(extraInstructions && extraInstructions.length > 0
-      ? { instructions: extraInstructions }
-      : {}),
-    userInput: userPart,
-    ...(topicMessages.length > 0 ? { topicContext: topicMessages } : {}),
-    quotedMessages,
-    interactiveCards,
-    attachments: promptAttachments,
+    } } : {}),
+    ...(extraInstructions?.length ? { instructions: extraInstructions } : {}),
+    ...(topicMessages.length ? { topicContext: topicMessages } : {}),
+    ...(quotedMessages.length ? { quotedMessages } : {}),
+    ...(interactiveCards.length ? { interactiveCards } : {}),
+    ...(promptAttachments.length ? { attachments: promptAttachments } : {}),
+    ...(mentions.length ? { mentions: mentions.filter(
+      mention => !botIdentity?.openId || mention.openId !== botIdentity.openId,
+    ) } : {}),
   });
 }
 

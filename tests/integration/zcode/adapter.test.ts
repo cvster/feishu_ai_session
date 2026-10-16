@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { ZcodeAdapter } from '../../../src/agent/zcode/adapter';
 import { ZcodeSessionProvider } from '../../../src/tools/zcode-sessions';
 import { ZcodeClient } from '../../../src/agent/zcode/client';
+import { buildDirectUserPrompt } from '../../../src/agent/prompt';
+import { wrapAuxiliaryPrompt } from '../../../src/bot/auxiliary-groups';
 import type { AgentEvent } from '../../../src/agent/types';
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -60,7 +62,7 @@ it('creates, streams and completes the actual protocol without submitting to ano
   const calls = await h.read();
   expect(calls[0].method).toBe('workspace/updateProviderRegistry');
   expect(calls.find(c => c.method === 'session/create')).toMatchObject({ params: { mode: 'plan' } });
-  expect(calls.find(c => c.method === 'session/send').params).toMatchObject({ inputId: 'bridge-one', sessionId: 'sess_test' });
+  expect(calls.find(c => c.method === 'session/send').params).toMatchObject({ inputId: 'bridge-one', sessionId: 'sess_test', content: 'hello' });
   expect(calls.every(c => !Object.hasOwn(c, 'jsonrpc'))).toBe(true);
   expect(calls.find(c => c.id === 'prefs').result).toMatchObject({ askUserQuestionAutoResolutionEnabled: false });
 });
@@ -153,4 +155,38 @@ it('refuses native copy while a task is running', async () => {
   const provider = new ZcodeSessionProvider(h.options, join(h.root, 'bridge-labels'));
   await expect(provider.fork('sess_test')).rejects.toThrow('先停止');
   expect((await h.read()).some(c => c.method === 'session/fork')).toBe(false);
+});
+
+it.each(['direct', 'full', 'brief'] as const)('preserves %s input without a global bridge prefix on fresh and resumed sessions', async kind => {
+  const h = await fixture();
+  const prompt = kind === 'direct' ? '你好 <tag>\n请继续' : wrapAuxiliaryPrompt(
+    { toolId: 'zcode', nativeId: 'source' }, '/history', '检查', false, { mode: kind, chatId: 'oc_target' },
+  );
+  for (const resumed of [false, true]) {
+    const run = h.agent.run({ runId: `prompt-${kind}-${resumed}`, cwd: h.root, prompt,
+      ...(resumed ? { sessionId: 'sess_test' } : {}),
+    });
+    for await (const _event of run.events) { /* drain */ }
+    expect(await run.waitForExit(3000)).toBe(true);
+    const sends = (await h.read()).filter(call => call.method === 'session/send');
+    expect(sends.at(-1).params.content).toBe(prompt);
+  }
+});
+
+it.each(['direct', 'full'] as const)('keeps attachment context inside the %s prompt without appending text outside FF JSON', async kind => {
+  const h = await fixture();
+  const path = join(h.root, '调试 report.png');
+  const input = buildDirectUserPrompt({ userInput: '看图', attachments: [
+    { path, kind: 'image', decision: 'accepted' },
+  ] });
+  const prompt = kind === 'direct' ? input : wrapAuxiliaryPrompt(
+    { toolId: 'zcode', nativeId: 'source' }, '/history', input, false, { mode: kind, chatId: 'oc_target' },
+  );
+  const run = h.agent.run({ runId: 'attachment', cwd: h.root, prompt, attachmentPaths: [path] });
+  for await (const _event of run.events) { /* drain */ }
+  expect(await run.waitForExit(3000)).toBe(true);
+  const content = (await h.read()).find(call => call.method === 'session/send').params.content;
+  expect(content).toBe(prompt);
+  expect(content).not.toContain('按外传限制使用');
+  expect(kind === 'full' ? JSON.parse(content).user_input : content).toContain(path);
 });

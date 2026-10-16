@@ -1,12 +1,21 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildAgentPrompt, buildCodexUserPrompt } from '../../../src/agent/prompt';
+import { buildAgentPrompt, buildCodexUserPrompt, buildDirectUserPrompt } from '../../../src/agent/prompt';
 
 describe('agent prompt builder', () => {
   it('passes an ordinary Codex text message through unchanged', () => {
     const text = '这种模式，飞书发的消息是否可以原样发送？';
     expect(buildCodexUserPrompt({ userInput: text })).toBe(text);
+  });
+
+  it('passes direct Claude and ZCode text through and retains their image paths', () => {
+    expect(buildDirectUserPrompt({ userInput: '直接对话' })).toBe('直接对话');
+    const prompt = buildDirectUserPrompt({ userInput: '看图', attachments: [
+      { path: '/tmp/image.png', kind: 'image', decision: 'accepted' },
+    ] });
+    expect(prompt).toContain('/tmp/image.png');
+    expect(prompt.endsWith('看图')).toBe(true);
   });
 
   it('adds only compact context for a Codex quote or non-image attachment', () => {
@@ -134,30 +143,6 @@ describe('agent prompt builder', () => {
     expect(prompt).not.toContain('<quoted_messages>');
     expect(prompt).not.toContain('<interactive_cards>');
     expect(prompt).not.toContain('<comment_context>');
-  });
-
-  it('keeps bridge agents inside the current lark-channel profile by default', () => {
-    const channelSource = readFileSync(join(process.cwd(), 'src/bot/channel.ts'), 'utf8');
-    const promptSource = readFileSync(
-      join(process.cwd(), 'src/agent/bridge-system-prompt.ts'),
-      'utf8',
-    );
-    const source = `${channelSource}\n${promptSource}`;
-
-    expect(source).not.toContain('命令必须写成 env -u LARK_CHANNEL');
-    expect(source).not.toContain('env -u LARK_CHANNEL lark-cli');
-    expect(source).toContain('不要 unset LARK_CHANNEL');
-    expect(source).toContain('LARKSUITE_CLI_CONFIG_DIR');
-    expect(source).not.toContain('lark-cli config bind --source lark-channel');
-  });
-
-  it('does not carry the obsolete interactive OAuth procedure in every agent prompt', () => {
-    const source = readFileSync(join(process.cwd(), 'src/agent/bridge-system-prompt.ts'), 'utf8');
-
-    expect(source).toContain('LARKSUITE_CLI_CONFIG_DIR');
-    expect(source).toContain('群聊中不要运行 lark-cli auth login');
-    expect(source).not.toContain('lark-cli auth login --device-code');
-    expect(source).not.toContain('lark-cli config strict-mode off');
   });
 
   it('omits repeated bridge environment instructions from per-message context', () => {

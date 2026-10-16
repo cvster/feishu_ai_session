@@ -93,14 +93,19 @@ export interface BuildCodexUserPromptInput {
   mentions?: BridgePromptMention[];
 }
 
-/**
- * Keep the common Codex path genuinely plain: a normal Feishu text message is
- * byte-for-byte the userInput supplied here. Rich Feishu-only details are
- * reduced to one compact block only when the model cannot infer them from the
- * text or native image inputs.
- */
+/** Ordinary messages stay plain; only details unavailable in the text add context. */
+export interface BuildDirectUserPromptInput extends BuildCodexUserPromptInput {
+  nativeImages?: boolean;
+  sender?: Pick<BridgePromptContext, 'senderId' | 'senderName' | 'senderType' | 'botOpenId'>;
+}
+
+/** Compatibility entry point for callers using Codex native image inputs. */
 export function buildCodexUserPrompt(input: BuildCodexUserPromptInput): string {
-  const context: Record<string, unknown> = {};
+  return buildDirectUserPrompt({ ...input, nativeImages: true });
+}
+
+export function buildDirectUserPrompt(input: BuildDirectUserPromptInput): string {
+  const context: Record<string, unknown> = { ...input.sender };
   if (input.instructions?.length) context.instructions = input.instructions;
   if (input.topicContext?.length) {
     context.topic = input.topicContext.map(compactConversationMessage);
@@ -112,7 +117,7 @@ export function buildCodexUserPrompt(input: BuildCodexUserPromptInput): string {
     context.cards = input.interactiveCards.map((card) => card.content);
   }
   const attachments = input.attachments
-    ?.filter((attachment) => !isNativeCodexImage(attachment))
+    ?.filter((attachment) => !input.nativeImages || !isNativeCodexImage(attachment))
     .map((attachment) => ({
       path: attachment.path,
       kind: attachment.kind,

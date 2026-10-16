@@ -1,8 +1,7 @@
 import { listZcodeModelCapabilities, loadZcodeProviderRegistry, loadZcodeRuntimeModel } from './model-config';
 import { createHash } from 'node:crypto';
-import type { AgentAdapter, AgentBotIdentity, AgentEvent, AgentRun, AgentRunOptions } from '../types';
+import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { resolveReasoningEffort } from '../models';
-import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { checkAgentAvailability } from '../preflight';
 import { ZcodeClient, zcodeCommand, type ZcodeOptions } from './client';
 
@@ -12,9 +11,7 @@ export function zcodeWorkspace(cwd: string) {
 /** The independent worker owns this connection; bridge restarts only detach observers. */
 export class ZcodeAdapter implements AgentAdapter {
   readonly id = 'zcode'; readonly displayName = 'ZCode';
-  private identity?: AgentBotIdentity;
   constructor(readonly options: ZcodeOptions = {}) {}
-  setBotIdentity(identity: AgentBotIdentity): void { this.identity = identity; }
   async checkAvailability() {
     const command = zcodeCommand(this.options);
     return checkAgentAvailability({ agentId: 'zcode', agentName: 'ZCode', command: command.binary, binaryPath: command.binary, args: [...command.args, '--version'] });
@@ -91,8 +88,8 @@ export class ZcodeAdapter implements AgentAdapter {
         await client.request('session/subscribe', { sessionId, deliveryKind: 'web-remote-replayable' });
         if (stopping) { push({ type: 'done', sessionId, terminationReason: 'interrupted' }); return; }
         sent = true;
-        const prompt = `${buildBridgeSystemPrompt(this.identity)}\n\n${opts.prompt}${opts.attachmentPaths?.length ? `\n\n本次本机附件路径（按外传限制使用）：${JSON.stringify(opts.attachmentPaths)}` : ''}`;
-        const result = await client.request('session/send', { sessionId, inputId, content: prompt, ...modelParams });
+        // Attachment context and any FF JSON envelope are supplied by the caller.
+        const result = await client.request('session/send', { sessionId, inputId, content: opts.prompt, ...modelParams });
         if (result.accepted !== true) throw new Error('ZCode did not acknowledge task acceptance');
         await finished;
       } catch (error) {

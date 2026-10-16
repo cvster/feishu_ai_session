@@ -97,7 +97,7 @@ describe('topic message quote handling', () => {
 
     expect(h.agent.runOptions).toHaveLength(1);
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('"threadId":"omt_topic"');
+    expect(prompt).toBe('@Bridge 继续说一下');
     expect(prompt).not.toContain('<quoted_messages>');
     expect(prompt).not.toContain('topic root content');
     expect(h.channel.fetchRawMessage).not.toHaveBeenCalled();
@@ -120,7 +120,7 @@ describe('topic message quote handling', () => {
     await waitFor(() => h.agent.runOptions.length === 1);
 
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('"threadId":"omt_converted_topic"');
+    expect(prompt).toBe('@Bridge 继续说一下');
     expect(prompt).not.toContain('<quoted_messages>');
     expect(h.channel.fetchRawMessage).not.toHaveBeenCalled();
     await waitFor(() => h.channel.streams.length === 1);
@@ -155,7 +155,7 @@ describe('topic message quote handling', () => {
 
     expect(h.channel.fetchRawMessage).toHaveBeenCalledWith('om_topic_start');
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('"threadId":"omt_backfilled"');
+    expect(prompt).toBe('@Bridge 开个新话题');
 
     await waitFor(() => h.channel.streams.length === 1);
     expect(h.channel.streams[0]?.options).toMatchObject({
@@ -235,11 +235,12 @@ describe('topic message quote handling', () => {
       }),
     );
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('<topic_context>');
+    expect(prompt).toContain('<lark_context>');
+    expect(prompt).toContain('"topic":');
     expect(prompt).toContain('the real upstream question');
     // The triggering message is in the thread list too — it must be excluded so
     // it isn't duplicated inside topic_context.
-    const topicBlock = prompt.slice(prompt.indexOf('<topic_context>'), prompt.indexOf('</topic_context>'));
+    const topicBlock = prompt.slice(prompt.indexOf('<lark_context>'), prompt.indexOf('</lark_context>'));
     expect(topicBlock).not.toContain('om_at_in_topic');
   });
 
@@ -301,7 +302,8 @@ describe('topic message quote handling', () => {
     await waitFor(() => h.agent.runOptions.length === 1);
 
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('<quoted_messages>');
+    expect(prompt).toContain('<lark_context>');
+    expect(prompt).toContain('"quotes":');
     expect(prompt).toContain('regular quoted content');
     expect(h.channel.fetchRawMessage).toHaveBeenCalledWith(
       'om_quote_target',
@@ -330,7 +332,8 @@ describe('topic message quote handling', () => {
     await waitFor(() => h.agent.runOptions.length === 1);
 
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('<quoted_messages>');
+    expect(prompt).toContain('<lark_context>');
+    expect(prompt).toContain('"quotes":');
     expect(prompt).toContain('topic parent content');
     expect(h.channel.fetchRawMessage).toHaveBeenCalledWith(
       'om_topic_parent',

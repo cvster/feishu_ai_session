@@ -7,12 +7,10 @@ import { log } from '../../core/logger';
 import { mergeProcessEnv, type SpawnedProcessByStdio } from '../../platform/spawn';
 import { spawnCodexProcess as spawnProcess } from '../../platform/codex-binary';
 import { SpawnFailed } from '../../runtime/errors';
-import { buildBridgeSystemPrompt, prefixBridgeSystemPrompt, prefixBridgeTurnPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import type {
   AgentAdapter,
-  AgentBotIdentity,
   AgentEvent,
   AgentRun,
   AgentRunOptions,
@@ -64,7 +62,6 @@ export class CodexAdapter implements AgentAdapter {
   private readonly useAppServerForFreshThreads: boolean;
   private readonly useQueueForExistingThreads: boolean;
   private readonly appServerRemote: string | undefined;
-  private botIdentity: AgentBotIdentity | undefined;
 
   constructor(opts: CodexAdapterOptions) {
     this.binary = opts.binary;
@@ -79,10 +76,6 @@ export class CodexAdapter implements AgentAdapter {
     this.useAppServerForFreshThreads = opts.useAppServerForFreshThreads !== false;
     this.useQueueForExistingThreads = opts.useQueueForExistingThreads !== false;
     this.appServerRemote = opts.appServerRemote ?? process.env.CODEX_QUEUE_REMOTE;
-  }
-
-  setBotIdentity(identity: AgentBotIdentity): void {
-    this.botIdentity = identity;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -157,7 +150,7 @@ export class CodexAdapter implements AgentAdapter {
     transport: 'rpc' | 'cli' }) => Promise<void>): Promise<CodexSubmissionResult> {
     return submitCodexMessage({ ...opts, sandbox: opts.sandbox ?? this.sandbox, binary: this.binary, profileStateDir: this.profileStateDir,
       codexHome: this.codexHome, inheritCodexHome: this.inheritCodexHome, remote: this.appServerRemote,
-      env: buildLarkChannelEnv(this.larkChannel), developerInstructions: buildBridgeSystemPrompt(this.botIdentity) }, beforeSend);
+      env: buildLarkChannelEnv(this.larkChannel) }, beforeSend);
   }
 
   run(opts: AgentRunOptions): AgentRun {
@@ -170,7 +163,6 @@ export class CodexAdapter implements AgentAdapter {
         runId: opts.runId, binary: this.binary, profileStateDir: this.profileStateDir,
         codexHome: this.codexHome, inheritCodexHome: this.inheritCodexHome,
         cwd: opts.cwd, sandbox: opts.sandbox ?? this.sandbox, prompt: opts.prompt,
-        developerInstructions: buildBridgeSystemPrompt(this.botIdentity),
         clientUserMessageId: codexBridgeClientMessageId(opts.runId),
         images: opts.images, model: opts.model, reasoningEffort: opts.reasoningEffort,
         remote: this.appServerRemote, env: buildLarkChannelEnv(this.larkChannel),
@@ -184,7 +176,6 @@ export class CodexAdapter implements AgentAdapter {
         cwd: opts.cwd,
         sandbox: opts.sandbox ?? this.sandbox,
         prompt: opts.prompt,
-        developerInstructions: buildBridgeSystemPrompt(this.botIdentity),
         clientUserMessageId: codexBridgeClientMessageId(opts.runId),
         images: opts.images,
         model: opts.model,
@@ -276,12 +267,7 @@ export class CodexAdapter implements AgentAdapter {
     child.stdin.on('error', (err) => {
       log.warn('agent', 'stdin-error', { message: err.message });
     });
-    child.stdin.end(
-      opts.threadId
-        ? prefixBridgeTurnPrompt(opts.prompt)
-        : prefixBridgeSystemPrompt(opts.prompt, this.botIdentity),
-      'utf8',
-    );
+    child.stdin.end(opts.prompt, 'utf8');
 
     const stopGraceMs = opts.stopGraceMs ?? this.defaultStopGraceMs;
 

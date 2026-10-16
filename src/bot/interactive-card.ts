@@ -22,8 +22,8 @@
  *      `[interactive card]` (lib/index.js:88951,88955). We fall back to the
  *      raw JSON so Claude can see the card structure.
  *
- * All branches wrap output in an `<interactive_card>` block. Claude is
- * taught in BRIDGE_SYSTEM_PROMPT not to echo the XML tag back to the user.
+ * All branches wrap output in an `<interactive_card>` block to distinguish
+ * the quoted card structure from the current user request.
  */
 export const INTERACTIVE_CARD_PLACEHOLDER = '[interactive card]';
 

@@ -52,6 +52,7 @@ describe('CodexAdapter native queue mode', () => {
       transport: transport === 'rpc' ? 'shared' : 'owned',
       params: { approvalPolicy: 'never', sandbox: 'danger-full-access', threadSource: 'user' },
     });
+    expect(requests.find(r => r.method === 'thread/start').params).not.toHaveProperty('developerInstructions');
     expect(requests.find(r => r.method === 'thread/name/set').params.name).toBe('AA-蓝图');
     if (transport === 'rpc') expect(methods).not.toContain('thread/resume');
     expect(methods.filter(method => method === 'thread/start')).toHaveLength(1);
@@ -72,6 +73,7 @@ describe('CodexAdapter native queue mode', () => {
     expect(requests.map(r => r.method)).toContain('thread/start');
     expect(requests.map(r => r.method)).not.toContain('turn/start');
     const start = requests.find(r => r.method === 'thread/start');
+    expect(start.params).not.toHaveProperty('developerInstructions');
     expect(start.params).toMatchObject({ historyMode: 'legacy', model: 'gpt-6.1-sol', config: { model_reasoning_effort: 'high' } });
     expect(await readFile(join(fake.dir, 'materialized.txt'), 'utf8')).toBe('ready');
     expect(run.detach).toBeTypeOf('function');

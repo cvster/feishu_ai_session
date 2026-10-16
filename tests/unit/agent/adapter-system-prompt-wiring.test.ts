@@ -1,5 +1,4 @@
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -18,11 +17,7 @@ vi.mock('../../../packages/codex-core/src/spawn', async (importOriginal) => {
   return { ...actual, spawnProcess: spawnMock.spawnProcess };
 });
 
-import {
-  buildBridgeSystemPrompt,
-  prefixBridgeSystemPrompt,
-  prefixBridgeTurnPrompt,
-} from '../../../src/agent/bridge-system-prompt';
+import { wrapAuxiliaryPrompt } from '../../../src/bot/auxiliary-groups';
 import { ClaudeAdapter } from '../../../src/agent/claude/adapter';
 import { CodexAdapter } from '../../../src/agent/codex/adapter';
 
@@ -52,88 +47,32 @@ beforeEach(() => {
   spawnMock.spawnProcess.mockReset();
 });
 
-describe('ClaudeAdapter system prompt wiring', () => {
-  it('appends the identity-aware bridge system prompt via a temp file after setBotIdentity', async () => {
-    const child = fakeChild();
-    spawnMock.spawnProcess.mockReturnValue(child);
-    const adapter = new ClaudeAdapter();
-    adapter.setBotIdentity({ openId: 'ou_bot_self', name: 'Bridge' });
+const prompts = [
+  ['direct', '原样输入 <tag>\n第二行'],
+  ['context', '<lark_context>\n{"quotes":[{"content":"引用"}]}\n</lark_context>\n\n请看引用'],
+  ...(['full', 'brief'] as const).map(mode => [mode, wrapAuxiliaryPrompt(
+    { toolId: 'codex', nativeId: 'source' }, '/history', '检查', false, { mode, chatId: 'oc_target' },
+  )]),
+];
 
-    adapter.run({ runId: 'r1', prompt: 'hi', cwd: '/tmp' });
-
-    // The prompt goes via stdin, never argv (cmd.exe would mangle it on Windows).
-    expect(await readAll(child.stdin)).toBe('hi');
-    expect(systemPromptFileContent()).toBe(
-      buildBridgeSystemPrompt({ openId: 'ou_bot_self', name: 'Bridge' }),
-    );
-  });
-
-  it('falls back to the base system prompt when no identity was set', async () => {
-    const child = fakeChild();
-    spawnMock.spawnProcess.mockReturnValue(child);
-    const adapter = new ClaudeAdapter();
-
-    adapter.run({ runId: 'r1', prompt: 'hi', cwd: '/tmp' });
-
-    expect(await readAll(child.stdin)).toBe('hi');
-    expect(systemPromptFileContent()).toBe(buildBridgeSystemPrompt(undefined));
-  });
-
-  function systemPromptFileContent(): string {
-    const args = spawnMock.spawnProcess.mock.calls[0]?.[1] as string[];
-    const flagIndex = args.indexOf('--append-system-prompt-file');
-    expect(flagIndex).toBeGreaterThan(-1);
-    expect(args).not.toContain('--append-system-prompt');
-    return readFileSync(args[flagIndex + 1] as string, 'utf8');
-  }
-});
-
-describe('CodexAdapter system prompt wiring', () => {
-  function codexAdapter(): CodexAdapter {
-    return new CodexAdapter({
-      binary: '/usr/local/bin/codex',
-      profileStateDir: '/tmp/codex-profile',
-      useAppServerForFreshThreads: false,
-      useQueueForExistingThreads: false,
-    });
-  }
-
-  it('prefixes stdin with the identity-aware bridge system prompt after setBotIdentity', async () => {
-    const child = fakeChild();
-    spawnMock.spawnProcess.mockReturnValue(child);
-    const adapter = codexAdapter();
-    adapter.setBotIdentity({ openId: 'ou_bot_self', name: 'Bridge' });
-
-    adapter.run({ runId: 'r1', prompt: 'hi', cwd: '/tmp' });
-
-    const stdin = await readAll(child.stdin);
-    expect(stdin).toBe(
-      prefixBridgeSystemPrompt('hi', { openId: 'ou_bot_self', name: 'Bridge' }),
-    );
-  });
-
-  it('falls back to the base system prompt when no identity was set', async () => {
-    const child = fakeChild();
-    spawnMock.spawnProcess.mockReturnValue(child);
-    const adapter = codexAdapter();
-
-    adapter.run({ runId: 'r1', prompt: 'hi', cwd: '/tmp' });
-
-    const stdin = await readAll(child.stdin);
-    expect(stdin).toBe(prefixBridgeSystemPrompt('hi', undefined));
-  });
-
-  it('passes a resumed Codex prompt through unchanged in the legacy fallback', async () => {
-    const child = fakeChild();
-    spawnMock.spawnProcess.mockReturnValue(child);
-    const adapter = codexAdapter();
-    adapter.setBotIdentity({ openId: 'ou_bot_self', name: 'Bridge' });
-
-    adapter.run({ runId: 'r1', prompt: 'hi', cwd: '/tmp', threadId: 'thread-1' });
-
-    const stdin = await readAll(child.stdin);
-    expect(stdin).toBe(prefixBridgeTurnPrompt('hi'));
-    expect(stdin).toBe('hi');
+describe.each(['claude', 'codex'] as const)('%s prompt delivery', tool => {
+  it.each(prompts)('passes %s input unchanged for fresh and resumed conversations', async (_kind, prompt) => {
+    for (const resumed of [false, true]) {
+      const child = fakeChild();
+      spawnMock.spawnProcess.mockReturnValue(child);
+      const adapter = tool === 'claude' ? new ClaudeAdapter() : new CodexAdapter({
+        binary: '/usr/local/bin/codex', profileStateDir: '/tmp/codex-profile',
+        useAppServerForFreshThreads: false, useQueueForExistingThreads: false,
+      });
+      adapter.run({ runId: 'r1', prompt: prompt!, cwd: '/tmp',
+        ...(resumed ? { sessionId: 'session-1', threadId: 'thread-1' } : {}),
+      });
+      expect(await readAll(child.stdin)).toBe(prompt);
+      const args = spawnMock.spawnProcess.mock.calls.at(-1)?.[1] as string[];
+      expect(args).not.toContain('--append-system-prompt-file');
+      expect(args).not.toContain('--append-system-prompt');
+      expect(args).not.toContain('--system-prompt');
+    }
   });
 });
 

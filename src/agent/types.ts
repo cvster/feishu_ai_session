@@ -82,8 +82,8 @@ export interface AgentRun {
 
 /**
  * The bridge bot's own IM identity, resolved by the channel after the WS
- * handshake (`/open-apis/bot/v3/info`). Injected into adapters so the agent
- * system prompt can state "this open_id is you" with the real value.
+ * handshake (`/open-apis/bot/v3/info`). Used for structured message context
+ * and forwarded by durable adapters as execution metadata.
  */
 export interface AgentBotIdentity {
   openId: string;
@@ -108,7 +108,7 @@ export interface AgentAdapter {
   /**
    * Late-bound identity injection: the adapter is constructed before the
    * channel connects, so the channel calls this once botIdentity is known.
-   * Adapters that don't bake identity into their prompts may omit it.
+   * Adapters that do not need bot identity metadata may omit it.
    */
   setBotIdentity?(identity: AgentBotIdentity): void;
 }
