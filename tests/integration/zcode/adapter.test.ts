@@ -15,7 +15,7 @@ async function fixture(kind = 'normal') {
     const fs = require('node:fs');
     if (process.argv.includes('--version')) { console.log('zcode 0.16.5'); process.exit(); }
     const send = value => process.stdout.write(JSON.stringify(value)+'\\n');
-    const snapshot = { session: { sessionId: 'sess_test', title: 'AA-zcode', sessionKind: 'interactive', workspace: { workspacePath: ${JSON.stringify(root)} }, createdAt: 1, updatedAt: 2, status: ${JSON.stringify(kind === 'busy' ? 'running' : 'idle')} }, messages: [{ role: 'user', parts: [{ type: 'text', text: 'latest context' }] }] };
+    const snapshot = { session: { sessionId: 'sess_test', title: 'AA-zcode', sessionKind: 'interactive', workspace: { workspacePath: ${JSON.stringify(root)} }, createdAt: 1, updatedAt: 2, status: ${JSON.stringify(kind === 'busy' ? 'running' : 'idle')}, model: { providerId: 'original', modelId: 'model' } }, lastError: ${JSON.stringify(kind === 'missing-model' ? { type: 'ZCODE_RUNTIME_MODEL_UNAVAILABLE' } : null)}, messages: [{ role: 'user', parts: [{ type: 'text', text: 'latest context' }] }] };
     let inputId, seq = 0;
     const event = (type, payload, sessionId = 'sess_test') => send({ method: 'session/event', params: { type, payload, sessionId, seq: ++seq, turnId: 'turn-a' } });
     require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
@@ -57,7 +57,8 @@ it('creates, streams and completes the actual protocol without submitting to ano
   expect(events).toContainEqual({ type: 'tool_result', id: 'tool-1', output: 'ok', isError: false });
   expect(await run.waitForExit(3000)).toBe(true);
   const calls = await h.read();
-  expect(calls[0]).toMatchObject({ method: 'session/create', params: { mode: 'plan' } });
+  expect(calls[0].method).toBe('workspace/updateProviderRegistry');
+  expect(calls.find(c => c.method === 'session/create')).toMatchObject({ params: { mode: 'plan' } });
   expect(calls.find(c => c.method === 'session/send').params).toMatchObject({ inputId: 'bridge-one', sessionId: 'sess_test' });
   expect(calls.every(c => !Object.hasOwn(c, 'jsonrpc'))).toBe(true);
   expect(calls.find(c => c.id === 'prefs').result).toMatchObject({ askUserQuestionAutoResolutionEnabled: false });
@@ -68,7 +69,8 @@ it('resumes an opaque ZCode ID and stops only the submitted session', async () =
   for await (const e of run.events) { events.push(e); if (e.type === 'system') setTimeout(() => { void run.stop(); }, 50); }
   expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'interrupted' });
   expect(await run.waitForExit(3000)).toBe(true);
-  const calls = await h.read(); expect(calls[0].method).toBe('session/resume');
+  const calls = await h.read(); expect(calls[0].method).toBe('workspace/updateProviderRegistry');
+  expect(calls.find(c => c.method === 'session/resume').params).not.toHaveProperty('runtimeModel');
   expect(calls.some(c => c.method === 'session/create')).toBe(false);
   expect(calls.find(c => c.method === 'session/stop').params.sessionId).toBe('sess_test');
 });
@@ -101,4 +103,36 @@ it('sets the native thought level before sending and carries it in the per-turn 
   expect(setIndex).toBeGreaterThan(0); expect(setIndex).toBeLessThan(sendIndex);
   expect(calls[setIndex].params).toEqual({ sessionId: 'sess_test', thoughtLevel: 'native-level' });
   expect(calls[sendIndex].params.runtimeModel.thoughtLevel).toBe('native-level');
+});
+
+it('preserves the resumed provider and all its models instead of selecting the new default', async () => {
+  const h = await fixture();
+  await writeFile(join(h.root, 'config.json'), JSON.stringify({ model: 'default-provider/model', provider: {
+    original: { name: 'Original', kind: 'openai', models: { model: {}, another: {} } },
+    'default-provider': { name: 'Default', kind: 'openai', models: { model: {} } },
+  } }));
+  const run = h.agent.run({ runId: 'keep-original', cwd: h.root, sessionId: 'sess_test', prompt: 'continue' });
+  const events: AgentEvent[] = []; for await (const event of run.events) events.push(event);
+  expect(await run.waitForExit(3000)).toBe(true);
+  expect(events).toContainEqual(expect.objectContaining({ type: 'system', model: 'original/model' }));
+  const calls = await h.read();
+  expect(calls[0].params.registry.providers.map((p: any) => [p.providerId, p.models.map((m: any) => m.modelId)])).toEqual([
+    ['original', ['model', 'another']], ['default-provider', ['model']],
+  ]);
+  for (const call of calls.filter(c => ['session/resume', 'session/send'].includes(c.method))) expect(call.params).not.toHaveProperty('runtimeModel');
+  expect(calls.some(c => c.method === 'session/setModel')).toBe(false);
+});
+it('blocks missing original models, while explicit model changes are applied before reasoning settings', async () => {
+  const h = await fixture('missing-model');
+  const run = h.agent.run({ runId: 'missing', cwd: h.root, sessionId: 'sess_test', prompt: 'must not run' });
+  const events: AgentEvent[] = []; for await (const event of run.events) events.push(event);
+  expect(await run.waitForExit(3000)).toBe(true);
+  expect(events.at(-1)).toMatchObject({ type: 'error', submissionStatus: 'rejected' });
+  expect((await h.read()).some(c => c.method === 'session/send')).toBe(false);
+  const next = h.agent.run({ runId: 'explicit', cwd: h.root, sessionId: 'sess_test', model: 'test/model', reasoningEffort: 'high', prompt: 'switch' });
+  for await (const _event of next.events) { /* drain */ }
+  expect(await next.waitForExit(3000)).toBe(true);
+  const calls = await h.read(), set = calls.findIndex(c => c.method === 'session/setModel');
+  expect(set).toBeGreaterThan(0); expect(set).toBeLessThan(calls.findIndex(c => c.method === 'session/setThoughtLevel'));
+  expect(calls[set].params.model).toEqual({ providerId: 'test', modelId: 'model' });
 });

@@ -87,7 +87,7 @@ export async function workerService(action: 'start' | 'stop' | 'status', options
     const unit = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', name);
     await mkdir(dirname(unit), { recursive: true });
     await writeFile(unit, buildWorkerUnit({ node: process.execPath, entry: process.argv[1]!, profile: paths.profile,
-      config: paths.configFile, envPath: process.env.PATH ?? '', toolId, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR, binary: process.env.LARK_CHANNEL_CLAUDE_BIN, zcodeBinary: process.env.LARK_CHANNEL_ZCODE_BIN, zcodeDataDir: toolId === 'zcode' ? sourceId : undefined }), 'utf8');
+      config: paths.configFile, envPath: process.env.PATH ?? '', toolId, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR, binary: process.env.LARK_CHANNEL_CLAUDE_BIN, zcodeBinary: process.env.LARK_CHANNEL_ZCODE_BIN, zcodeDataDir: toolId === 'zcode' && (selected.zcode?.dataDir || process.env.ZCODE_STORAGE_DIR) ? sourceId : undefined }), 'utf8');
     systemctl(['daemon-reload']); systemctl(['enable', '--now', name]);
   }
   const client = new WorkerClient(stateDir, sourceId, selected.accounts.app.id, toolId);

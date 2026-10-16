@@ -30,3 +30,23 @@ export async function sessionGroupAvatar(channel: LarkChannel, toolId: AgentKind
     throw error;
   }
 }
+
+// Backfill existing personal groups once per channel; failed uploads/updates retry on the next sync.
+const repairs = new WeakMap<LarkChannel, Map<string, Promise<void>>>();
+export async function ensureSessionGroupAvatar(channel: LarkChannel, toolId: AgentKind, chatId: string): Promise<void> {
+  if (!channel.rawClient.im?.v1?.image?.create || !channel.rawClient.im?.v1?.chat?.update) return;
+  let cache = repairs.get(channel);
+  if (!cache) { cache = new Map(); repairs.set(channel, cache); }
+  const key = JSON.stringify([toolId, chatId]);
+  let pending = cache.get(key);
+  if (!pending) {
+    pending = (async () => {
+      const avatar = await sessionGroupAvatar(channel, toolId);
+      if (!avatar) return;
+      const response = await channel.rawClient.im.v1.chat.update({ path: { chat_id: chatId }, data: { avatar } });
+      if (response.code) throw new Error(`Feishu avatar update failed (${response.code})`);
+    })();
+    cache.set(key, pending);
+  }
+  try { await pending; } catch (error) { if (cache.get(key) === pending) cache.delete(key); throw error; }
+}

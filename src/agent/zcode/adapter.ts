@@ -1,4 +1,4 @@
-import { listZcodeModelCapabilities, loadZcodeRuntimeModel } from './model-config';
+import { listZcodeModelCapabilities, loadZcodeProviderRegistry, loadZcodeRuntimeModel } from './model-config';
 import { createHash } from 'node:crypto';
 import type { AgentAdapter, AgentBotIdentity, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { resolveReasoningEffort } from '../models';
@@ -66,20 +66,27 @@ export class ZcodeAdapter implements AgentAdapter {
     const task = (async () => {
       try {
         const mode = opts.accessMode === 'read-only' || opts.sandbox === 'read-only' ? 'plan' : opts.accessMode === 'workspace' || opts.sandbox === 'workspace-write' ? 'build' : 'yolo';
-        const runtimeModel = await loadZcodeRuntimeModel(this.options, opts.model);
+        const workspace = zcodeWorkspace(opts.cwd!);
+        await client.request('workspace/updateProviderRegistry', { workspace,
+          registry: await loadZcodeProviderRegistry(this.options), includeWorkspaceState: false });
+        // A missing override means follow this conversation, not the first provider's default.
+        const runtimeModel = !opts.sessionId || opts.model ? await loadZcodeRuntimeModel(this.options, opts.model) : undefined;
         const effort = resolveReasoningEffort(opts.reasoningEffort);
         const modelParams = runtimeModel ? { runtimeModel } : {};
         const snapshot = opts.sessionId
-          ? await client.request('session/resume', { sessionId: opts.sessionId, workspace: zcodeWorkspace(opts.cwd!), ...modelParams })
-          : await client.request('session/create', { workspace: zcodeWorkspace(opts.cwd!), mode, titleGenerationEnabled: false, ...modelParams });
+          ? await client.request('session/resume', { sessionId: opts.sessionId, workspace })
+          : await client.request('session/create', { workspace, mode, titleGenerationEnabled: false, ...modelParams });
         sessionId = snapshot.session?.sessionId ?? snapshot.sessionId;
         if (!sessionId || (opts.sessionId && sessionId !== opts.sessionId)) throw new Error('ZCode returned a mismatched session');
         if (snapshot.session?.status === 'running' || snapshot.runtime?.isRunning) throw new Error('ZCode 会话正在运行，请在原入口完成后继续。');
-        push({ type: 'system', sessionId, cwd: opts.cwd });
+        if ((snapshot.restoreWarning || snapshot.runtime?.lastError?.type === 'ZCODE_RUNTIME_MODEL_UNAVAILABLE' || snapshot.lastError?.type === 'ZCODE_RUNTIME_MODEL_UNAVAILABLE') && !opts.model) throw new Error('ZCode 原会话模型无法恢复，请在 /config 选择当前供应商下的模型；本次未执行，也未自动换用其他供应商。');
+        if (opts.sessionId && runtimeModel) await client.request('session/setModel', { sessionId, model: runtimeModel.model, runtimeModel });
+        const selected = runtimeModel?.model ?? snapshot.settings?.model?.current ?? snapshot.session?.model;
+        push({ type: 'system', sessionId, cwd: opts.cwd, ...(selected?.providerId && selected?.modelId ? { model: `${selected.providerId}/${selected.modelId}` } : {}) });
         await client.request('session/setMode', { sessionId, mode });
         if (effort) {
           await client.request('session/setThoughtLevel', { sessionId, thoughtLevel: effort });
-          Object.assign(runtimeModel, { thoughtLevel: effort });
+          if (runtimeModel) Object.assign(runtimeModel, { thoughtLevel: effort });
         }
         await client.request('session/subscribe', { sessionId, deliveryKind: 'web-remote-replayable' });
         if (stopping) { push({ type: 'done', sessionId, terminationReason: 'interrupted' }); return; }

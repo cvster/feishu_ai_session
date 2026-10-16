@@ -212,7 +212,7 @@ export class AuxiliaryGroups {
         // Reuse Feishu's create-chat uuid after an uncertain reply; cap retries conservatively.
         if (Date.now() - intent.startedAt > 55 * 60_000) throw new Error('上次建群结果未确认且已超过去重窗口，请所有者检查后处理，避免重复建群。');
         const created = await createBoundChat({ channel: this.deps.channel, name: intent.name, ownerOpenId: ownerId,
-          inviteOpenIds: [actorId], uuid: intent.uuid, description: '项目私聊问答群，与辅助群共用 FF 上下文。' });
+          inviteOpenIds: [actorId], toolId: binding.toolId, uuid: intent.uuid, description: '项目私聊问答群，与辅助群共用 FF 上下文。' });
         intent.chatId = created.chatId;
       }
       const chatId = intent.chatId;

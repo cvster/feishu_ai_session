@@ -26,6 +26,17 @@ describe('AA session automatic groups', () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it('backfills an already bound personal group without creating a duplicate or touching another bot group', async () => {
+    const h = createHarness([], { knownChats: [{ id: 'oc_current', name: 'AA existing' }, { id: 'oc_other', name: 'AA old app' }],
+      entries: [catalogEntry('oc_current', 'thread-current', 'cli_test'), catalogEntry('oc_other', 'thread-other', 'another-app')] });
+    const image = vi.fn(async () => ({ image_key: 'img_current_tool' }));
+    Object.assign(h.channel.rawClient.im.v1, { image: { create: image } });
+    await syncAaSessionGroupsOnce(h.deps); await syncAaSessionGroupsOnce(h.deps);
+    expect(h.created).toHaveLength(0);
+    expect(h.channel.rawClient.im.v1.chat.update).toHaveBeenCalledTimes(1);
+    expect(h.channel.rawClient.im.v1.chat.update).toHaveBeenCalledWith({ path: { chat_id: 'oc_current' }, data: { avatar: 'img_current_tool' } });
+  });
+
   it('checks current archive state at the AA group creation boundary', async () => {
     const create = vi.fn(); const check = vi.fn(async () => true);
     const profileConfig = createDefaultProfileConfig({ agentKind: 'codex',

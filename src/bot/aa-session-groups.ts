@@ -14,6 +14,7 @@ import { resolveWorkingDirectory } from '../policy/workspace';
 import type { SessionCatalog, SessionCatalogEntry } from '../session/catalog';
 import { listCodexThreadHistory, type CodexThreadHistoryEntry } from '../session/codex-history';
 import type { WorkspaceStore } from '../workspace/store';
+import { ensureSessionGroupAvatar } from './group-avatar';
 import { createBoundChat, renameChat } from './group';
 import { fetchKnownChatsResult, type KnownChat } from './lark-info';
 
@@ -146,6 +147,10 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
     isBinding(entry) && isPersonalScope(entry.scopeId) && nativeId(entry) === id) ||
     deps.controls.toolBindings?.entries().some(([scope, b]) => knownChatIds.has(scope) && isPersonalScope(scope) &&
       b.toolId === toolId && b.sourceId === sourceId && b.nativeId === id);
+  const personalChats = new Set(catalogEntries.filter(entry => isBinding(entry) && isPersonalScope(entry.scopeId) &&
+    !deps.sessionCatalog.isScopeArchived?.(entry.scopeId)).map(entry => entry.scopeId));
+  for (const chatId of personalChats) await ensureSessionGroupAvatar(deps.channel, toolId, chatId).catch(error =>
+    log.warn('group-avatar', 'backfill-failed', { toolId, chatId, error: errorText(error) }));
   const aaCandidates = latestVersionSessions(history).filter(
     (thread) => isAaSession(thread) && !deps.controls.auxiliary?.isAuxiliaryNative(toolId, sourceId, thread.threadId) && !boundThreadIds.has(thread.threadId) &&
       !deps.controls.toolBindings?.hasNativeBinding(toolId, sourceId, thread.threadId, knownChatIds) &&

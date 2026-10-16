@@ -19,7 +19,7 @@
 
 以上字段合入现有 profile，保留其他配置。已有 Codex/Claude profile 无须修改 `agentKind`；它只决定默认工具。新 profile 可使用 `profile create --agent zcode`。
 
-模型列表和账号配置动态读取，默认优先使用桌面当前的 `~/.zcode/v2/provider_config.json`；无需把供应商和密钥复制到独立 CLI。可通过 `zcode.modelConfigPath` 显式指定配置来源。完整来源优先级、刷新和失效处理见 [动态模型列表](MODELS.md)。独立 CLI 的 `~/.zcode/cli/config.json` 仍受支持，权限设为 `600`，示意：
+模型列表和账号配置动态读取，默认读取桌面当前的 `~/.zcode/v2` 配置目录（兼容新旧格式）；无需把供应商和密钥复制到独立 CLI。可通过 `zcode.modelConfigPath` 显式指定配置来源。完整来源优先级、刷新和失效处理见 [动态模型列表](MODELS.md)。独立 CLI 的 `~/.zcode/cli/config.json` 仍受支持，权限设为 `600`，示意：
 
 ```json
 {
@@ -34,7 +34,7 @@
 }
 ```
 
-provider 的类型、URL、模型参数应沿用实际账号配置；不要把凭据提交到仓库。桥接在本机读取当前配置，模型列表仅提取标识与显示名；执行时将选定供应商的凭据经私有 stdin 传给其拥有的 ZCode 进程，不写入提示词、卡片、worker 收据或桥接日志。它不会改写桌面或 CLI 的默认模型设置。
+provider 的类型、URL、模型参数应沿用实际账号配置；不要把凭据提交到仓库。桥接在本机读取当前配置，模型列表仅提取标识、显示名和推理档位；执行时将选定供应商的凭据经私有 stdin 传给其拥有的 ZCode 进程，不写入提示词、卡片、worker 收据或桥接日志。它不会改写桌面或 CLI 的默认模型设置。
 
 若使用 `zcode.dataDir` 或 `ZCODE_STORAGE_DIR`，`config.json` 放在该目录下；bridge 与 worker 必须使用相同目录及账号。不要在已经绑定的群上直接更换数据源。
 
@@ -51,6 +51,10 @@ node bin/lark-channel-bridge.mjs run --profile my-bot
 
 Linux ZCode worker 服务名为 `lark-channel-worker.zcode.my-bot.service`。非 Linux 可用 `worker run --profile my-bot --tool zcode` 配合独立进程托管。Claude worker 的旧命令与服务名保持兼容；同时使用两种工具时分别启动两种 worker。以上命令是手动启动步骤，普通桥接部署不要停止或重启 worker。
 
+涉及 ZCode 执行适配器的修复需要**单独升级 ZCode worker**；只重启桥接不会更新已加载的 worker 代码。健康接口的 `zcodeRegistryResume` 标记用于阻止将新请求交给仍会覆盖原会话供应商的旧 worker，不影响已经接收的任务。
+
+本机曾因旧 `provider_config.json` 残留而读到了 `new-provider`；桌面实际使用 `config.json` 中的 `tars`/`TarsC`。部署这次修复时，应将 profile 的 `zcode.modelConfigPath` 改为当前桌面目录（本机 `/home/pc/.zcode/v2`）或实际使用的文件，保留其他 profile 字段及独立会话数据目录。不要将供应商名称当作原生 ID 重新创建供应商。
+
 私聊机器人发送“新建会话”，选择 **ZCode** 和项目目录。也可从已有会话面板创建工作群；正式名称以 `AA` 开头的 ZCode 会话可自动建群。原生 ID 使用 `sess_...`，不要求 UUID。默认列出独立 CLI 数据源中的会话；桌面账号可复用，但桌面历史不会自动迁入这个数据源。
 
 将机器人拉入协作群后，所有者选择已有个人工作群对应的 ZCode 会话，即可复用 FF 功能；同一来源共享一个 FF 会话，FF 工作群和私聊群不会成为新的来源而递归建群。每次提问通过原生协议读取最新来源记录，在本机生成上下文快照，不向来源提交消息。A2A 的配置和用法见 [接口文档](A2A_API.md)。
@@ -62,6 +66,10 @@ Linux ZCode worker 服务名为 `lark-channel-worker.zcode.my-bot.service`。非
 - 尚未实现 ZCode 原生交互问题和权限弹窗的飞书转接；遇到这类原生请求结束本次桥接执行并提示，不自动同意。飞书 `/config` 动态列出多个供应商的模型，也可选择跟随默认；推理强度按各模型的原生档位动态显示，工具没有提供元数据时仅显示“跟随工具默认”；暂不提供 fork 控件。
 - 重命名和归档保存在桥接元数据中，原生历史保留；桌面原生标题不会随桥接改名。桌面独立发起的 ZCode 轮次尚不自动回显飞书。避免同时在桌面和飞书写入同一原生会话。
 - 附件目前作为本机文件路径提供给 ZCode；尚未接入原生图片输入，不能据此宣称已支持读图。
+
+## 工作群头像
+
+Codex、Claude、ZCode 均使用各自专用头像；手动创建、AA 自动建群、FF 个人工作群及新建的私聊群复用同一个头像入口。原有个人工作群在同步时补设工具头像；每个连接只补设一次，失败下次重试，不创建重复群。外部辅助群保持原头像。新注册工具必须同时提供头像，否则类型检查失败。
 
 ## 新工具如何接入
 

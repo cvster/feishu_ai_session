@@ -1,4 +1,4 @@
-import { readFile, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, mkdtemp, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -52,28 +52,37 @@ async function desktopRules(raw: any, path: string): Promise<ModelConfig> {
     providers[id] = { name: rule.providerName ?? id, kind: kinds[api.type], apiFormat: api.type,
       options: { apiKey: access.apiKey, baseURL: api.baseUrl, headers: api.headers }, models };
   }
-  return { provider: providers };
+  const selected = raw.config.defaultModelSelection;
+  return { provider: providers, ...(selected?.providerId && selected?.modelId ? { model: `${selected.providerId}/${selected.modelId}` } : {}) };
+}
+/** Old and new desktop formats may coexist after upgrades/downgrades. Never merge stale registries. */
+async function desktopConfigPath(root: string): Promise<string | undefined> {
+  const candidates = await Promise.all(['provider_config.json', 'config.json'].map(async name => {
+    const path = join(root, name);
+    try { return { path, modified: (await stat(path)).mtimeMs }; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  }));
+  return candidates.filter((item): item is NonNullable<typeof item> => !!item)
+    .sort((a, b) => b.modified - a.modified)[0]?.path;
 }
 async function effectiveConfig(options: ZcodeOptions): Promise<ModelConfig> {
   const args = options.args ?? [], settingsIndex = args.indexOf('--settings');
   const explicit = options.modelConfigPath ?? (settingsIndex >= 0 ? args[settingsIndex + 1] : undefined);
   const nativePath = join(zcodeStorageDir(options), 'config.json');
-  if (explicit) {
-    const config = await readConfig(explicit);
-    return config.config?.providerConfigRules ? desktopRules(config, explicit) : config;
+  let path = explicit;
+  if (path && (await stat(path)).isDirectory()) path = await desktopConfigPath(path);
+  if (explicit && !path) throw new Error('ZCode 桌面目录中没有模型配置');
+  if (!path && !options.dataDir && !process.env.ZCODE_STORAGE_DIR) path = await desktopConfigPath(join(homedir(), '.zcode', 'v2'));
+  path ??= nativePath;
+  const config = await readConfig(path);
+  const resolved = config.config?.providerConfigRules ? await desktopRules(config, path) : config;
+  // A native CLI default is useful only if that exact provider/model remains in the desktop registry.
+  if (path !== nativePath && !resolved.model) {
+    const cli = await readConfig(nativePath, true);
+    const selected = typeof cli?.model === 'string' ? cli.model : cli?.model?.main;
+    if (selected && modelEntries(resolved).some(row => `${row.providerId}/${row.modelId}` === selected)) return { ...resolved, model: selected };
   }
-  if (!options.dataDir && !process.env.ZCODE_STORAGE_DIR) {
-    const desktopRoot = join(homedir(), '.zcode', 'v2');
-    const modernPath = join(desktopRoot, 'provider_config.json');
-    const modern = await readConfig(modernPath, true);
-    if (modern) return desktopRules(modern, modernPath);
-    const desktop = await readConfig(join(desktopRoot, 'config.json'), true);
-    if (desktop?.provider) {
-      const cli = await readConfig(nativePath, true);
-      return { ...desktop, model: cli?.model ?? desktop.model };
-    }
-  }
-  return await readConfig(nativePath);
+  return resolved;
 }
 function modelEntries(config: ModelConfig) {
   const rows: Array<{ providerId: string; modelId: string; provider: any; model: any }> = [];
@@ -86,13 +95,28 @@ function modelEntries(config: ModelConfig) {
   return rows;
 }
 function modelChoices(entries: ReturnType<typeof modelEntries>): ModelOption[] {
-  return entries.map(({ providerId, modelId, provider, model }) => ({
-    value: `${providerId}/${modelId}`, label: `${provider.name ?? providerId} / ${model.name ?? modelId} (${providerId})`,
-    ...(model.reasoning?.enabled ? { reasoningEfforts: nativeReasoning(model.reasoning).levels } : {}),
-  }));
+  const label = (entry: typeof entries[number]) => `${entry.provider.name ?? entry.providerId} / ${entry.model.name ?? entry.modelId}`;
+  const labels = entries.map(label);
+  return entries.map((entry, index) => {
+    const { providerId, modelId, model } = entry;
+    return {
+      value: `${providerId}/${modelId}`, label: labels.filter(value => value === labels[index]).length > 1 ? `${labels[index]} (${providerId})` : labels[index]!,
+      ...(model.reasoning?.enabled ? { reasoningEfforts: nativeReasoning(model.reasoning).levels } : {}),
+    };
+  });
 }
 export async function listZcodeModels(options: ZcodeOptions = {}): Promise<ModelOption[]> {
   return modelChoices(modelEntries(await effectiveConfig(options)));
+}
+/** The native process receives the complete current registry so resume can resolve its own stored provider ID. */
+export async function loadZcodeProviderRegistry(options: ZcodeOptions) {
+  const entries = modelEntries(await effectiveConfig(options));
+  const providers = new Map<string, ReturnType<typeof nativeProvider>>();
+  for (const entry of entries) {
+    const provider = nativeProvider(entry), previous = providers.get(entry.providerId);
+    if (previous) previous.models.push(...provider.models); else providers.set(entry.providerId, provider);
+  }
+  return { revision: randomUUID(), generatedAt: Date.now(), providers: [...providers.values()] };
 }
 /** Credentials are read afresh only in the worker, sent over private stdin, never in prompts or receipts. */
 export async function loadZcodeRuntimeModel(options: ZcodeOptions, selected?: string) {

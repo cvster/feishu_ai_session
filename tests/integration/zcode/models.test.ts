@@ -1,8 +1,8 @@
 import { afterEach, expect, it } from 'vitest';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { listZcodeModels, listZcodeModelCapabilities, loadZcodeRuntimeModel } from '../../../src/agent/zcode/model-config';
+import { listZcodeModels, listZcodeModelCapabilities, loadZcodeProviderRegistry, loadZcodeRuntimeModel } from '../../../src/agent/zcode/model-config';
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 it('refreshes native desktop providers and models, keeps same-named models distinct, and never exposes keys', async () => {
@@ -61,4 +61,23 @@ it('discovers native levels in an isolated metadata process and excludes credent
   expect(requests).not.toContain('session/create'); expect(requests).not.toContain('session/send');
   expect(requests).toContain('workspace/updateProviderRegistry');
   expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(config);
+});
+
+it('selects the currently edited desktop format without mixing stale providers, and lists every model by native identity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'zcode-desktop-formats-')); roots.push(root);
+  const legacy = join(root, 'config.json'), modern = join(root, 'provider_config.json');
+  const provider = { 'uuid-tars': { name: 'tars', kind: 'openai', models: { glm: {}, deepseek: {} } }, 'uuid-tarsc': { name: 'TarsC', kind: 'openai', models: { deepseek: {} } } };
+  await writeFile(legacy, JSON.stringify({ provider, model: 'uuid-tarsc/deepseek' }));
+  await writeFile(modern, JSON.stringify({ schemaVersion: 1, config: { providerConfigRules: { providerRules: [{ providerId: 'new-provider', providerName: 'gaoliu', config: { access: { type: 'api-key', apiKey: 'test-key' }, api: { type: 'openai-responses', baseUrl: 'https://example.invalid/v1' }, personalModelIds: ['other'] } }] }, defaultModelSelection: { providerId: 'new-provider', modelId: 'other' } } }));
+  await utimes(modern, 100, 100); await utimes(legacy, 200, 200);
+  const opts = { modelConfigPath: root, dataDir: join(root, 'isolated-cli') };
+  expect((await listZcodeModels(opts)).map(row => [row.value, row.label])).toEqual([
+    ['uuid-tars/glm', 'tars / glm'], ['uuid-tars/deepseek', 'tars / deepseek'], ['uuid-tarsc/deepseek', 'TarsC / deepseek'],
+  ]);
+  expect((await loadZcodeRuntimeModel(opts)).model).toEqual({ providerId: 'uuid-tarsc', modelId: 'deepseek' });
+  expect((await loadZcodeProviderRegistry(opts)).providers.map(p => p.models.length)).toEqual([2, 1]);
+  await utimes(modern, 300, 300);
+  expect((await listZcodeModels(opts)).map(row => row.value)).toEqual(['new-provider/other']);
+  expect((await loadZcodeRuntimeModel(opts)).model).toEqual({ providerId: 'new-provider', modelId: 'other' });
+  await expect(loadZcodeRuntimeModel(opts, 'uuid-tars/deepseek')).rejects.toThrow('已移除');
 });

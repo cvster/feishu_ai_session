@@ -40,14 +40,14 @@ ZCode 能力读取使用临时目录和独立的短生命周期 Agent CLI，仅�
 
 按以下顺序解析，每次读取当前文件，不使用一次性复制的供应商名单：
 
-1. profile 的 `zcode.modelConfigPath`（绝对路径）；或 Agent CLI 参数 `--settings` 指定的配置文件。
+1. profile 的 `zcode.modelConfigPath`（绝对文件路径或桌面配置目录）；或 Agent CLI 参数 `--settings` 指定的配置文件。
 2. 指定 `zcode.dataDir` / `ZCODE_STORAGE_DIR` 时，使用该目录下的 `config.json`，保持独立 CLI 数据源隔离。
-3. 默认桌面模式优先使用 `~/.zcode/v2/provider_config.json` 的当前供应商规则；不存在时兼容旧版桌面 `~/.zcode/v2/config.json`。
+3. 默认桌面模式读取 `~/.zcode/v2`：兼容 `provider_config.json` 的供应商规则和 `config.json` 的供应商字典。两者并存时使用最近修改的一份，适应桌面升级/降级留下旧文件的情况。可显式指定正在使用的配置文件固定来源，也可指定桌面目录自动选择。
 4. 无桌面配置时使用 `~/.zcode/cli/config.json`。
 
-新版桌面规则为准，不把旧 CLI 快照中的已删除供应商重新合并回来。读取 `providerOrder`、供应商/模型启停状态以及实际声明的模型 ID，`modelOrder` 只用于排序，不恢复已删除模型。支持 API Key 供应商的 Anthropic Messages、OpenAI Chat Completions 和 OpenAI Responses 协议。ZCode 原生 OAuth 账号凭据刷新及交互转接仍属于尚未接入的能力，不通过静默批准绕过。
+只使用本次选中的配置，不混合另一格式或旧 CLI 快照中的供应商，避免恢复已删除项。供应商原生 ID 与显示名分开：选择值保留 `providerId/modelId`，卡片显示“供应商 / 模型”，同名显示项追加 ID 区分。读取 `providerOrder`、供应商/模型启停状态以及实际声明的模型 ID，`modelOrder` 只用于排序，不恢复已删除模型。支持 API Key 供应商的 Anthropic Messages、OpenAI Chat Completions 和 OpenAI Responses 协议。ZCode 原生 OAuth 账号凭据刷新及交互转接仍属于尚未接入的能力，不通过静默批准绕过。
 
-独立 CLI 的默认选择来自 `model.main`；桌面模式跟随原生供应商推荐顺序。选择具体模型后使用其完整供应商和模型 ID，删除该模型不会触发自动替换。切换模型不会改写桌面的 UI 选择或独立 CLI 配置文件。
+新会话的默认选择来自原生 `model.main`、新版桌面 `defaultModelSelection` 或供应商推荐顺序；CLI 默认只有在所选桌面配置中仍存在完全相同的供应商/模型时才能沿用。恢复已有会话且未显式选择模型时，先加载完整的当前供应商目录，再由 ZCode 恢复该会话保存的供应商、模型和档位；不会强制替换成目录第一项。原会话模型不可用时停止本次执行并提示主动选择。选择具体模型后使用其完整供应商和模型 ID，删除该模型不会触发自动替换。切换模型不会改写桌面的 UI 选择或独立 CLI 配置文件。
 
 配置和凭据仅在本机读取。模型列表、飞书卡片和 worker 收据只包含模型标识、显示名和推理能力元数据；执行凭据通过私有 stdin 传给本次 ZCode 进程，不放入提示词、群消息或仓库。
 

@@ -100,3 +100,12 @@ it('checks worker capability without restarting it or silently coercing future e
   health.mockResolvedValue({ nativeReasoningEfforts: true });
   await expect(h.adapter.prepareRun({ ...h.options, reasoningEffort: 'native-new' })).resolves.toBeUndefined();
 });
+
+it('requires the ZCode registry/resume fix before dispatching work to an old worker', async () => {
+  const h = await fixture('zcode');
+  const health = vi.spyOn(h.client, 'health').mockResolvedValue({ nativeReasoningEfforts: true });
+  await expect(h.adapter.prepareRun(h.options)).rejects.toThrow('保留原会话供应商');
+  expect(h.calls).toHaveLength(0); expect(h.stop).not.toHaveBeenCalled();
+  health.mockResolvedValue({ nativeReasoningEfforts: true, zcodeRegistryResume: true });
+  await expect(h.adapter.prepareRun(h.options)).resolves.toBeUndefined();
+});
