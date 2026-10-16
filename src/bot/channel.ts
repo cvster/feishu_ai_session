@@ -88,6 +88,7 @@ import { lookupMessageThreadId } from './thread-id';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import { isSoloUserBotChat } from './group';
+import { configureGroupNotifications } from './group-notifications';
 import { CodexNameSync } from './thread-name';
 import { startAaSessionGroupSync } from './aa-session-groups';
 import { startCodexTurnSync } from './codex-turn-sync';
@@ -361,6 +362,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   };
 
   const channel = createLarkChannel(opts);
+  configureGroupNotifications(channel, {
+    appId: cfg.accounts.app.id,
+    ownerId: () => controls.ownerRefreshState === 'ok' ? controls.botOwnerId : undefined,
+  });
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
   const batchTasks = new Set<Promise<void>>();
   let a2a: Awaited<ReturnType<typeof startA2AServer>>;

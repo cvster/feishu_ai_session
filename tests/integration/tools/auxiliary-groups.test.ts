@@ -6,6 +6,7 @@ import type { BotAddedEvent, CardActionEvent, LarkChannel } from '@larksuite/cha
 import { AuxiliaryGroups, findSessionHistory, wrapAuxiliaryPrompt } from '../../../src/bot/auxiliary-groups';
 import { auxiliarySessionName, isRetiredPrivateInput, auxiliaryUserIsMember } from '../../../src/bot/auxiliary-private';
 import { createBoundChat } from '../../../src/bot/group';
+import { configureGroupNotifications } from '../../../src/bot/group-notifications';
 import { ToolRegistry } from '../../../src/tools/types';
 import { ToolBindingStore } from '../../../src/tools/bindings';
 import { SessionStore } from '../../../src/session/store';
@@ -74,6 +75,22 @@ async function harness(toolId: 'codex' | 'claude' = 'claude') {
 }
 
 describe('auxiliary owner linking and lifecycle', () => {
+  it('mutes the owner of an externally named FF group only after successful association', async () => {
+    const h = await harness();
+    const run = vi.fn(async (args: string[], _data?: unknown): Promise<unknown> => args[0] === 'auth'
+      ? { appId: 'cli_bot', identities: { user: { available: true, openId: 'ou_owner' } } }
+      : { ok: true, identity: 'user', data: { invalid_ids: [] } });
+    configureGroupNotifications(h.channel, { appId: 'cli_bot', ownerId: () => 'ou_owner' }, run);
+    await h.groups.joined(joined);
+    await h.groups.action(h.event());
+    expect(run).not.toHaveBeenCalled();
+    await h.groups.action(h.event());
+    expect(h.groups.get('oc_aux')?.status).toBe('active');
+    expect(run).toHaveBeenLastCalledWith(
+      ['im', 'chat.user_setting', 'batch_update', '--as', 'user', '--data', '-'],
+      { chat_settings: [{ chat_id: 'oc_aux', is_muted: true }] },
+    );
+  });
   it.each(['codex', 'claude'] as const)('creates one personal workgroup for a shared %s FF without recursive linking or archival', async toolId => {
     const h = await harness(toolId); await h.activate(); await h.activate('oc_aux_2');
     expect(h.groups.personalGroupSessions(toolId, h.home)).toEqual([]);

@@ -14,6 +14,7 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { resolveWorkingDirectory } from '../policy/workspace';
 import { sendManagedCard } from '../card/managed';
 import { createBoundChat, waitForBridgeGroupCreation } from './group';
+import { muteSessionGroup } from './group-notifications';
 import { auxiliaryBotIsMember } from './auxiliary-membership';
 import { fetchKnownChatsResult } from './lark-info';
 import { auxiliarySessionName, auxiliaryUserIsMember } from './auxiliary-private';
@@ -491,6 +492,7 @@ export class AuxiliaryGroups {
         await this.save(); this.choices.delete(token); return true;
       });
       if (!activated) return;
+      await muteSessionGroup(this.deps.channel, row.chatId);
       await this.deps.channel.send(row.ownerId, { text: `已关联「${row.name}」到 ${tool.label} 会话「${source.name || source.nativeId}」。` });
       await this.deps.channel.send(row.chatId, { text: '辅助已启用，请 @我提问。需要私聊时，在本群 @我发送“私聊”，我会拉你和所有者创建私聊群。' });
     });

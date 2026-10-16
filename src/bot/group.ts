@@ -2,6 +2,7 @@ import type { LarkChannel } from '@larksuite/channel';
 import type { AgentKind } from '../config/profile-schema';
 import { sessionGroupAvatar } from './group-avatar';
 import { log } from '../core/logger';
+import { muteSessionGroup } from './group-notifications';
 
 export interface CreateBoundChatOptions {
   channel: LarkChannel;
@@ -81,6 +82,7 @@ async function createTrackedChat(opts: CreateBoundChatOptions): Promise<CreatedC
   const chatId = response.data?.chat_id;
   if (response.code || !chatId) throw new Error(`Feishu chat creation failed (${response.code ?? 'unknown'}): ${response.msg ?? 'missing chat_id'}`);
   bridgeCreatedChats.add(chatId);
+  await muteSessionGroup(channel, chatId);
   return { chatId, name };
 }
 
