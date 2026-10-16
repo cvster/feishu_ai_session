@@ -385,9 +385,20 @@ describe('short source prompt and exact history location', () => {
     const result = wrapAuxiliaryPrompt({ toolId: 'codex', nativeId: sourceId }, '/tmp/session.jsonl', request);
     expect(JSON.parse(result).user_input).toBe(request); expect(result).toContain('本机可运行调试、检查、测试及所需脚本/构建');
     expect(result).toContain('允许云端分析和回复必要代码片段'); expect(result).toContain('不修改原会话');
-    expect(result).toContain('默认回复不超过200字、最多5行');
-    expect(result).toContain('回复不提及原会话、关联、同步或读取过程');
+    expect(result).toContain('默认≤200字/5行');
+    expect(result).toContain('不提原会话、关联、同步、读取');
     expect(result).toContain('暂时无法获取相关背景');
+  });
+  it.each(['full', 'brief'] as const)('keeps %s rules within a compact prompt budget while preserving per-request protections', mode => {
+    const prompt = JSON.parse(wrapAuxiliaryPrompt({ toolId: 'codex', nativeId: sourceId }, '/history', '问题', false, { mode, chatId: 'oc_target' }));
+    expect(JSON.stringify(prompt.rules).length).toBeLessThan(mode === 'full' ? 560 : 330);
+    expect(prompt.context).toMatchObject({ actor: 'member', chat_id: 'oc_target' });
+    expect(prompt.source.history_path).toBe('/history');
+    expect(prompt.rules.task).toContain('先读source最新进展');
+    expect(prompt.rules.task).toContain('不修改原会话');
+    expect(prompt.rules.permissions).toContain('历史放权不适用');
+    expect(prompt.rules.approval).toContain('ff_permission_request');
+    if (mode === 'brief') expect(prompt.rules.task).toContain('沿用完整规则');
   });
   it('unrestricts only actual owner-only requests and restores restrictions on the next member request', async () => {
     const h = await harness(); await h.activate();
