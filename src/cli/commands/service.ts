@@ -1,3 +1,4 @@
+import { toolDefinition } from '../../tools/definitions';
 import { isComplete } from '../../config/schema';
 import { createInterface } from 'node:readline';
 import { paths } from '../../config/paths';
@@ -469,7 +470,6 @@ async function maybeResolveProfileRuntime(
 }
 
 function agentDisplay(agentKind: ProcessEntry['agentKind']): { id: string; displayName: string } {
-  return agentKind === 'codex'
-    ? { id: 'codex', displayName: 'Codex CLI' }
-    : { id: 'claude', displayName: 'Claude Code' };
+  const kind = agentKind ?? 'claude';
+  return { id: kind, displayName: kind === 'codex' ? 'Codex CLI' : toolDefinition(kind).label };
 }

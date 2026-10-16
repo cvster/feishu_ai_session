@@ -109,3 +109,12 @@ it('requires the ZCode registry/resume fix before dispatching work to an old wor
   health.mockResolvedValue({ nativeReasoningEfforts: true, zcodeRegistryResume: true });
   await expect(h.adapter.prepareRun(h.options)).resolves.toBeUndefined();
 });
+
+it('registers Kilo as an independent worker without reusing an existing tool service', () => {
+  const unit = buildWorkerUnit({ node: '/node', entry: '/bridge/entry.mjs', profile: 'p', config: '/state/config.json', envPath: '/bin',
+    toolId: 'kilo', kiloBinary: '/native/kilo', kiloDataHome: '/native/data-home' });
+  expect(unit).toContain('--tool kilo');
+  expect(unit).toContain('LARK_CHANNEL_KILO_BIN=/native/kilo');
+  expect(unit).toContain('XDG_DATA_HOME=/native/data-home');
+  expect(unit).not.toContain('ZCODE_STORAGE_DIR');
+});

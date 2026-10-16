@@ -91,6 +91,7 @@ export interface ProfileConfig {
   permissions: PermissionConfig;
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
+  kilo?: { binaryPath: string; args?: string[]; dataHome?: string };
   zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string };
   attachments: AttachmentConfig;
   comments: CommentConfig;
@@ -118,6 +119,7 @@ export interface CreateDefaultProfileConfigInput {
   sandbox?: Partial<SandboxConfig>;
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
+  kilo?: { binaryPath: string; args?: string[]; dataHome?: string };
   zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string };
   secrets?: SecretsConfig;
 }
@@ -153,6 +155,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     sandbox?: Partial<SandboxConfig>;
     permissions?: Partial<PermissionConfig>;
     codex?: CodexConfig & { flags?: unknown };
+    kilo?: { binaryPath?: unknown; args?: unknown; dataHome?: unknown };
     zcode?: { binaryPath?: unknown; args?: unknown; dataDir?: unknown; modelConfigPath?: unknown };
     attachments?: Partial<AttachmentConfig>;
     comments?: unknown;
@@ -163,7 +166,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     throw new Error('profile schemaVersion must be 2');
   }
   if (!isToolId(raw.agentKind)) {
-    throw new Error('agentKind must be a registered tool (claude, codex, zcode)');
+    throw new Error('agentKind must be a registered tool (claude, codex, zcode, kilo)');
   }
   const accounts = normalizeAccounts(raw.accounts);
   if (raw.agentKind === 'codex' && !raw.codex) {
@@ -199,6 +202,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissions,
     permissionSource,
     ...(raw.codex ? { codex: normalizeCodex(raw.codex) } : {}),
+    ...(raw.kilo ? { kilo: normalizeKilo(raw.kilo) } : {}),
     ...(raw.zcode ? { zcode: normalizeZcode(raw.zcode) } : {}),
     attachments: {
       maxCount: numberOr(raw.attachments?.maxCount, 10),
@@ -358,4 +362,11 @@ function normalizeZcode(input: { binaryPath?: unknown; args?: unknown; dataDir?:
       (input.dataDir !== undefined && typeof input.dataDir !== 'string') ||
       (input.modelConfigPath !== undefined && typeof input.modelConfigPath !== 'string')) throw new Error('Invalid zcode configuration');
   return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.dataDir ? { dataDir: input.dataDir as string } : {}), ...(input.modelConfigPath ? { modelConfigPath: input.modelConfigPath as string } : {}) };
+}
+
+function normalizeKilo(input: { binaryPath?: unknown; args?: unknown; dataHome?: unknown }): NonNullable<ProfileConfig['kilo']> {
+  if (typeof input.binaryPath !== 'string' || !input.binaryPath.trim() ||
+      (input.args !== undefined && (!Array.isArray(input.args) || !input.args.every(v => typeof v === 'string'))) ||
+      (input.dataHome !== undefined && (typeof input.dataHome !== 'string' || !input.dataHome.trim()))) throw new Error('Invalid kilo configuration');
+  return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.dataHome ? { dataHome: input.dataHome as string } : {}) };
 }

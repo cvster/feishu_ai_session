@@ -2,6 +2,7 @@
 export const TOOL_DEFINITIONS = {
   codex: { label: 'Codex', backend: 'native-queue', nativeField: 'threadId', fork: true, reasoning: true, sessionKind: 'codex-thread', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
   claude: { label: 'Claude Code', backend: 'worker', nativeField: 'sessionId', fork: false, reasoning: true, sessionKind: 'claude-session', promptInjection: 'none', nativeHistory: true, legacyMarkers: ['__claude_cb'] },
+  kilo: { label: 'Kilo', backend: 'worker', nativeField: 'sessionId', fork: true, reasoning: true, sessionKind: 'kilo-session', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
   zcode: { label: 'ZCode', backend: 'worker', nativeField: 'sessionId', fork: true, reasoning: true, sessionKind: 'zcode-session', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
 } as const;
 export type ToolId = keyof typeof TOOL_DEFINITIONS;

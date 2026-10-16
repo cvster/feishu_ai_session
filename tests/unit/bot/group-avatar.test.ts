@@ -12,7 +12,7 @@ function channel() {
 }
 
 describe('session group avatars', () => {
-  it.each(['codex', 'claude', 'zcode'] as const)('uses the bound %s tool for the group avatar', async toolId => {
+  it.each(['codex', 'claude', 'zcode', 'kilo'] as const)('uses the bound %s tool for the group avatar', async toolId => {
     const h = channel();
     await createBoundChat({ channel: h.api, name: 'AA same name', toolId, inviteOpenId: 'ou_owner' });
     expect(h.image).toHaveBeenCalledWith({ data: { image_type: 'avatar',
@@ -51,5 +51,5 @@ it('repairs an existing group once, retries failures, and uses the original tool
   await ensureSessionGroupAvatar(h.api, 'zcode', 'oc_old');
   expect(h.update).toHaveBeenCalledTimes(2); expect(h.image).toHaveBeenCalledTimes(1);
   expect(h.update).toHaveBeenLastCalledWith({ path: { chat_id: 'oc_old' }, data: { avatar: 'img_avatar' } });
-  expect(Object.keys(GROUP_AVATAR_IMAGES).sort()).toEqual(['claude', 'codex', 'zcode']);
+  expect(Object.keys(GROUP_AVATAR_IMAGES).sort()).toEqual(['claude', 'codex', 'kilo', 'zcode']);
 });

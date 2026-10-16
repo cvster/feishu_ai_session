@@ -1,5 +1,7 @@
 # lark-channel-bridge
 
+Kilo 可直接使用本机 VS Code 扩展附带的运行时，动态读取其模型和推理档位，并复用工作群、FF 与 A2A；详见 [Kilo 接入与使用](docs/KILO.md)。
+
 把飞书 / Lark 消息和本地 Claude Code、Codex 或 ZCode CLI 打通的轻量 bot。用一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里和本机编程助手对话，让它读图、处理文件、改代码。
 
 本项目基于 [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge)（原名 `feishu-claude-code-bridge`） 二次开发。开发者：**Lennox Gao**；有问题、建议或需求，欢迎联系。
@@ -107,7 +109,7 @@ daemon 日志在 `~/.lark-channel/profiles/<profile>/logs/daemon/`。
 
 AA 会话群就是个人工作群，与私聊控制台创建的群适用相同的功能与权限规则，仅创建方式不同。同步器每分钟发现两个工具中正式名称以 `AA` 开头的会话，沿用原会话 ID 和工作目录自动建群。Claude Code 从本地 `CLAUDE_CONFIG_DIR`（默认 `~/.claude`）的主会话 JSONL 读取 `custom-title`；子代理、仅问题预览以 AA 开头、未正式命名的会话不会建群。可在 Claude CLI 中用 `/rename AA-项目名` 命名。主动创建的 AA 工作群不会被重复导入。
 
-个人工作群的直接对话原样传递消息，Codex、Claude Code 和 ZCode 均不再附加通用桥接系统提示；有引用、附件等内容时，仅补充必要上下文。FF 辅助入口（协作群、私聊群和 A2A）继续使用现有 JSON 规则，每 10 次请求第 1 次完整、其余精简。旧会话历史中已有的提示词不会自动删除。FF 完整提示保留协议与文件发送说明，精简提示沿用完整规则，仅重复当次权限、读取、简答和投递要求。
+个人工作群的直接对话原样传递消息，Codex、Claude Code、ZCode 和 Kilo 均不再附加通用桥接系统提示；有引用、附件等内容时，仅补充必要上下文。FF 辅助入口（协作群、私聊群和 A2A）继续使用现有 JSON 规则，每 10 次请求第 1 次完整、其余精简。旧会话历史中已有的提示词不会自动删除。FF 完整提示保留协议与文件发送说明，精简提示沿用完整规则，仅重复当次权限、读取、简答和投递要求。
 
 辅助群关联来源时，仅显示当前已有个人工作群绑定的会话；未建群的本地历史、已归档工作群和 FF 辅助会话不显示。没有可选项时，请先创建或关联个人工作群，再重新打开辅助群选择卡片。
 

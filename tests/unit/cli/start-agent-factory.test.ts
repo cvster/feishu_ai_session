@@ -30,6 +30,13 @@ describe('start runtime agent factory', () => {
     expect(agent.displayName).toBe('Claude Code');
   });
 
+  it('creates the Kilo runtime without falling back to Claude or Codex', () => {
+    const profile = createDefaultProfileConfig({ agentKind: 'kilo', accounts: appAccount(), kilo: { binaryPath: '/native/kilo', dataHome: '/native/data-home' } });
+    const agent = createRuntimeAgent(profile, { profileDir: tmpdir() });
+    expect(agent.id).toBe('kilo');
+    expect(agent.displayName).toBe('Kilo');
+  });
+
   it('creates CodexAdapter from canonical workspace permissions', () => {
     const profile = createDefaultProfileConfig({
       agentKind: 'codex',

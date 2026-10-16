@@ -197,7 +197,7 @@ export class RunExecutor {
       model: input.model,
       reasoningEffort: input.reasoningEffort,
       images: input.images,
-      ...(this.agent.id === 'zcode' ? { accessMode: input.policy.accessMode } : {}),
+      ...((this.agent.id === 'zcode' || this.agent.id === 'kilo') ? { accessMode: input.policy.accessMode } : {}),
       attachmentPaths: input.attachmentPaths,
       sandbox: input.policy.sandbox,
       permissionMode: input.policy.permissionMode,

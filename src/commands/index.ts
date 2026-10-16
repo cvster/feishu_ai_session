@@ -1549,7 +1549,7 @@ function runtimeAccessStatus(
       ),
     };
   }
-  if (profileConfig.agentKind === 'zcode') return { label: 'access', value: profileConfig.permissions.defaultAccess };
+  if ((profileConfig.agentKind === 'zcode' || profileConfig.agentKind === 'kilo')) return { label: 'access', value: profileConfig.permissions.defaultAccess };
   return {
     label: 'sandbox',
     value: `${profileConfig.sandbox.defaultMode}/${profileConfig.sandbox.maxMode}`,

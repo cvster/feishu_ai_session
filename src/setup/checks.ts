@@ -1,3 +1,4 @@
+import { kiloCommand, kiloStorageDir } from '../agent/kilo/client';
 import { zcodeStorageDir } from '../agent/zcode/client';
 import { zcodeCommand } from '../agent/zcode/client';
 import { workerStateDirName, type ToolId } from '../tools/definitions';
@@ -58,7 +59,7 @@ export async function checkTool(kind: 'codex' | 'claude', binary: string, run: P
 }
 export async function collectChecks(options: DoctorOptions, run: Probe = probe): Promise<Check[]> {
   const rows: Check[] = [], requested = options.agents ?? 'auto';
-  if (!['auto', 'codex', 'claude', 'zcode', 'both'].includes(requested)) throw new Error('--agents 仅支持 auto、codex、claude、zcode、both');
+  if (!['auto', 'codex', 'claude', 'zcode', 'kilo', 'both'].includes(requested)) throw new Error('--agents 仅支持 auto、codex、claude、zcode、kilo、both');
   const rootDir = options.config ? dirname(resolve(options.config)) : undefined;
   const profile = options.profile ?? await readActiveProfile(rootDir);
   if (profile) await loadRuntimeEnv(profile, rootDir);
@@ -91,6 +92,18 @@ export async function collectChecks(options: DoctorOptions, run: Probe = probe):
     selected ? [selected.agentKind] : (['codex', 'claude'] as const).filter(kind => available[kind].ok);
   if (!kinds.length) rows.push({ id: 'agents', status: 'fail', detail: '至少需要 Codex 或 Claude 之一', fix: '运行安装脚本 --agents codex、claude 或 both' });
   for (const kind of kinds) {
+    if (kind === 'kilo') {
+      const command = kiloCommand({ binary: selected?.kilo?.binaryPath, args: selected?.kilo?.args });
+      const version = await run(command.binary, [...command.args, '--version']);
+      const help = await run(command.binary, [...command.args, '--help']);
+      rows.push({ id: 'kilo.capabilities', status: version.ok && help.ok && ['serve', 'session', 'models'].every(flag => help.output.includes(flag)) ? 'pass' : 'fail', detail: 'Kilo CLI 版本与服务/会话/模型入口检查（不启动任务）' });
+      rows.push({ id: 'kilo.auth', status: 'warn', detail: '本机模型目录不证明授权或额度可用，请在 Kilo 验证实际问答', fix: '沿用扩展账号和供应商配置，见 docs/KILO.md' });
+      if (options.runtime && selected) {
+        try { await new WorkerClient(join(paths.profileDir, workerStateDirName('kilo')), kiloStorageDir({ dataHome: selected.kilo?.dataHome }), selected.accounts.app.id, 'kilo').health(); rows.push({ id: 'kilo.worker', status: 'pass', detail: 'Kilo worker 身份和来源匹配' }); }
+        catch { rows.push({ id: 'kilo.worker', status: 'fail', detail: 'Kilo worker 未就绪', fix: `worker start --tool kilo --profile ${profile}` }); }
+      }
+      continue;
+    }
     if (kind === 'zcode') {
       const command = zcodeCommand({ binary: selected?.zcode?.binaryPath, args: selected?.zcode?.args });
       const version = await run(command.binary, [...command.args, '--version']);

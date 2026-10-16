@@ -1,3 +1,5 @@
+import { kiloStorageDir } from '../../agent/kilo/client';
+import { KiloAdapter } from '../../agent/kilo/adapter';
 import { zcodeStorageDir } from '../../agent/zcode/client';
 import { ZcodeAdapter } from '../../agent/zcode/adapter';
 import { isToolId, toolDefinition, workerStateDirName, type ToolId } from '../../tools/definitions';
@@ -16,7 +18,7 @@ import { loadRuntimeEnv } from '../../config/runtime-env';
 
 interface WorkerOptions { profile?: string; config?: string; tool?: string }
 const quote = (value: string) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
-export function buildWorkerUnit(inputs: { node: string; entry: string; profile: string; config: string; envPath: string; claudeConfigDir?: string; binary?: string; toolId?: ToolId; zcodeBinary?: string; zcodeDataDir?: string }): string {
+export function buildWorkerUnit(inputs: { node: string; entry: string; profile: string; config: string; envPath: string; claudeConfigDir?: string; binary?: string; toolId?: ToolId; zcodeBinary?: string; zcodeDataDir?: string; kiloBinary?: string; kiloDataHome?: string }): string {
   return `[Unit]
 Description=Lark independent ${inputs.toolId ? toolDefinition(inputs.toolId).label : 'Claude'} execution worker (${inputs.profile})
 After=network-online.target
@@ -31,6 +33,7 @@ TimeoutStopSec=30
 KillMode=control-group
 Environment=${quote(`PATH=${inputs.envPath}`)}
 ${inputs.claudeConfigDir ? `Environment=${quote(`CLAUDE_CONFIG_DIR=${inputs.claudeConfigDir}`)}\n` : ''}${inputs.binary ? `Environment=${quote(`LARK_CHANNEL_CLAUDE_BIN=${inputs.binary}`)}\n` : ''}${inputs.zcodeBinary ? `Environment=${quote(`LARK_CHANNEL_ZCODE_BIN=${inputs.zcodeBinary}`)}\n` : ''}${inputs.zcodeDataDir ? `Environment=${quote(`ZCODE_STORAGE_DIR=${inputs.zcodeDataDir}`)}\n` : ''}
+${inputs.kiloBinary ? `Environment=${quote(`LARK_CHANNEL_KILO_BIN=${inputs.kiloBinary}`)}\n` : ''}${inputs.kiloDataHome ? `Environment=${quote(`XDG_DATA_HOME=${inputs.kiloDataHome}`)}\n` : ''}
 [Install]
 WantedBy=default.target
 `;
@@ -44,8 +47,8 @@ async function workerContext(options: WorkerOptions) {
   const selected = config?.profiles[profile];
   if (!selected) throw new Error(`profile not found: ${profile}`);
   const toolId = options.tool ?? 'claude';
-  if (!isToolId(toolId) || toolDefinition(toolId).backend !== 'worker') throw new Error('worker --tool 仅支持注册为 worker 的工具：claude、zcode');
-  const sourceId = toolId === 'claude' ? resolve(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')) : zcodeStorageDir(selected.zcode);
+  if (!isToolId(toolId) || toolDefinition(toolId).backend !== 'worker') throw new Error('worker --tool 仅支持注册为 worker 的工具：claude、zcode、kilo');
+  const sourceId = toolId === 'claude' ? resolve(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')) : toolId === 'zcode' ? zcodeStorageDir(selected.zcode) : kiloStorageDir({ dataHome: selected.kilo?.dataHome });
   return { paths, selected, sourceId, toolId, stateDir: join(paths.profileDir, workerStateDirName(toolId)) };
 }
 export async function runWorker(options: WorkerOptions): Promise<void> {
@@ -53,8 +56,8 @@ export async function runWorker(options: WorkerOptions): Promise<void> {
   configureLogger({ logsDir: join(paths.logsDir, 'worker') });
   const larkChannel = { profile: paths.profile, rootDir: paths.rootDir, configPath: paths.configFile,
     larkCliConfigDir: paths.larkCliConfigDir, larkCliSourceConfigFile: paths.larkCliSourceConfigFile };
-  if (toolId !== 'claude' && toolId !== 'zcode') throw new Error(`Worker adapter not registered: ${toolId}`);
-  const agent = toolId === 'zcode' ? new ZcodeAdapter({ binary: selected.zcode?.binaryPath, args: selected.zcode?.args, dataDir: selected.zcode?.dataDir, modelConfigPath: selected.zcode?.modelConfigPath, larkChannel }) : new ClaudeAdapter({ binary: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude',
+  if (toolId !== 'claude' && toolId !== 'zcode' && toolId !== 'kilo') throw new Error(`Worker adapter not registered: ${toolId}`);
+  const agent = toolId === 'kilo' ? new KiloAdapter({ binary: selected.kilo?.binaryPath, args: selected.kilo?.args, dataHome: selected.kilo?.dataHome, larkChannel }) : toolId === 'zcode' ? new ZcodeAdapter({ binary: selected.zcode?.binaryPath, args: selected.zcode?.args, dataDir: selected.zcode?.dataDir, modelConfigPath: selected.zcode?.modelConfigPath, larkChannel }) : new ClaudeAdapter({ binary: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude',
     larkChannel: { profile: paths.profile, rootDir: paths.rootDir, configPath: paths.configFile,
       larkCliConfigDir: paths.larkCliConfigDir, larkCliSourceConfigFile: paths.larkCliSourceConfigFile } });
   const worker = await startWorkerServer({ stateDir, agent, sourceId, botAppId: selected.accounts.app.id,
@@ -87,7 +90,7 @@ export async function workerService(action: 'start' | 'stop' | 'status', options
     const unit = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', name);
     await mkdir(dirname(unit), { recursive: true });
     await writeFile(unit, buildWorkerUnit({ node: process.execPath, entry: process.argv[1]!, profile: paths.profile,
-      config: paths.configFile, envPath: process.env.PATH ?? '', toolId, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR, binary: process.env.LARK_CHANNEL_CLAUDE_BIN, zcodeBinary: process.env.LARK_CHANNEL_ZCODE_BIN, zcodeDataDir: toolId === 'zcode' && (selected.zcode?.dataDir || process.env.ZCODE_STORAGE_DIR) ? sourceId : undefined }), 'utf8');
+      config: paths.configFile, envPath: process.env.PATH ?? '', toolId, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR, binary: process.env.LARK_CHANNEL_CLAUDE_BIN, zcodeBinary: process.env.LARK_CHANNEL_ZCODE_BIN, kiloBinary: toolId === 'kilo' ? process.env.LARK_CHANNEL_KILO_BIN : undefined, kiloDataHome: toolId === 'kilo' ? selected.kilo?.dataHome ?? process.env.XDG_DATA_HOME : undefined, zcodeDataDir: toolId === 'zcode' && (selected.zcode?.dataDir || process.env.ZCODE_STORAGE_DIR) ? sourceId : undefined }), 'utf8');
     systemctl(['daemon-reload']); systemctl(['enable', '--now', name]);
   }
   const client = new WorkerClient(stateDir, sourceId, selected.accounts.app.id, toolId);

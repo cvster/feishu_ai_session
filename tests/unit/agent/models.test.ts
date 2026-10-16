@@ -2,7 +2,7 @@ import { expect, it, vi } from 'vitest';
 import { DEFAULT_MODEL, supportedModels, normalizeModelSelection, resolveModelArg, modelLabel, loadModelChoices, normalizeReasoningEffort, normalizeNativeModels, reasoningOptions, resolveReasoningEffort } from '../../../src/agent/models';
 import { FakeAgentAdapter } from '../../helpers/fake-agent';
 
-it.each(['codex', 'claude', 'zcode'] as const)('keeps only the default locally and preserves opaque %s native model IDs', kind => {
+it.each(['codex', 'claude', 'zcode', 'kilo'] as const)('keeps only the default locally and preserves opaque %s native model IDs', kind => {
   expect(supportedModels(kind).map(row => row.value)).toEqual([DEFAULT_MODEL]);
   expect(normalizeModelSelection(kind, undefined)).toBe(DEFAULT_MODEL);
   expect(resolveModelArg(kind, DEFAULT_MODEL)).toBeUndefined();

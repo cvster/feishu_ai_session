@@ -11,16 +11,16 @@ import { startWorkerReplies } from '../../../src/worker/replies';
 import { createFakeChannel } from '../../helpers/fake-channel';
 import type { Controls } from '../../../src/commands';
 import type { LarkChannel } from '@larksuite/channel';
-it('keeps ZCode running across bridge detach and recovers exactly one result in its own group', async () => {
-  const h = await fixture('zcode');
+it.each(['zcode', 'kilo'] as const)('keeps %s running across bridge detach and recovers exactly one result in its own group', async toolId => {
+  const h = await fixture(toolId);
   const options = { ...h.options, initialSessionId: 'sess_ff' };
   const first = h.adapter.run(options);
   const consume = (async () => { for await (const _event of first.events) { /* observation only */ } })();
   await vi.waitFor(() => expect(h.calls).toHaveLength(1));
   await first.detach!(); await consume; expect(h.stop).not.toHaveBeenCalled();
   const bindings = new ToolBindingStore(join(h.dir, 'bindings')); await bindings.load();
-  bindings.set('oc_group', { toolId: 'zcode', sourceId: 'local-zcode', nativeId: 'sess_ff', nativeCreated: false });
-  const profile = createDefaultProfileConfig({ agentKind: 'zcode', accounts: { app: { id: 'cli_test', secret: 's', tenant: 'feishu' } } });
+  bindings.set('oc_group', { toolId, sourceId: `local-${toolId}`, nativeId: 'sess_ff', nativeCreated: false });
+  const profile = createDefaultProfileConfig({ agentKind: toolId, accounts: { app: { id: 'cli_test', secret: 's', tenant: 'feishu' } } });
   const channel = createFakeChannel();
   const update = vi.spyOn(channel, 'updateCardById');
   const catalog = new SessionCatalog(join(h.dir, 'catalog')); await catalog.load();
@@ -32,7 +32,7 @@ it('keeps ZCode running across bridge detach and recovers exactly one result in 
   let publisher = await startWorkerReplies(deps);
   try {
     await publisher.runNow(); expect(channel.sent).toHaveLength(1);
-    expect(catalog.entries()[0]).toMatchObject({ agentId: 'zcode', sessionId: 'sess_ff', scopeId: 'oc_group' });
+    expect(catalog.entries()[0]).toMatchObject({ agentId: toolId, sessionId: 'sess_ff', scopeId: 'oc_group' });
     await publisher.stop(); expect(h.stop).not.toHaveBeenCalled();
     h.finish(); await vi.waitFor(async () => expect((await h.client.list())[0]?.status).toBe('completed'));
     publisher = await startWorkerReplies(deps); await publisher.runNow();
@@ -46,7 +46,7 @@ it('keeps ZCode running across bridge detach and recovers exactly one result in 
     await writeFile(path, JSON.stringify(ledger));
     const updates = update.mock.calls.length;
     publisher = await startWorkerReplies(deps); await publisher.runNow(); await publisher.runNow();
-    expect(update.mock.calls.length).toBe(updates + 1);
+    expect(update.mock.calls.length).toBe(updates + (toolId === 'zcode' ? 1 : 0));
     expect(channel.sent).toHaveLength(1); expect(h.calls).toHaveLength(1);
   } finally { await publisher.stop(); await Promise.all([bindings.flush(), catalog.flush(), sessions.flush()]); }
 });

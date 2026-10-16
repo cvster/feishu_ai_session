@@ -8,7 +8,7 @@ import { WorkerClient } from '../../src/worker/client';
 import { DurableClaudeAdapter } from '../../src/worker/adapter';
 export const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-export async function fixture(toolId: 'claude' | 'zcode' = 'claude') {
+export async function fixture(toolId: 'claude' | 'zcode' | 'kilo' = 'claude') {
   const dir = await mkdtemp(join(tmpdir(), 'durable-worker-')); cleanups.push(() => rm(dir, { recursive: true, force: true }));
   let finish!: () => void;
   const barrier = new Promise<void>(resolve => { finish = resolve; });

@@ -189,3 +189,17 @@ it('retains the complete ZCode configuration when saving unrelated preferences r
   }
   expect(JSON.parse(await readFile(path, 'utf8')).profiles.bot.zcode).toEqual(zcode);
 });
+
+it('retains Kilo runtime and data source settings across unrelated profile saves', async () => {
+  const dir = await tmpRoot(), path = join(dir, 'config.json');
+  const kilo = { binaryPath: '/native/kilo', args: ['--log-level', 'ERROR'], dataHome: '/native/data-home' };
+  const root = createRootConfig('bot', createDefaultProfileConfig({ agentKind: 'kilo', accounts: { app }, kilo }));
+  await saveRootConfig(root, path);
+  for (const limit of [7, 9]) {
+    const loaded = (await loadRootConfig(path))!;
+    expect(loaded.profiles.bot?.kilo).toEqual(kilo);
+    loaded.profiles.bot!.preferences.maxConcurrentRuns = limit;
+    await saveRootConfig(loaded, path);
+  }
+  expect(JSON.parse(await readFile(path, 'utf8')).profiles.bot.kilo).toEqual(kilo);
+});

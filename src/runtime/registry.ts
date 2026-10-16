@@ -1,3 +1,4 @@
+import { isToolId } from '../tools/definitions';
 import { randomBytes } from 'node:crypto';
 import {
   closeSync,
@@ -64,7 +65,7 @@ function isValidEntry(e: unknown): e is ProcessEntry {
     typeof x.appId === 'string' &&
     (x.tenant === 'feishu' || x.tenant === 'lark') &&
     typeof x.profileName === 'string' &&
-    (x.agentKind === 'claude' || x.agentKind === 'codex') &&
+    isToolId(x.agentKind) &&
     typeof x.configPath === 'string' &&
     typeof x.startedAt === 'string' &&
     typeof x.version === 'string'

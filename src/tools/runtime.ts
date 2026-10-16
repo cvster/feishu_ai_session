@@ -1,3 +1,6 @@
+import { KiloAdapter } from '../agent/kilo/adapter';
+import { kiloStorageDir } from '../agent/kilo/client';
+import { KiloSessionProvider } from './kilo-sessions';
 import { zcodeStorageDir } from '../agent/zcode/client';
 import { ZcodeAdapter } from '../agent/zcode/adapter';
 import { ZcodeSessionProvider } from './zcode-sessions';
@@ -46,6 +49,12 @@ export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, prim
   registry.register({ id: 'zcode', label: 'ZCode', sourceId: zcodeHome,
     agent: new DurableAgentAdapter(new WorkerClient(join(paths.profileDir, workerStateDirName('zcode')), zcodeHome, profile.accounts.app.id, 'zcode'),
       primary.id === 'zcode' ? primary : new ZcodeAdapter(zcodeOptions)), sessions: zcodeSessions, listSessions: () => zcodeSessions.listSessions() });
+  const kiloOptions = { binary: profile.kilo?.binaryPath, args: profile.kilo?.args, dataHome: profile.kilo?.dataHome, larkChannel };
+  const kiloHome = kiloStorageDir(kiloOptions);
+  const kiloSessions = new KiloSessionProvider(kiloOptions, join(paths.profileDir, 'kilo-sessions'));
+  registry.register({ id: 'kilo', label: 'Kilo', sourceId: kiloHome,
+    agent: new DurableAgentAdapter(new WorkerClient(join(paths.profileDir, workerStateDirName('kilo')), kiloHome, profile.accounts.app.id, 'kilo'),
+      primary.id === 'kilo' ? primary : new KiloAdapter(kiloOptions)), sessions: kiloSessions, listSessions: () => kiloSessions.listSessions() });
   for (const tool of registry.all()) tool.sessions ??= nativeSessionOperations(tool);
   return registry;
 }
