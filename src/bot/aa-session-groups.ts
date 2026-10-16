@@ -1,7 +1,8 @@
+import { nativeSessionFields, nativeSessionId, toolDefinition } from '../tools/definitions';
 import { controlsForTool } from '../tools/context';
 import type { AgentKind } from '../config/profile-schema';
 import type { LarkChannel } from '@larksuite/channel';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { capabilityForTool } from '../agent/capability';
 import { sendManagedCard } from '../card/managed';
 import { newChatWorkspaceCard } from '../card/templates';
 import { loadRootConfig, runtimeProfileConfig, saveRootConfig, withConfigFileLock } from '../config/profile-store';
@@ -95,8 +96,8 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
   const sourceId = deps.sourceId ?? 'legacy';
   const codex = deps.controls.profileConfig.codex ?? { binaryPath: 'codex' };
   if (!deps.toolId && deps.controls.profileConfig.agentKind !== 'codex') return;
-  const capability = toolId === 'codex' ? codexCapability(deps.controls.profileConfig) : claudeCapability(deps.controls.profileConfig);
-  const nativeId = (entry: SessionCatalogEntry) => toolId === 'codex' ? entry.threadId : entry.sessionId;
+  const capability = capabilityForTool(toolId, deps.controls.profileConfig);
+  const nativeId = (entry: SessionCatalogEntry) => nativeSessionId(toolId, entry);
   const isBinding = (entry: SessionCatalogEntry) => entry.agentId === toolId && (!entry.sourceId || entry.sourceId === sourceId) && isCurrentBotBinding(entry, currentBotAppId, knownChatIds);
   const isArchived = (id: string) => deps.controls.toolBindings?.isArchived(toolId, sourceId, id) || (toolId === 'codex' && deps.sessionCatalog.isThreadArchived?.(id));
 
@@ -223,14 +224,14 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
         }
         deps.sessionCatalog.archiveActive(previous);
         if (toolId === 'codex') deps.sessionCatalog.archiveThread(thread.threadId);
-        else deps.sessionCatalog.archiveNativeSession('claude', thread.threadId, sourceId);
+        else deps.sessionCatalog.archiveNativeSession(toolId, thread.threadId, sourceId);
         deps.sessionCatalog.upsertActive({
           scopeId: previous.scopeId,
           agentId: toolId,
           sourceId,
           cwdRealpath: workspace.cwdRealpath,
           policyFingerprint: policy.policyFingerprint,
-          ...(toolId === 'codex' ? { threadId: thread.threadId } : { sessionId: thread.threadId }),
+          ...nativeSessionFields(toolId, thread.threadId),
           botAppId: currentBotAppId,
           recentTurnReplayCount: null,
         });
@@ -280,7 +281,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
         name,
         inviteOpenIds: ff ? [deps.controls.botOwnerId!] : inviteOpenIds,
         toolId,
-        description: `自动绑定 ${toolId === 'codex' ? 'Codex' : 'Claude Code'} 会话 ${thread.threadId}`,
+        description: `自动绑定 ${toolDefinition(toolId).label} 会话 ${thread.threadId}`,
       });
     } catch (err) {
       log.fail('aa-session-groups', err, { step: 'create-chat', threadId: thread.threadId });
@@ -318,7 +319,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
     // recording the newly created group for the authenticated bot.
     if (!ff) {
       if (toolId === 'codex') deps.sessionCatalog.archiveThread(thread.threadId);
-      else deps.sessionCatalog.archiveNativeSession('claude', thread.threadId, sourceId);
+      else deps.sessionCatalog.archiveNativeSession(toolId, thread.threadId, sourceId);
     }
     deps.sessionCatalog.upsertActive({
       scopeId: created.chatId,
@@ -326,7 +327,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
       sourceId,
       cwdRealpath: workspace.cwdRealpath,
       policyFingerprint: policy.policyFingerprint,
-      ...(toolId === 'codex' ? { threadId: thread.threadId } : { sessionId: thread.threadId }),
+      ...nativeSessionFields(toolId, thread.threadId),
       botAppId: currentBotAppId,
       recentTurnReplayCount: !ff && toolId === 'codex' ? AA_RECENT_TURN_REPLAY_COUNT : undefined,
     });
@@ -449,7 +450,7 @@ function concreteInviteOpenIds(controls: Controls): string[] {
 
 export function uniqueToolGroupName(title: string, usedNames: Set<string>, toolId: AgentKind): string {
   const normalized = normalizeTitle(title);
-  return uniqueGroupName(usedNames.has(normalized) ? `${normalized}（${toolId === 'codex' ? 'Codex' : 'Claude Code'}）` : normalized, usedNames);
+  return uniqueGroupName(usedNames.has(normalized) ? `${normalized}（${toolDefinition(toolId).label}）` : normalized, usedNames);
 }
 
 function uniqueGroupName(title: string, usedNames: Set<string>): string {

@@ -1,3 +1,4 @@
+import { toolDefinition, workerInboxName, workerRepliesName, type ToolId } from '../tools/definitions';
 import { auxiliaryLinkError } from './auxiliary-membership';
 import { AuxiliaryApprovals } from './auxiliary-approvals';
 import { AuxiliaryGroups } from './auxiliary-groups';
@@ -17,7 +18,7 @@ import type {
 } from '@larksuite/channel';
 import { createLarkChannel } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { capabilityForTool } from '../agent/capability';
 import { modelLabel, normalizeModelSelection, resolveModelArg, unavailableModelNotice } from '../agent/models';
 import {
   buildAgentPrompt,
@@ -91,7 +92,7 @@ import { isSoloUserBotChat } from './group';
 import { CodexNameSync } from './thread-name';
 import { startAaSessionGroupSync } from './aa-session-groups';
 import { startCodexTurnSync } from './codex-turn-sync';
-import { DurableClaudeAdapter } from '../worker/adapter';
+import { DurableAgentAdapter } from '../worker/adapter';
 import { startWorkerReplies } from '../worker/replies';
 import { messageRequestId } from '../worker/identity';
 import { WorkerInbox } from '../worker/inbox';
@@ -243,8 +244,12 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     await controls.toolBindings.load();
     if (sessionCatalog) controls.toolBindings.migrate(sessionCatalog, id => controls.toolRegistry!.get(id).sourceId);
     await controls.toolBindings.flush();
-    controls.workerInbox = new WorkerInbox(join(deps.appPaths.profileDir, 'claude-inbox.json'));
-    await controls.workerInbox.load();
+    controls.workerRuntimes = new Map();
+    for (const tool of controls.toolRegistry.all()) if (tool.agent instanceof DurableAgentAdapter) {
+      const inbox = new WorkerInbox(join(deps.appPaths.profileDir, workerInboxName(tool.id))); await inbox.load();
+      controls.workerRuntimes.set(tool.id, { inbox });
+    }
+    controls.workerInbox = controls.workerRuntimes.get('claude')?.inbox;
     const nativeSessionLocks = new NativeSessionLocks();
     controls.executorForTool = id => {
       let instance = executors.get(id);
@@ -423,7 +428,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       } catch (err) {
         log.fail('flush', err);
       } finally {
-        controls.workerInbox?.releaseQueued(scope, batch);
+        controlsForTool(controls, toolForScope(controls, scope), scope).workerInbox?.releaseQueued(scope, batch);
         pending.unblock(scope);
         log.info('flush', 'end');
       }
@@ -439,8 +444,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       ownerId: () => controls.botOwnerId, refreshOwner: () => controls.refreshOwner(channel),
       cancelPending: async chatId => {
         const dropped = pending.cancel(chatId);
-        if (dropped.length) await controls.workerInbox?.reject(chatId, dropped);
-        await controls.workerInbox?.rejectScope(chatId);
+        for (const runtime of controls.workerRuntimes?.values() ?? []) {
+          if (dropped.length) await runtime.inbox.reject(chatId, dropped); await runtime.inbox.rejectScope(chatId);
+        }
         for (const r of controls.codexSubmissions?.records() ?? []) if (r.scope === chatId && r.status === 'pending')
           await controls.codexSubmissions!.mark(r.id, { status: 'rejected', error: '辅助群正在退出' }, ['pending']);
       },
@@ -463,9 +469,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         if (id === 'codex' && controls.codexSubmissions) {
           const current = controls.toolBindings?.get(approval.scope)?.nativeId;
           if (!await controls.codexSubmissions.receive(approval.scope, msg, current)) return;
-        } else if (controls.toolRegistry?.get(id).agent instanceof DurableClaudeAdapter && controls.workerInbox) {
-          if (!await controls.workerInbox.receive(approval.scope, msg)) return;
-          controls.workerInbox.markQueued(approval.scope, msg);
+        } else if (controls.workerRuntimes?.has(id)) {
+          const inbox = controls.workerRuntimes.get(id)!.inbox;
+          if (!await inbox.receive(approval.scope, msg)) return;
+          inbox.markQueued(approval.scope, msg);
         }
         await controls.auxiliary!.noteRequest(approval.scope, msg.messageId, msg.senderId);
         pending.push(approval.scope, msg);
@@ -654,27 +661,29 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   controls.codexUserInput = controls.profileConfig.agentKind === 'codex' && sessionCatalog && deps.appPaths?.profileDir
     ? await startCodexUserInput({ channel, controls, sessionCatalog, profileStateDir: deps.appPaths.profileDir })
     : undefined;
-  const claudeTool = controls.toolRegistry?.get('claude').agent;
-  let workerReplies: Awaited<ReturnType<typeof startWorkerReplies>> | undefined;
-  if (claudeTool instanceof DurableClaudeAdapter && sessionCatalog && deps.appPaths?.profileDir) {
-    workerReplies = await startWorkerReplies({
-      adapter: claudeTool, channel, controls, sessions, catalog: sessionCatalog, activeRuns,
-      statePath: join(deps.appPaths.profileDir, 'worker-replies.json'),
+  const workerReplies: Awaited<ReturnType<typeof startWorkerReplies>>[] = [];
+  for (const tool of controls.toolRegistry?.all() ?? []) {
+    const workerTool = tool.agent; const runtime = controls.workerRuntimes?.get(tool.id);
+    if (!(workerTool instanceof DurableAgentAdapter) || !runtime || !sessionCatalog || !deps.appPaths?.profileDir) continue;
+    const scopedControls = controlsForTool(controls, tool.id);
+    const replies = await startWorkerReplies({
+      adapter: workerTool, channel, controls: scopedControls, sessions, catalog: sessionCatalog, activeRuns,
+      statePath: join(deps.appPaths.profileDir, workerRepliesName(tool.id)),
       onReady: async jobs => {
         if (disconnecting) return;
-        await controls.workerInbox?.reconcile(jobs);
+        await runtime.inbox?.reconcile(jobs);
         const busy = new Set(jobs.filter(isJobActive).map(job => job.options.delivery?.scope).filter((scope): scope is string => Boolean(scope)));
-        for (const entry of pending.snapshot()) if (controls.toolBindings?.get(entry.scope)?.toolId === 'claude' && !busy.has(entry.scope) && !activeRuns.get(entry.scope)) pending.unblock(entry.scope);
-        for (const entry of controls.workerInbox?.available() ?? []) {
+        for (const entry of pending.snapshot()) if (controls.toolBindings?.get(entry.scope)?.toolId === tool.id && !busy.has(entry.scope) && !activeRuns.get(entry.scope)) pending.unblock(entry.scope);
+        for (const entry of runtime.inbox?.available() ?? []) {
           const binding = controls.toolBindings?.get(entry.scope);
-          if ((controls.auxiliary?.isAuxiliary(entry.scope) && !controls.auxiliary.isActive(entry.scope)) || binding?.toolId !== 'claude' || binding.sourceId !== claudeTool.client.sourceId || sessionCatalog.isScopeArchived(entry.scope)) {
-            await controls.workerInbox?.reject(entry.scope, [entry.message]); continue;
+          if ((controls.auxiliary?.isAuxiliary(entry.scope) && !controls.auxiliary.isActive(entry.scope)) || binding?.toolId !== tool.id || binding.sourceId !== workerTool.client.sourceId || sessionCatalog.isScopeArchived(entry.scope)) {
+            await runtime.inbox?.reject(entry.scope, [entry.message]); continue;
           }
           if (busy.has(entry.scope) || activeRuns.get(entry.scope)) continue;
-          controls.workerInbox!.markQueued(entry.scope, entry.message); pending.push(entry.scope, entry.message);
+          runtime.inbox!.markQueued(entry.scope, entry.message); pending.push(entry.scope, entry.message);
         }
       },
-      renderOptions: job => ({ ...controls.runControlIcons,
+      renderOptions: job => ({ ...controls.runControlIcons, supportsFork: toolDefinition(tool.id).fork,
         ...(controls.auxiliary?.isAuxiliary(job.options.delivery?.scope ?? '') ? { auxiliary: true, auxiliaryRunId: job.id, auxiliaryScope: job.options.delivery?.scope } : {}),
         ...(callbackAuth && job.options.delivery && !controls.auxiliary?.isAuxiliary(job.options.delivery.scope) ? { signCallback: action => callbackAuth.sign({
           runId: job.id, scope: job.options.delivery!.scope, chatId: job.options.delivery!.chatId,
@@ -683,8 +692,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         }) } : {}),
       }),
     });
+    runtime.replies = replies; workerReplies.push(replies);
   }
-  controls.claudeReplySync = workerReplies;
+  controls.claudeReplySync = controls.workerRuntimes?.get('claude')?.replies;
 
   for (const record of submissions?.records() ?? []) {
     if (record.status !== 'pending') continue;
@@ -748,8 +758,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       await Promise.all([executor, ...executors.values()].map(item => item.waitForSubmissions()));
       await activeRuns.disconnectAll();
       if (submissions) await Promise.allSettled([...batchTasks]);
-      await workerReplies?.stop();
-      controls.claudeReplySync = undefined;
+      await Promise.all(workerReplies.map(replies => replies.stop()));
+      controls.workerReplySync = undefined;
       await controls.auxiliary?.flush();
       ownerRefresh.stop();
       knownChatsRefresh.stop();
@@ -768,7 +778,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         callbackNonceStore?.flush(),
         workspaces.flush(),
         controls.toolBindings?.flush(),
-        controls.workerInbox?.flush(),
+        ...Array.from(controls.workerRuntimes?.values() ?? [], runtime => runtime.inbox.flush()),
         controls.auxiliaryApprovals?.flush(),
         submissions?.flush(),
       ]);
@@ -1034,7 +1044,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.threadId;
     if (!await controls.codexSubmissions.receive(scope, emsg, currentThread)) return;
   }
-  if (agent instanceof DurableClaudeAdapter) {
+  if (agent instanceof DurableAgentAdapter) {
     try {
       const id = messageRequestId(emsg);
       if ((await agent.client.list()).some(job => job.options.delivery?.scope === scope && job.options.delivery.messageIds?.includes(id))) return;
@@ -1094,7 +1104,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   if (binding && tool && binding.sourceId !== tool.sourceId) throw new Error('会话数据来源已变化，不能恢复到其他账户/目录');
   const agent = tool?.agent ?? primaryAgent;
   const executor = rootControls.executorForTool?.(toolId) ?? primaryExecutor;
-  const batch = agent instanceof DurableClaudeAdapter ? [...new Map(inputBatch.map(message => [messageRequestId(message), message])).values()] : inputBatch;
+  const batch = agent instanceof DurableAgentAdapter ? [...new Map(inputBatch.map(message => [messageRequestId(message), message])).values()] : inputBatch;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
   const lastMsg = batch[batch.length - 1];
@@ -1258,9 +1268,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ...(threadId && !controls.auxiliary?.isAuxiliary(scope) ? { threadId } : {}),
   };
   const capability =
-    controls.profileConfig.agentKind === 'codex'
-      ? codexCapability(controls.profileConfig)
-      : claudeCapability(controls.profileConfig);
+    capabilityForTool(controls.profileConfig.agentKind, controls.profileConfig);
   if (controls.auxiliary?.isActive(scope)) await controls.auxiliary.prepareScope(scope,
     await commandSessionCatalogIdentity({ msg: firstMsg, scope, mode, workspaces, controls, access: accessDecision }));
   const flowInput = {
@@ -1281,7 +1289,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       : undefined,
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
-    ...(agent instanceof DurableClaudeAdapter ? {
+    ...(agent instanceof DurableAgentAdapter ? {
       requestKey: JSON.stringify([controls.profile, scope, batch.map(messageRequestId).sort()]),
       delivery: { scope, chatId, replyTo: lastMsg.messageId, replyInThread: sendOpts.replyInThread,
         operatorOpenId: firstMsg.senderId, policyFingerprint: '', botAppId: controls.profileConfig.accounts.app.id,
@@ -1332,7 +1340,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   let runCodexTurnId: string | undefined;
   const recordSession = (evt: AgentEvent): void => {
     if (controls.auxiliary?.isAuxiliary(scope) && !controls.auxiliary.isActive(scope)) return;
-    if (agent instanceof DurableClaudeAdapter && (handle.interrupted || handle.detached)) return;
+    if (agent instanceof DurableAgentAdapter && (handle.interrupted || handle.detached)) return;
     if (evt.type === 'user_input') {
       controls.codexUserInput?.accept(evt.prompt, handle.run.runId,
         { scope, replyTo: sendOpts.replyTo, replyInThread: sendOpts.replyInThread });
@@ -1383,13 +1391,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   };
 
-  if (agent instanceof DurableClaudeAdapter && controls.claudeReplySync) {
+  if (agent instanceof DurableAgentAdapter && controls.workerReplySync) {
     // The journal-backed publisher is the only reply owner, including after restart.
     // This observer maintains intake ordering and the current bridge's session state.
     for await (const event of eventStream) {
       recordSession(event);
       if (event.type === 'error') {
-        await controls.claudeReplySync.runNow();
+        await controls.workerReplySync.runNow();
         const recorded = await agent.client.snapshot(execution.runId).then(() => true, () => false);
         if (!recorded && !handle.detached) {
           if (event.retryable) controls.workerInbox?.defer(scope, batch);
@@ -1398,7 +1406,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         }
       }
     }
-    await controls.claudeReplySync.runNow();
+    await controls.workerReplySync.runNow();
     activePolicyFingerprints.delete(scope);
     return;
   }

@@ -1,3 +1,4 @@
+import { toolDefinition, type ToolId } from '../tools/definitions';
 import { modelLabel, supportedModels } from '../agent/models';
 import { CODEX_STANDARD_REASONING_VALUES } from '../../packages/codex-core/src/models';
 
@@ -93,9 +94,9 @@ export function workspacesCard(current: string | undefined, named: Record<string
 export function newChatWorkspaceCard(
   chatName: string,
   binding?: { threadId: string; existing: boolean },
-  agentKind: 'codex' | 'claude' = 'codex',
+  agentKind: ToolId = 'codex',
 ): object {
-  const toolName = agentKind === 'codex' ? 'Codex' : 'Claude Code';
+  const toolName = toolDefinition(agentKind).label;
   const bindingText = binding?.existing
     ? `这个群已绑定现有 ${toolName} 会话 \`${binding.threadId.slice(0, 8)}…\`，可以直接继续原对话。`
     : `这个群已绑定独立 ${toolName} 会话，发送第一条任务时会自动创建会话。`;
@@ -139,7 +140,7 @@ export function newChatWorkspaceCard(
 }
 
 export interface TaskPanelInfo {
-  agentKind: 'claude' | 'codex';
+  agentKind: ToolId;
   chatName: string;
   chatMode: 'p2p' | 'group' | 'topic';
   model: string;
@@ -160,14 +161,14 @@ export function taskPanelCard(info: TaskPanelInfo): object {
   const model = modelLabel(info.agentKind, info.model);
   return {
     schema: '2.0',
-    config: { summary: { content: `${info.agentKind === 'codex' ? 'Codex' : 'Claude Code'} 任务控制台` } },
+    config: { summary: { content: `${toolDefinition(info.agentKind).label} 任务控制台` } },
     body: {
       elements: [
         {
           tag: 'markdown',
           content: [
         `💬 **群/范围**：${escapeMd(scopeLabel)}`,
-        `🛠️ **执行工具**：${info.agentKind === 'codex' ? 'Codex' : 'Claude Code'}`,
+        `🛠️ **执行工具**：${toolDefinition(info.agentKind).label}`,
         `🤖 **模型**：${escapeMd(model)}${info.agentKind === 'codex' ? ` · ${info.reasoningEffort}` : ''}`,
         `📁 **工作目录**：\`${escapeCode(info.cwd ?? '(未设置)')}\``,
         `🔗 **会话**：${session}`,
@@ -210,7 +211,7 @@ export function taskPanelCard(info: TaskPanelInfo): object {
   };
 }
 
-export function newSessionConfirmationCard(agentKind: 'codex' | 'claude' = 'codex'): object {
+export function newSessionConfirmationCard(agentKind: ToolId = 'codex'): object {
   return {
     schema: '2.0',
     config: { summary: { content: '确认新建会话' } },
@@ -218,7 +219,7 @@ export function newSessionConfirmationCard(agentKind: 'codex' | 'claude' = 'code
       elements: [
         {
           tag: 'markdown',
-          content: `当前会话将结束，工作目录保持不变。下一条任务会建立一个全新的 ${agentKind === 'codex' ? 'Codex' : 'Claude Code'} 会话。`,
+          content: `当前会话将结束，工作目录保持不变。下一条任务会建立一个全新的 ${toolDefinition(agentKind).label} 会话。`,
         },
         { tag: 'hr' },
         cardKitButtonRow([
@@ -231,8 +232,8 @@ export function newSessionConfirmationCard(agentKind: 'codex' | 'claude' = 'code
 }
 
 /** Destructive confirmation shown before archiving the session and dissolving the group. */
-export function finishTaskConfirmationCard(agentKind: 'codex' | 'claude' = 'codex'): object {
-  const toolName = agentKind === 'codex' ? 'Codex' : 'Claude Code';
+export function finishTaskConfirmationCard(agentKind: ToolId = 'codex'): object {
+  const toolName = toolDefinition(agentKind).label;
   return {
     schema: '2.0',
     config: { summary: { content: `归档 ${toolName} 工作群` } },

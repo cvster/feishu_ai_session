@@ -69,9 +69,8 @@ export function configFormCard(opts: ConfigFormOpts): object {
           tag: 'form', name: 'config_form', elements: [
             label('模型'),
             select('model', opts.model, supportedModels(opts.agentKind)),
-            label('推理强度'),
-            select('reasoning_effort', normalizeReasoningEffort(opts.agentKind, opts.reasoningEffort),
-              supportedReasoningEfforts(opts.agentKind).map(value => ({ value, label: value }))),
+            ...(supportedReasoningEfforts(opts.agentKind).length ? [label('推理强度'),
+              select('reasoning_effort', normalizeReasoningEffort(opts.agentKind, opts.reasoningEffort), supportedReasoningEfforts(opts.agentKind).map(value => ({ value, label: value })))] : []),
             collapsedPanel('更多设置', [
               label('回复方式'),
               select('message_reply', opts.messageReply, [

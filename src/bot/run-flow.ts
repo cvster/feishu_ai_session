@@ -1,3 +1,4 @@
+import { toolDefinition } from '../tools/definitions';
 import type { AgentCapability } from '../agent/capability';
 import { normalizeReasoningEffort, resolveModelArg } from '../agent/models';
 import type { AgentEvent } from '../agent/types';
@@ -142,7 +143,7 @@ export async function prepareRunFlow(input: StartRunFlowInput): Promise<Prepared
       cwdRealpath: workspace.cwdRealpath,
       policyFingerprint: policy.policyFingerprint,
     });
-    if (catalogEntry?.agentId === 'claude') {
+    if (catalogEntry && toolDefinition(catalogEntry.agentId).nativeField === 'sessionId') {
       sessionId = catalogEntry.sessionId;
       resumeFrom = sessionId;
     } else if (catalogEntry?.agentId === 'codex') {
@@ -150,7 +151,7 @@ export async function prepareRunFlow(input: StartRunFlowInput): Promise<Prepared
       resumeFrom = threadId;
     }
   }
-  if (!resumeFrom && input.capability.agentId === 'claude') {
+  if (!resumeFrom && toolDefinition(input.capability.agentId).nativeField === 'sessionId') {
     resumeFrom = input.sessions.resumeFor(input.scopeId, workspace.cwdRealpath);
     sessionId = resumeFrom;
     const stale = input.sessions.getRaw(input.scopeId);
@@ -238,13 +239,13 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
 
 export function recordRunSessionEvent(input: RecordRunSessionEventInput): void {
   if (input.event.type !== 'system') return;
-  if (input.capability.agentId === 'claude' && input.event.sessionId) {
+  if (toolDefinition(input.capability.agentId).nativeField === 'sessionId' && input.event.sessionId) {
     if (input.sessionCatalog?.isScopeArchived(input.scopeId)) return;
     const cwdRealpath = input.event.cwd ?? input.policy.cwdRealpath;
     input.sessions.set(input.scopeId, input.event.sessionId, cwdRealpath);
     input.sessionCatalog?.upsertActive({
       scopeId: input.scopeId,
-      agentId: 'claude',
+      agentId: input.capability.agentId,
       cwdRealpath,
       policyFingerprint: input.policy.policyFingerprint,
       sessionId: input.event.sessionId,

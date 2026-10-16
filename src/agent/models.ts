@@ -51,7 +51,7 @@ const CODEX_MODELS: ModelOption[] = [
 
 /** The model picker options for a profile's agent kind. */
 export function supportedModels(agentKind: AgentKind): ModelOption[] {
-  return agentKind === 'codex' ? CODEX_MODELS : CLAUDE_MODELS;
+  return agentKind === 'codex' ? CODEX_MODELS : agentKind === 'claude' ? CLAUDE_MODELS : [{ value: DEFAULT_MODEL, label: '跟随 ZCode 配置模型' }];
 }
 
 /** True when the selection means "use the agent default" (no `--model`). */
@@ -107,7 +107,7 @@ type ReasoningEffort = NonNullable<AgentRunOptions['reasoningEffort']>;
 const CLAUDE_REASONING_VALUES: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export function supportedReasoningEfforts(agentKind: AgentKind): readonly string[] {
-  return agentKind === 'codex' ? CODEX_STANDARD_REASONING_VALUES : CLAUDE_REASONING_VALUES;
+  return agentKind === 'codex' ? CODEX_STANDARD_REASONING_VALUES : agentKind === 'claude' ? CLAUDE_REASONING_VALUES : [];
 }
 
 export function normalizeReasoningEffort(agentKind: AgentKind, value: string | undefined): ReasoningEffort {

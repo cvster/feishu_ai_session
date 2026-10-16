@@ -1,3 +1,5 @@
+import { nativeSessionFields, nativeSessionId } from '../tools/definitions';
+import { isToolId, toolDefinition, type ToolId } from '../tools/definitions';
 import { controlsForTool } from '../tools/context';
 import { routeCommandContext } from '../tools/context';
 import type { ToolRegistry } from '../tools/types';
@@ -9,7 +11,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { capabilityForTool } from '../agent/capability';
 import { DEFAULT_MODEL, normalizeModelSelection, normalizeReasoningEffort, supportedModels,
   supportedReasoningEfforts, unavailableModelNotice } from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
@@ -118,6 +120,8 @@ export interface Controls {
   toolBindings?: ToolBindingStore;
   defaultToolId?: import('../config/profile-schema').AgentKind;
   executorForTool?(id: import('../config/profile-schema').AgentKind): RunExecutor;
+  workerRuntimes?: Map<ToolId, { inbox: import('../worker/inbox').WorkerInbox; replies?: { runNow(): Promise<void>; stopScope(scope: string): Promise<boolean> } }>;
+  workerReplySync?: { runNow(): Promise<void>; stopScope(scope: string): Promise<boolean> };
   claudeReplySync?: { runNow(): Promise<void>; stopScope(scope: string): Promise<boolean> };
   workerInbox?: import('../worker/inbox').WorkerInbox;
   codexSubmissions?: import('../session/codex-submissions').CodexSubmissionStore;
@@ -201,7 +205,7 @@ type Handler = (args: string, ctx: CommandContext) => Promise<void>;
 
 interface ResumeCandidate {
   scopeId: string;
-  agentId: 'claude' | 'codex';
+  agentId: ToolId;
   cwdRealpath: string;
   policyFingerprint: string;
   sessionId?: string;
@@ -212,7 +216,7 @@ interface ResumeCandidate {
 type PanelCandidate =
   | {
       kind: 'session';
-      toolId?: 'codex' | 'claude';
+      toolId?: ToolId;
       sourceId?: string;
       threadId: string;
       cwd: string;
@@ -224,7 +228,7 @@ type PanelCandidate =
     }
   | {
       kind: 'group';
-      toolId?: 'codex' | 'claude';
+      toolId?: ToolId;
       sourceId?: string;
       chatId: string;
       name: string;
@@ -487,7 +491,7 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
     const groupName = String(ctx.formValue?.group_name ?? '').trim();
     const cwd = String(ctx.formValue?.cwd ?? '').trim();
     const rawTool = String(ctx.formValue?.agent_kind ?? ctx.controls.defaultToolId ?? ctx.controls.profileConfig.agentKind);
-    if (rawTool !== 'codex' && rawTool !== 'claude') return reply(ctx, '❌ 无效的执行工具，请重新创建会话。');
+    if (!isToolId(rawTool)) return reply(ctx, '❌ 无效的执行工具，请重新创建会话。');
     return handleNewChat(groupName, ctx, cwd, rawTool);
   }
 
@@ -681,7 +685,7 @@ const PANEL_ACTION_SETTLE_MS = 1000;
 
 async function showExistingSessionsPanel(ctx: CommandContext, page: number): Promise<void> {
   if (ctx.chatMode !== 'p2p') { await reply(ctx, '请在机器人私聊控制台中管理现有会话。'); return; }
-  let history: (CodexThreadHistoryEntry & { toolId?: 'codex' | 'claude'; sourceId?: string })[];
+  let history: (CodexThreadHistoryEntry & { toolId?: ToolId; sourceId?: string })[];
   if (ctx.controls.toolRegistry) {
     history = [];
     for (const tool of ctx.controls.toolRegistry.all()) {
@@ -705,7 +709,7 @@ async function showExistingSessionsPanel(ctx: CommandContext, page: number): Pro
       ...(thread.name ? { name: thread.name } : {}),
       preview: thread.preview,
     }),
-    title: `${thread.toolId === 'claude' ? 'Claude Code · ' : thread.toolId ? 'Codex · ' : ''}${thread.name || thread.preview || '未命名会话'}`,
+    title: `${thread.toolId ? `${toolDefinition(thread.toolId).label} · ` : ''}${thread.name || thread.preview || '未命名会话'}`,
     preview: thread.name && thread.preview !== thread.name ? thread.preview : '保留原会话上下文',
     cwd: thread.cwd,
     threadId: thread.threadId,
@@ -825,7 +829,7 @@ async function createGroupForPanelSession(
   }
   ctx.sessionCatalog.upsertActive({
     ...identity,
-    ...(toolId === 'codex' ? { threadId: target.threadId } : { sessionId: target.threadId }),
+    ...nativeSessionFields(toolId, target.threadId),
     sourceId: tool?.sourceId,
     botAppId: ctx.controls.profileConfig.accounts.app.id,
     ...(options.recentTurnReplayCount ? { recentTurnReplayCount: options.recentTurnReplayCount } : {}),
@@ -856,13 +860,13 @@ async function archivePanelSession(ctx: CommandContext, token: string): Promise<
   const toolId = target.toolId ?? 'codex';
   const tool = ctx.controls.toolRegistry?.get(toolId);
   if (target.sourceId && tool?.sourceId !== target.sourceId) throw new Error('会话数据来源已变化');
-  if (toolId === 'claude') {
-    if (!tool || !ctx.controls.toolBindings) return reply(ctx, 'Claude 会话来源未配置');
+  if (toolDefinition(toolId).backend === 'worker') {
+    if (!tool || !ctx.controls.toolBindings) return reply(ctx, `${toolDefinition(toolId).label} 会话来源未配置`);
     ctx.controls.toolBindings.archive(toolId, tool.sourceId, target.threadId);
     ctx.sessionCatalog?.archiveNativeSession(toolId, target.threadId, tool.sourceId);
     for (const row of ctx.sessionCatalog?.entries() ?? []) if (row.agentId === toolId && row.sessionId === target.threadId && (!row.sourceId || row.sourceId === tool.sourceId)) ctx.sessionCatalog?.archiveScope(row.scopeId, target.threadId);
     await Promise.all([ctx.controls.toolBindings.flush(), ctx.sessionCatalog?.flush()]);
-    panelCandidates.delete(token); await reply(ctx, '✓ Claude 会话已在桥接中归档，原生历史保留。'); return;
+    panelCandidates.delete(token); await reply(ctx, `✓ ${toolDefinition(toolId).label} 会话已在桥接中归档，原生历史保留。`); return;
   }
   const selectedAgent = tool?.agent ?? ctx.agent;
   if (!selectedAgent.archiveThread) return reply(ctx, '当前 Codex 适配器不支持归档会话。');
@@ -886,12 +890,12 @@ async function finishPanelGroup(ctx: CommandContext, token: string): Promise<voi
   await ctx.activeRuns.stopScopes(scopes);
   const binding = ctx.controls.toolBindings?.get(target.chatId);
   const toolId = target.toolId ?? binding?.toolId ?? 'codex';
-  if (toolId === 'claude' && scopes.length === 0) await controlsForTool(ctx.controls, 'claude').claudeReplySync?.stopScope(target.chatId);
+  if (toolDefinition(toolId).backend === 'worker' && scopes.length === 0) await controlsForTool(ctx.controls, toolId).workerReplySync?.stopScope(target.chatId);
   const selectedAgent = ctx.controls.toolRegistry?.get(toolId).agent ?? ctx.agent;
-  if (toolId === 'claude' && binding) {
+  if (toolDefinition(toolId).backend === 'worker' && binding) {
     const nativeId = target.threadId ?? binding.nativeId;
-    if (nativeId) ctx.controls.toolBindings!.archive('claude', binding.sourceId, nativeId);
-    ctx.sessionCatalog?.archiveScope(target.chatId, nativeId ?? 'pending-claude');
+    if (nativeId) ctx.controls.toolBindings!.archive(toolId, binding.sourceId, nativeId);
+    ctx.sessionCatalog?.archiveScope(target.chatId, nativeId ?? `pending-${toolId}`);
     await ctx.controls.toolBindings!.flush();
   }
   if (target.threadId && toolId === 'codex' && selectedAgent.archiveThread) {
@@ -914,13 +918,13 @@ async function handleNewChat(
   rawName: string,
   ctx: CommandContext,
   requestedCwd?: string,
-  selectedTool?: 'codex' | 'claude',
+  selectedTool?: ToolId,
 ): Promise<void> {
   const toolId = selectedTool ?? ctx.controls.defaultToolId ?? ctx.controls.profileConfig.agentKind;
   const tool = ctx.controls.toolRegistry?.get(toolId);
   const targetAgent = tool?.agent ?? ctx.agent;
   if (tool && (targetAgent.id !== toolId || !await targetAgent.isAvailable())) {
-    await reply(ctx, `❌ ${toolId === 'claude' ? 'Claude Code' : 'Codex'} 不可用，请检查本机安装和认证${toolId === 'claude' ? '，以及独立 worker 服务' : ''}。`);
+    await reply(ctx, `❌ ${toolDefinition(toolId).label} 不可用，请检查本机安装和认证${toolDefinition(toolId).backend === 'worker' ? '，以及独立 worker 服务' : ''}。`);
     return;
   }
   let sourceCwd = effectiveWorkspaceCwd(ctx);
@@ -1273,7 +1277,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
       } else {
         ctx.sessionCatalog.upsertActive({
           scopeId: ctx.sessionCatalogIdentity.scopeId,
-          agentId: 'claude',
+          agentId: ctx.sessionCatalogIdentity.agentId,
           cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
           policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
           sessionId: resolved.sessionId!,
@@ -1294,7 +1298,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
       return;
     }
     ctx.activeRuns.interrupt(ctx.scope);
-    if (ctx.sessionCatalogIdentity.agentId === 'claude') {
+    if (toolDefinition(ctx.sessionCatalogIdentity.agentId).nativeField === 'sessionId') {
       ctx.sessions.set(ctx.scope, sessionId, ctx.sessionCatalogIdentity.cwdRealpath);
     }
     await reply(ctx, RESUME_APPLIED_REPLY);
@@ -1347,7 +1351,7 @@ function consumeResumeCandidate(
     candidate.agentId !== identity.agentId ||
     candidate.cwdRealpath !== identity.cwdRealpath ||
     candidate.policyFingerprint !== identity.policyFingerprint ||
-    (identity.agentId === 'claude' && !candidate.sessionId) ||
+    (toolDefinition(identity.agentId).nativeField === 'sessionId' && !candidate.sessionId) ||
     (identity.agentId === 'codex' && !candidate.threadId)
   ) {
     return undefined;
@@ -1364,8 +1368,8 @@ function pruneResumeCandidates(now = Date.now()): void {
 function issuePanelCandidate(
   ctx: CommandContext,
   input:
-    | { kind: 'session'; toolId?: 'codex' | 'claude'; sourceId?: string; threadId: string; cwd: string; name?: string; preview: string }
-    | { kind: 'group'; toolId?: 'codex' | 'claude'; sourceId?: string; chatId: string; name: string; cwd?: string; threadId?: string },
+    | { kind: 'session'; toolId?: ToolId; sourceId?: string; threadId: string; cwd: string; name?: string; preview: string }
+    | { kind: 'group'; toolId?: ToolId; sourceId?: string; chatId: string; name: string; cwd?: string; threadId?: string },
 ): string {
   prunePanelCandidates();
   let token = randomUUID().slice(0, 12);
@@ -1491,7 +1495,7 @@ function panelGroupIdentity(
     chatId,
     ctx.msg.senderId,
   );
-  const capability = ctx.controls.profileConfig.agentKind === 'codex' ? codexCapability(ctx.controls.profileConfig) : claudeCapability(ctx.controls.profileConfig);
+  const capability = capabilityForTool(ctx.controls.profileConfig.agentKind, ctx.controls.profileConfig);
   const policy = evaluateRunPolicy({
     scope: { source: 'im', chatId, actorId: ctx.msg.senderId },
     attachments: [],
@@ -1548,6 +1552,7 @@ function runtimeAccessStatus(
       ),
     };
   }
+  if (profileConfig.agentKind === 'zcode') return { label: 'access', value: profileConfig.permissions.defaultAccess };
   return {
     label: 'sandbox',
     value: `${profileConfig.sandbox.defaultMode}/${profileConfig.sandbox.maxMode}`,
@@ -1615,8 +1620,8 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function handleFork(_args: string, ctx: CommandContext): Promise<void> {
-  if (ctx.controls.profileConfig.agentKind !== 'codex' || !ctx.agent.forkThread || !ctx.sessionCatalog) {
-    return reply(ctx, '当前适配器不支持 Codex 会话分叉。');
+  if (!toolDefinition(ctx.controls.profileConfig.agentKind).fork || !ctx.agent.forkThread || !ctx.sessionCatalog) {
+    return reply(ctx, '当前工具不支持会话分叉。');
   }
   const botAppId = ctx.controls.profileConfig.accounts.app.id;
   const exact = ctx.sessionCatalogIdentity ? ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity) : undefined;
@@ -1780,7 +1785,7 @@ async function handleStop(args: string, ctx: CommandContext, strict = false): Pr
     ctx.activeRuns.unregister(scope, handle.run);
     ok = true;
   } else ok = ctx.activeRuns.interrupt(scope);
-  if (!ok && ctx.controls.claudeReplySync) ok = await ctx.controls.claudeReplySync.stopScope(scope);
+  if (!ok && ctx.controls.workerReplySync) ok = await ctx.controls.workerReplySync.stopScope(scope);
   if (!ok && ctx.controls.codexSubmissions) {
     const threadId = ctx.sessionCatalog?.entries().filter(e => e.scopeId === scope && e.agentId === 'codex' && e.status === 'active')
       .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.threadId;
@@ -1846,7 +1851,7 @@ async function archiveGroupInput(ctx: CommandContext, chatId: string, nativeId: 
 
 async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
   const toolName = ctx.controls.toolRegistry?.get(ctx.controls.profileConfig.agentKind).label ??
-    (ctx.controls.profileConfig.agentKind === 'codex' ? 'Codex' : 'Claude Code');
+    (toolDefinition(ctx.controls.profileConfig.agentKind).label);
   if (ctx.chatMode === 'p2p') {
     await reply(ctx, `❌ “终止任务”只能在要结束的 ${toolName} 工作群中使用。`);
     return;
@@ -1876,7 +1881,7 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
     `⏳ 正在停止任务并归档当前 ${toolName} 会话…`,
   );
   await ctx.activeRuns.stopScopes(groupScopes);
-  if (ctx.controls.profileConfig.agentKind === 'claude' && groupScopes.length === 0) await ctx.controls.claudeReplySync?.stopScope(ctx.scope);
+  if (toolDefinition(ctx.controls.profileConfig.agentKind).backend === 'worker' && groupScopes.length === 0) await ctx.controls.workerReplySync?.stopScope(ctx.scope);
 
   const catalogEntry =
     ctx.sessionCatalog && ctx.sessionCatalogIdentity
@@ -1899,11 +1904,11 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
     }
   }
 
-  if (ctx.controls.profileConfig.agentKind === 'claude') {
+  if (toolDefinition(ctx.controls.profileConfig.agentKind).backend === 'worker') {
     const binding = ctx.controls.toolBindings?.get(ctx.scope);
     const nativeId = catalogEntry?.sessionId ?? binding?.nativeId;
-    if (binding && nativeId) { ctx.controls.toolBindings!.archive('claude', binding.sourceId, nativeId); await ctx.controls.toolBindings!.flush(); }
-    ctx.sessionCatalog?.archiveScope(ctx.scope, nativeId ?? 'pending-claude');
+    if (binding && nativeId) { ctx.controls.toolBindings!.archive(ctx.controls.profileConfig.agentKind, binding.sourceId, nativeId); await ctx.controls.toolBindings!.flush(); }
+    ctx.sessionCatalog?.archiveScope(ctx.scope, nativeId ?? `pending-${ctx.controls.profileConfig.agentKind}`);
   }
   if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
     if (catalogEntry?.threadId) ctx.sessionCatalog.archiveCodexThread(catalogEntry.threadId);
@@ -2174,9 +2179,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   doctorLastByOperator.set(rateKey, now);
 
   const capability =
-    ctx.controls.profileConfig.agentKind === 'codex'
-      ? codexCapability(ctx.controls.profileConfig)
-      : claudeCapability(ctx.controls.profileConfig);
+    capabilityForTool(ctx.controls.profileConfig.agentKind, ctx.controls.profileConfig);
   const policy = evaluateRunPolicy({
     scope: {
       source: 'im',

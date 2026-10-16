@@ -1,6 +1,6 @@
 # lark-channel-bridge
 
-把飞书 / Lark 消息和本地 Claude Code 或 Codex CLI 打通的轻量 bot。用一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里和本机编程助手对话，让它读图、处理文件、改代码。
+把飞书 / Lark 消息和本地 Claude Code、Codex 或 ZCode CLI 打通的轻量 bot。用一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里和本机编程助手对话，让它读图、处理文件、改代码。
 
 本项目基于 [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge)（原名 `feishu-claude-code-bridge`） 二次开发。开发者：**Lennox Gao**；有问题、建议或需求，欢迎联系。
 
@@ -9,6 +9,8 @@
 其他 agent 可通过 [FF 项目助手 A2A 接口](./docs/A2A_API.md) 委派问答/调试任务。默认端口 36999，使用自定义用户名路径、永久及易读双别名、独立密钥、全量轮询和飞书私聊权限确认；默认关闭，不是通用模型供应商接口。
 
 关于能实现的效果，详情可以阅读[飞书文档](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e)
+
+ZCode 已接入统一工具注册和独立 worker，安装、账号及能力边界见 [ZCode 指引](docs/ZCODE.md)。
 
 ## 主要功能
 

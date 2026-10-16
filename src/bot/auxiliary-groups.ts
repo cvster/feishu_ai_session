@@ -1,6 +1,7 @@
+import { sessionOperations, findNativeHistory } from '../tools/session-operations';
+import { nativeSessionFields } from '../tools/definitions';
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { access, readFile, readdir, open } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BotAddedEvent, CardActionEvent, LarkChannel } from '@larksuite/channel';
 import type { AgentKind } from '../config/profile-schema';
@@ -60,7 +61,7 @@ interface Choice {
 export interface AuxiliaryGrant { id: string; action: string; ownerId: string }
 interface PromptCycle { next: number; nativeId?: string }
 
-/** Private owner selection; no source conversation is resumed or mutated. */
+/** Private owner selection; no new turn is submitted to a source conversation. */
 export class AuxiliaryGroups {
   private records: Record<string, AuxiliaryGroup> = {};
   private privateCreations: Record<string, { uuid: string; startedAt: number; name: string; chatId?: string }> = {};
@@ -322,17 +323,7 @@ export class AuxiliaryGroups {
     const key = JSON.stringify([b.sourceId, b.toolId, b.nativeId, b.name]);
     if (this.renamed.has(key)) return;
     if (b.nativeId === b.linkedSource?.nativeId) throw new Error('拒绝修改原会话名称');
-    if (b.toolId === 'codex') {
-      const agent = this.deps.tools.get('codex').agent;
-      if (!agent.setThreadName) throw new Error('Codex 未提供会话改名能力');
-      await agent.setThreadName(b.nativeId, b.name);
-    } else {
-      const path = await findSessionHistory('claude', b.sourceId, b.nativeId);
-      if (!path) throw new Error('辅助 Claude 会话记录不可读');
-      const file = await open(path, constants.O_WRONLY | constants.O_APPEND);
-      try { await file.writeFile(JSON.stringify({ type: 'custom-title', sessionId: b.nativeId, customTitle: b.name }) + '\n'); }
-      finally { await file.close(); }
-    }
+    await sessionOperations(this.deps.tools.get(b.toolId)).rename(b.nativeId, b.name);
     this.renamed.add(key);
   }
   /** Materialize a chat-local routing catalog entry for the shared native conversation. */
@@ -342,7 +333,7 @@ export class AuxiliaryGroups {
     if (b.nativeId === b.linkedSource?.nativeId) throw new Error('辅助会话不能恢复原会话');
     if (this.deps.catalog?.isScopeArchived(chatId)) throw new Error('辅助群已归档');
     this.deps.catalog?.upsertActive({ ...identity, sourceId: b.sourceId, botAppId: this.deps.appId,
-      ...(b.toolId === 'codex' ? { threadId: b.nativeId } : { sessionId: b.nativeId }) });
+      ...nativeSessionFields(b.toolId, b.nativeId) });
     this.deps.sessions.set(chatId, b.nativeId, this.get(chatId)!.cwd!);
     await Promise.all([this.deps.catalog?.flush(), this.deps.sessions.flush()]);
   }
@@ -474,7 +465,7 @@ export class AuxiliaryGroups {
       if (!source || this.deps.bindings.isArchived(tool.id, tool.sourceId, source.nativeId)) throw new Error('原会话已不可用，请重新选择。');
       const workspace = await resolveWorkingDirectory(source.cwd);
       if (!workspace.ok) throw new Error(workspace.userVisible);
-      const historyPath = await findSessionHistory(tool.id, tool.sourceId, source.nativeId);
+      const historyPath = await sessionOperations(tool).historyPath(source.nativeId);
       if (!historyPath) throw new Error('未找到原会话的可读取记录，请重新选择。');
       if (!await auxiliaryBotIsMember(this.deps.channel, row.chatId)) throw new Error('机器人已不在目标群内，无法关联。');
       const linkedSource: LinkedSession = { toolId: tool.id, sourceId: tool.sourceId, nativeId: source.nativeId, historyPath };
@@ -541,7 +532,11 @@ export class AuxiliaryGroups {
     if (!row || !this.isActive(chatId) || !row.source) throw new Error('辅助群尚未关联或已退出。');
     const source = row.source;
     let location = source.historyPath;
-    try { await access(location); } catch { location = await findSessionHistory(source.toolId, source.sourceId, source.nativeId) ?? '当前记录不可读'; }
+    const operations = sessionOperations(this.deps.tools.get(source.toolId));
+    try {
+      if (operations.historyMode === 'snapshot') location = await operations.historyPath(source.nativeId) ?? '当前记录不可读';
+      else try { await access(location); } catch { location = await operations.historyPath(source.nativeId) ?? '当前记录不可读'; }
+    } catch { location = '当前记录不可读'; }
     // Recheck trusted metadata even though normal intake already splits permission classes.
     const binding = this.deps.bindings.get(chatId);
     const key = binding?.sharedScope ?? chatId;
@@ -574,11 +569,7 @@ export class AuxiliaryGroups {
         for (const id of ids) {
           if (id === row.source?.nativeId) throw new Error('拒绝归档关联原会话。');
           if (sharedElsewhere) continue;
-          if (binding.toolId === 'codex') {
-            const agent = this.deps.tools.get('codex').agent;
-            if (!agent.archiveThread) throw new Error('当前 Codex 未提供原生归档能力。');
-            await agent.archiveThread(id);
-          }
+          await sessionOperations(this.deps.tools.get(binding.toolId)).archive(id);
           this.deps.bindings.archive(binding.toolId, binding.sourceId, id);
         }
         for (const entry of this.deps.catalog?.entries().filter(e => e.scopeId === chatId && e.status === 'active') ?? []) this.deps.catalog!.archiveActive(entry);
@@ -627,15 +618,4 @@ export function wrapAuxiliaryPrompt(source: Pick<LinkedSession, 'toolId' | 'nati
   });
 }
 
-export async function findSessionHistory(toolId: AgentKind, sourceId: string, nativeId: string): Promise<string | undefined> {
-  if (!/^[\da-f-]{36}$/i.test(nativeId)) return undefined;
-  const roots = toolId === 'claude' ? [join(sourceId, 'projects')] : [join(sourceId, 'sessions'), join(sourceId, 'archived_sessions')];
-  async function walk(dir: string, depth: number): Promise<string | undefined> {
-    let files; try { files = await readdir(dir, { withFileTypes: true }); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return; throw e; }
-    for (const f of files) {
-      if (f.isFile() && (f.name === `${nativeId}.jsonl` || f.name.endsWith(`-${nativeId}.jsonl`))) return join(dir, f.name);
-      if (f.isDirectory() && depth < 4) { const found = await walk(join(dir, f.name), depth + 1); if (found) return found; }
-    }
-  }
-  for (const root of roots) { const found = await walk(root, 0); if (found) return found; }
-}
+export const findSessionHistory = findNativeHistory;

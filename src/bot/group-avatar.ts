@@ -7,6 +7,8 @@ import { GROUP_AVATAR_IMAGES } from './group-avatar-images';
 const uploads = new WeakMap<LarkChannel, Map<AgentKind, Promise<string>>>();
 
 export async function sessionGroupAvatar(channel: LarkChannel, toolId: AgentKind): Promise<string | undefined> {
+  if (!(toolId in GROUP_AVATAR_IMAGES)) return undefined;
+  const image = GROUP_AVATAR_IMAGES[toolId as keyof typeof GROUP_AVATAR_IMAGES];
   if (!channel.rawClient.im?.v1?.image?.create) return undefined;
   let cache = uploads.get(channel);
   if (!cache) { cache = new Map(); uploads.set(channel, cache); }
@@ -14,7 +16,7 @@ export async function sessionGroupAvatar(channel: LarkChannel, toolId: AgentKind
   if (!pending) {
     pending = (async () => {
       const response = await channel.rawClient.im.v1.image.create({
-        data: { image_type: 'avatar', image: Buffer.from(GROUP_AVATAR_IMAGES[toolId], 'base64') },
+        data: { image_type: 'avatar', image: Buffer.from(image, 'base64') },
       });
       const key = response?.image_key;
       if (!key?.trim()) throw new Error('Group avatar upload returned no image key');

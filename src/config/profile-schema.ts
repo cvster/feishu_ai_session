@@ -1,3 +1,4 @@
+import { isToolId, type ToolId } from '../tools/definitions';
 import type {
   AppCredentials,
   AppPreferences,
@@ -13,7 +14,7 @@ import {
   type PermissionSource,
 } from './permissions';
 
-export type AgentKind = 'claude' | 'codex';
+export type AgentKind = ToolId;
 export type SandboxMode = CodexSandboxMode;
 export type { AccessMode, PermissionConfig, PermissionSource };
 
@@ -90,6 +91,7 @@ export interface ProfileConfig {
   permissions: PermissionConfig;
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
+  zcode?: { binaryPath: string; args?: string[]; dataDir?: string };
   attachments: AttachmentConfig;
   comments: CommentConfig;
   larkCli: LarkCliConfig;
@@ -116,6 +118,7 @@ export interface CreateDefaultProfileConfigInput {
   sandbox?: Partial<SandboxConfig>;
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
+  zcode?: { binaryPath: string; args?: string[]; dataDir?: string };
   secrets?: SecretsConfig;
 }
 
@@ -150,6 +153,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     sandbox?: Partial<SandboxConfig>;
     permissions?: Partial<PermissionConfig>;
     codex?: CodexConfig & { flags?: unknown };
+    zcode?: { binaryPath?: unknown; args?: unknown; dataDir?: unknown };
     attachments?: Partial<AttachmentConfig>;
     comments?: unknown;
     larkCli?: unknown;
@@ -158,8 +162,8 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
   if (raw.schemaVersion !== 2) {
     throw new Error('profile schemaVersion must be 2');
   }
-  if (raw.agentKind !== 'claude' && raw.agentKind !== 'codex') {
-    throw new Error('agentKind must be claude or codex');
+  if (!isToolId(raw.agentKind)) {
+    throw new Error('agentKind must be a registered tool (claude, codex, zcode)');
   }
   const accounts = normalizeAccounts(raw.accounts);
   if (raw.agentKind === 'codex' && !raw.codex) {
@@ -196,6 +200,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissions,
     permissionSource,
     ...(raw.codex ? { codex: normalizeCodex(raw.codex) } : {}),
+    ...(raw.zcode ? { zcode: normalizeZcode(raw.zcode) } : {}),
     attachments: {
       maxCount: numberOr(raw.attachments?.maxCount, 10),
       maxBytes: numberOr(raw.attachments?.maxBytes, 100 * 1024 * 1024),
@@ -346,4 +351,11 @@ function numberOr(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
     ? value
     : fallback;
+}
+
+function normalizeZcode(input: { binaryPath?: unknown; args?: unknown; dataDir?: unknown }): NonNullable<ProfileConfig['zcode']> {
+  if (typeof input.binaryPath !== 'string' || !input.binaryPath.trim() ||
+      (input.args !== undefined && (!Array.isArray(input.args) || !input.args.every(v => typeof v === 'string'))) ||
+      (input.dataDir !== undefined && typeof input.dataDir !== 'string')) throw new Error('Invalid zcode configuration');
+  return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.dataDir ? { dataDir: input.dataDir as string } : {}) };
 }

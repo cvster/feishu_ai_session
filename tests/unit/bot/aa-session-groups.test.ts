@@ -197,6 +197,22 @@ describe('AA session automatic groups', () => {
     expect(workspaces.setCwd).toHaveBeenCalledWith('oc_auto_1', process.cwd());
   });
 
+  it('binds an opaque ZCode AA session once and archives only ZCode metadata', async () => {
+    const knownChats: Array<{ id: string; name: string }> = [];
+    const h = createHarness([historyThread('sess_native', 'AA-ZCode', 1)], { knownChats });
+    const archive = vi.fn();
+    h.sessionCatalog.archiveNativeSession = archive;
+    h.deps.controls.profileConfig.agentKind = 'zcode';
+    const deps = { ...h.deps, toolId: 'zcode' as const, sourceId: 'zcode-data' };
+    await syncAaSessionGroupsOnce(deps);
+    knownChats.push({ id: 'oc_auto_1', name: 'AA-ZCode' });
+    await syncAaSessionGroupsOnce(deps);
+    expect(h.created).toHaveLength(1);
+    expect(h.sessionCatalog.upsertActive).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'zcode', sessionId: 'sess_native', sourceId: 'zcode-data' }));
+    expect(archive).toHaveBeenCalledWith('zcode', 'sess_native', 'zcode-data');
+    expect(h.sessionCatalog.archiveThread).not.toHaveBeenCalled();
+  });
+
   it('creates only the highest trailing-number version during an initial scan', async () => {
     const h = createHarness([
       historyThread('thread-v2', 'AA-脚踝自动标零2', 2),

@@ -12,6 +12,7 @@ export function submissionFingerprint(input: WorkerSubmission): string {
   const o = input.options;
   const fields: unknown[] = [o.prompt, o.cwd, o.model, o.permissionMode, o.sandbox,
     o.images, o.attachmentPaths, o.delivery?.scope, o.delivery?.botAppId, o.delivery?.sourceId];
+  if (o.accessMode !== undefined) fields.push({ accessMode: o.accessMode });
   // Preserve fingerprints of tasks accepted before CC effort was configurable.
   if (o.reasoningEffort !== undefined) fields.push({ reasoningEffort: o.reasoningEffort });
   return jobIdFor(JSON.stringify(fields));

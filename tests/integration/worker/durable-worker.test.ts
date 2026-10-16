@@ -80,3 +80,12 @@ it('defines an independent systemd unit with no bridge lifetime dependency', () 
   expect(unit).not.toMatch(/PartOf=|BindsTo=|bot\.p/);
   expect(unit).toContain('KillMode=control-group'); expect(unit).toContain('Restart=on-failure');
 });
+
+it('keeps ZCode service selection and custom storage independent of Claude', () => {
+  const unit = buildWorkerUnit({ node: '/node', entry: '/bridge/entry.mjs', profile: 'p', config: '/state/config.json', envPath: '/bin',
+    toolId: 'zcode', zcodeDataDir: '/private/zcode data', zcodeBinary: '/private/zcode-cli' });
+  expect(unit).toContain('--tool zcode');
+  expect(unit).toContain('Environment="ZCODE_STORAGE_DIR=/private/zcode data"');
+  expect(unit).toContain('Environment="LARK_CHANNEL_ZCODE_BIN=/private/zcode-cli"');
+  expect(unit).not.toMatch(/CLAUDE_CONFIG_DIR|LARK_CHANNEL_CLAUDE_BIN|PartOf=|BindsTo=/);
+});

@@ -1,0 +1,107 @@
+import { loadZcodeRuntimeModel } from './model-config';
+import { createHash } from 'node:crypto';
+import type { AgentAdapter, AgentBotIdentity, AgentEvent, AgentRun, AgentRunOptions } from '../types';
+import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
+import { checkAgentAvailability } from '../preflight';
+import { ZcodeClient, zcodeCommand, type ZcodeOptions } from './client';
+
+export function zcodeWorkspace(cwd: string) {
+  return { workspacePath: cwd, workspaceKey: createHash('sha256').update(cwd).digest('hex') };
+}
+/** The independent worker owns this connection; bridge restarts only detach observers. */
+export class ZcodeAdapter implements AgentAdapter {
+  readonly id = 'zcode'; readonly displayName = 'ZCode';
+  private identity?: AgentBotIdentity;
+  constructor(readonly options: ZcodeOptions = {}) {}
+  setBotIdentity(identity: AgentBotIdentity): void { this.identity = identity; }
+  async checkAvailability() {
+    const command = zcodeCommand(this.options);
+    return checkAgentAvailability({ agentId: 'zcode', agentName: 'ZCode', command: command.binary, binaryPath: command.binary, args: [...command.args, '--version'] });
+  }
+  async isAvailable(): Promise<boolean> { return (await this.checkAvailability()).ok; }
+  run(opts: AgentRunOptions): AgentRun {
+    if (!opts.cwd) throw new Error('ZCode requires a project directory');
+    const client = new ZcodeClient(this.options, opts.cwd);
+    const queue: AgentEvent[] = []; let wake: (() => void) | undefined;
+    let ended = false, stopping = false, sessionId: string | undefined, sent = false, currentTurn: string | undefined;
+    const inputId = `bridge-${opts.runId}`;
+    let ownTurnStarted = false; const sequences = new Map<string, number>();
+    const push = (event: AgentEvent) => { if (!ended) { queue.push(event); if (event.type === 'done' || event.type === 'error') { ended = true; finish(); } wake?.(); } };
+    let response = '';
+    let finish!: () => void; const finished = new Promise<void>(resolve => { finish = resolve; });
+    client.onInteraction = method => push({ type: 'error', terminationReason: 'failed', message: `ZCode 请求尚未适配的交互 ${method}，桥接未自动同意。` });
+    client.onNotification((method, params) => {
+      const event = params?.event ?? params;
+      if (method !== 'session/event' || !event || event.sessionId !== sessionId || !sent) return;
+      const payload = event.payload ?? {};
+      if (payload.inputId && payload.inputId !== inputId) return;
+      if (event.type === 'turn.started') { currentTurn = event.turnId; ownTurnStarted = true; return; }
+      if (!ownTurnStarted && payload.inputId !== inputId) return;
+      if (currentTurn && event.turnId && currentTurn !== event.turnId) return;
+      const sequenceKey = event.turnId ?? '';
+      if (typeof event.seq === 'number') {
+        if (event.seq <= (sequences.get(sequenceKey) ?? -1)) return;
+        sequences.set(sequenceKey, event.seq);
+      }
+      if (event.type === 'model.streaming' || event.type === 'part.delta') {
+        if (payload.kind === 'text_delta' || payload.field === 'text') { response += payload.delta ?? ''; push({ type: 'text', delta: payload.delta ?? '' }); }
+        else if (payload.kind === 'reasoning_delta' || payload.field === 'reasoning') push({ type: 'thinking', delta: payload.delta ?? '' });
+      }
+      if (event.type === 'tool.updated') {
+        const id = payload.toolCallId; if (!id) return;
+        if (payload.kind === 'result' || payload.kind === 'error' || payload.status === 'completed' || payload.status === 'failed') {
+          const output = payload.result?.content ?? payload.output ?? payload.error ?? '';
+          push({ type: 'tool_result', id, output: typeof output === 'string' ? output : JSON.stringify(output), isError: payload.kind === 'error' || payload.status === 'failed' || payload.result?.success === false });
+        } else if (payload.kind !== 'progress' && payload.kind !== 'batch') push({ type: 'tool_use', id, name: payload.toolName ?? 'ZCode tool', input: payload.input ?? {} });
+      }
+      if (event.type === 'turn.completed') {
+        if (typeof payload.response === 'string' && payload.response.startsWith(response) && payload.response.length > response.length) push({ type: 'text', delta: payload.response.slice(response.length) });
+        if (payload.resultType && !['success', 'cancelled'].includes(payload.resultType)) push({ type: 'error', terminationReason: 'failed', message: `ZCode task ended: ${payload.resultType}` });
+        else push({ type: 'done', sessionId, terminationReason: stopping || payload.resultType === 'cancelled' ? 'interrupted' : 'normal' });
+      }
+      if (event.type === 'turn.failed') push({ type: 'error', terminationReason: stopping ? 'interrupted' : 'failed', message: payload.error?.message ?? 'ZCode task failed' });
+    });
+    const task = (async () => {
+      try {
+        const mode = opts.accessMode === 'read-only' || opts.sandbox === 'read-only' ? 'plan' : opts.accessMode === 'workspace' || opts.sandbox === 'workspace-write' ? 'build' : 'yolo';
+        const runtimeModel = await loadZcodeRuntimeModel(this.options, opts.model);
+        const modelParams = runtimeModel ? { runtimeModel } : {};
+        const snapshot = opts.sessionId
+          ? await client.request('session/resume', { sessionId: opts.sessionId, workspace: zcodeWorkspace(opts.cwd!), ...modelParams })
+          : await client.request('session/create', { workspace: zcodeWorkspace(opts.cwd!), mode, titleGenerationEnabled: false, ...modelParams });
+        sessionId = snapshot.session?.sessionId ?? snapshot.sessionId;
+        if (!sessionId || (opts.sessionId && sessionId !== opts.sessionId)) throw new Error('ZCode returned a mismatched session');
+        if (snapshot.session?.status === 'running' || snapshot.runtime?.isRunning) throw new Error('ZCode 会话正在运行，请在原入口完成后继续。');
+        push({ type: 'system', sessionId, cwd: opts.cwd });
+        await client.request('session/setMode', { sessionId, mode });
+        await client.request('session/subscribe', { sessionId, deliveryKind: 'web-remote-replayable' });
+        if (stopping) { push({ type: 'done', sessionId, terminationReason: 'interrupted' }); return; }
+        sent = true;
+        const prompt = `${buildBridgeSystemPrompt(this.identity)}\n\n${opts.prompt}${opts.attachmentPaths?.length ? `\n\n本次本机附件路径（按外传限制使用）：${JSON.stringify(opts.attachmentPaths)}` : ''}`;
+        const result = await client.request('session/send', { sessionId, inputId, content: prompt, ...modelParams });
+        if (result.accepted !== true) throw new Error('ZCode did not acknowledge task acceptance');
+        await finished;
+      } catch (error) {
+        push({ type: 'error', terminationReason: stopping ? 'interrupted' : 'failed', submissionStatus: sent ? 'unknown' : 'rejected',
+          message: error instanceof Error ? error.message : String(error) });
+      } finally { await client.close(); wake?.(); }
+    })();
+    void client.exited.then(() => { if (!ended) push({ type: 'error', terminationReason: 'failed', submissionStatus: sent ? 'unknown' : 'rejected', message: 'ZCode 连接已断开，任务状态未确认；未自动重发。' }); });
+    return { runId: opts.runId,
+      events: { async *[Symbol.asyncIterator]() { while (!ended || queue.length) { if (queue.length) yield queue.shift()!; else await new Promise<void>(resolve => { wake = resolve; }); } } },
+      async stop() {
+        stopping = true;
+        if (sessionId && sent && !ended) {
+          try {
+            await client.request('session/stop', { sessionId });
+            push({ type: 'done', sessionId, terminationReason: 'interrupted' });
+          } catch {
+            push({ type: 'error', terminationReason: 'failed', submissionStatus: 'unknown', message: 'ZCode 停止回执未确认；已关闭本次原生连接，未自动重发。' });
+            await client.close();
+          }
+        }
+      },
+      async waitForExit(timeoutMs) { let timer: ReturnType<typeof setTimeout>; return Promise.race([task.then(() => true), new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); })]).finally(() => clearTimeout(timer!)); },
+    };
+  }
+}

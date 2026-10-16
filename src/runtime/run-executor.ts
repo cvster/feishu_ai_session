@@ -6,7 +6,7 @@ import { ProcessPool } from '../bot/process-pool';
 import type { RunPolicyAllow } from '../policy/run-policy';
 import { log } from '../core/logger';
 import { RunRejected, SpawnFailed } from './errors';
-import type { CodexSubmissionResult } from '../../packages/codex-core/src/submission';
+import type { AgentSubmissionResult } from '../agent/types';
 import type { RunDelivery } from '../worker/protocol';
 
 export interface RunExecutorDeps {
@@ -65,7 +65,7 @@ export class RunExecutor {
   private readonly nativeSessionKey?: RunExecutorDeps['nativeSessionKey'];
   private readonly initialSessionIdForScope?: RunExecutorDeps['initialSessionIdForScope'];
   private readonly sessionNameForScope: RunExecutorDeps['sessionNameForScope'];
-  private readonly submissions = new Set<Promise<CodexSubmissionResult>>();
+  private readonly submissions = new Set<Promise<AgentSubmissionResult>>();
   private readonly agent: AgentAdapter;
   private readonly pool: ProcessPool;
   private readonly activeRuns: ActiveRuns;
@@ -87,7 +87,7 @@ export class RunExecutor {
   }
 
   submitMessage(input: SubmitRunInput, beforeSend: (prepared: { threadId: string; knownTurnIds: string[];
-    transport: 'rpc' | 'cli' }) => Promise<void>): Promise<CodexSubmissionResult> {
+    transport: 'rpc' | 'cli' }) => Promise<void>): Promise<AgentSubmissionResult> {
     const task = this.submitMessageImpl(input, beforeSend);
     this.submissions.add(task);
     void task.finally(() => this.submissions.delete(task)).catch(() => {});
@@ -97,7 +97,7 @@ export class RunExecutor {
   async waitForSubmissions(): Promise<void> { await Promise.allSettled([...this.submissions]); }
 
   private async submitMessageImpl(input: SubmitRunInput, beforeSend: (prepared: { threadId: string; knownTurnIds: string[];
-    transport: 'rpc' | 'cli' }) => Promise<void>): Promise<CodexSubmissionResult> {
+    transport: 'rpc' | 'cli' }) => Promise<void>): Promise<AgentSubmissionResult> {
     if (!this.agent.submit) throw new Error('Agent does not support acceptance-only submission');
     if (this.activeRuns.newRunsPaused()) throw new RunRejected('reconnect-in-progress', 'Bridge is disconnecting');
     const releaseScope = this.activeRuns.reserve(input.scopeId);
@@ -180,6 +180,8 @@ export class RunExecutor {
       model: input.model,
       reasoningEffort: input.reasoningEffort,
       images: input.images,
+      ...(this.agent.id === 'zcode' ? { accessMode: input.policy.accessMode } : {}),
+      attachmentPaths: input.attachmentPaths,
       sandbox: input.policy.sandbox,
       permissionMode: input.policy.permissionMode,
       stopGraceMs: input.stopGraceMs,

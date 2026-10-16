@@ -27,7 +27,7 @@ export async function startWorkerServer(options: WorkerServerOptions) {
   for (const job of store.list()) if (isJobActive(job)) {
     const terminal = store.snapshot(job.id)?.events.map(row => row.event).reverse().find(event => event.type === 'done' || event.type === 'error');
     if (terminal) {
-      await store.put({ ...job, status: terminal.type === 'done' && terminal.terminationReason === 'normal' ? 'completed' : terminal.terminationReason === 'interrupted' ? 'interrupted' : 'failed', updatedAt: Date.now() });
+      await store.put({ ...job, status: terminal.type === 'error' && terminal.submissionStatus === 'unknown' ? 'unknown' : terminal.type === 'done' && terminal.terminationReason === 'normal' ? 'completed' : terminal.terminationReason === 'interrupted' ? 'interrupted' : 'failed', updatedAt: Date.now() });
       continue;
     }
     // A crash may occur on either side of spawn. Never replay an uncertain request.
@@ -72,7 +72,7 @@ export async function startWorkerServer(options: WorkerServerOptions) {
         await store.append(job.id, event.type === 'done' && timeout ? { ...event, terminationReason: 'timeout' } : event);
         if (event.type === 'done' || event.type === 'error') {
           terminal = true;
-          status = event.type === 'done' && event.terminationReason === 'normal' ? 'completed' :
+          status = event.type === 'error' && event.submissionStatus === 'unknown' ? 'unknown' : event.type === 'done' && event.terminationReason === 'normal' ? 'completed' :
             event.terminationReason === 'interrupted' || stopped.has(job.id) ? 'interrupted' : 'failed';
           if (timer) { clearInterval(timer); timer = undefined; }
         }
@@ -88,7 +88,7 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       if (timer) clearInterval(timer);
       if (!terminal) await store.append(job.id, status === 'interrupted' || stopped.has(job.id) || timeout
         ? { type: 'done', terminationReason: timeout ? 'timeout' : 'interrupted' }
-        : { type: 'error', terminationReason: 'failed', message: 'Claude 进程已退出，但未返回完整结果；未自动重新执行。' });
+        : { type: 'error', terminationReason: 'failed', message: `${options.agent.displayName} 进程已退出，但未返回完整结果；未自动重新执行。` });
       await persistStatus(job, status);
       runs.delete(job.id); tasks.delete(job.id); stopped.delete(job.id);
       if (native) nativeLeases.delete(native);

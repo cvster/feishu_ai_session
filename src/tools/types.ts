@@ -1,3 +1,4 @@
+import { isToolId } from './definitions';
 import type { AgentAdapter } from '../agent/types';
 import type { AgentKind } from '../config/profile-schema';
 
@@ -11,7 +12,14 @@ export interface ToolSession {
 }
 
 /** Provider-specific formats and protocols stay behind this interface. */
+export interface ToolSessionOperations {
+  readonly historyMode?: 'file' | 'snapshot';
+  historyPath(nativeId: string): Promise<string | undefined>;
+  rename(nativeId: string, name: string): Promise<void>;
+  archive(nativeId: string): Promise<void>;
+}
 export interface AgentTool {
+  sessions?: ToolSessionOperations;
   id: AgentKind;
   sourceId: string;
   label: string;
@@ -23,6 +31,7 @@ export interface AgentTool {
 export class ToolRegistry {
   private readonly tools = new Map<AgentKind, AgentTool>();
   register(tool: AgentTool): void {
+    if (!isToolId(tool.id)) throw new Error(`未注册的执行工具：${String(tool.id)}`);
     if (this.tools.has(tool.id)) throw new Error(`Duplicate tool: ${tool.id}`);
     this.tools.set(tool.id, tool);
   }

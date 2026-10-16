@@ -269,7 +269,7 @@ function controlButtonRow(options: RunCardRenderOptions): object {
     ...(options.auxiliary || options.showStopButton !== false ? [stopButton(options)] : []),
     ...(!options.auxiliary ? [iconButton('setting_outlined', 'config', '模型与推理设置')] : []),
     iconButton('refresh_outlined', 'refresh', '刷新会话状态', 'green'),
-    ...(!options.auxiliary ? [forkButton(options), archiveButton()] : []),
+    ...(!options.auxiliary ? [...(options.supportsFork === false ? [] : [forkButton(options)]), archiveButton()] : []),
   ];
   return {
     tag: 'column_set',

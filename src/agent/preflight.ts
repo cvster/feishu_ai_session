@@ -1,7 +1,8 @@
+import { isToolId, toolDefinition, type ToolId } from '../tools/definitions';
 import { spawnProcess } from '../platform/spawn';
 import { resolveCodexBinary } from '../platform/codex-binary';
 
-export type LocalAgentId = 'claude' | 'codex';
+export type LocalAgentId = ToolId;
 
 export type AgentPreflightErrorCode =
   | 'agent-binary-not-found'
@@ -281,7 +282,7 @@ export function isAgentPreflightDiagnostic(input: unknown): input is AgentPrefli
   return (
     typeof raw.code === 'string' &&
     raw.code.startsWith('agent-') &&
-    (raw.agentId === 'claude' || raw.agentId === 'codex') &&
+    isToolId(raw.agentId) &&
     typeof raw.agentName === 'string' &&
     typeof raw.command === 'string'
   );

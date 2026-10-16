@@ -1,3 +1,4 @@
+import { isToolId, toolDefinition } from '../tools/definitions';
 import { randomUUID } from 'node:crypto';
 import { open, readFile, rename, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -385,7 +386,7 @@ function normalizeEntry(input: unknown): SessionCatalogEntry | undefined {
   if (
     typeof raw.key !== 'string' ||
     typeof raw.scopeId !== 'string' ||
-    (raw.agentId !== 'claude' && raw.agentId !== 'codex') ||
+    !isToolId(raw.agentId) ||
     typeof raw.cwdRealpath !== 'string' ||
     typeof raw.policyFingerprint !== 'string' ||
     (raw.status !== 'active' && raw.status !== 'archived') ||
@@ -431,14 +432,14 @@ function matchesIdentity(entry: SessionCatalogEntry, input: SessionCatalogIdenti
 }
 
 function isValidAgentEntry(entry: SessionCatalogEntry): boolean {
-  if (entry.agentId === 'claude') return Boolean(entry.sessionId) && !entry.threadId;
+  if (toolDefinition(entry.agentId).nativeField === 'sessionId') return Boolean(entry.sessionId) && !entry.threadId;
   return Boolean(entry.threadId) && !entry.sessionId;
 }
 
 function assertAgentIdentity(input: UpsertSessionCatalogInput): void {
-  if (input.agentId === 'claude') {
+  if (toolDefinition(input.agentId).nativeField === 'sessionId') {
     if (!input.sessionId || input.threadId) {
-      throw new Error('Claude catalog entries require sessionId and must not include threadId');
+      throw new Error(`${toolDefinition(input.agentId).label} catalog entries require sessionId and must not include threadId`);
     }
     return;
   }

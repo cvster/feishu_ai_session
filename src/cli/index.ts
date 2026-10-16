@@ -54,7 +54,7 @@ program
   .description('Run the bridge in the foreground (was `start` in older versions)')
   .option('-c, --config <path>', 'path to config file')
   .option('--profile <name>', 'profile name to run')
-  .option('--agent <kind>', 'agent kind for a new profile (claude or codex)')
+  .option('--agent <kind>', 'agent kind for a new profile (claude, codex or zcode)')
   .option('--workspace <path>', 'initial working directory for first-run profile bootstrap')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
   .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')
@@ -78,7 +78,7 @@ program
   .description('Migrate legacy bridge config/state into the current profile layout')
   .option('-c, --config <path>', 'path to config file')
   .option('--profile <name>', 'target profile name for legacy v1 config migration')
-  .option('--agent <kind>', 'agent kind for legacy v1 profile migration (claude or codex)')
+  .option('--agent <kind>', 'agent kind for legacy v1 profile migration (claude, codex or zcode)')
   .action(async (opts: { config?: string; profile?: string; agent?: string }) => {
     await runMigrate(opts);
   });
@@ -87,7 +87,7 @@ const profile = program
   .command('profile')
   .description('Manage local bridge profiles');
 
-const worker = program.command('worker').description('Manage the independent Claude execution worker');
+const worker = program.command('worker').description('Manage the independent tool execution workers');
 const a2a = program.command('a2a').description('Manage FF project-assistant A2A HTTP endpoints (never restarts services)');
 for (const action of ['configure', 'list', 'enable', 'disable', 'alias', 'grant', 'revoke'] as const) {
   const command = a2a.command(['configure', 'list'].includes(action) ? action : `${action} <session>`)
@@ -101,10 +101,12 @@ for (const action of ['configure', 'list', 'enable', 'disable', 'alias', 'grant'
 }
 worker.command('run').description('Run a worker in the foreground under an independent supervisor')
   .option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
+  .option('--tool <kind>', 'worker tool (claude or zcode; default claude)')
   .action(runWorker);
 for (const action of ['start', 'stop', 'status'] as const) {
-  worker.command(action).description(action === 'stop' ? 'Stop the worker and its active Claude tasks' : `${action} the independent worker (does not restart the bridge)`)
+  worker.command(action).description(action === 'stop' ? 'Stop the worker and its active tasks of the selected tool' : `${action} the independent worker (does not restart the bridge)`)
     .option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
+    .option('--tool <kind>', 'worker tool (claude or zcode; default claude)')
     .action(options => workerService(action, options));
 }
 
@@ -118,7 +120,7 @@ profile
 profile
   .command('create <name>')
   .description('Create a profile from QR registration or existing app credentials')
-  .option('--agent <kind>', 'agent kind (claude or codex)')
+  .option('--agent <kind>', 'agent kind (claude, codex or zcode)')
   .option('--workspace <path>', 'initial working directory for this profile')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
   .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')
@@ -190,7 +192,7 @@ program
   .command('start')
   .description('Install (if needed) and start the bridge as an OS-managed daemon')
   .option('--profile <name>', 'profile name (defaults to active profile)')
-  .option('--agent <kind>', 'agent kind for first-run profile bootstrap (claude or codex)')
+  .option('--agent <kind>', 'agent kind for first-run profile bootstrap (claude, codex or zcode)')
   .option('--workspace <path>', 'initial working directory for first-run profile bootstrap')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
   .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')

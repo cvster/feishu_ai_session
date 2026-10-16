@@ -1,3 +1,4 @@
+import { ZcodeAdapter } from '../../agent/zcode/adapter';
 import dns from 'node:dns';
 import os from 'node:os';
 import { createInterface } from 'node:readline';
@@ -436,6 +437,7 @@ export function createRuntimeAgent(
       useQueueForExistingThreads: true,
     });
   }
+  if (profileConfig.agentKind === 'zcode') return new ZcodeAdapter({ binary: profileConfig.zcode?.binaryPath, args: profileConfig.zcode?.args, dataDir: profileConfig.zcode?.dataDir, larkChannel });
   return new ClaudeAdapter({ larkChannel, binary: process.env.LARK_CHANNEL_CLAUDE_BIN });
 }
 

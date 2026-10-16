@@ -1,3 +1,6 @@
+import { zcodeStorageDir } from '../agent/zcode/client';
+import { zcodeCommand } from '../agent/zcode/client';
+import { workerStateDirName, type ToolId } from '../tools/definitions';
 import { createRequire } from 'node:module';
 import { access, constants, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -18,7 +21,7 @@ import pkg from '../../package.json';
 // Project support floor, not the date these features first appeared upstream.
 // Always check capabilities too: a version string alone proves very little.
 export const SUPPORTED = { codex: '0.159.2', claude: '2.1.261', lark: '1.0.97', pnpm: '10.33.0', node: '20.12.0' };
-export type Agents = 'auto' | 'codex' | 'claude' | 'both';
+export type Agents = 'auto' | ToolId | 'both';
 export interface ProbeResult { ok: boolean; output: string }
 export type Probe = (command: string, args: string[]) => Promise<ProbeResult>;
 export interface Check { id: string; status: 'pass' | 'warn' | 'fail'; detail: string; fix?: string }
@@ -55,7 +58,7 @@ export async function checkTool(kind: 'codex' | 'claude', binary: string, run: P
 }
 export async function collectChecks(options: DoctorOptions, run: Probe = probe): Promise<Check[]> {
   const rows: Check[] = [], requested = options.agents ?? 'auto';
-  if (!['auto', 'codex', 'claude', 'both'].includes(requested)) throw new Error('--agents 仅支持 auto、codex、claude、both');
+  if (!['auto', 'codex', 'claude', 'zcode', 'both'].includes(requested)) throw new Error('--agents 仅支持 auto、codex、claude、zcode、both');
   const rootDir = options.config ? dirname(resolve(options.config)) : undefined;
   const profile = options.profile ?? await readActiveProfile(rootDir);
   if (profile) await loadRuntimeEnv(profile, rootDir);
@@ -84,10 +87,23 @@ export async function collectChecks(options: DoctorOptions, run: Probe = probe):
   const codexBinary = resolveCodexBinary(selected?.codex?.binaryPath ?? process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex');
   const claudeBinary = process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude';
   const available = { codex: await run(codexBinary, ['--version']), claude: await run(claudeBinary, ['--version']) };
-  const kinds: ('codex' | 'claude')[] = requested === 'both' ? ['codex', 'claude'] : requested !== 'auto' ? [requested as 'codex' | 'claude'] :
+  const kinds: ToolId[] = requested === 'both' ? ['codex', 'claude'] : requested !== 'auto' ? [requested as ToolId] :
     selected ? [selected.agentKind] : (['codex', 'claude'] as const).filter(kind => available[kind].ok);
   if (!kinds.length) rows.push({ id: 'agents', status: 'fail', detail: '至少需要 Codex 或 Claude 之一', fix: '运行安装脚本 --agents codex、claude 或 both' });
   for (const kind of kinds) {
+    if (kind === 'zcode') {
+      const command = zcodeCommand({ binary: selected?.zcode?.binaryPath, args: selected?.zcode?.args });
+      const version = await run(command.binary, [...command.args, '--version']);
+      const help = await run(command.binary, [...command.args, '--help']);
+      rows.push({ id: 'zcode.capabilities', status: version.ok && help.ok && ['app-server', '--resume', '--mode'].every(flag => help.output.includes(flag)) ? 'pass' : 'fail', detail: 'ZCode Agent CLI 版本与 app-server/恢复/权限入口检查（不启动任务）' });
+      rows.push({ id: 'zcode.auth', status: 'warn', detail: 'ZCode 的会话列表不证明模型已授权；请先在同一 CLI 完成登录和简单问答', fix: '配置本机 CLI 的模型与账号并验证问答，见 docs/ZCODE.md；不将凭据写入桥接仓库' });
+      if (options.runtime && selected) {
+        const source = zcodeStorageDir(selected.zcode);
+        try { await new WorkerClient(join(paths.profileDir, workerStateDirName('zcode')), source, selected.accounts.app.id, 'zcode').health(); rows.push({ id: 'zcode.worker', status: 'pass', detail: 'ZCode worker 身份和来源匹配' }); }
+        catch { rows.push({ id: 'zcode.worker', status: 'fail', detail: 'ZCode worker 未就绪', fix: `worker start --tool zcode --profile ${profile}` }); }
+      }
+      continue;
+    }
     const binary = kind === 'codex' ? codexBinary : claudeBinary;
     rows.push(...await checkTool(kind, binary, run));
     const auth = await run(binary, kind === 'codex' ? ['login', 'status'] : ['auth', 'status', '--json']);

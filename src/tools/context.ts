@@ -1,3 +1,4 @@
+import { toolDefinition } from './definitions';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
 import { canUseDm, canUseGroup } from '../policy/access';
 import type { Controls, CommandContext } from '../commands';
@@ -16,12 +17,13 @@ export function controlsForTool(root: Controls, toolId: AgentKind, scope?: strin
       const profile = toolProfile(target.profileConfig, toolId);
       if (binding?.model !== undefined) profile.preferences.model = binding.model === 'default' ? undefined : binding.model;
       if (binding?.reasoningEffort) profile.preferences.reasoningEffort = binding.reasoningEffort;
-      if (key === 'runControlIcons' && binding?.linkedSource) return { ...target.runControlIcons, auxiliary: true };
+      if (key === 'runControlIcons') return { ...target.runControlIcons, supportsFork: toolDefinition(toolId).fork, ...(binding?.linkedSource ? { auxiliary: true } : {}) };
       if (key === 'profileConfig') return profile;
       if (key === 'cfg') return { ...target.cfg, agentKind: toolId,
         preferences: { ...target.cfg.preferences, model: profile.preferences.model, reasoningEffort: profile.preferences.reasoningEffort } };
       if (toolId !== 'codex' && ['codexSubmissions', 'codexReplySync', 'codexUserInput'].includes(String(key))) return undefined;
-      if (toolId !== 'claude' && ['claudeReplySync', 'workerInbox'].includes(String(key))) return undefined;
+      if (key === 'workerInbox') return target.workerRuntimes?.get(toolId)?.inbox ?? (toolId === 'claude' ? target.workerInbox : undefined);
+      if (key === 'workerReplySync' || key === 'claudeReplySync') return target.workerRuntimes?.get(toolId)?.replies ?? (toolId === 'claude' ? target.claudeReplySync : undefined);
       return Reflect.get(target, key, receiver);
     },
   });

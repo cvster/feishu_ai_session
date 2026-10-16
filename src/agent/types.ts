@@ -1,7 +1,6 @@
 import type { AgentAvailability } from './preflight';
 import type { ClaudePermissionMode, CodexSandboxMode } from '../config/permissions';
 import type { CodexInputPrompt, CodexRequestId } from '../session/codex-user-input';
-import type { CodexSubmissionResult } from '../../packages/codex-core/src/submission';
 import type { RunDelivery } from '../worker/protocol';
 
 export type { ClaudePermissionMode } from '../config/permissions';
@@ -48,6 +47,7 @@ export interface AgentRunOptions {
   images?: readonly string[];
   /** All accepted local attachments; submission must not silently lose files. */
   attachmentPaths?: readonly string[];
+  accessMode?: import('../config/permissions').AccessMode;
   sandbox?: CodexSandboxMode;
   permissionMode?: ClaudePermissionMode;
   /**
@@ -99,7 +99,7 @@ export interface AgentAdapter {
   run(opts: AgentRunOptions): AgentRun;
   /** Queue acceptance only; subsequent execution belongs to the shared writer. */
   submit?(opts: AgentRunOptions, beforeSend: (prepared: { threadId: string; knownTurnIds: string[];
-    transport: 'rpc' | 'cli' }) => Promise<void>): Promise<CodexSubmissionResult>;
+    transport: 'rpc' | 'cli' }) => Promise<void>): Promise<AgentSubmissionResult>;
   setThreadName?(threadId: string, name: string): Promise<void>;
   archiveThread?(threadId: string): Promise<void>;
   forkThread?(threadId: string): Promise<{ threadId: string; name: string; cwd: string }>;
@@ -110,3 +110,9 @@ export interface AgentAdapter {
    */
   setBotIdentity?(identity: AgentBotIdentity): void;
 }
+
+/** Queue acceptance contract; threadId is the legacy native-queue wire name. */
+export type AgentSubmissionResult = { submissionId: string; threadId: string; transport: 'rpc' | 'cli' } & (
+  | { status: 'accepted'; queueId?: string; clientUserMessageId?: string; continuationWarning?: string }
+  | { status: 'rejected' | 'unknown'; message: string }
+);

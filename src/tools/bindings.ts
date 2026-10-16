@@ -1,12 +1,10 @@
+import { isToolId, type SessionRef } from './definitions';
 import { readFile } from 'node:fs/promises';
 import type { AgentKind } from '../config/profile-schema';
 import type { SessionCatalog } from '../session/catalog';
 import { writeFileAtomic } from '../platform/atomic-write';
 
-export interface LinkedSession {
-  toolId: AgentKind;
-  sourceId: string;
-  nativeId: string;
+export interface LinkedSession extends SessionRef {
   historyPath: string;
 }
 
@@ -41,9 +39,9 @@ export class ToolBindingStore {
       if (raw.version !== 1 || !raw.bindings || !Array.isArray(raw.archived)) throw new Error('Invalid tool binding ledger');
       for (const [scope, b] of Object.entries(raw.bindings)) {
         const value = b as ToolBinding;
-        if (!value || !['codex', 'claude'].includes(value.toolId) || typeof value.sourceId !== 'string') throw new Error('Invalid tool binding');
+        if (!value || !isToolId(value.toolId) || typeof value.sourceId !== 'string') throw new Error('Invalid tool binding');
         if (value.sharedScope !== undefined && (typeof value.sharedScope !== 'string' || !value.sharedScope)) throw new Error('Invalid shared scope');
-        if (value.linkedSource && (!['codex', 'claude'].includes(value.linkedSource.toolId) ||
+        if (value.linkedSource && (!isToolId(value.linkedSource.toolId) ||
           ![value.linkedSource.sourceId, value.linkedSource.nativeId, value.linkedSource.historyPath].every(v => typeof v === 'string' && v.length > 0))) throw new Error('Invalid linked source');
         this.bindings[scope] = value;
       }

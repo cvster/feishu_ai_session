@@ -1,3 +1,4 @@
+import { toolDefinition } from '../tools/definitions';
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import * as p from '@clack/prompts';
@@ -570,7 +571,7 @@ function formatAmbiguousAgentSelectionError(
 ): string {
   const lines = detected.map((agent) => `  - ${agent.kind}: ${agent.binaryPath}`);
   return [
-    '检测到多个本地 agent，请使用 --agent <claude|codex> 指定要初始化哪一个。',
+    '检测到多个本地 agent，请使用 --agent <claude|codex|zcode> 指定要初始化哪一个。',
     '已检测到：',
     ...lines,
   ].join('\n');
@@ -615,7 +616,7 @@ class UserCancelledError extends Error {
 }
 
 function displayAgentKind(kind: AgentKind): string {
-  return kind === 'claude' ? 'Claude Code' : 'Codex CLI';
+  return toolDefinition(kind).label;
 }
 
 async function maybeMigrateRootPlaintextSecret(

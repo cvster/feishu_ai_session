@@ -1,14 +1,15 @@
 # CodexFeishu · 飞书 AI 助手桥接
 
-将飞书 / Lark 群聊接入本机 Codex 和 Claude Code。私聊机器人创建或管理会话，在工作群中提问、处理图片和文件、执行项目任务；也可以把机器人加入已有协作群，关联一个已有会话作为背景。
+将飞书 / Lark 群聊接入本机 Codex、Claude Code 和 ZCode。私聊机器人创建或管理会话，在工作群中提问、处理图片和文件、执行项目任务；也可以把机器人加入已有协作群，关联一个已有会话作为背景。
 
 本项目基于原始 GitHub 项目 [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge)（原名 `feishu-claude-code-bridge`） 二次开发，保留原项目的版权与许可证说明。
 
 **本项目开发者：Lennox Gao。** 使用过程中有问题、建议或需求，欢迎联系 Lennox Gao。
 
-本仓库包含个人工作群、AA 会话自动建群、共享 FF 辅助会话、折叠回复和独立 Claude worker 等定制功能。使用本仓库版本请按下文从源码构建；公开 npm 包不保证包含这些改动。
+本仓库包含个人工作群、AA 会话自动建群、共享 FF 辅助会话、折叠回复和独立 Claude/ZCode worker 等定制功能。使用本仓库版本请按下文从源码构建；公开 npm 包不保证包含这些改动。
 
 - [完整安装配置指引](docs/INSTALL.md)：一键安装、二选一/双工具、版本检查、登录、writer/worker、后台环境及验收。
+- [ZCode 接入与工具扩展](docs/ZCODE.md)：本机模型账号、独立 worker、支持范围及架构说明。
 - [飞书权限申请清单](docs/FEISHU_PERMISSIONS.md)：权限标识、申请用途、事件订阅与验收步骤。
 - [详细配置与排错](README.zh.md)：权限模式、访问控制、会话与日志等进阶说明。
 - [多服务目录说明](docs/MONOREPO.md)：飞书桥接、共享 Codex core 与独立 Web 服务的边界。
@@ -16,12 +17,12 @@
 
 ## 主要功能
 
-- 给Codex或者Claude会话创建个人飞书工作群，每个群对应一个会话，在群里发消息等同于ai会话中聊天。
-- 一个机器人同时支持 Codex 和 Claude Code，创建工作群时选择工具与项目目录。
+- 给 Codex、Claude 或 ZCode 会话创建个人飞书工作群，每个群对应一个会话，在群里发消息等同于ai会话中聊天。
+- 一个机器人同时支持 Codex、Claude Code 和 ZCode，创建工作群时选择工具与项目目录。
 - 以 `AA` 开头的已有会话可自动创建同名的飞书工作群。
 - 把机器人加入开放协作群后，由所有者在私聊选择关联ai会话，创建 FF 辅助会话（名称开头 `AA` 替换为 `FF`，其他名称加 `FF-`）。辅助群只响应真实 `@机器人` 的消息；同事可提问，回答仅回到提问群。
 - 辅助群默认简短回复，不提及来源会话和内部读取过程。长正文、代码和工具记录默认折叠；结束后的状态与按钮也放入折叠区。
-- Codex 通过原生队列提交、统一同步桌面与飞书回复；Claude 由独立 worker 执行。桥接重启后可继续同步已有结果。
+- Codex 通过原生队列提交、统一同步桌面与飞书回复；Claude/ZCode 由各自独立 worker 执行。桥接重启后可继续同步已有结果。
 
 ## 环境要求
 
@@ -29,14 +30,14 @@
 | ------- | ------------------------------------------------ |
 | Node.js | `>= 20.12.0`；本机部署已验证 Node 24                     |
 | pnpm    | `10.33.0`，以 `package.json` 的 `packageManager` 为准 |
-| 编程助手    | 至少一个已安装并登录的 `codex` 或 `claude`；需要两个工具时分别登录       |
+| 编程助手    | 至少配置 Codex、Claude 或 ZCode 之一；各工具分别配置模型账号       |
 | 飞书应用    | 启用机器人能力，配置权限、事件与回调，并发布应用版本                       |
 | 飞书 CLI  | `lark-cli`；首次交互启动会检查安装及当前 profile 的应用绑定          |
 | 部署账户    | 可读写会话状态目录，并能访问对应项目、CLI 登录信息和网络                   |
 
 Codex 的发送、队列与选项交互依赖兼容的原生接口；桌面已有任务的问询需要可访问的公开共享 app-server，可按环境配置 `CODEX_QUEUE_REMOTE`。只安装 CLI 并不保证桌面私有连接上的交互可用。详见 [Codex 任务生命周期](docs/CODEX_TASK_LIFECYCLE.md)。
 
-Claude 独立 worker 的系统服务和重启恢复目前以 Linux 为主要验证环境。不要把桥接重启保活理解为 worker、Codex writer 或主机重启也能保活。
+Claude/ZCode 独立 worker 的系统服务和重启恢复目前以 Linux 为主要验证环境。不要把桥接重启保活理解为 worker、Codex writer 或主机重启也能保活。
 
 ## 安装与首次启动
 
@@ -60,7 +61,7 @@ node bin/lark-channel-bridge.mjs doctor --agents codex
 node bin/lark-channel-bridge.mjs doctor --profile my-bot --agents codex --runtime --network
 ```
 
-Codex 和 Claude 至少一个，也可以同时存在。支持基线为 Codex 0.159.2、Claude 2.1.261、飞书 CLI 1.0.97；仍须通过功能检查。后台和前台可共用 `profiles/<profile>/runtime.env`，示例见 [环境模板](config/runtime.env.example)，Linux/macOS 必须 `chmod 600`。所选工具决定检查项，不因另一工具缺失报错。
+Codex、Claude 和 ZCode 至少配置一个，也可以同时存在。ZCode 单独安装与配置，见 [接入指引](docs/ZCODE.md)。支持基线为 Codex 0.159.2、Claude 2.1.261、飞书 CLI 1.0.97；仍须通过功能检查。后台和前台可共用 `profiles/<profile>/runtime.env`，示例见 [环境模板](config/runtime.env.example)，Linux/macOS 必须 `chmod 600`。所选工具决定检查项，不因另一工具缺失报错。
 
 ### 手动安装：下载和构建
 
@@ -103,9 +104,9 @@ node bin/lark-channel-bridge.mjs profile create my-bot \
 
 按提示交互输入 App Secret；不要把 Secret 写入命令历史或提交到仓库。Lark 国际版加 `--tenant lark`。应用权限与事件订阅按 [权限清单](docs/FEISHU_PERMISSIONS.md) 配置，修改后需发布生效。
 
-### 3. 启动 Claude worker 与桥接
+### 3. 启动 worker 与桥接
 
-需要在工作群中使用 Claude 时，先启动该 profile 的 worker。只使用 Codex 可跳过 worker 两条命令。
+需要在工作群中使用 Claude 时，先启动该 profile 的 worker。ZCode 使用独立的 `worker start --profile my-bot --tool zcode`，详见 [接入指引](docs/ZCODE.md)。只使用 Codex 可跳过 worker 两条命令。
 
 ```bash
 node bin/lark-channel-bridge.mjs worker start --profile my-bot
@@ -127,7 +128,7 @@ AA 会话群就是个人工作群，不作为单独的群类型。个人工作�
 归档工作群时只提供一个红色“归档”按钮。归档后提示已归档，保留群、目录和会话历史；如需解散群，由用户自行在飞书中操作。已归档群的后续消息、命令和旧卡片不再响应，也不会自动创建新会话。
 
 1. 私聊机器人发送“新建会话”或“控制台”。本版私聊主要用于会话与工作群管理。
-2. 在卡片中选择 **Codex** 或 **Claude Code**，填写工作群名和本机项目目录。
+2. 在卡片中选择 **Codex**、**Claude Code** 或 **ZCode**，填写工作群名和本机项目目录。
 3. 创建后进入对应群提问；需要 @ 的群请真实选择并 @ 机器人。
 4. 在普通工作群中用 `/cd`、`/ws`、`/config` 等命令调整目录或偏好。群创建后工具固定，不会因重启或重置切换引擎。
 

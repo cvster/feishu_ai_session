@@ -5,9 +5,9 @@ import { isJobActive } from './protocol';
 import { jobIdFor } from './store';
 
 /** Execution belongs to the worker; this object owns only a detachable observer. */
-export class DurableClaudeAdapter implements AgentAdapter {
-  readonly id = 'claude';
-  readonly displayName = 'Claude Code';
+export class DurableAgentAdapter implements AgentAdapter {
+  get id(): string { return this.client.toolId; }
+  get displayName(): string { return this.cli.displayName; }
   private identity?: AgentBotIdentity;
   constructor(readonly client: WorkerClient, private readonly cli: AgentAdapter) {}
   setBotIdentity(identity: AgentBotIdentity): void { this.identity = identity; }
@@ -17,7 +17,7 @@ export class DurableClaudeAdapter implements AgentAdapter {
   }
   async prepareRun(): Promise<void> {
     try { await this.client.health(); }
-    catch { throw new RunRejected('execution-worker-unavailable', 'Claude 执行服务不可用，本次请求未执行。请先启动独立 worker 服务。'); }
+    catch { throw new RunRejected('execution-worker-unavailable', `${this.displayName} 执行服务不可用，本次请求未执行。请先启动对应工具的独立 worker 服务。`); }
   }
   run(options: AgentRunOptions): AgentRun {
     const requestKey = options.requestKey ?? options.runId;
@@ -77,3 +77,6 @@ export class DurableClaudeAdapter implements AgentAdapter {
     };
   }
 }
+
+/** Backward compatible constructor for existing Claude integrations. */
+export class DurableClaudeAdapter extends DurableAgentAdapter {}

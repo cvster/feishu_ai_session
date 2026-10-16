@@ -1,3 +1,9 @@
+import { zcodeStorageDir } from '../agent/zcode/client';
+import { ZcodeAdapter } from '../agent/zcode/adapter';
+import { ZcodeSessionProvider } from './zcode-sessions';
+import { nativeSessionOperations } from './session-operations';
+import { DurableAgentAdapter, DurableClaudeAdapter } from '../worker/adapter';
+import { workerStateDirName } from './definitions';
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -9,7 +15,6 @@ import { CodexAdapter } from '../agent/codex/adapter';
 import { listCodexThreadHistory } from '../session/codex-history';
 import { ToolRegistry } from './types';
 import { ClaudeSessionProvider } from './claude-sessions';
-import { DurableClaudeAdapter } from '../worker/adapter';
 import { WorkerClient } from '../worker/client';
 
 export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, primary: AgentAdapter): ToolRegistry {
@@ -34,12 +39,20 @@ export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, prim
     agent: new DurableClaudeAdapter(new WorkerClient(join(paths.profileDir, 'execution-worker'), resolve(claudeHome), profile.accounts.app.id),
       primary.id === 'claude' ? primary : new ClaudeAdapter({ binary: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude', larkChannel })),
     listSessions: () => claudeHistory.listSessions() });
+  const zcodeConfig = profile.zcode;
+  const zcodeHome = zcodeStorageDir(zcodeConfig);
+  const zcodeOptions = { binary: zcodeConfig?.binaryPath, args: zcodeConfig?.args, dataDir: zcodeConfig?.dataDir, larkChannel };
+  const zcodeSessions = new ZcodeSessionProvider(zcodeOptions, join(paths.profileDir, 'zcode-sessions'));
+  registry.register({ id: 'zcode', label: 'ZCode', sourceId: zcodeHome,
+    agent: new DurableAgentAdapter(new WorkerClient(join(paths.profileDir, workerStateDirName('zcode')), zcodeHome, profile.accounts.app.id, 'zcode'),
+      primary.id === 'zcode' ? primary : new ZcodeAdapter(zcodeOptions)), sessions: zcodeSessions, listSessions: () => zcodeSessions.listSessions() });
+  for (const tool of registry.all()) tool.sessions ??= nativeSessionOperations(tool);
   return registry;
 }
 
 export function toolProfile(profile: ProfileConfig, toolId: AgentKind): ProfileConfig {
   return { ...profile, agentKind: toolId,
-    ...(toolId === 'claude' ? { codex: undefined } : {}),
+    ...(toolId !== 'codex' ? { codex: undefined } : {}),
     preferences: { ...profile.preferences,
       model: toolId === profile.agentKind ? profile.preferences.model : undefined } };
 }

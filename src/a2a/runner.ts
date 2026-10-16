@@ -1,5 +1,6 @@
 import type { NormalizedMessage } from '@larksuite/channel';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { nativeSessionId } from '../tools/definitions';
+import { capabilityForTool } from '../agent/capability';
 import { initialState, reduce } from '../card/run-state';
 import type { Controls } from '../commands';
 import type { AuxiliaryApproval } from '../bot/auxiliary-approvals';
@@ -21,7 +22,7 @@ export function createA2ARunner(deps: { controls: Controls; sessions: SessionSto
       if (!session || !binding || binding.sharedScope !== task.sharedScope || binding.sourceId !== root.toolRegistry!.get(binding.toolId).sourceId) throw new Error('FF 会话身份已变化');
       workspaces.setCwd(task.scope, session.cwd);
       const controls = controlsForTool(root, binding.toolId, task.scope);
-      const capability = binding.toolId === 'codex' ? codexCapability(controls.profileConfig) : claudeCapability(controls.profileConfig);
+      const capability = capabilityForTool(binding.toolId, controls.profileConfig);
       const messageId = approval?.receiptMessageId ?? task.messageId;
       const text = approval ? `继续此前请求：${task.question}\n本次仅执行已确认操作：${approval.action}。不要重复已完成的动作。` : task.question;
       const message = { messageId, chatId: task.scope, chatType: 'p2p', senderId: task.actorId,
@@ -61,7 +62,7 @@ export function createA2ARunner(deps: { controls: Controls; sessions: SessionSto
             return { state: 'TASK_STATE_REJECTED', text: '', notice: '任务已停止或授权已失效' };
           }
           if (event.type === 'system') {
-            const nativeId = binding.toolId === 'codex' ? event.threadId : event.sessionId;
+            const nativeId = nativeSessionId(binding.toolId, event);
             const current = root.toolBindings!.get(task.scope)!;
             if (nativeId) {
               if (nativeId === current.linkedSource?.nativeId) throw new Error('拒绝恢复原会话');

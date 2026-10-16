@@ -11,7 +11,7 @@ import { renderCard, type RunCardRenderOptions } from '../card/run-renderer';
 import { renderText } from '../card/text-renderer';
 import { getMessageReplyMode, getShowToolCalls } from '../config/schema';
 import { log } from '../core/logger';
-import { DurableClaudeAdapter } from './adapter';
+import { DurableAgentAdapter } from './adapter';
 import { isJobActive, type WorkerJob } from './protocol';
 
 interface ReplyDelivery {
@@ -26,7 +26,7 @@ interface ReplyDelivery {
   skipped?: boolean;
 }
 export interface WorkerRepliesDeps {
-  adapter: DurableClaudeAdapter;
+  adapter: DurableAgentAdapter;
   channel: LarkChannel;
   controls: Controls;
   sessions: SessionStore;
@@ -38,7 +38,7 @@ export interface WorkerRepliesDeps {
   onReady?(jobs: WorkerJob[]): Promise<void>;
 }
 
-/** Sole Claude IM reply writer; reconstructs output from the worker journal. */
+/** Sole worker IM reply writer; reconstructs output from the worker journal. */
 export async function startWorkerReplies(deps: WorkerRepliesDeps) {
   let deliveries: Record<string, ReplyDelivery> = {};
   try {
@@ -55,7 +55,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     const jobs = await deps.adapter.client.list();
     for (const job of jobs) {
       if (stopped || !job.options.delivery) continue;
-      try { await publish(job); } catch (error) { log.warn('worker-replies', 'publish-failed', { jobId: job.id, error: error instanceof Error ? error.message : String(error) }); }
+      try { await publish(job); } catch (error) { log.warn('worker-replies', 'publish-failed', { toolId: deps.adapter.id, jobId: job.id, error: error instanceof Error ? error.message : String(error) }); }
     }
     if (!stopped) await deps.onReady?.(jobs);
   }
@@ -69,7 +69,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     if (target.botAppId !== deps.controls.profileConfig.accounts.app.id || target.sourceId !== deps.adapter.client.sourceId) return;
     const binding = deps.controls.toolBindings?.get(target.scope);
     const originalNative = job.options.sessionId ?? job.options.initialSessionId;
-    if (!binding || binding.toolId !== 'claude' || binding.sourceId !== target.sourceId ||
+    if (!binding || binding.toolId !== deps.adapter.id || binding.sourceId !== target.sourceId ||
       (originalNative && binding.nativeId && originalNative !== binding.nativeId) || deps.catalog.isScopeArchived(target.scope)) {
       if (deliveries[job.id] && !deliveries[job.id]!.skipped) { deliveries[job.id]!.skipped = true; await save(); }
       return;
@@ -85,7 +85,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       const sessionId = init.sessionId;
       deps.controls.toolBindings!.set(target.scope, { ...binding, nativeId: sessionId, nativeCreated: true });
       deps.sessions.set(target.scope, sessionId, job.options.cwd ?? '');
-      deps.catalog.upsertActive({ scopeId: target.scope, agentId: 'claude', cwdRealpath: job.options.cwd!,
+      deps.catalog.upsertActive({ scopeId: target.scope, agentId: binding.toolId, cwdRealpath: job.options.cwd!,
         policyFingerprint: target.policyFingerprint, sessionId, sourceId: target.sourceId, botAppId: target.botAppId });
       await Promise.all([deps.controls.toolBindings!.flush(), deps.sessions.flush(), deps.catalog.flush()]);
     }
@@ -138,7 +138,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
   const runNow = (): Promise<void> => {
     if (stopped) return Promise.resolve();
     return running ??= sync().catch(error => {
-      if (Date.now() - lastWarning > 30_000) { lastWarning = Date.now(); log.warn('worker-replies', 'sync-unavailable', { error: error instanceof Error ? error.message : String(error) }); }
+      if (Date.now() - lastWarning > 30_000) { lastWarning = Date.now(); log.warn('worker-replies', 'sync-unavailable', { toolId: deps.adapter.id, error: error instanceof Error ? error.message : String(error) }); }
     }).finally(() => { running = undefined; });
   };
   const timer = setInterval(() => { void runNow(); }, deps.intervalMs ?? 1000); timer.unref?.();

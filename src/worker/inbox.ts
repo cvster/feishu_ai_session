@@ -15,8 +15,8 @@ export class WorkerInbox {
   async load(): Promise<void> {
     try {
       const raw = JSON.parse(await readFile(this.path, 'utf8'));
-      if (raw.version !== 1 || !raw.entries || Array.isArray(raw.entries)) throw new Error('Invalid Claude inbox');
-      for (const value of Object.values(raw.entries) as InboxEntry[]) if (!value.message?.messageId || !value.scope || !['pending', 'accepted', 'rejected'].includes(value.status)) throw new Error('Invalid Claude inbox receipt');
+      if (raw.version !== 1 || !raw.entries || Array.isArray(raw.entries)) throw new Error('Invalid worker inbox');
+      for (const value of Object.values(raw.entries) as InboxEntry[]) if (!value.message?.messageId || !value.scope || !['pending', 'accepted', 'rejected'].includes(value.status)) throw new Error('Invalid worker inbox receipt');
       this.entries = raw.entries;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }

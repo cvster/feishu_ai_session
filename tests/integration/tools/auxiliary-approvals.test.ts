@@ -41,7 +41,10 @@ async function setup(privateGroup = false, toolId: 'codex' | 'claude' = 'codex')
       chatMembers: { get: async () => ({ code: 0, data: { items: [{ member_id: 'ou_member' }, { member_id: 'ou_owner' }] } }) },
       message: { create },
     } } } } as unknown as LarkChannel;
-  const auxiliary = new AuxiliaryGroups({ path: groupsPath, appId: 'cli_bot', channel, bindings, tools: new ToolRegistry(),
+  const tools = new ToolRegistry();
+  tools.register({ id: toolId, label: toolId, sourceId: dir, agent: {} as any, listSessions: async () => [],
+    sessions: { historyPath: async () => source.historyPath, rename: async () => {}, archive: async () => {} } });
+  const auxiliary = new AuxiliaryGroups({ path: groupsPath, appId: 'cli_bot', channel, bindings, tools,
     sessions: new SessionStore(join(dir, 'sessions')), workspaces: new WorkspaceStore(join(dir, 'workspaces')),
     ownerId: () => owner, refreshOwner: async () => {}, cancelPending: async () => {} }); await auxiliary.load();
   const scope = privateGroup ? (await auxiliary.createPrivateGroup('oc_group', 'ou_member')).chatId : 'oc_group';
@@ -173,7 +176,7 @@ it.each([false, true])('routes a completed Claude permission response to the cor
   const job = { id: 'claude-job', status: 'completed', createdAt: 1000, options: { sessionId: 'ff-native', cwd: h.dir,
     delivery: { scope: h.scope, chatId: h.message.chatId, replyTo: 'om_question', operatorOpenId: 'ou_member', botAppId: 'cli_bot', sourceId: h.dir } } };
   const snapshot = { job, events: [{ seq: 1, event: { type: 'text', delta: requestText } }, { seq: 2, event: { type: 'done', terminationReason: 'normal' } }] };
-  const publisher = await startWorkerReplies({ adapter: { client: { sourceId: h.dir, list: async () => [job], snapshot: async () => snapshot } } as any,
+  const publisher = await startWorkerReplies({ adapter: { id: 'claude', client: { sourceId: h.dir, list: async () => [job], snapshot: async () => snapshot } } as any,
     channel: h.channel, controls: { profileConfig: profile, cfg: profile, toolBindings: h.bindings, auxiliary: h.auxiliary, auxiliaryApprovals: h.approvals } as any,
     sessions, catalog, activeRuns: new ActiveRuns(), statePath: join(h.dir, 'replies'), intervalMs: 60_000,
     renderOptions: () => ({ auxiliary: true }) });
