@@ -3,7 +3,6 @@
 - When the user requests a bridge deployment or restart, execute it directly on the requested local/remote hosts. Do not check whether Codex tasks are running, inspect task lists or active-run state as a restart gate, or ask for additional restart confirmation. This applies regardless of which conversations are active.
 - Announce the deployment/restart and verify the bridge's service health afterward. Backups, artifact validation, and service-process checks are still allowed; they must not become active-task checks or confirmation gates.
 - Restart only the bridge services. Do not interrupt Codex turns, delete queued input, or stop/restart Codex Desktop, the shared writer/app-server, or unrelated processes as part of a routine bridge deployment/restart.
-- Deployments and restarts still require a user request or explicit authorization; this rule does not authorize unsolicited service changes or host reboots.
 
 # Delivery workflow
 
