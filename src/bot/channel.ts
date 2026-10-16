@@ -19,7 +19,7 @@ import type {
 import { createLarkChannel } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
 import { capabilityForTool } from '../agent/capability';
-import { modelLabel, normalizeModelSelection, resolveModelArg, unavailableModelNotice } from '../agent/models';
+import { modelLabel, normalizeModelSelection, resolveModelArg } from '../agent/models';
 import {
   buildAgentPrompt,
   buildCodexUserPrompt,
@@ -1244,10 +1244,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     replyTo: lastMsg.messageId,
     ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
   };
-  const modelNotice = unavailableModelNotice(agentKind, modelPref);
-  if (modelNotice && (prevModel === undefined || modelSwitched)) {
-    await channel.send(chatId, { markdown: `⚠️ ${modelNotice}` }, sendOpts);
-  }
   log.info('flush', 'reply-target', {
     scope,
     mode,

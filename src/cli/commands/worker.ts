@@ -54,7 +54,7 @@ export async function runWorker(options: WorkerOptions): Promise<void> {
   const larkChannel = { profile: paths.profile, rootDir: paths.rootDir, configPath: paths.configFile,
     larkCliConfigDir: paths.larkCliConfigDir, larkCliSourceConfigFile: paths.larkCliSourceConfigFile };
   if (toolId !== 'claude' && toolId !== 'zcode') throw new Error(`Worker adapter not registered: ${toolId}`);
-  const agent = toolId === 'zcode' ? new ZcodeAdapter({ binary: selected.zcode?.binaryPath, args: selected.zcode?.args, dataDir: selected.zcode?.dataDir, larkChannel }) : new ClaudeAdapter({ binary: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude',
+  const agent = toolId === 'zcode' ? new ZcodeAdapter({ binary: selected.zcode?.binaryPath, args: selected.zcode?.args, dataDir: selected.zcode?.dataDir, modelConfigPath: selected.zcode?.modelConfigPath, larkChannel }) : new ClaudeAdapter({ binary: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude',
     larkChannel: { profile: paths.profile, rootDir: paths.rootDir, configPath: paths.configFile,
       larkCliConfigDir: paths.larkCliConfigDir, larkCliSourceConfigFile: paths.larkCliSourceConfigFile } });
   const worker = await startWorkerServer({ stateDir, agent, sourceId, botAppId: selected.accounts.app.id,

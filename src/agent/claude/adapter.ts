@@ -1,3 +1,4 @@
+import { listClaudeModels } from './models';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -57,6 +58,8 @@ export class ClaudeAdapter implements AgentAdapter {
       binaryPath: this.binary,
     });
   }
+
+  listModels(options: { cwd?: string } = {}) { return listClaudeModels(this.binary, options.cwd, this.larkChannel); }
 
   async prepareRun(opts: AgentRunOptions): Promise<void> {
     const availability = await this.checkAvailability();

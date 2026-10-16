@@ -1,4 +1,4 @@
-import { loadZcodeRuntimeModel } from './model-config';
+import { listZcodeModels, loadZcodeRuntimeModel } from './model-config';
 import { createHash } from 'node:crypto';
 import type { AgentAdapter, AgentBotIdentity, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
@@ -19,6 +19,7 @@ export class ZcodeAdapter implements AgentAdapter {
     return checkAgentAvailability({ agentId: 'zcode', agentName: 'ZCode', command: command.binary, binaryPath: command.binary, args: [...command.args, '--version'] });
   }
   async isAvailable(): Promise<boolean> { return (await this.checkAvailability()).ok; }
+  listModels() { return listZcodeModels(this.options); }
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) throw new Error('ZCode requires a project directory');
     const client = new ZcodeClient(this.options, opts.cwd);

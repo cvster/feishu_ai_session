@@ -15,6 +15,10 @@ export class DurableAgentAdapter implements AgentAdapter {
     if (!await this.cli.isAvailable()) return false;
     return this.client.health().then(() => true, () => false);
   }
+  async listModels(options?: { cwd?: string }) {
+    if (!this.cli.listModels) throw new Error('工具未提供原生模型列表');
+    return this.cli.listModels(options);
+  }
   async prepareRun(): Promise<void> {
     try { await this.client.health(); }
     catch { throw new RunRejected('execution-worker-unavailable', `${this.displayName} 执行服务不可用，本次请求未执行。请先启动对应工具的独立 worker 服务。`); }

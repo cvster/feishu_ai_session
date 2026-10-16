@@ -10,7 +10,7 @@
 
 关于能实现的效果，详情可以阅读[飞书文档](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e)
 
-ZCode 已接入统一工具注册和独立 worker，安装、账号及能力边界见 [ZCode 指引](docs/ZCODE.md)。
+Codex、Claude 和 ZCode 的模型列表动态读取工具当前配置或接口，支持刷新和失效校验，见 [动态模型列表](docs/MODELS.md)。ZCode 已接入统一工具注册和独立 worker，安装、账号及能力边界见 [ZCode 指引](docs/ZCODE.md)。
 
 ## 主要功能
 

@@ -108,7 +108,7 @@ test('deployed status includes the project and model for running and completed t
     assert.ok(JSON.stringify(api.renderCard(state)).includes('项目 tmini_platform'));
   }
   assert.equal(api.projectNameFromCwd('C:\\code\\project\\'), 'project');
-  assert.equal(api.modelLabel('codex', 'gpt-6.1-sol'), 'GPT-6.1-Sol');
+  assert.equal(api.modelLabel('codex', 'gpt-6.1-sol'), 'gpt-6.1-sol');
 });
 test('project names cannot inject status font markup', () => {
   assert.ok(api.renderColoredRunStatus({ ...initial, projectName: '<demo>&' })

@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { claudeCapability } from '../../../src/agent/capability';
+import { capabilityForTool, claudeCapability } from '../../../src/agent/capability';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import { startRunFlow } from '../../../src/bot/run-flow';
 import { ProcessPool } from '../../../src/bot/process-pool';
@@ -20,9 +20,10 @@ afterEach(async () => {
 });
 
 describe('IM run flow', () => {
-  it('resumes a CC binding with the selected effort and recovers an unavailable model via the CLI default', async () => {
+  it('resumes a CC binding with a newly advertised model and the selected effort', async () => {
     const h = await createHarness({ defaultWorkspace: true });
-    h.profileConfig.preferences.model = 'claude-fable-5-1';
+    h.profileConfig.preferences.model = 'provider-new-model';
+    Object.assign(h.agent, { listModels: async () => [{ value: 'provider-new-model', label: 'new native model' }] });
     h.profileConfig.preferences.reasoningEffort = 'xhigh';
     h.sessions.set('chat-1', 'existing-cc-session', await realpath(h.tmp.workspace));
     const result = await startRunFlow({ scopeId: 'chat-1',
@@ -33,7 +34,19 @@ describe('IM run flow', () => {
     });
     expect(result.ok).toBe(true);
     expect(h.agent.runOptions[0]).toMatchObject({ sessionId: 'existing-cc-session', reasoningEffort: 'xhigh' });
-    expect(h.agent.runOptions[0]?.model).toBeUndefined();
+    expect(h.agent.runOptions[0]?.model).toBe('provider-new-model');
+  });
+
+  it.each(['claude', 'codex', 'zcode'] as const)('rejects a removed %s model before starting a task', async kind => {
+    const h = await createHarness({ defaultWorkspace: true });
+    h.profileConfig.agentKind = kind; h.profileConfig.preferences.model = 'removed-model';
+    Object.assign(h.agent, { listModels: async () => [{ value: 'new-model', label: 'New model' }] });
+    const result = await startRunFlow({ scopeId: 'chat-1', scope: { source: 'im', chatId: 'chat-1', actorId: 'ou_user' },
+      prompt: 'must not run', attachments: [], access: { ok: true, reason: 'allowed-user' },
+      capability: capabilityForTool(kind, h.profileConfig), profileConfig: h.profileConfig, sessions: h.sessions, workspaces: h.workspaces,
+      executor: h.executor, now: 1000 });
+    expect(result).toMatchObject({ ok: false, rejectReason: { code: 'model-unavailable', userVisible: expect.stringContaining('/config') } });
+    expect(h.agent.runOptions).toEqual([]);
   });
 
   it.each(['persisted', 'external', 'unavailable'])('does not submit or create a session after archive: %s', async (mode) => {

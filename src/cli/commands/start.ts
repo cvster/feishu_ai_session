@@ -437,7 +437,7 @@ export function createRuntimeAgent(
       useQueueForExistingThreads: true,
     });
   }
-  if (profileConfig.agentKind === 'zcode') return new ZcodeAdapter({ binary: profileConfig.zcode?.binaryPath, args: profileConfig.zcode?.args, dataDir: profileConfig.zcode?.dataDir, larkChannel });
+  if (profileConfig.agentKind === 'zcode') return new ZcodeAdapter({ binary: profileConfig.zcode?.binaryPath, args: profileConfig.zcode?.args, dataDir: profileConfig.zcode?.dataDir, modelConfigPath: profileConfig.zcode?.modelConfigPath, larkChannel });
   return new ClaudeAdapter({ larkChannel, binary: process.env.LARK_CHANNEL_CLAUDE_BIN });
 }
 

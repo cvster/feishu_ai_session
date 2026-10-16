@@ -1,13 +1,13 @@
 import { expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ZcodeAdapter } from '../../../src/agent/zcode/adapter';
 import type { AgentEvent } from '../../../src/agent/types';
 it.skipIf(process.env.ZCODE_LIVE_SMOKE !== '1')('creates, continues and reads a file through a real local ZCode session', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'bridge-zcode-live-'));
-  const adapter = new ZcodeAdapter(); expect(await adapter.isAvailable()).toBe(true);
+  const adapter = new ZcodeAdapter(process.env.ZCODE_LIVE_ISOLATED === '1' ? { dataDir: join(cwd, '.native-state'), modelConfigPath: join(homedir(), '.zcode/v2/provider_config.json') } : {}); expect(await adapter.isAvailable()).toBe(true);
   let sessionId: string | undefined;
   const token = `ZCODE_${randomUUID()}`;
   await writeFile(join(cwd, 'marker.txt'), `FILE_${token}`);

@@ -95,6 +95,8 @@ export interface AgentAdapter {
   readonly displayName: string;
   isAvailable(): Promise<boolean>;
   checkAvailability?(): Promise<AgentAvailability>;
+  /** Read the tool's current catalog without sending user input or running inference. */
+  listModels?(options?: { cwd?: string }): Promise<import('./models').ModelOption[]>;
   prepareRun?(opts: AgentRunOptions): Promise<void>;
   run(opts: AgentRunOptions): AgentRun;
   /** Queue acceptance only; subsequent execution belongs to the shared writer. */

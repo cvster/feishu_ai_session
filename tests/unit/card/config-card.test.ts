@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { configFormCard, configSavedCard, type ConfigFormOpts } from '../../../src/card/config-card';
 
 const defaults: ConfigFormOpts = {
+  modelOptions: [{ value: 'default', label: '跟随工具默认' }, { value: 'claude-opus-5-5', label: 'Opus 5.5' }],
   agentKind: 'claude', model: 'claude-opus-5-5', reasoningEffort: 'high',
   messageReply: 'card', showToolCalls: false, cotMessages: 'brief', maxConcurrentRuns: 7,
   runIdleTimeoutMinutes: 27, requireMentionInGroup: true, larkCliIdentity: 'bot-only',
@@ -42,4 +43,14 @@ describe('compact settings card', () => {
     expect(summary).toContain('xhigh');
     expect(summary.split('\n').length).toBeLessThanOrEqual(4);
   });
+});
+
+it('pages large native catalogs while retaining the current selection as a valid Feishu option', () => {
+  const options = [{ value: 'default', label: 'Default' }, ...Array.from({ length: 210 }, (_, i) => ({ value: `model-${i}`, label: `Model ${i}` }))];
+  const card = configFormCard({ ...defaults, model: 'model-209', modelOptions: options, modelPage: 1 }) as { body: { elements: Element[] } };
+  const picker = card.body.elements.find(e => e.tag === 'form')!.elements!.find(e => e.name === 'model')!;
+  expect(picker.options!.length).toBeLessThanOrEqual(82);
+  expect(picker.options!.some(o => o.value === picker.initial_option)).toBe(true);
+  expect(picker.options!.some(o => o.value === 'model-100')).toBe(true);
+  expect(JSON.stringify(card)).toContain('config models 2');
 });

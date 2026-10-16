@@ -1,115 +1,58 @@
 import type { AgentKind } from '../config/profile-schema';
-import { CODEX_MODEL_OPTIONS, CODEX_STANDARD_REASONING_VALUES } from '../../packages/codex-core/src/models';
-import type { AgentRunOptions } from './types';
+import { CODEX_STANDARD_REASONING_VALUES } from '../../packages/codex-core/src/models';
+import type { AgentAdapter, AgentRunOptions } from './types';
 
-/**
- * Sentinel selection meaning "don't pass `--model`; let the agent CLI /
- * account decide". Kept as a real option value (rather than empty string)
- * because Feishu's `select_static` requires `initial_option` to match one of
- * the option `value`s exactly and rejects an empty string.
- */
 export const DEFAULT_MODEL = 'default';
-
-export interface ModelOption {
-  /**
-   * Stored in `preferences.model` and forwarded to the agent's `--model`
-   * flag. `DEFAULT_MODEL` is special-cased to omit the flag entirely.
-   */
-  value: string;
-  /** Human-facing label shown in the `/config` picker. */
-  label: string;
+export interface ModelOption { value: string; label: string; unavailable?: boolean }
+/** Only the default sentinel is local. Concrete models always belong to the native tool. */
+export function supportedModels(_agentKind: AgentKind): ModelOption[] {
+  return [{ value: DEFAULT_MODEL, label: '跟随工具默认模型' }];
 }
-
-/**
- * Claude Code models. Pinned to concrete version ids (Claude Code's `--model`
- * accepts the full model-id string, not just the `opus`/`sonnet` aliases) so
- * the picker names an exact model. Add new ids here when a generation ships;
- * `opusplan` is kept as the one alias with no versioned equivalent (it runs
- * Opus for planning and Sonnet for execution).
- */
-const CLAUDE_MODELS: ModelOption[] = [
-  { value: DEFAULT_MODEL, label: '跟随默认（不指定）' },
-  { value: 'claude-opus-5-5', label: 'Opus 5.5（最新）' },
-  { value: 'claude-opus-4-8', label: 'Opus 4.8' },
-  { value: 'claude-opus-4-7', label: 'Opus 4.7' },
-  { value: 'claude-sonnet-5', label: 'Sonnet 5（最新）' },
-  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-  { value: 'claude-haiku-4-5', label: 'Haiku 4.5（最新）' },
-  { value: 'opusplan', label: 'Opus Plan（规划用 Opus，执行用 Sonnet）' },
-];
-
-/**
- * Models currently advertised by the authenticated Codex app-server.
- *
- * Keep the explicit default sentinel: omitting a model lets the account and
- * CLI select their current default without pinning a stale model id.
- */
-const CODEX_MODELS: ModelOption[] = [
-  { value: DEFAULT_MODEL, label: '跟随 CLI 默认（不指定）' },
-  ...CODEX_MODEL_OPTIONS,
-];
-
-/** The model picker options for a profile's agent kind. */
-export function supportedModels(agentKind: AgentKind): ModelOption[] {
-  return agentKind === 'codex' ? CODEX_MODELS : agentKind === 'claude' ? CLAUDE_MODELS : [{ value: DEFAULT_MODEL, label: '跟随 ZCode 配置模型' }];
+export function isDefaultModel(value: string | undefined): boolean { return !value || value === DEFAULT_MODEL; }
+export function normalizeModelSelection(_agentKind: AgentKind, value: string | undefined): string {
+  return value && value.length <= 512 && !/[\x00-\x1f]/.test(value) ? value : DEFAULT_MODEL;
 }
-
-/** True when the selection means "use the agent default" (no `--model`). */
-export function isDefaultModel(value: string | undefined): boolean {
-  return !value || value === DEFAULT_MODEL;
+export function resolveModelArg(agentKind: AgentKind, value: string | undefined): string | undefined {
+  const selected = normalizeModelSelection(agentKind, value);
+  return selected === DEFAULT_MODEL ? undefined : selected;
 }
-
-/**
- * Coerce a stored model preference into a value guaranteed to be one of the
- * current agent's picker options — Feishu's `select_static` requires
- * `initial_option` to match an option value exactly. Unknown / cross-agent
- * values (e.g. a Claude alias left over after switching a profile to Codex)
- * fall back to {@link DEFAULT_MODEL}.
- */
-export function normalizeModelSelection(
-  agentKind: AgentKind,
-  value: string | undefined,
-): string {
-  if (isDefaultModel(value)) return DEFAULT_MODEL;
-  return supportedModels(agentKind).some((m) => m.value === value)
-    ? (value as string)
-    : DEFAULT_MODEL;
+export function modelLabel(agentKind: AgentKind, value: string | undefined, options?: readonly ModelOption[]): string {
+  const selected = normalizeModelSelection(agentKind, value);
+  return (options ?? supportedModels(agentKind)).find(model => model.value === selected)?.label ?? selected;
 }
-
-/**
- * Resolve the concrete model string to hand the agent, or `undefined` to omit
- * the `--model` flag. Cross-agent / unknown values are treated as "default".
- */
-export function resolveModelArg(
-  agentKind: AgentKind,
-  value: string | undefined,
-): string | undefined {
-  const normalized = normalizeModelSelection(agentKind, value);
-  return normalized === DEFAULT_MODEL ? undefined : normalized;
+export interface ModelChoices {
+  options: ModelOption[];
+  available: boolean;
+  notice?: string;
 }
-
-/** Picker label for a stored value, for display in the saved-config card. */
-export function modelLabel(agentKind: AgentKind, value: string | undefined): string {
-  const normalized = normalizeModelSelection(agentKind, value);
-  return supportedModels(agentKind).find((m) => m.value === normalized)?.label ?? normalized;
-}
-
-/** A previously offered model was rejected by the configured Claude gateway.
- * Keep old bindings resumable via the CLI default rather than sending it again. */
-export function unavailableModelNotice(agentKind: AgentKind, value: string | undefined): string | undefined {
-  if (agentKind === 'claude' && value === 'claude-fable-5-1') {
-    return 'Fable 5.1 在当前接入端不可用，已改为跟随 CLI 默认模型。';
+export function normalizeNativeModels(rows: ModelOption[]): ModelOption[] {
+  const result = new Map<string, ModelOption>();
+  for (const row of rows) {
+    if (typeof row.value !== 'string' || !row.value || row.value === DEFAULT_MODEL || row.value.length > 512 || /[\x00-\x1f]/.test(row.value)) continue;
+    result.set(row.value, { value: row.value, label: typeof row.label === 'string' && row.label ? row.label : row.value });
   }
-  return undefined;
+  return [...result.values()];
 }
-
+export async function loadModelChoices(agent: AgentAdapter, cwd?: string, current?: string): Promise<ModelChoices> {
+  const options = supportedModels(agent.id as AgentKind);
+  try {
+    if (!agent.listModels) throw new Error('Native model discovery unavailable');
+    options.push(...normalizeNativeModels(await agent.listModels({ cwd })));
+    if (current && current !== DEFAULT_MODEL && !options.some(model => model.value === current)) {
+      options.push({ value: current, label: `已不可用 · ${current}`, unavailable: true });
+      return { options, available: true, notice: '已选模型已不在工具列表中；请选择其他模型，或跟随工具默认。' };
+    }
+    return { options, available: true };
+  } catch {
+    if (current && current !== DEFAULT_MODEL) options.push({ value: current, label: `未验证 · ${current}`, unavailable: true });
+    return { options, available: false, notice: '暂时无法读取工具模型列表，保留原选择。可重新打开 /config 刷新，或选择跟随工具默认。' };
+  }
+}
 type ReasoningEffort = NonNullable<AgentRunOptions['reasoningEffort']>;
 const CLAUDE_REASONING_VALUES: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
-
 export function supportedReasoningEfforts(agentKind: AgentKind): readonly string[] {
   return agentKind === 'codex' ? CODEX_STANDARD_REASONING_VALUES : agentKind === 'claude' ? CLAUDE_REASONING_VALUES : [];
 }
-
 export function normalizeReasoningEffort(agentKind: AgentKind, value: string | undefined): ReasoningEffort {
   return supportedReasoningEfforts(agentKind).includes(value ?? '') ? value as ReasoningEffort : 'high';
 }

@@ -1,6 +1,9 @@
 import { readdir, readFile, readlink, stat } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 
+// Exact owned discovery invocation; it never receives a user turn or persists a session.
+export const CLAUDE_MODEL_QUERY_ARGS = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--name', 'lark-bridge-model-catalog-readonly'] as const;
+
 export interface ClaudeProcess {
   argv: string[];
   cwd: string;
@@ -12,6 +15,8 @@ export function occupiesClaudeWorkspace(process: ClaudeProcess, cwd: string, bin
   const commands = new Set(['claude', 'claude.exe', 'claude.cmd', basename(binary)]);
   const isClaude = process.argv.slice(0, 2).some(arg => commands.has(basename(arg))) ||
     process.argv.some(arg => /[/\\]@anthropic-ai[/\\]claude-code[/\\]/.test(arg));
+  const optionsIndex = process.argv.indexOf('--input-format');
+  if (isClaude && optionsIndex >= 1 && optionsIndex <= 2 && process.argv.slice(optionsIndex).join('\0') === CLAUDE_MODEL_QUERY_ARGS.join('\0')) return false;
   return isClaude && resolve(process.cwd) === resolve(cwd);
 }
 

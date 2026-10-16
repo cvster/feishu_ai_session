@@ -42,6 +42,7 @@ async function fixture(kind = 'normal') {
       send({ id: r.id, result: {} });
     });
   `);
+  await writeFile(join(root, 'config.json'), JSON.stringify({ model: { main: 'test/model' }, provider: { test: { kind: 'openai', models: { model: {} } } } }));
   const options = { binary: process.execPath, args: [path], dataDir: root };
   const agent = new ZcodeAdapter(options);
   const read = async () => (await readFile(calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line));

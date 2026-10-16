@@ -1,3 +1,4 @@
+import { listCodexModels } from './models';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { join } from 'node:path';
@@ -95,6 +96,10 @@ export class CodexAdapter implements AgentAdapter {
       command: this.binary,
       binaryPath: this.binary,
     });
+  }
+
+  listModels(options: { cwd?: string } = {}) {
+    return listCodexModels({ binary: this.binary, profileStateDir: this.profileStateDir, codexHome: this.codexHome, inheritCodexHome: this.inheritCodexHome, remote: this.appServerRemote, cwd: options.cwd });
   }
 
   async prepareRun(): Promise<void> {

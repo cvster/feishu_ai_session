@@ -195,20 +195,36 @@ describe('profile-aware account and config commands', () => {
     expect(cleared.profiles.claude?.preferences.model).toBeUndefined();
   });
 
-  it('recovers an old Fable setting and preserves folded preferences when saving effort only', async () => {
+  it('marks a removed selection and preserves it when saving unrelated preferences', async () => {
     vi.useFakeTimers();
     const h = await createHarness({ preferences: { model: 'claude-fable-5-1', showToolCalls: false,
       cotMessages: 'brief', maxConcurrentRuns: 7, messageReply: 'text', messageReplyMigrated: true } });
     await h.command('/config');
     const card = JSON.stringify(h.channel.sent.at(-1)?.content);
-    expect(card).toContain('Fable 5.1 在当前接入端不可用');
+    expect(card).toContain('已选模型已不在工具列表中');
+    expect(card).toContain('claude-fable-5-1');
     expect(card).toContain('reasoning_effort');
     await h.command('/config submit', { reasoning_effort: 'xhigh' });
     const root = await waitForRoot(h.rootDir, candidate => candidate.profiles.claude?.preferences.reasoningEffort === 'xhigh');
     expect(root.profiles.claude?.preferences).toMatchObject({
       showToolCalls: false, cotMessages: 'brief', maxConcurrentRuns: 7, messageReply: 'text',
     });
+    expect(root.profiles.claude?.preferences.model).toBe('claude-fable-5-1');
+  });
+
+  it('refreshes newly added models and rejects a model deleted while its settings card was open', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness();
+    h.nativeModels.push({ value: 'brand-new-native-alias', label: 'Brand new model' });
+    await h.command('/config models 0');
+    expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('Brand new model');
+    h.nativeModels.splice(h.nativeModels.findIndex(row => row.value === 'brand-new-native-alias'), 1);
+    await h.command('/config submit', { model: 'brand-new-native-alias', show_tool_calls: 'hide' });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('模型列表已变化');
+    const root = JSON.parse(await readFile(join(h.rootDir, 'config.json'), 'utf8')) as RootConfig;
     expect(root.profiles.claude?.preferences.model).toBeUndefined();
+    expect(root.profiles.claude?.preferences.showToolCalls).not.toBe(false);
   });
 
   it('does not persist Codex-only ultra when submitted from an old or forged CC settings card', async () => {
@@ -358,6 +374,8 @@ async function createHarness(options: {
 } = {}): Promise<{
   rootDir: string;
   channel: ReturnType<typeof createFakeChannel>;
+  nativeModels: Array<{ value: string; label: string }>;
+  agent: FakeAgentAdapter & { listModels: ReturnType<typeof vi.fn> };
   command(content: string, formValue?: Record<string, unknown>, overrides?: CommandOverrides): Promise<boolean>;
 }> {
   const rootDir = await mkdtemp(join(tmpdir(), 'bridge-profile-config-command-'));
@@ -383,9 +401,11 @@ async function createHarness(options: {
     processId: 'proc-1',
   } satisfies Controls;
 
+  const nativeModels = ['claude-opus-4-8', 'claude-opus-5-5', 'claude-sonnet-5'].map(value => ({ value, label: value }));
+  const agent = Object.assign(new FakeAgentAdapter(), { listModels: vi.fn(async () => nativeModels) });
   return {
     rootDir,
-    channel,
+    channel, nativeModels, agent,
     command: (content: string, formValue?: Record<string, unknown>, overrides: CommandOverrides = {}) =>
       tryHandleCommand({
         channel: channel as unknown as CommandContext['channel'],
@@ -398,7 +418,7 @@ async function createHarness(options: {
         chatMode: overrides.chatMode ?? 'p2p',
         sessions,
         workspaces,
-        agent: new FakeAgentAdapter(),
+        agent,
         activeRuns: new ActiveRuns(),
         controls,
         formValue,

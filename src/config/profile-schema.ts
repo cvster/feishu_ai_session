@@ -91,7 +91,7 @@ export interface ProfileConfig {
   permissions: PermissionConfig;
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
-  zcode?: { binaryPath: string; args?: string[]; dataDir?: string };
+  zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string };
   attachments: AttachmentConfig;
   comments: CommentConfig;
   larkCli: LarkCliConfig;
@@ -118,7 +118,7 @@ export interface CreateDefaultProfileConfigInput {
   sandbox?: Partial<SandboxConfig>;
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
-  zcode?: { binaryPath: string; args?: string[]; dataDir?: string };
+  zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string };
   secrets?: SecretsConfig;
 }
 
@@ -153,7 +153,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     sandbox?: Partial<SandboxConfig>;
     permissions?: Partial<PermissionConfig>;
     codex?: CodexConfig & { flags?: unknown };
-    zcode?: { binaryPath?: unknown; args?: unknown; dataDir?: unknown };
+    zcode?: { binaryPath?: unknown; args?: unknown; dataDir?: unknown; modelConfigPath?: unknown };
     attachments?: Partial<AttachmentConfig>;
     comments?: unknown;
     larkCli?: unknown;
@@ -353,9 +353,10 @@ function numberOr(value: unknown, fallback: number): number {
     : fallback;
 }
 
-function normalizeZcode(input: { binaryPath?: unknown; args?: unknown; dataDir?: unknown }): NonNullable<ProfileConfig['zcode']> {
+function normalizeZcode(input: { binaryPath?: unknown; args?: unknown; dataDir?: unknown; modelConfigPath?: unknown }): NonNullable<ProfileConfig['zcode']> {
   if (typeof input.binaryPath !== 'string' || !input.binaryPath.trim() ||
       (input.args !== undefined && (!Array.isArray(input.args) || !input.args.every(v => typeof v === 'string'))) ||
-      (input.dataDir !== undefined && typeof input.dataDir !== 'string')) throw new Error('Invalid zcode configuration');
-  return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.dataDir ? { dataDir: input.dataDir as string } : {}) };
+      (input.dataDir !== undefined && typeof input.dataDir !== 'string') ||
+      (input.modelConfigPath !== undefined && typeof input.modelConfigPath !== 'string')) throw new Error('Invalid zcode configuration');
+  return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.dataDir ? { dataDir: input.dataDir as string } : {}), ...(input.modelConfigPath ? { modelConfigPath: input.modelConfigPath as string } : {}) };
 }

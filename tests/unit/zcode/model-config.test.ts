@@ -20,7 +20,7 @@ it('projects the selected local model without placing account secrets in model i
   expect((await loadZcodeRuntimeModel({ dataDir }, 'local/model-b'))?.model.modelId).toBe('model-b');
   await expect(loadZcodeRuntimeModel({ dataDir }, 'foreign/model-a')).rejects.toThrow('选定模型');
   await writeFile(join(dataDir, 'config.json'), 'invalid-secret-data');
-  await expect(loadZcodeRuntimeModel({ dataDir })).rejects.toThrow('ZCode CLI 模型配置无法读取');
+  await expect(loadZcodeRuntimeModel({ dataDir })).rejects.toThrow('ZCode 模型配置无法读取');
 });
 it('keeps opaque native IDs and rejects unknown providers instead of falling back', () => {
   expect(nativeSessionFields('zcode', 'sess_opaque')).toEqual({ sessionId: 'sess_opaque' });

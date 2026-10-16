@@ -1,4 +1,4 @@
-import { modelLabel, normalizeReasoningEffort, supportedModels, supportedReasoningEfforts } from '../agent/models';
+import { modelLabel, normalizeReasoningEffort, supportedModels, supportedReasoningEfforts, type ModelOption } from '../agent/models';
 import type { KnownChat } from '../bot/lark-info';
 import type { AgentKind, LarkCliIdentityPreset } from '../config/profile-schema';
 import type { CotMessagesMode, MessageReplyMode } from '../config/schema';
@@ -6,9 +6,11 @@ import type { CotMessagesMode, MessageReplyMode } from '../config/schema';
 export interface ConfigFormOpts {
   /** Profile's agent kind — decides which model catalog the picker shows. */
   agentKind: AgentKind;
-  /** Current model selection (a value from {@link supportedModels}). */
+  /** Current native model ID or the default sentinel. */
   model: string;
   modelNotice?: string;
+  modelOptions?: ModelOption[];
+  modelPage?: number;
   reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
   messageReply: MessageReplyMode;
   showToolCalls: boolean;
@@ -58,17 +60,28 @@ export function configFormCard(opts: ConfigFormOpts): object {
     ...(submit ? { type: 'primary', form_action_type: 'submit' } : {}),
     behaviors: [{ type: 'callback', value: { cmd } }],
   });
+  const allModels = [...(opts.modelOptions ?? supportedModels(opts.agentKind))];
+  if (!allModels.some(model => model.value === opts.model)) allModels.push({ value: opts.model, label: `未验证 · ${opts.model}` });
+  const pages = Math.max(1, Math.ceil(allModels.filter(model => model.value !== 'default').length / 80));
+  const page = Math.max(0, Math.min(pages - 1, Math.floor(Number.isFinite(opts.modelPage) ? opts.modelPage! : 0)));
+  const modelOptions = allModels.filter(model => model.value !== 'default').slice(page * 80, (page + 1) * 80);
+  for (const model of allModels) if ((model.value === 'default' || model.value === opts.model) && !modelOptions.some(m => m.value === model.value)) modelOptions.unshift(model);
   return {
     schema: '2.0',
     config: { summary: { content: '偏好设置' } },
     body: {
       elements: [
         { tag: 'markdown', content: '⚙️ **偏好设置** · 保存后下次请求生效' },
+        { tag: 'column_set', flex_mode: 'flow', horizontal_spacing: 'small', columns: [
+          ...(page > 0 ? [button('models_prev', '上一页模型', `config models ${page - 1}`)] : []),
+          button('models_refresh', pages > 1 ? `刷新模型（${page + 1}/${pages}）` : '刷新模型', `config models ${page}`),
+          ...(page + 1 < pages ? [button('models_next', '下一页模型', `config models ${page + 1}`)] : []),
+        ].map(action => ({ tag: 'column', width: 'auto', elements: [action] })) },
         ...(opts.modelNotice ? [{ tag: 'markdown', content: `⚠️ ${opts.modelNotice}` }] : []),
         {
           tag: 'form', name: 'config_form', elements: [
             label('模型'),
-            select('model', opts.model, supportedModels(opts.agentKind)),
+            select('model', opts.model, modelOptions),
             ...(supportedReasoningEfforts(opts.agentKind).length ? [label('推理强度'),
               select('reasoning_effort', normalizeReasoningEffort(opts.agentKind, opts.reasoningEffort), supportedReasoningEfforts(opts.agentKind).map(value => ({ value, label: value })))] : []),
             collapsedPanel('更多设置', [
@@ -109,7 +122,7 @@ export function configSavedCard(opts: ConfigFormOpts): object {
   return {
     schema: '2.0', config: { summary: { content: '偏好已保存' } },
     body: { elements: [
-      { tag: 'markdown', content: `✅ **偏好已保存**\n${modelLabel(opts.agentKind, opts.model)} · ${opts.reasoningEffort}\n下次请求生效。` },
+      { tag: 'markdown', content: `✅ **偏好已保存**\n${modelLabel(opts.agentKind, opts.model, opts.modelOptions)} · ${opts.reasoningEffort}\n下次请求生效。` },
       { tag: 'button', text: { tag: 'plain_text', content: '返回控制台' },
         behaviors: [{ type: 'callback', value: { cmd: 'panel' } }] },
     ] },

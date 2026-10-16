@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { spawnProcess, mergeProcessEnv } from '../../platform/spawn';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
 
-export interface ZcodeOptions { binary?: string; args?: readonly string[]; dataDir?: string; larkChannel?: LarkChannelEnvContext }
+export interface ZcodeOptions { binary?: string; args?: readonly string[]; dataDir?: string; modelConfigPath?: string; larkChannel?: LarkChannelEnvContext }
 export function zcodeStorageDir(options: Pick<ZcodeOptions, 'dataDir'> = {}): string {
   return resolve(options.dataDir ?? process.env.ZCODE_STORAGE_DIR ?? join(homedir(), '.zcode', 'cli'));
 }
@@ -33,7 +33,7 @@ export class ZcodeClient {
   constructor(options: ZcodeOptions = {}, cwd?: string) {
     const command = zcodeCommand(options);
     this.child = spawnProcess(command.binary, [...command.args, 'app-server'], { cwd,
-      env: mergeProcessEnv(process.env, { ...buildLarkChannelEnv(options.larkChannel), ...(options.dataDir ? { ZCODE_STORAGE_DIR: options.dataDir, ZCODE_DATA_BASE_DIR: options.dataDir } : {}) }),
+      env: mergeProcessEnv(process.env, { ...buildLarkChannelEnv(options.larkChannel), ...(options.dataDir ? { ZCODE_STORAGE_DIR: zcodeStorageDir(options), ZCODE_DATA_BASE_DIR: zcodeStorageDir(options) } : {}) }),
       stdio: ['pipe', 'pipe', 'pipe'] });
     const lines = createInterface({ input: this.child.stdout! });
     // stderr is drained, never logged: upstream diagnostics can contain credentials or full prompts.

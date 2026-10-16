@@ -12,8 +12,8 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { capabilityForTool } from '../agent/capability';
-import { DEFAULT_MODEL, normalizeModelSelection, normalizeReasoningEffort, supportedModels,
-  supportedReasoningEfforts, unavailableModelNotice } from '../agent/models';
+import { DEFAULT_MODEL, loadModelChoices, normalizeModelSelection, normalizeReasoningEffort,
+  supportedReasoningEfforts } from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import {
@@ -2810,6 +2810,8 @@ async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
   switch (sub) {
     case '':
       return showConfigForm(ctx);
+    case 'models':
+      return showConfigForm(ctx, Number(args.trim().split(/\s+/)[1]) || 0);
     case 'submit':
       return submitConfig(ctx);
     case 'cancel':
@@ -2819,7 +2821,7 @@ async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
   }
 }
 
-async function showConfigForm(ctx: CommandContext): Promise<void> {
+async function showConfigForm(ctx: CommandContext, modelPage = 0): Promise<void> {
   await Promise.all([
     ctx.controls.refreshOwner(ctx.channel).catch(() => {}),
     fetchKnownChats(ctx.channel)
@@ -2831,7 +2833,9 @@ async function showConfigForm(ctx: CommandContext): Promise<void> {
 
   const ms = getRunIdleTimeoutMs(ctx.controls.cfg);
   const access = ctx.controls.profileConfig.access;
+  const modelChoices = await loadModelChoices(ctx.agent, effectiveWorkspaceCwd(ctx), ctx.controls.cfg.preferences?.model);
   const card = configFormCard({
+    modelOptions: modelChoices.options, modelPage,
     agentKind: ctx.controls.profileConfig.agentKind,
     model: normalizeModelSelection(
       ctx.controls.profileConfig.agentKind,
@@ -2839,7 +2843,7 @@ async function showConfigForm(ctx: CommandContext): Promise<void> {
     ),
     reasoningEffort: normalizeReasoningEffort(ctx.controls.profileConfig.agentKind,
       ctx.controls.cfg.preferences?.reasoningEffort),
-    modelNotice: unavailableModelNotice(ctx.controls.profileConfig.agentKind, ctx.controls.cfg.preferences?.model),
+    modelNotice: modelChoices.notice,
     messageReply: getMessageReplyMode(ctx.controls.cfg),
     showToolCalls: getShowToolCalls(ctx.controls.cfg),
     cotMessages: getCotMessages(ctx.controls.cfg),
@@ -2902,10 +2906,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
   // tidy (resolveModelArg treats both the same way).
   const agentKind = ctx.controls.profileConfig.agentKind;
   const rawModel = String(fv.model ?? '').trim();
-  const modelValid = rawModel !== '' && supportedModels(agentKind).some((m) => m.value === rawModel);
-  const modelSelection = modelValid
-    ? rawModel
-    : normalizeModelSelection(agentKind, ctx.controls.cfg.preferences?.model);
+  const modelSelection = normalizeModelSelection(agentKind, rawModel || ctx.controls.cfg.preferences?.model);
   const model = modelSelection === DEFAULT_MODEL ? undefined : modelSelection;
   const rawReasoningEffort = String(fv.reasoning_effort ?? '').trim();
   const reasoningEffort = normalizeReasoningEffort(agentKind,
@@ -2991,9 +2992,19 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
       requireMentionInGroup,
     };
 
+    let modelOptions: import('../agent/models').ModelOption[] | undefined;
     let failureStep = 'config.save';
     let larkCliPolicyApplied = false;
     try {
+      if (rawModel && model) {
+        const choices = await loadModelChoices(ctx.agent, effectiveWorkspaceCwd(ctx));
+        if (!choices.available || !choices.options.some(option => option.value === model && !option.unavailable)) {
+          await waitForSettle();
+          await showResultCardInPlace(ctx, formMsgId, configFailedCard('模型列表已变化或暂时无法读取，请重新打开 /config 刷新后选择；原设置未修改。'));
+          return;
+        }
+        modelOptions = choices.options;
+      }
       if (larkCliIdentityChanged) {
         failureStep = 'config.lark-cli-policy';
         const applied = await applyConfigLarkCliIdentityPolicy(ctx, larkCliIdentity);
@@ -3046,6 +3057,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
       configSavedCard({
         agentKind,
         model: modelSelection,
+        modelOptions,
         reasoningEffort,
         messageReply,
         showToolCalls,

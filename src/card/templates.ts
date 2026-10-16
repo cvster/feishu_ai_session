@@ -1,5 +1,5 @@
 import { toolDefinition, type ToolId } from '../tools/definitions';
-import { modelLabel, supportedModels } from '../agent/models';
+import { modelLabel } from '../agent/models';
 import { CODEX_STANDARD_REASONING_VALUES } from '../../packages/codex-core/src/models';
 
 interface ButtonSpec {

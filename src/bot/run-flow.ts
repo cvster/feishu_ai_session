@@ -214,7 +214,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
         rejectReason: {
           code: err.code,
           userVisible:
-            err.code === 'session-archived' || err.code === 'archive-check-unavailable' || err.code === 'native-session-busy' || err.code === 'execution-worker-unavailable'
+            err.code === 'session-archived' || err.code === 'archive-check-unavailable' || err.code === 'native-session-busy' || err.code === 'execution-worker-unavailable' || err.code === 'model-unavailable'
               ? err.message
               : err.code === 'reconnect-in-progress'
               ? '当前 bot 正在重连，稍后会继续处理新消息。'

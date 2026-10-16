@@ -1,6 +1,6 @@
 import type { NativeSessionLocks } from '../tools/locks';
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentAdapter, AgentEvent, AgentRun } from '../agent/types';
+import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../agent/types';
 import { ActiveRuns, type RunHandle } from '../bot/active-runs';
 import { ProcessPool } from '../bot/process-pool';
 import type { RunPolicyAllow } from '../policy/run-policy';
@@ -94,6 +94,14 @@ export class RunExecutor {
     return task;
   }
 
+  private async validateModel(options: Pick<AgentRunOptions, 'model' | 'cwd'>): Promise<void> {
+    if (!options.model || !this.agent.listModels) return;
+    let models;
+    try { models = await this.agent.listModels({ cwd: options.cwd }); }
+    catch { throw new RunRejected('model-unavailable', '暂时无法确认工具模型列表，本次未执行。请重新打开 /config 刷新后重试。'); }
+    if (!models.some(model => model.value === options.model)) throw new RunRejected('model-unavailable', '已选模型已移除或不可用，本次未执行。请通过 /config 重新选择模型。');
+  }
+
   async waitForSubmissions(): Promise<void> { await Promise.allSettled([...this.submissions]); }
 
   private async submitMessageImpl(input: SubmitRunInput, beforeSend: (prepared: { threadId: string; knownTurnIds: string[];
@@ -115,6 +123,7 @@ export class RunExecutor {
         sessionName: this.sessionNameForScope?.(input.scopeId),
         cwd: input.policy.cwdRealpath, threadId: input.threadId, model: input.model,
         reasoningEffort: input.reasoningEffort, images: input.images, attachmentPaths: input.attachmentPaths, sandbox: input.policy.sandbox };
+      await this.validateModel(opts);
       await this.agent.prepareRun?.(opts);
       await input.beforeSpawn?.(); validate();
       return await this.agent.submit(opts, async prepared => {
@@ -189,6 +198,7 @@ export class RunExecutor {
     let run: AgentRun;
     try {
       input.validateBeforeStart?.();
+      await this.validateModel(runOptions);
       await this.agent.prepareRun?.(runOptions);
       await input.beforeSpawn?.();
       input.validateBeforeStart?.();

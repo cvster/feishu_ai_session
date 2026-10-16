@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { expect, it } from 'vitest';
-import { claudeWorkspaceOccupation, occupiesClaudeWorkspace } from '../../../src/agent/claude/occupation';
+import { CLAUDE_MODEL_QUERY_ARGS, claudeWorkspaceOccupation, occupiesClaudeWorkspace } from '../../../src/agent/claude/occupation';
 
 it('recognizes native and Node Claude executables without matching unrelated processes', () => {
   expect(occupiesClaudeWorkspace({ argv: ['/bin/claude', '--resume', 'id'], cwd: '/repo' }, '/repo', 'claude')).toBe(true);
@@ -26,4 +26,10 @@ it.skipIf(process.platform !== 'linux')('detects a live external Claude process 
   } finally {
     child.kill(); await rm(cwd, { recursive: true, force: true });
   }
+});
+
+it('does not mistake an owned read-only model query for an active task in the same project', () => {
+  const query = { argv: ['/usr/bin/claude', ...CLAUDE_MODEL_QUERY_ARGS], cwd: '/project' };
+  expect(occupiesClaudeWorkspace(query, '/project', 'claude')).toBe(false);
+  expect(occupiesClaudeWorkspace({ ...query, argv: [...query.argv, '-p', 'real task'] }, '/project', 'claude')).toBe(true);
 });
