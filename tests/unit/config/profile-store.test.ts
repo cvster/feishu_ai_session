@@ -175,3 +175,17 @@ describe('profile store canonical serialization', () => {
     expect(root.migrations?.permissionDefaultsV1).toEqual(['claude']);
   });
 });
+
+it('retains the complete ZCode configuration when saving unrelated preferences repeatedly', async () => {
+  const dir = await tmpRoot(), path = join(dir, 'config.json');
+  const zcode = { binaryPath: '/native/node', args: ['/native/zcode.cjs'], dataDir: '/native/data', modelConfigPath: '/desktop/v2' };
+  const root = createRootConfig('bot', { ...createDefaultProfileConfig({ agentKind: 'codex', accounts: { app }, codex: { binaryPath: 'codex' } }), zcode });
+  await saveRootConfig(root, path);
+  for (const limit of [7, 9]) {
+    const loaded = (await loadRootConfig(path))!;
+    expect(loaded.profiles.bot?.zcode).toEqual(zcode);
+    loaded.profiles.bot!.preferences.maxConcurrentRuns = limit;
+    await saveRootConfig(loaded, path);
+  }
+  expect(JSON.parse(await readFile(path, 'utf8')).profiles.bot.zcode).toEqual(zcode);
+});
