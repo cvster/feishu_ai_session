@@ -17,6 +17,7 @@ export interface ToolSessionOperations {
   historyPath(nativeId: string): Promise<string | undefined>;
   rename(nativeId: string, name: string): Promise<void>;
   archive(nativeId: string): Promise<void>;
+  fork?(nativeId: string): Promise<{ nativeId: string; name: string; cwd: string }>;
 }
 export interface AgentTool {
   sessions?: ToolSessionOperations;

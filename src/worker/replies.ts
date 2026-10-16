@@ -23,6 +23,7 @@ interface ReplyDelivery {
   pushedAt: number;
   sendingSince?: number;
   finished?: boolean;
+  controlsVersion?: number;
   skipped?: boolean;
 }
 export interface WorkerRepliesDeps {
@@ -78,7 +79,9 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       const run = deps.adapter.observe(job.id);
       recovered.set(job.id, { handle: deps.activeRuns.register(target.scope, run), scope: target.scope });
     }
-    if (deliveries[job.id]?.finished || deliveries[job.id]?.skipped) return;
+    const previousDelivery = deliveries[job.id];
+    const repairZcodeControls = deps.adapter.id === 'zcode' && previousDelivery?.mode === 'card' && previousDelivery.controlsVersion !== 1;
+    if (previousDelivery?.skipped || (previousDelivery?.finished && !repairZcodeControls)) return;
     const snapshot = await deps.adapter.client.snapshot(job.id);
     const init = snapshot.events.find(row => row.event.type === 'system' && row.event.sessionId)?.event;
     if (init?.type === 'system' && init.sessionId && (binding.nativeId !== init.sessionId || !binding.nativeCreated)) {
@@ -105,7 +108,8 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     if (delivery.lastEvent === lastEvent && !finished && Date.now() - delivery.pushedAt < 15_000) return;
     if (deps.controls.auxiliary?.isAuxiliary(target.scope)) await deps.controls.auxiliary.trackRun(target.scope, job.id, target.replyTo, !finished, target.operatorOpenId);
     const options = deps.renderOptions?.(job) ?? {};
-    const card = renderCard(state, { ...options, showStopButton: !finished });
+    // Completed personal cards retain the same group controls as Codex. Active stops stay bound to their job token.
+    const card = renderCard(state, { ...options, showStopButton: true, ...(finished ? { signCallback: undefined } : {}) });
     // CardKit updates own the stream window across reconnects; avoid its 10-minute streaming timeout.
     (card as { config: { streaming_mode: boolean } }).config.streaming_mode = false;
     const text = renderText(state);
@@ -133,7 +137,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       const response = await deps.channel.rawClient.im.v1.message.patch({ path: { message_id: delivery.messageId }, data: { content: content! } });
       if (response.code) throw new Error(`更新回复失败：${response.code} ${response.msg ?? ''}`);
     }
-    delivery.lastEvent = lastEvent; delivery.pushedAt = Date.now(); delivery.finished = finished; await save();
+    delivery.lastEvent = lastEvent; delivery.pushedAt = Date.now(); delivery.finished = finished; delivery.controlsVersion = 1; await save();
   }
   const runNow = (): Promise<void> => {
     if (stopped) return Promise.resolve();

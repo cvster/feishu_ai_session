@@ -15,13 +15,14 @@ async function fixture(kind = 'normal') {
     const fs = require('node:fs');
     if (process.argv.includes('--version')) { console.log('zcode 0.16.5'); process.exit(); }
     const send = value => process.stdout.write(JSON.stringify(value)+'\\n');
-    const snapshot = { session: { sessionId: 'sess_test', title: 'AA-zcode', sessionKind: 'interactive', workspace: { workspacePath: ${JSON.stringify(root)} }, createdAt: 1, updatedAt: 2, status: ${JSON.stringify(kind === 'busy' ? 'running' : 'idle')}, model: { providerId: 'original', modelId: 'model' } }, lastError: ${JSON.stringify(kind === 'missing-model' ? { type: 'ZCODE_RUNTIME_MODEL_UNAVAILABLE' } : null)}, messages: [{ role: 'user', parts: [{ type: 'text', text: 'latest context' }] }] };
+    const snapshot = { session: { sessionId: 'sess_test', title: 'AA-zcode', sessionKind: 'interactive', workspace: { workspacePath: ${JSON.stringify(root)} }, createdAt: 1, updatedAt: 2, status: ${JSON.stringify(kind === 'busy' ? 'running' : 'idle')}, model: { providerId: 'original', modelId: 'model' } }, lastError: ${JSON.stringify(kind === 'missing-model' ? { type: 'ZCODE_RUNTIME_MODEL_UNAVAILABLE' } : null)}, messages: [{ info: { role: 'assistant', messageId: 'msg_latest' }, role: 'assistant', parts: [{ type: 'text', text: 'latest context' }] }] };
     let inputId, seq = 0;
     const event = (type, payload, sessionId = 'sess_test') => send({ method: 'session/event', params: { type, payload, sessionId, seq: ++seq, turnId: 'turn-a' } });
     require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
       const r = JSON.parse(line); fs.appendFileSync(${JSON.stringify(calls)}, line+'\\n');
       if (r.method === 'session/list') return send({ id: r.id, result: { sessions: [snapshot.session] } });
       if (r.method === 'session/create' || r.method === 'session/resume') { send({ id: 'prefs', method: 'session/requestRuntimePreferences', params: {} }); return send({ id: r.id, result: snapshot }); }
+      if (r.method === 'session/fork') return send({ id: r.id, result: { forkedSessionId: 'sess_copy', snapshot: { session: { sessionId: 'sess_copy' } } } });
       if (r.method === 'session/send') {
         inputId = r.params.inputId;
         send({ id: r.id, result: { accepted: true, sessionId: 'sess_test' } });
@@ -135,4 +136,21 @@ it('blocks missing original models, while explicit model changes are applied bef
   const calls = await h.read(), set = calls.findIndex(c => c.method === 'session/setModel');
   expect(set).toBeGreaterThan(0); expect(set).toBeLessThan(calls.findIndex(c => c.method === 'session/setThoughtLevel'));
   expect(calls[set].params.model).toEqual({ providerId: 'test', modelId: 'model' });
+});
+
+it('copies the native checkpoint through the provider without sending a prompt or changing the source', async () => {
+  const h = await fixture();
+  const provider = new ZcodeSessionProvider(h.options, join(h.root, 'bridge-labels'));
+  const copy = await provider.fork('sess_test');
+  expect(copy).toEqual({ nativeId: 'sess_copy', name: 'AA-zcode (1)', cwd: h.root });
+  const calls = await h.read();
+  expect(calls.find(c => c.method === 'session/fork').params).toEqual({ sessionId: 'sess_test', target: { kind: 'message', messageId: 'msg_latest' } });
+  expect(calls.some(c => ['session/send', 'session/setModel', 'session/stop'].includes(c.method))).toBe(false);
+  expect(calls.findIndex(c => c.method === 'workspace/updateProviderRegistry')).toBeLessThan(calls.findIndex(c => c.method === 'session/resume'));
+});
+it('refuses native copy while a task is running', async () => {
+  const h = await fixture('busy');
+  const provider = new ZcodeSessionProvider(h.options, join(h.root, 'bridge-labels'));
+  await expect(provider.fork('sess_test')).rejects.toThrow('先停止');
+  expect((await h.read()).some(c => c.method === 'session/fork')).toBe(false);
 });

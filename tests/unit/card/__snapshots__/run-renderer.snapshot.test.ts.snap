@@ -310,7 +310,7 @@ _运行中…_",
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -676,7 +676,7 @@ exports[`run card renderer snapshots > collapses consecutive tools while preserv
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -1045,7 +1045,7 @@ exports[`run card renderer snapshots > renders active and completed thinking 1`]
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -1413,7 +1413,7 @@ exports[`run card renderer snapshots > renders active and completed thinking 2`]
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -1751,7 +1751,7 @@ exports[`run card renderer snapshots > renders done, error, interrupted, and idl
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -2089,7 +2089,7 @@ exports[`run card renderer snapshots > renders done, error, interrupted, and idl
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -2431,7 +2431,7 @@ exports[`run card renderer snapshots > renders done, error, interrupted, and idl
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -2773,7 +2773,7 @@ exports[`run card renderer snapshots > renders done, error, interrupted, and idl
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -3111,7 +3111,7 @@ exports[`run card renderer snapshots > renders initial running state 1`] = `
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -3517,7 +3517,7 @@ _运行中…_",
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -3889,7 +3889,7 @@ pwd
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -4258,7 +4258,7 @@ ENOENT
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "分叉会话并创建新群",
+                  "content": "复制会话并创建新群",
                   "tag": "plain_text",
                 },
                 "padding": "0px",

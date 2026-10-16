@@ -330,7 +330,7 @@ function iconButton(token: string, cmd: string, label: string, color = 'grey'): 
 }
 
 function forkButton(options: RunCardRenderOptions): RunControl {
-  const button = iconButton('mindmap-down_outlined', 'fork', '分叉会话并创建新群', 'blue');
+  const button = iconButton('mindmap-down_outlined', 'fork', '复制会话并创建新群', 'blue');
   return options.forkIconKey
     ? { ...button, icon: { tag: 'custom_icon', img_key: options.forkIconKey } }
     : button;

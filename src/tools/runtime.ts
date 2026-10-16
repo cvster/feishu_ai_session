@@ -54,5 +54,6 @@ export function toolProfile(profile: ProfileConfig, toolId: AgentKind): ProfileC
   return { ...profile, agentKind: toolId,
     ...(toolId !== 'codex' ? { codex: undefined } : {}),
     preferences: { ...profile.preferences,
-      model: toolId === profile.agentKind ? profile.preferences.model : undefined } };
+      model: toolId === profile.agentKind ? profile.preferences.model : undefined,
+      reasoningEffort: toolId === profile.agentKind ? profile.preferences.reasoningEffort : undefined } };
 }

@@ -4,6 +4,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ZcodeAdapter } from '../../../src/agent/zcode/adapter';
+import { ZcodeSessionProvider } from '../../../src/tools/zcode-sessions';
 import type { AgentEvent } from '../../../src/agent/types';
 it.skipIf(process.env.ZCODE_LIVE_SMOKE !== '1')('creates, continues and reads a file through a real local ZCode session', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'bridge-zcode-live-'));
@@ -28,4 +29,16 @@ it.skipIf(process.env.ZCODE_LIVE_SMOKE !== '1')('creates, continues and reads a 
     expect(await run.waitForExit(5000)).toBe(true);
   }
   expect(sessionId).toMatch(/^sess_/);
+  const provider = new ZcodeSessionProvider(adapter.options, join(cwd, '.bridge-labels'));
+  const copy = await provider.fork(sessionId!);
+  expect(copy.nativeId).not.toBe(sessionId);
+  const run = adapter.run({ runId: `copy-${Date.now()}`, cwd, sessionId: copy.nativeId,
+    prompt: '不要调用工具，回复我之前让你记住的完整标记。', accessMode: 'read-only' });
+  const events: AgentEvent[] = [];
+  const timer = setTimeout(() => { void run.stop(); }, 45000);
+  try { for await (const event of run.events) events.push(event); }
+  finally { clearTimeout(timer); await run.stop(); await run.waitForExit(5000); }
+  expect(events.filter(event => event.type === 'error')).toEqual([]);
+  expect(events).toContainEqual(expect.objectContaining({ type: 'system', model: effortModel!.value }));
+  expect(events.filter(event => event.type === 'text').map(event => event.delta).join('')).toContain(token);
 }, 180000);

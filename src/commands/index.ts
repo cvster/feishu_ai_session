@@ -1617,32 +1617,43 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function handleFork(_args: string, ctx: CommandContext): Promise<void> {
-  if (!toolDefinition(ctx.controls.profileConfig.agentKind).fork || !ctx.agent.forkThread || !ctx.sessionCatalog) {
+  const toolId = ctx.controls.profileConfig.agentKind;
+  const tool = ctx.controls.toolRegistry?.get(toolId);
+  const nativeFork = tool?.sessions?.fork;
+  if (!toolDefinition(toolId).fork || (!nativeFork && !ctx.agent.forkThread) || !ctx.sessionCatalog) {
     return reply(ctx, '当前工具不支持会话分叉。');
   }
   const botAppId = ctx.controls.profileConfig.accounts.app.id;
   const exact = ctx.sessionCatalogIdentity ? ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity) : undefined;
   const source = exact ?? ctx.sessionCatalog.entries()
-    .filter((entry) => entry.status === 'active' && entry.agentId === 'codex' &&
-      entry.scopeId === ctx.scope && entry.botAppId === botAppId)
+    .filter((entry) => entry.status === 'active' && entry.agentId === toolId &&
+      entry.scopeId === ctx.scope && entry.botAppId === botAppId && (!tool || !entry.sourceId || entry.sourceId === tool.sourceId))
     .sort((a, b) => b.updatedAt - a.updatedAt)[0];
-  if (!source?.threadId || source.botAppId !== botAppId) {
-    return reply(ctx, '当前群尚未绑定本机器人的 Codex 会话，无法分叉。');
+  const sourceNativeId = source && nativeSessionId(toolId, source);
+  if (!sourceNativeId || source?.botAppId !== botAppId || source.agentId !== toolId || (tool && source.sourceId && source.sourceId !== tool.sourceId)) {
+    return reply(ctx, `当前群尚未绑定本机器人的 ${toolDefinition(toolId).label} 会话，无法复制。`);
   }
-  const key = `${botAppId}:${source.threadId}`;
+  if (toolId === 'zcode' && ctx.activeRuns.get(ctx.scope)) return reply(ctx, '请先停止当前 ZCode 任务，再复制会话。');
+  const key = JSON.stringify([botAppId, toolId, tool?.sourceId, sourceNativeId]);
   if (pendingForks.has(key)) return reply(ctx, '正在创建分叉，请稍候。');
   pendingForks.add(key);
   try {
     const createForkAndGroup = async () => {
-      const fork = unboundForks.get(key) ?? await ctx.agent.forkThread!(source.threadId!);
+      let fork = unboundForks.get(key);
+      if (!fork) {
+        if (nativeFork) {
+          const copy = await nativeFork.call(tool!.sessions!, sourceNativeId);
+          fork = { threadId: copy.nativeId, name: copy.name, cwd: copy.cwd };
+        } else fork = await ctx.agent.forkThread!(sourceNativeId);
+      }
       // A group-creation retry must not create another native fork.
       unboundForks.set(key, fork);
-      const token = issuePanelCandidate(ctx, { kind: 'session', ...fork, preview: fork.name });
+      const token = issuePanelCandidate(ctx, { kind: 'session', ...fork, toolId, sourceId: tool?.sourceId, preview: fork.name });
       try {
         const bound = await createGroupForPanelSession(ctx, token, {
           exactName: true, forked: true,
           // Preserve the existing creation-time history replay for AA groups.
-          ...(fork.name.startsWith('AA') ? { recentTurnReplayCount: 3 } : {}),
+          ...(toolId === 'codex' && fork.name.startsWith('AA') ? { recentTurnReplayCount: 3 } : {}),
         });
         if (bound) unboundForks.delete(key);
         else await reply(ctx, `⚠️ 分叉 **${fork.name}** 已创建，建群尚未完成。再次点击“分叉”可重试建群，不会重复分叉。`);

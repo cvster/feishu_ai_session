@@ -1,3 +1,5 @@
+import { ToolRegistry } from '../../../src/tools/types';
+import { ToolBindingStore } from '../../../src/tools/bindings';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -264,6 +266,31 @@ describe('Bridge command contracts', () => {
     expect(h.sessionCatalog.activeFor(source)?.threadId).toBe('source-thread');
     expect(h.sessionCatalog.entries().find((entry) => entry.scopeId === 'oc_fake_1')?.threadId).toBe('fork-non-aa');
     expect(h.agent.archivedThreads).toEqual([]);
+  });
+
+  it('copies a ZCode session into a new ZCode workgroup and retries group creation without copying twice', async () => {
+    const h = await createHarness();
+    h.controls.profileConfig.agentKind = 'zcode';
+    const bindings = new ToolBindingStore(join(h.tmp.profile, 'tool-bindings')); await bindings.load();
+    h.controls.toolBindings = bindings;
+    bindings.set('chat-1', { toolId: 'zcode', sourceId: 'source-zcode', nativeId: 'sess_original', nativeCreated: true });
+    h.sessionCatalog.upsertActive({ scopeId: 'chat-1', agentId: 'zcode', cwdRealpath: h.tmp.workspace,
+      policyFingerprint: 'p', sessionId: 'sess_original', sourceId: 'source-zcode', botAppId: 'app-id' });
+    const tools = new ToolRegistry();
+    const fork = vi.fn(async () => ({ nativeId: 'sess_child', name: 'AA-ZCode (1)', cwd: h.tmp.workspace }));
+    tools.register({ id: 'zcode', label: 'ZCode', sourceId: 'source-zcode', agent: h.agent, listSessions: async () => [],
+      sessions: { historyPath: async () => undefined, rename: async () => {}, archive: async () => {}, fork } });
+    h.controls.toolRegistry = tools;
+    vi.spyOn(h.channel.rawClient.im.v1.chat, 'create').mockRejectedValueOnce(new Error('temporary group failure'));
+    await h.run('/fork', { chatMode: 'group' });
+    expect(fork).toHaveBeenCalledWith('sess_original'); expect(lastMarkdown(h.channel)).toContain('建群尚未完成');
+    await h.run('/fork', { chatMode: 'group' });
+    expect(fork).toHaveBeenCalledTimes(1);
+    expect(h.channel.createdChats[0]?.options).toMatchObject({ name: 'AA-ZCode (1)' });
+    expect(bindings.get('oc_fake_1')).toMatchObject({ toolId: 'zcode', sourceId: 'source-zcode', nativeId: 'sess_child' });
+    expect(h.sessionCatalog.entries().find(entry => entry.scopeId === 'chat-1' && entry.status === 'active')?.sessionId).toBe('sess_original');
+    expect(h.sessionCatalog.entries().find(entry => entry.scopeId === 'oc_fake_1')).toMatchObject({ agentId: 'zcode', sessionId: 'sess_child' });
+    await bindings.flush();
   });
 
   it('retries failed group creation without creating a second fork', async () => {
