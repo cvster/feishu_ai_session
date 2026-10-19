@@ -35,7 +35,7 @@ async function freePort() {
   const port = (server.address() as { port: number }).port; await new Promise<void>(resolve => server.close(() => resolve())); return port;
 }
 function deferred() { let resolve!: () => void; return { promise: new Promise<void>(r => { resolve = r; }), release: () => resolve() }; }
-async function setup(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' = 'codex') {
+async function setup(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' | 'dsh' = 'codex') {
   const root = await mkdtemp(join(tmpdir(), 'ff-a2a-')); roots.push(root);
   const history = join(root, 'source.jsonl'); await writeFile(history, '原会话记录');
   const bindings = new ToolBindingStore(join(root, 'bindings.json')); await bindings.load();
@@ -59,7 +59,7 @@ async function setup(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' = 'codex') {
     const historyRoot = join(root, 'projects', '-project'); await mkdir(historyRoot, { recursive: true });
     await writeFile(join(historyRoot, `${nativeId}.jsonl`), '');
   }
-  const tools = new ToolRegistry(); tools.register({ id: toolId, sourceId: root, label: toolId, agent, listSessions: async () => [], ...(['zcode', 'kilo'].includes(toolId) ? { sessions: { historyMode: 'snapshot' as const, historyPath: async () => history, rename: async () => {}, archive: async () => {} } } : {}) });
+  const tools = new ToolRegistry(); tools.register({ id: toolId, sourceId: root, label: toolId, agent, listSessions: async () => [], ...(['zcode', 'kilo', 'dsh'].includes(toolId) ? { sessions: { historyMode: 'snapshot' as const, historyPath: async () => history, rename: async () => {}, archive: async () => {} } } : {}) });
   await writeFile(join(root, 'aux.json'), JSON.stringify({ version: 1, appId: 'cli_test', groups: {
     oc_group: { chatId: 'oc_group', ownerId: 'ou_owner', generation: 'g1', status: 'active', name: 'C系列讨论', cwd: root,
       source: bindings.get(shared)!.linkedSource },
@@ -103,7 +103,7 @@ async function setup(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' = 'codex') {
   };
 }
 
-it.each(['codex', 'claude', 'zcode', 'kilo'] as const)('runs %s in the shared FF with both aliases, owner-bound member keys and no IM delivery', async toolId => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs %s in the shared FF with both aliases, owner-bound member keys and no IM delivery', async toolId => {
   const h = await setup(toolId);
   const accepted = await h.request('/message:send', h.ask()); expect(accepted.status).toBe(200);
   const id = accepted.body.task.id, result = await h.finished(id);

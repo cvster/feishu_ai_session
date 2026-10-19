@@ -118,3 +118,12 @@ it('registers Kilo as an independent worker without reusing an existing tool ser
   expect(unit).toContain('XDG_DATA_HOME=/native/data-home');
   expect(unit).not.toContain('ZCODE_STORAGE_DIR');
 });
+
+it('starts DSH through its own service and preserves its native home and binary', () => {
+  const unit = buildWorkerUnit({ node: '/node', entry: '/bridge/entry.mjs', profile: 'p', config: '/state/config.json', envPath: '/bin',
+    toolId: 'dsh', dshBinary: '/native/dsh', dshHome: '/native/dsh-home' });
+  expect(unit).toContain('--tool dsh');
+  expect(unit).toContain('LARK_CHANNEL_DSH_BIN=/native/dsh');
+  expect(unit).toContain('DSH_HOME=/native/dsh-home');
+  expect(unit).not.toMatch(/CLAUDE_CONFIG_DIR|ZCODE_STORAGE_DIR|XDG_DATA_HOME|PartOf=|BindsTo=/);
+});

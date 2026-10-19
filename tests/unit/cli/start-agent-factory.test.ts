@@ -10,6 +10,13 @@ import { createDefaultProfileConfig } from '../../../src/config/profile-schema.j
 import { createRuntimeProfileConfig } from '../../../src/runtime/profile-runtime.js';
 
 describe('start runtime agent factory', () => {
+  it('constructs a primary DSH adapter with its native runtime settings', () => {
+    const dsh = { binaryPath: '/native/dsh', homeDir: '/native/home', args: ['--patch', '/native/profile.yml'] };
+    const agent = createRuntimeAgent(createDefaultProfileConfig({ agentKind: 'dsh', accounts: appAccount(), dsh }), { profileDir: tmpdir() });
+    expect(agent.id).toBe('dsh');
+    expect(agent.displayName).toBe('DeepSeek Harness');
+    expect((agent as unknown as { options: unknown }).options).toMatchObject({ binary: dsh.binaryPath, homeDir: dsh.homeDir, args: dsh.args });
+  });
   beforeEach(() => {
     // The host's service override must not change the default-path fixture.
     vi.stubEnv('LARK_CHANNEL_CODEX_BIN', undefined);

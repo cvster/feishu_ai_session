@@ -1,6 +1,6 @@
 # CodexFeishu · 飞书 AI 助手桥接
 
-将飞书 / Lark 群聊接入本机 Codex、Claude Code、ZCode 和 Kilo。私聊机器人创建或管理会话，在工作群中提问、处理图片和文件、执行项目任务；也可以把机器人加入已有协作群，关联一个已有会话作为背景。
+将飞书 / Lark 群聊接入本机 Codex、Claude Code、ZCode、Kilo 和 DeepSeek Harness（DSH）。私聊机器人创建或管理会话，在工作群中提问、处理图片和文件、执行项目任务；也可以把机器人加入已有协作群，关联一个已有会话作为背景。
 
 本项目基于原始 GitHub 项目 [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge)（原名 `feishu-claude-code-bridge`） 二次开发，保留原项目的版权与许可证说明。
 
@@ -12,6 +12,7 @@
 - [动态模型列表](docs/MODELS.md)：Codex、Claude、ZCode、Kilo 原生模型发现，供应商区分、刷新及删除后的处理。
 - [ZCode 接入与工具扩展](docs/ZCODE.md)：本机模型账号、独立 worker、支持范围及架构说明。
 - [Kilo 接入与使用](docs/KILO.md)：复用 VS Code 扩展运行时、动态模型及推理档位、独立 worker 和会话操作。
+- [DeepSeek Harness 接入](docs/DSH.md)：官方 DSH CLI 安装、原生模型配置、独立 worker、AA/FF 和会话操作。
 - [飞书权限申请清单](docs/FEISHU_PERMISSIONS.md)：权限标识、申请用途、事件订阅与验收步骤。
 - [详细配置与排错](README.zh.md)：权限模式、访问控制、会话与日志等进阶说明。
 - [多服务目录说明](docs/MONOREPO.md)：飞书桥接、共享 Codex core 与独立 Web 服务的边界。
@@ -20,7 +21,7 @@
 ## 主要功能
 
 - 给 Codex、Claude、ZCode 或 Kilo 会话创建个人飞书工作群，每个群对应一个会话，在群里发消息等同于ai会话中聊天。
-- 一个机器人同时支持 Codex、Claude Code、ZCode 和 Kilo，创建工作群时选择工具与项目目录。
+- 一个机器人同时支持 Codex、Claude Code、ZCode、Kilo 和 DeepSeek Harness，创建工作群时选择工具与项目目录。
 - 以 `AA` 开头的已有会话可自动创建同名的飞书工作群。
 - 新建工作群、关联 FF 辅助群时，自动为飞书 CLI 所有者开启消息免打扰；不会更改其他成员的通知设置。主 CLI 需以应用所有者登录并授权 `im:chat.user_setting:write`，不影响 Agent 专用 CLI 的身份限制。
 - 把机器人加入开放协作群后，由所有者在私聊选择关联ai会话，创建 FF 辅助会话（名称开头 `AA` 替换为 `FF`，其他名称加 `FF-`）。辅助群只响应真实 `@机器人` 的消息；同事可提问，回答仅回到提问群。

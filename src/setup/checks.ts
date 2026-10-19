@@ -1,3 +1,4 @@
+import { dshCommand, dshStorageDir } from '../agent/dsh/client';
 import { kiloCommand, kiloStorageDir } from '../agent/kilo/client';
 import { zcodeStorageDir } from '../agent/zcode/client';
 import { zcodeCommand } from '../agent/zcode/client';
@@ -59,7 +60,7 @@ export async function checkTool(kind: 'codex' | 'claude', binary: string, run: P
 }
 export async function collectChecks(options: DoctorOptions, run: Probe = probe): Promise<Check[]> {
   const rows: Check[] = [], requested = options.agents ?? 'auto';
-  if (!['auto', 'codex', 'claude', 'zcode', 'kilo', 'both'].includes(requested)) throw new Error('--agents 仅支持 auto、codex、claude、zcode、kilo、both');
+  if (!['auto', 'codex', 'claude', 'zcode', 'kilo', 'dsh', 'both'].includes(requested)) throw new Error('--agents 仅支持 auto、codex、claude、zcode、kilo、dsh、both');
   const rootDir = options.config ? dirname(resolve(options.config)) : undefined;
   const profile = options.profile ?? await readActiveProfile(rootDir);
   if (profile) await loadRuntimeEnv(profile, rootDir);
@@ -92,6 +93,18 @@ export async function collectChecks(options: DoctorOptions, run: Probe = probe):
     selected ? [selected.agentKind] : (['codex', 'claude'] as const).filter(kind => available[kind].ok);
   if (!kinds.length) rows.push({ id: 'agents', status: 'fail', detail: '至少需要 Codex 或 Claude 之一', fix: '运行安装脚本 --agents codex、claude 或 both' });
   for (const kind of kinds) {
+    if (kind === 'dsh') {
+      const command = dshCommand({ binary: selected?.dsh?.binaryPath, args: selected?.dsh?.args });
+      const version = await run(command.binary, [...command.args, '--version']);
+      const help = await run(command.binary, [...command.args, 'web', '--help']);
+      rows.push({ id: 'dsh.capabilities', status: version.ok && help.ok && ['--host', '--port', '--no-open'].every(flag => help.output.includes(flag)) ? 'pass' : 'fail', detail: 'DeepSeek Harness 版本与原生 loopback Web 入口检查（不启动任务）' });
+      rows.push({ id: 'dsh.auth', status: 'warn', detail: '模型目录不证明 API 凭据和额度可用，请先在 DSH 配置并验证模型账号', fix: '见 docs/DSH.md' });
+      if (options.runtime && selected) {
+        try { await new WorkerClient(join(paths.profileDir, workerStateDirName('dsh')), dshStorageDir({ homeDir: selected.dsh?.homeDir }), selected.accounts.app.id, 'dsh').health(); rows.push({ id: 'dsh.worker', status: 'pass', detail: 'DSH worker 身份和来源匹配' }); }
+        catch { rows.push({ id: 'dsh.worker', status: 'fail', detail: 'DSH worker 未就绪', fix: `worker start --tool dsh --profile ${profile}` }); }
+      }
+      continue;
+    }
     if (kind === 'kilo') {
       const command = kiloCommand({ binary: selected?.kilo?.binaryPath, args: selected?.kilo?.args });
       const version = await run(command.binary, [...command.args, '--version']);

@@ -91,6 +91,7 @@ export interface ProfileConfig {
   permissions: PermissionConfig;
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
+  dsh?: { binaryPath: string; args?: string[]; homeDir?: string };
   kilo?: { binaryPath: string; args?: string[]; dataHome?: string };
   zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string };
   attachments: AttachmentConfig;
@@ -119,6 +120,7 @@ export interface CreateDefaultProfileConfigInput {
   sandbox?: Partial<SandboxConfig>;
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
+  dsh?: { binaryPath: string; args?: string[]; homeDir?: string };
   kilo?: { binaryPath: string; args?: string[]; dataHome?: string };
   zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string };
   secrets?: SecretsConfig;
@@ -155,6 +157,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     sandbox?: Partial<SandboxConfig>;
     permissions?: Partial<PermissionConfig>;
     codex?: CodexConfig & { flags?: unknown };
+    dsh?: { binaryPath?: unknown; args?: unknown; homeDir?: unknown };
     kilo?: { binaryPath?: unknown; args?: unknown; dataHome?: unknown };
     zcode?: { binaryPath?: unknown; args?: unknown; dataDir?: unknown; modelConfigPath?: unknown };
     attachments?: Partial<AttachmentConfig>;
@@ -166,7 +169,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     throw new Error('profile schemaVersion must be 2');
   }
   if (!isToolId(raw.agentKind)) {
-    throw new Error('agentKind must be a registered tool (claude, codex, zcode, kilo)');
+    throw new Error('agentKind must be a registered tool (claude, codex, zcode, kilo, dsh)');
   }
   const accounts = normalizeAccounts(raw.accounts);
   if (raw.agentKind === 'codex' && !raw.codex) {
@@ -202,6 +205,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissions,
     permissionSource,
     ...(raw.codex ? { codex: normalizeCodex(raw.codex) } : {}),
+    ...(raw.dsh ? { dsh: normalizeDsh(raw.dsh) } : {}),
     ...(raw.kilo ? { kilo: normalizeKilo(raw.kilo) } : {}),
     ...(raw.zcode ? { zcode: normalizeZcode(raw.zcode) } : {}),
     attachments: {
@@ -369,4 +373,11 @@ function normalizeKilo(input: { binaryPath?: unknown; args?: unknown; dataHome?:
       (input.args !== undefined && (!Array.isArray(input.args) || !input.args.every(v => typeof v === 'string'))) ||
       (input.dataHome !== undefined && (typeof input.dataHome !== 'string' || !input.dataHome.trim()))) throw new Error('Invalid kilo configuration');
   return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.dataHome ? { dataHome: input.dataHome as string } : {}) };
+}
+
+function normalizeDsh(input: { binaryPath?: unknown; args?: unknown; homeDir?: unknown }): NonNullable<ProfileConfig['dsh']> {
+  if (typeof input.binaryPath !== 'string' || !input.binaryPath.trim() ||
+      (input.args !== undefined && (!Array.isArray(input.args) || !input.args.every(v => typeof v === 'string'))) ||
+      (input.homeDir !== undefined && (typeof input.homeDir !== 'string' || !input.homeDir.trim()))) throw new Error('Invalid dsh configuration');
+  return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.homeDir ? { homeDir: input.homeDir as string } : {}) };
 }

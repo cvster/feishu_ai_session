@@ -208,7 +208,7 @@ describe('AA session automatic groups', () => {
     expect(workspaces.setCwd).toHaveBeenCalledWith('oc_auto_1', process.cwd());
   });
 
-  it.each(['zcode', 'kilo'] as const)('binds an opaque %s AA session once and archives only its metadata', async toolId => {
+  it.each(['zcode', 'kilo', 'dsh'] as const)('binds an opaque %s AA session once and archives only its metadata', async toolId => {
     const knownChats: Array<{ id: string; name: string }> = [];
     const h = createHarness([historyThread('sess_native', 'AA-ZCode', 1)], { knownChats });
     const archive = vi.fn();

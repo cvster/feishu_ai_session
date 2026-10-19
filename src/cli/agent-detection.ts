@@ -49,6 +49,7 @@ export async function detectInstalledAgents(): Promise<DetectedAgent[]> {
   const candidates: Array<{ kind: AgentKind; command: string }> = [
     { kind: 'claude', command: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude' },
     { kind: 'codex', command: process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' },
+    { kind: 'dsh', command: process.env.LARK_CHANNEL_DSH_BIN ?? 'dsh' },
     { kind: 'kilo', command: process.env.LARK_CHANNEL_KILO_BIN ?? 'kilo' },
     { kind: 'zcode', command: process.env.LARK_CHANNEL_ZCODE_BIN ?? 'zcode' },
   ];

@@ -1,3 +1,4 @@
+import { DshAdapter } from '../../agent/dsh/adapter';
 import { KiloAdapter } from '../../agent/kilo/adapter';
 import { ZcodeAdapter } from '../../agent/zcode/adapter';
 import dns from 'node:dns';
@@ -438,6 +439,7 @@ export function createRuntimeAgent(
       useQueueForExistingThreads: true,
     });
   }
+  if (profileConfig.agentKind === 'dsh') return new DshAdapter({ binary: profileConfig.dsh?.binaryPath, args: profileConfig.dsh?.args, homeDir: profileConfig.dsh?.homeDir, larkChannel });
   if (profileConfig.agentKind === 'kilo') return new KiloAdapter({ binary: profileConfig.kilo?.binaryPath, args: profileConfig.kilo?.args, dataHome: profileConfig.kilo?.dataHome, larkChannel });
   if (profileConfig.agentKind === 'zcode') return new ZcodeAdapter({ binary: profileConfig.zcode?.binaryPath, args: profileConfig.zcode?.args, dataDir: profileConfig.zcode?.dataDir, modelConfigPath: profileConfig.zcode?.modelConfigPath, larkChannel });
   return new ClaudeAdapter({ larkChannel, binary: process.env.LARK_CHANNEL_CLAUDE_BIN });

@@ -203,3 +203,16 @@ it('retains Kilo runtime and data source settings across unrelated profile saves
   }
   expect(JSON.parse(await readFile(path, 'utf8')).profiles.bot.kilo).toEqual(kilo);
 });
+
+it('retains DSH runtime and native home across unrelated profile saves', async () => {
+  const dir = await tmpRoot(), path = join(dir, 'config.json');
+  const dsh = { binaryPath: '/native/dsh', args: ['--patch', '/native/extra.yml'], homeDir: '/native/dsh-home' };
+  await saveRootConfig(createRootConfig('bot', createDefaultProfileConfig({ agentKind: 'dsh', accounts: { app }, dsh })), path);
+  for (const limit of [7, 9]) {
+    const loaded = (await loadRootConfig(path))!;
+    expect(loaded.profiles.bot?.dsh).toEqual(dsh);
+    loaded.profiles.bot!.preferences.maxConcurrentRuns = limit;
+    await saveRootConfig(loaded, path);
+  }
+  expect(JSON.parse(await readFile(path, 'utf8')).profiles.bot.dsh).toEqual(dsh);
+});

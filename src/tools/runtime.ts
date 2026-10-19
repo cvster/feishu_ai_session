@@ -1,3 +1,6 @@
+import { DshAdapter } from '../agent/dsh/adapter';
+import { dshStorageDir } from '../agent/dsh/client';
+import { DshSessionProvider } from './dsh-sessions';
 import { KiloAdapter } from '../agent/kilo/adapter';
 import { kiloStorageDir } from '../agent/kilo/client';
 import { KiloSessionProvider } from './kilo-sessions';
@@ -55,6 +58,13 @@ export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, prim
   registry.register({ id: 'kilo', label: 'Kilo', sourceId: kiloHome,
     agent: new DurableAgentAdapter(new WorkerClient(join(paths.profileDir, workerStateDirName('kilo')), kiloHome, profile.accounts.app.id, 'kilo'),
       primary.id === 'kilo' ? primary : new KiloAdapter(kiloOptions)), sessions: kiloSessions, listSessions: () => kiloSessions.listSessions() });
+  const dshOptions = { binary: profile.dsh?.binaryPath, args: profile.dsh?.args, homeDir: profile.dsh?.homeDir, larkChannel };
+  const dshHome = dshStorageDir(dshOptions);
+  const dshSessions = new DshSessionProvider(dshOptions, join(paths.profileDir, 'dsh-sessions'));
+  registry.register({ id: 'dsh', label: 'DeepSeek Harness', sourceId: dshHome,
+    reserveSessionId: () => `session-${randomUUID()}`,
+    agent: new DurableAgentAdapter(new WorkerClient(join(paths.profileDir, workerStateDirName('dsh')), dshHome, profile.accounts.app.id, 'dsh'),
+      primary.id === 'dsh' ? primary : new DshAdapter(dshOptions)), sessions: dshSessions, listSessions: () => dshSessions.listSessions() });
   for (const tool of registry.all()) tool.sessions ??= nativeSessionOperations(tool);
   return registry;
 }
