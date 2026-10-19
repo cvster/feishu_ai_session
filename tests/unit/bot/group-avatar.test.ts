@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createBoundChat } from '../../../src/bot/group';
 import { sessionGroupAvatar, ensureSessionGroupAvatar } from '../../../src/bot/group-avatar';
 import { GROUP_AVATAR_IMAGES } from '../../../src/bot/group-avatar-images';
+import { readFileSync } from 'node:fs';
 
 function channel() {
   const image = vi.fn(async (_params: unknown) => ({ image_key: 'img_avatar' }));
@@ -12,6 +13,17 @@ function channel() {
 }
 
 describe('session group avatars', () => {
+  it('embeds the opaque RGB Kilo asset so white/transparent extension icons cannot disappear on white', () => {
+    const png = Buffer.from(GROUP_AVATAR_IMAGES.kilo!, 'base64');
+    expect(png).toEqual(readFileSync(new URL('../../../assets/session-avatars/kilo.png', import.meta.url)));
+    expect(png.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([512, 512]);
+    expect(png[25]).toBe(2); // RGB, no alpha channel or palette transparency.
+    const chunks: string[] = [];
+    for (let at = 8; at + 12 <= png.length; at += png.readUInt32BE(at) + 12)
+      chunks.push(png.toString('ascii', at + 4, at + 8));
+    expect(chunks).not.toContain('tRNS');
+  });
   it.each(['codex', 'claude', 'zcode', 'kilo'] as const)('uses the bound %s tool for the group avatar', async toolId => {
     const h = channel();
     await createBoundChat({ channel: h.api, name: 'AA same name', toolId, inviteOpenId: 'ou_owner' });

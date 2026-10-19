@@ -1,4 +1,6 @@
-Kilo icon from the installed official Kilo VS Code extension (assets/icons/kilo-dark.png).
+Kilo icon from the installed official Kilo VS Code extension (assets/icons/kilo-dark.svg).
+The adjacent kilo.png is rendered from this opaque yellow/black SVG, not the
+extension PNG whose white/transparent pixels disappear on Feishu's white background.
 Source: https://github.com/Kilo-Org/kilocode
 
 MIT License
