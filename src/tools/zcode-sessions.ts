@@ -33,7 +33,7 @@ export class ZcodeSessionProvider implements ToolSessionOperations {
     } finally { await client.close(); }
   }
   async historyPath(nativeId: string): Promise<string | undefined> {
-    if (!/^sess_[A-Za-z0-9_-]+$/.test(nativeId)) return;
+    if (!/^(?:sess|session)_[A-Za-z0-9_-]+$/.test(nativeId)) return;
     const client = new ZcodeClient(this.options);
     try {
       // Resume loads the persisted conversation; no session/send is issued to the source.
@@ -53,7 +53,7 @@ export class ZcodeSessionProvider implements ToolSessionOperations {
     await this.saving;
   }
   async fork(nativeId: string): Promise<{ nativeId: string; name: string; cwd: string }> {
-    if (!/^sess_[A-Za-z0-9_-]+$/.test(nativeId)) throw new Error('ZCode 会话 ID 无效');
+    if (!/^(?:sess|session)_[A-Za-z0-9_-]+$/.test(nativeId)) throw new Error('ZCode 会话 ID 无效');
     const sessions = await this.listSessions(), source = sessions.find(row => row.nativeId === nativeId);
     if (!source?.cwd || source.archived) throw new Error('ZCode 原会话不存在或已归档');
     const client = new ZcodeClient(this.options, source.cwd);
@@ -70,7 +70,7 @@ export class ZcodeSessionProvider implements ToolSessionOperations {
       if (typeof messageId !== 'string' || !messageId) throw new Error('ZCode 会话尚无可复制的对话消息');
       const result = await client.request('session/fork', { sessionId: nativeId, target: { kind: 'message', messageId } });
       const id = result.forkedSessionId;
-      if (typeof id !== 'string' || !/^sess_[A-Za-z0-9_-]+$/.test(id) || id === nativeId || result.snapshot?.session?.sessionId !== id) throw new Error('ZCode 返回了不匹配的复制会话');
+      if (typeof id !== 'string' || !/^(?:sess|session)_[A-Za-z0-9_-]+$/.test(id) || id === nativeId || result.snapshot?.session?.sessionId !== id) throw new Error('ZCode 返回了不匹配的复制会话');
       const names = new Set(sessions.map(row => row.name)), base = source.name || 'ZCode会话';
       let n = 1; while (names.has(`${base} (${n})`)) n++;
       const name = `${base} (${n})`;

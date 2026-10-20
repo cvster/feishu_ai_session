@@ -127,6 +127,16 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     const expected = Buffer.from(`Bearer ${token}`);
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new HttpError(401, 'Unauthorized');
     const url = new URL(req.url ?? '/', 'http://localhost');
+    if (req.method === 'GET' && url.pathname === '/models' && options.agent.id === 'zcode' && 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true) {
+      const cwd = url.searchParams.get('cwd') ?? '';
+      if (cwd.length > 4096) throw new HttpError(400, 'Invalid workspace');
+      const models = await exclusive(async () => {
+        if (closing || tasks.size) throw new HttpError(429, 'ZCode 正在执行，请完成或停止后刷新桌面模型列表');
+        if (!options.agent.listModels) throw new HttpError(404, 'Model discovery unavailable');
+        return options.agent.listModels({ cwd: cwd || undefined });
+      });
+      return reply(res, 200, models);
+    }
     if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { version: 1, toolId: options.agent.id, sourceId: options.sourceId, botAppId: options.botAppId, nativeReasoningEfforts: true, ...(options.agent.id === 'zcode' ? { zcodeRegistryResume: true, zcodeDesktopRemote: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true, zcodeDesktopRemoteConfigId: 'desktopRemoteConfigId' in options.agent ? options.agent.desktopRemoteConfigId : undefined } : {}), ...(options.agent.id === 'kilo' ? { kiloEditorSync: true } : {}) });
     if (req.method === 'GET' && url.pathname === '/jobs') return reply(res, 200, store.list());
     if (req.method === 'POST' && url.pathname === '/jobs') {

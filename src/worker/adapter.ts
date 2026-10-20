@@ -17,6 +17,9 @@ export class DurableAgentAdapter implements AgentAdapter {
     return this.client.health().then(() => true, () => false);
   }
   async listModels(options?: { cwd?: string }) {
+    if (this.id === 'zcode' && 'desktopRemoteEnabled' in this.cli && this.cli.desktopRemoteEnabled === true) {
+      await this.prepareRun(); return this.client.models(options?.cwd);
+    }
     if (!this.cli.listModels) throw new Error('工具未提供原生模型列表');
     return this.cli.listModels(options);
   }

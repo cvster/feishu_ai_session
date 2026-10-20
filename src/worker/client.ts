@@ -23,6 +23,7 @@ export class WorkerClient {
     return { nativeReasoningEfforts: value.nativeReasoningEfforts, zcodeRegistryResume: value.zcodeRegistryResume, zcodeDesktopRemote: value.zcodeDesktopRemote, zcodeDesktopRemoteConfigId: value.zcodeDesktopRemoteConfigId, kiloEditorSync: value.kiloEditorSync };
   }
   async list(): Promise<WorkerJob[]> { await this.health(); return this.request('/jobs'); }
+  async models(cwd?: string): Promise<import('../agent/models').ModelOption[]> { await this.health(); return this.request(`/models?cwd=${encodeURIComponent(cwd ?? '')}`); }
   async submit(input: WorkerSubmission): Promise<WorkerJob> { await this.health(); return this.request('/jobs', input); }
   async snapshot(id: string, after = 0): Promise<JobSnapshot> { return this.request(`/jobs/${id}?after=${after}`); }
   async stop(id: string): Promise<void> { await this.request(`/jobs/${id}/stop`, {}); }

@@ -6,6 +6,7 @@ import { loadRootConfig, readActiveProfile, saveRootConfig, withConfigFileLock }
 import { writeFileAtomic } from '../../platform/atomic-write';
 import { parseZcodePairing, ZcodeRemoteClient } from '../../agent/zcode/remote-client';
 import { zcodeCommand } from '../../agent/zcode/client';
+import { zcodeDesktopCredentialFile } from '../../agent/zcode/remote-auth';
 
 /** Read from stdin, never a CLI argument (process lists / shell history). No link echo. */
 export async function runZcodePair(options: { profile?: string; config?: string; workspace?: string }) {
@@ -25,7 +26,8 @@ export async function runZcodePair(options: { profile?: string; config?: string;
   let saved = false;
   try {
     if (options.workspace) {
-      const client = new ZcodeRemoteClient(file, resolve(options.workspace));
+      const current = await loadRootConfig(paths.configFile);
+      const client = new ZcodeRemoteClient(file, resolve(options.workspace), undefined, zcodeDesktopCredentialFile(current?.profiles[profile]?.zcode?.modelConfigPath));
       try { await client.request('workspace/updateProviderRegistry', {}); }
       finally { await client.close(); }
     }

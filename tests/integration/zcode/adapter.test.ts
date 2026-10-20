@@ -94,6 +94,14 @@ it('reads fresh history and durable bridge labels through session operations wit
   expect((await h.read()).some(c => c.method === 'session/send')).toBe(false);
   expect(await provider.historyPath('../../file')).toBeUndefined();
 });
+it('reads current desktop session_ IDs as well as legacy sess_ IDs',async()=>{
+  const h=await fixture();const cli=join(h.root,'cli.cjs');
+  await writeFile(cli,(await readFile(cli,'utf8')).replaceAll("'sess_test'","'session_desktop'"));
+  const provider=new ZcodeSessionProvider(h.options,join(h.root,'state'));
+  const path=await provider.historyPath('session_desktop');
+  expect(await readFile(path!,'utf8')).toContain('latest context');
+  expect((await h.read()).some(c=>c.method==='session/send')).toBe(false);
+});
 
 it('sets the native thought level before sending and carries it in the per-turn runtime model', async () => {
   const h = await fixture();

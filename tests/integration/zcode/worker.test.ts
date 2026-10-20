@@ -20,6 +20,17 @@ it('rejects a paired bridge against a worker still using independent execution',
   await expect(adapter.prepareRun(h.options)).rejects.toThrow('桌面配对模式与配置不一致');
   expect(h.calls).toHaveLength(0);
 });
+it('serializes paired model discovery against active runs without replacing their connection',async()=>{
+  const h=await fixture('zcode');
+  const listModels=vi.fn(async()=>[{value:'account:native/model',label:'Native'}]);
+  Object.assign(h.raw,{desktopRemoteEnabled:true,listModels});
+  expect(await h.client.models(h.dir)).toEqual([{value:'account:native/model',label:'Native'}]);
+  const running=await h.client.submit({requestKey:'paired-active',options:h.options});
+  await vi.waitFor(()=>expect(h.calls).toHaveLength(1));
+  await expect(h.client.models(h.dir)).rejects.toThrow('完成或停止后');
+  expect(listModels).toHaveBeenCalledTimes(1);
+  await h.client.stop(running.id);h.finish();
+});
 it.each(['zcode', 'kilo'] as const)('keeps %s running across bridge detach and recovers exactly one result in its own group', async toolId => {
   const h = await fixture(toolId);
   const options = { ...h.options, initialSessionId: 'sess_ff' };

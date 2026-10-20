@@ -10,7 +10,7 @@
 
 - [完整安装配置指引](docs/INSTALL.md)：一键安装、二选一/双工具、版本检查、登录、writer/worker、后台环境及验收。
 - [动态模型列表](docs/MODELS.md)：Codex、Claude、ZCode、Kilo 原生模型发现，供应商区分、刷新及删除后的处理。
-- [ZCode 接入与工具扩展](docs/ZCODE.md)：本机模型账号、独立 worker、可选桌面远控配对（待本机联调）、支持范围及架构说明。
+- [ZCode 接入与工具扩展](docs/ZCODE.md)：本机模型账号、独立 worker、可选桌面远控配对、支持范围及架构说明。
 - [Kilo 接入与使用](docs/KILO.md)：复用 VS Code 扩展运行时、动态模型及推理档位、独立 worker 和会话操作。
 - [DeepSeek Harness 接入](docs/DSH.md)：官方 DSH CLI 安装、原生模型配置、独立 worker、AA/FF 和会话操作。
 - [飞书权限申请清单](docs/FEISHU_PERMISSIONS.md)：权限标识、申请用途、事件订阅与验收步骤。

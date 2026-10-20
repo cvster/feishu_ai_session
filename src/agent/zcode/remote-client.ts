@@ -5,15 +5,17 @@ import { resolve } from 'node:path';
 import WebSocket from 'ws';
 import * as lockfile from 'proper-lockfile';
 import { decodeRpc, encodeRpc, RemoteFrames } from './remote-wire';
+import { requestZcodeTerminalToken, zcodeDesktopCredentialFile } from './remote-auth';
+import { normalizeNativeModels, type ModelOption } from '../models';
 
-export interface ZcodePairing { deviceSid: string; passHash: string; deviceMid?: string; appVersion?: string }
+export interface ZcodePairing { deviceSid: string; passHash?: string; deviceMid?: string; appVersion?: string }
 export function parseZcodePairing(link: string): ZcodePairing {
   let url: URL;
   try { url = new URL(link.trim()); } catch { throw new Error('ZCode 远控链接格式无效'); }
   if (url.protocol !== 'https:' || url.hostname !== 'zcode.z.ai' || url.port || url.username || url.password || !/^\/remote(?:\/v[34])?\/?$/.test(url.pathname)) throw new Error('请使用 ZCode 官方桌面复制的远控链接');
   const deviceSid = url.searchParams.get('sid'), passHash = url.searchParams.get('hash');
-  if (!deviceSid || deviceSid.length > 512 || !passHash || passHash.length > 4096 || !url.searchParams.get('t') || !Number.isFinite(Number(url.searchParams.get('t')))) throw new Error('ZCode 远控链接缺少配对信息');
-  return { deviceSid, passHash, deviceMid: url.searchParams.get('mid') || undefined, appVersion: url.searchParams.get('app_version') || undefined };
+  if (!deviceSid || deviceSid.length > 128 || (passHash !== null && (!passHash || passHash.length > 4096 || !url.searchParams.get('t') || !Number.isFinite(Number(url.searchParams.get('t')))))) throw new Error('ZCode 远控链接缺少配对信息');
+  return { deviceSid, ...(passHash ? { passHash } : {}), deviceMid: url.searchParams.get('mid') || undefined, appVersion: url.searchParams.get('app_version') || undefined };
 }
 export async function readZcodePairing(path: string): Promise<ZcodePairing> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -23,7 +25,10 @@ export async function readZcodePairing(path: string): Promise<ZcodePairing> {
     return parseZcodePairing(await file.readFile('utf8'));
   } finally { await file.close(); }
 }
-export const zcodeAuthProof = (pair: ZcodePairing, nonce: string) => createHmac('sha256', pair.passHash).update(`${nonce}|terminal|${pair.deviceSid}`).digest('base64url');
+export const zcodeAuthProof = (pair: ZcodePairing, nonce: string) => {
+  if (!pair.passHash) throw new Error('ZCode V2 does not use a challenge proof');
+  return createHmac('sha256', pair.passHash).update(`${nonce}|terminal|${pair.deviceSid}`).digest('base64url');
+};
 
 type Pending = { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 /** One authenticated terminal / workspace attachment. No reconnect or mutation replay.
@@ -52,11 +57,13 @@ export class ZcodeRemoteClient {
   private inputId?: string;
   private turnId?: string;
   private executionId?: string;
+  private v2 = false;
+  private phase = 'read-pairing';
   readonly exited = new Promise<void>(resolve => { this.finishExit = resolve; });
   onInteraction?: (method: string, params: any) => void;
-  constructor(pairingFile: string, cwd: string, /** Loopback fixture only; production always uses the official relay. */ testRelay?: string) {
-    this.ready = this.connect(pairingFile, cwd, testRelay).catch(async () => {
-      await this.close(); throw new Error('ZCode 桌面远控连接失败，请检查配对链接、桌面和工作区；本次未改用独立 Agent，也未自动重发。');
+  constructor(pairingFile: string, cwd: string, /** Loopback fixture only; production always uses the official relay. */ testRelay?: string, credentialFile = zcodeDesktopCredentialFile()) {
+    this.ready = this.connect(pairingFile, cwd, testRelay, credentialFile).catch(async () => {
+      await this.close(); throw new Error(`ZCode 桌面远控连接失败（阶段：${this.phase}），请检查配对链接、桌面和工作区；本次未改用独立 Agent，也未自动重发。`);
     });
     // A constructor can fail before the first request is awaited.
     void this.ready.catch(() => {});
@@ -78,27 +85,36 @@ export class ZcodeRemoteClient {
     if (Buffer.byteLength(data) > 1024 * 1024) throw new Error('ZCode relay frame too large');
     this.socket.send(data);
   }
-  private payload(value: unknown) { this.send({ type: 'data', payload: value, client_ts: Date.now() }); }
+  private timestamp() { return this.v2 ? Math.floor(Date.now() / 1000) : Date.now(); }
+  private payload(value: unknown) { this.send({ type: 'data', payload: value, client_ts: this.timestamp() }); }
   private async appRequest(type: string, params: object = {}) {
     const requestId = randomUUID(), response = this.deferred(this.app, requestId);
     try { this.payload({ zcode_type: type, requestId, ...params }); }
     catch (error) { this.settle(this.app, requestId, undefined, error as Error); }
     return response;
   }
-  private async connect(path: string, cwd: string, testRelay?: string) {
+  private async connect(path: string, cwd: string, testRelay?: string, credentialFile?: string) {
     const pair = await readZcodePairing(path);
     this.release = await lockfile.lock(path, { realpath: true, stale: 30_000, update: 5_000, onCompromised: () => { void this.close(); } });
     if (this.closed) { await this.release(); this.release = undefined; throw new Error('ZCode remote closed'); }
-    const url = new URL(testRelay ?? 'wss://zcode.z.ai/ws');
+    this.v2 = !pair.passHash;
+    const url = new URL(testRelay ?? (this.v2 ? 'wss://zcode.z.ai/api/v1/remote/ws2' : 'wss://zcode.z.ai/ws'));
     if (testRelay && !/^ws:\/\/127\.0\.0\.1:\d+\/$/.test(url.href)) throw new Error('Invalid test relay');
+    if (this.v2) {
+      this.phase = 'authorize';
+      const testOrigin = testRelay ? `http://${url.host}` : undefined;
+      url.searchParams.set('token', await requestZcodeTerminalToken(pair, credentialFile!, testOrigin));
+      if (this.closed) throw new Error('ZCode remote closed');
+    }
     if (pair.deviceMid) url.searchParams.set('mid', pair.deviceMid);
+    this.phase = 'websocket';
     const paired = new Promise<void>((resolve, reject) => {
       this.pairedWait = { resolve, reject, timer: setTimeout(() => reject(new Error('ZCode pairing timeout')), 30_000) };
     });
     this.socket = new WebSocket(url, { maxPayload: 1024 * 1024 });
     this.socket.on('open', () => {
-      try { this.send({ type: 'auth_init', role: 'terminal', device_sid: pair.deviceSid,
-        meta: { platform: 'web', version: pair.appVersion ?? 'feishu-bridge', name: 'feishu-bridge' }, client_ts: Date.now() }); }
+      try { this.send({ type: 'auth_init', ...(!this.v2 ? { role: 'terminal' } : {}), device_sid: pair.deviceSid,
+        meta: { platform: 'web', version: pair.appVersion ?? 'feishu-bridge', name: 'feishu-bridge' }, client_ts: this.timestamp() }); }
       catch { void this.close(); }
     });
     this.socket.on('error', () => { void this.close(); });
@@ -114,7 +130,7 @@ export class ZcodeRemoteClient {
           this.lastAck = Date.now();
           if (!this.heartbeat) this.heartbeat = setInterval(() => {
             if (Date.now() - this.lastAck > 30_000) { void this.close(); return; }
-            try { this.send({ type: 'pair_status_query', device_sid: pair.deviceSid, client_ts: Date.now() }); } catch { void this.close(); }
+            try { this.send({ type: 'pair_status_query', ...(!this.v2 ? { device_sid: pair.deviceSid } : {}), client_ts: this.timestamp() }); } catch { void this.close(); }
           }, 10_000);
           if (message.pair_status === 'matched' && this.pairedWait) {
             clearTimeout(this.pairedWait.timer); this.pairedWait.resolve(undefined); this.pairedWait = undefined;
@@ -124,11 +140,14 @@ export class ZcodeRemoteClient {
       } catch { void this.close(); }
     });
     await paired;
+    this.phase = 'bootstrap';
     const bootstrap = await this.appRequest('bootstrap-request');
     const workspaces = bootstrap.result?.workspaces;
+    this.phase = 'select-workspace';
     const candidates = Array.isArray(workspaces) ? workspaces.filter((w: any) => !w.remoteSessionId && !w.workspaceIdentity && w.kind !== 'remote' && typeof w.workspacePath === 'string' && resolve(w.workspacePath) === resolve(cwd)) : [];
     if (candidates.length !== 1) throw new Error('ZCode 桌面需打开唯一匹配的本地工作区');
     this.target = { workspacePath: candidates[0].workspacePath };
+    this.phase = 'open-workspace';
     const opened = await this.appRequest('workspace-bridge-open', { bridgeSessionId: this.frames.bridgeSessionId, workspaceKey: candidates[0].workspaceKey ?? candidates[0].workspacePath });
     if (opened.bridge?.bridgeSessionId !== this.frames.bridgeSessionId || opened.bridge?.kind !== 'local' || opened.bridge?.workspacePath !== this.target.workspacePath) throw new Error('Mismatched ZCode workspace attachment');
     if (!this.initialized) await new Promise<void>((resolve, reject) => {
@@ -159,9 +178,9 @@ export class ZcodeRemoteClient {
     }
   }
   private writeRpc(header: unknown[], body?: unknown) { for (const frame of this.frames.encode(encodeRpc(header, body))) this.payload(frame); }
-  private async call(method: string, args: unknown[] = []): Promise<any> {
+  private async call(method: string, args: unknown[] = [], channel = 'zcode-agent'): Promise<any> {
     const id = ++this.rpcNext, response = this.deferred(this.rpc, id);
-    try { this.writeRpc([100, id, 'zcode-agent', method], args); }
+    try { this.writeRpc([100, id, channel, method], args); }
     catch (error) { this.settle(this.rpc, id, undefined, error as Error); }
     return response;
   }
@@ -173,7 +192,15 @@ export class ZcodeRemoteClient {
     switch (method) {
       // Credentials and provider registries stay in the desktop. Never transmit them over relay.
       case 'workspace/updateProviderRegistry': result = {}; break;
+      case 'workspace/readPresentation': result = await this.call('readWorkspacePresentation', [target]); break;
       case 'session/resume': result = await this.call('resumeSession', [target]); break;
+      case 'session/read': result = await this.call('readSession', [target]); break;
+      case 'session/list': {
+        const rows = await this.call('listSessions', [{ ...target, limit: 100, includeArchived: true }]);
+        result = Array.isArray(rows) ? { sessions: rows } : rows;
+        break;
+      }
+      case 'session/archive': result = await this.call('archiveTask', [{ workspacePath: target.workspacePath, taskId: params.sessionId }], 'zcode-task'); break;
       case 'session/create': result = await this.call('createSession', [{ ...target, mode: params.mode, titleGenerationEnabled: false, ...(params.runtimeModel ? { model: params.runtimeModel.model } : {}) }]); break;
       case 'session/setMode': result = await this.call('setMode', [{ ...target, mode: params.mode }]); break;
       case 'session/setModel': result = await this.call('setModel', [{ ...target, model: params.model }]); break;
@@ -190,7 +217,9 @@ export class ZcodeRemoteClient {
               if (event.snapshot?.session?.sessionId !== params.sessionId) { reject(new Error('ZCode 桌面订阅返回了不匹配的会话')); return; }
               resolve({});
             }
-            if (['permission.request', 'userInput.request', 'providerRuntimeHeaders.request'].includes(event.type) && this.inputId) this.onInteraction?.(event.type, event);
+            // Runtime headers are owned by the desktop's workspace auth handler.
+            // They are not a user permission question and must not end observation.
+            if (['permission.request', 'userInput.request'].includes(event.type) && this.inputId) this.onInteraction?.(event.type, event);
             if (event.type !== 'session.event' || event.event?.sessionId !== params.sessionId || !this.inputId) return;
             const native = event.event;
             if (native.type === 'turn.started') {
@@ -235,5 +264,28 @@ export class ZcodeRemoteClient {
     this.events.clear(); this.socket?.terminate();
     if (this.release) { const release = this.release; this.release = undefined; await release().catch(() => {}); }
     this.finishExit();
+  }
+}
+
+/** Run only in the owning worker while idle, so model discovery cannot kick a live turn. */
+export async function listZcodeRemoteModels(pairingFile: string, cwd: string, credentialFile?: string, testRelay?: string): Promise<ModelOption[]> {
+  const client = new ZcodeRemoteClient(pairingFile, cwd, testRelay, credentialFile);
+  let temporary: string | undefined;
+  try {
+    const listed = await client.request('session/list', {});
+    const existing = listed.sessions?.find((s: any) => s.workspace?.workspacePath === cwd || s.workspacePath === cwd);
+    const snapshot = existing ? await client.request('session/read', { sessionId: existing.sessionId }) : await client.request('session/create', { mode: 'plan' });
+    if (!existing) temporary = snapshot.session?.sessionId;
+    const rows = snapshot.settings?.model?.available;
+    if (!Array.isArray(rows)) throw new Error('ZCode 桌面模型列表格式不兼容');
+    const current = snapshot.settings?.model?.current;
+    return normalizeNativeModels(rows.filter((row: any) => typeof row.ref?.providerId === 'string' && typeof row.ref?.modelId === 'string' && !row.disabledReason).map((row: any) => ({
+      value: `${row.ref.providerId}/${row.ref.modelId}`, label: `${row.providerLabel ?? row.ref.providerId} / ${row.label ?? row.ref.modelId}`,
+      isDefault: current?.providerId === row.ref.providerId && current?.modelId === row.ref.modelId,
+      ...(row.reasoning?.enabled ? { reasoningEfforts: row.reasoning.levels, defaultReasoningEffort: row.reasoning.defaultLevel } : {}),
+    })));
+  } finally {
+    try { if (temporary) await client.request('session/archive', { sessionId: temporary }); }
+    finally { await client.close(); }
   }
 }

@@ -5,7 +5,8 @@ import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../typ
 import { resolveReasoningEffort } from '../models';
 import { AgentPreflightError, checkAgentAvailability, type AgentPreflightDiagnostic } from '../preflight';
 import { ZcodeClient, zcodeCommand, type ZcodeOptions } from './client';
-import { ZcodeRemoteClient, readZcodePairing } from './remote-client';
+import { ZcodeRemoteClient, readZcodePairing, listZcodeRemoteModels } from './remote-client';
+import { zcodeDesktopCredentialFile } from './remote-auth';
 
 export function zcodeWorkspace(cwd: string) {
   return { workspacePath: cwd, workspaceKey: createHash('sha256').update(cwd).digest('hex') };
@@ -14,7 +15,7 @@ export function zcodeWorkspace(cwd: string) {
 export class ZcodeAdapter implements AgentAdapter {
   readonly id = 'zcode'; readonly displayName = 'ZCode';
   get desktopRemoteEnabled() { return !!this.options.remoteControlFile; }
-  get desktopRemoteConfigId() { return this.options.remoteControlFile ? createHash('sha256').update(resolve(this.options.remoteControlFile)).digest('hex') : undefined; }
+  get desktopRemoteConfigId() { return this.options.remoteControlFile ? createHash('sha256').update(JSON.stringify([resolve(this.options.remoteControlFile), resolve(zcodeDesktopCredentialFile(this.options.modelConfigPath))])).digest('hex') : undefined; }
   constructor(readonly options: ZcodeOptions = {}) {}
   async checkAvailability() {
     if (this.options.remoteControlFile) {
@@ -28,10 +29,13 @@ export class ZcodeAdapter implements AgentAdapter {
     return checkAgentAvailability({ agentId: 'zcode', agentName: 'ZCode', command: command.binary, binaryPath: command.binary, args: [...command.args, '--version'] });
   }
   async isAvailable(): Promise<boolean> { return (await this.checkAvailability()).ok; }
-  listModels() { return listZcodeModelCapabilities(this.options); }
+  listModels(options: { cwd?: string } = {}) {
+    if (this.options.remoteControlFile) return options.cwd ? listZcodeRemoteModels(this.options.remoteControlFile, options.cwd, zcodeDesktopCredentialFile(this.options.modelConfigPath)) : Promise.resolve([]);
+    return listZcodeModelCapabilities(this.options);
+  }
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) throw new Error('ZCode requires a project directory');
-    const client = this.options.remoteControlFile ? new ZcodeRemoteClient(this.options.remoteControlFile, opts.cwd) : new ZcodeClient(this.options, opts.cwd);
+    const client = this.options.remoteControlFile ? new ZcodeRemoteClient(this.options.remoteControlFile, opts.cwd, undefined, zcodeDesktopCredentialFile(this.options.modelConfigPath)) : new ZcodeClient(this.options, opts.cwd);
     const queue: AgentEvent[] = []; let wake: (() => void) | undefined;
     let ended = false, stopping = false, sessionId: string | undefined, sent = false, currentTurn: string | undefined;
     const inputId = `bridge-${opts.runId}`;
@@ -77,10 +81,14 @@ export class ZcodeAdapter implements AgentAdapter {
       try {
         const mode = opts.accessMode === 'read-only' || opts.sandbox === 'read-only' ? 'plan' : opts.accessMode === 'workspace' || opts.sandbox === 'workspace-write' ? 'build' : 'yolo';
         const workspace = zcodeWorkspace(opts.cwd!);
-        await client.request('workspace/updateProviderRegistry', { workspace,
+        if (!this.options.remoteControlFile) await client.request('workspace/updateProviderRegistry', { workspace,
           registry: await loadZcodeProviderRegistry(this.options), includeWorkspaceState: false });
         // A missing override means follow this conversation, not the first provider's default.
-        const runtimeModel = !opts.sessionId || opts.model ? await loadZcodeRuntimeModel(this.options, opts.model) : undefined;
+        const separator = opts.model?.indexOf('/') ?? -1;
+        if (this.options.remoteControlFile && opts.model && separator < 1) throw new Error('ZCode 桌面模型标识无效，请重新打开 /config 选择');
+        const runtimeModel = this.options.remoteControlFile
+          ? opts.model ? { model: { providerId: opts.model.slice(0, separator), modelId: opts.model.slice(separator + 1) } } : undefined
+          : opts.model || !opts.sessionId ? await loadZcodeRuntimeModel(this.options, opts.model) : undefined;
         const effort = resolveReasoningEffort(opts.reasoningEffort);
         const modelParams = runtimeModel ? { runtimeModel } : {};
         const snapshot = opts.sessionId
