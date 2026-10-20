@@ -49,11 +49,11 @@ export async function showSessionCopyMenu(ctx: CommandContext): Promise<void> {
       source: { ...source, copyId: randomUUID() }, target, targetSource: ctx.controls.toolRegistry?.get(target).sourceId, expires: Date.now() + 15 * 60_000 });
     return token;
   };
-  const tools = ctx.controls.toolRegistry?.all().filter(t => t.id !== source.toolId) ?? [];
+  const tools = ctx.controls.toolRegistry?.all() ?? [];
   const available = await Promise.allSettled(tools.map(t => t.agent.isAvailable()));
-  const alternatives = tools.filter((_, i) => available[i]?.status === 'fulfilled' && (available[i] as PromiseFulfilledResult<boolean>).value)
+  const creationTools = tools.filter((_, i) => available[i]?.status === 'fulfilled' && (available[i] as PromiseFulfilledResult<boolean>).value)
     .map(t => ({ id: t.id, token: issue(t.id) }));
-  await sendManagedCard(ctx.channel, ctx.msg.chatId, sessionCopyCard(source.toolId, issue(source.toolId), alternatives),
+  await sendManagedCard(ctx.channel, ctx.msg.chatId, sessionCopyCard(source.toolId, issue(source.toolId), creationTools),
     { replyTo: ctx.msg.messageId, ...(ctx.chatMode === 'topic' ? { replyInThread: true } : {}) });
 }
 

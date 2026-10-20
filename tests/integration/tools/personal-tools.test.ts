@@ -78,21 +78,39 @@ async function harness() {
 }
 
 describe('personal multi-tool workflows', () => {
-  function copyButton(h: Awaited<ReturnType<typeof harness>>, label: string) {
+  function copyButton(h: Awaited<ReturnType<typeof harness>>, label: string, command = 'fork.to') {
     const card = vi.mocked(h.channel.createCard).mock.calls.at(-1)![0] as any;
     const buttons = card.body.elements.flatMap((row: any) => row.columns?.flatMap((c: any) => c.elements) ?? []);
-    return buttons.find((b: any) => b.text?.content === label)?.behaviors[0].value;
+    return buttons.find((b: any) => b.text?.content === label && b.behaviors?.[0]?.value?.cmd === command)?.behaviors[0].value;
   }
-  it('opens a two-row copy menu with available alternatives and omits the current tool', async () => {
+  it('labels the copy and create rows and includes the current tool in both', async () => {
     const h = await harness(); await h.sync();
     for (const id of ['zcode', 'kilo', 'dsh'] as const) h.registry.register({ id, sourceId: id+'-home', label: id,
       agent: { ...h.registry.get('claude').agent, id, isAvailable: async () => id === 'dsh' ? Promise.reject(Error('offline')) : id === 'kilo' }, listSessions: async () => [] });
     await runCommandHandler('fork', '', h.context(h.groups[0]!.id, 'group'));
-    expect(copyButton(h, '复制会话（Codex）')).toMatchObject({ cmd: 'fork.same' });
+    expect(copyButton(h, 'Codex', 'fork.same')).toMatchObject({ cmd: 'fork.same' });
     expect(copyButton(h, 'Claude Code')).toMatchObject({ cmd: 'fork.to' });
     expect(copyButton(h, 'Kilo')).toMatchObject({ cmd: 'fork.to' });
-    expect(copyButton(h, 'Codex')).toBeUndefined(); expect(copyButton(h, 'ZCode')).toBeUndefined(); expect(copyButton(h, 'DeepSeek Harness')).toBeUndefined();
+    expect(copyButton(h, 'Codex')).toMatchObject({ cmd: 'fork.to' });
+    expect(copyButton(h, 'Codex').arg).not.toBe(copyButton(h, 'Codex', 'fork.same').arg);
+    expect(copyButton(h, 'ZCode')).toBeUndefined(); expect(copyButton(h, 'DeepSeek Harness')).toBeUndefined();
+    const card = vi.mocked(h.channel.createCard).mock.calls.at(-1)![0] as any;
+    expect(card.body.elements.map((row: any) => row.columns[0].elements[0].content)).toEqual(['复制会话：', '在新工具中创建会话：']);
     expect(h.groups).toHaveLength(2);
+  });
+  it('creates a fresh session in the original tool from the second row without forking or copying history automatically', async () => {
+    const h = await harness(); await h.sync(); const source = h.groups[0]!.id;
+    const fork = vi.fn(async () => { throw Error('must not call native fork'); }); h.registry.get('codex').agent.forkThread = fork;
+    const before = h.bindings.get(source);
+    await runCommandHandler('fork', '', h.context(source, 'group'));
+    const value = copyButton(h, 'Codex');
+    await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group'));
+    expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
+    expect(h.workspaces.cwdFor(target)).toBe(h.dir);
+    expect(h.bindings.get(target)).toMatchObject({ toolId: 'codex', nativeCreated: false, copiedFrom: { toolId: 'codex', nativeId: 'same-uuid' } });
+    expect(h.bindings.get(target)?.nativeId).not.toBe('same-uuid');
+    expect(h.bindings.get(source)).toEqual(before); expect(fork).not.toHaveBeenCalled(); expect(h.runs).toEqual([]);
+    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('读取原会话内容');
   });
   it('creates a fresh cross-tool group with the same cwd, persists provenance, and only imports history on click after restart', async () => {
     const h = await harness(); await h.sync();
@@ -123,7 +141,7 @@ describe('personal multi-tool workflows', () => {
   it('offers same-tool creation with a read button when the original tool has no native fork', async () => {
     const h = await harness(); await h.sync(); const group = h.groups[1]!.id;
     await runCommandHandler('fork', '', h.context(group, 'group'));
-    const value = copyButton(h, '复制会话（Claude Code）');
+    const value = copyButton(h, 'Claude Code', 'fork.same');
     await runCommandHandler('fork', `same ${value.arg}`, h.context(group, 'group'));
     expect(h.groups).toHaveLength(3); expect(h.bindings.get(h.groups[2]!.id)).toMatchObject({ toolId: 'claude', nativeCreated: false, copiedFrom: { toolId: 'claude' } });
   });

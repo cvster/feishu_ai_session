@@ -34,16 +34,19 @@ function cardKitButton(spec: ButtonSpec): object {
   };
 }
 
-function cardKitButtonRow(buttons: ButtonSpec[]): object {
+function cardKitButtonRow(buttons: ButtonSpec[], label?: string): object {
   return {
     tag: 'column_set',
     flex_mode: 'flow',
     horizontal_spacing: 'small',
-    columns: buttons.map((spec) => ({
-      tag: 'column',
-      width: 'auto',
-      elements: [cardKitButton(spec)],
-    })),
+    columns: [
+      ...(label ? [{ tag: 'column', width: 'auto', elements: [{ tag: 'markdown', content: label }] }] : []),
+      ...buttons.map((spec) => ({
+        tag: 'column',
+        width: 'auto',
+        elements: [cardKitButton(spec)],
+      })),
+    ],
   };
 }
 
@@ -139,15 +142,15 @@ export function newChatWorkspaceCard(
   };
 }
 
-export function sessionCopyCard(current: ToolId, token: string, alternatives: { id: ToolId; token: string }[]): object {
+export function sessionCopyCard(current: ToolId, token: string, tools: { id: ToolId; token: string }[]): object {
   return {
     schema: '2.0',
     header: { title: { tag: 'plain_text', content: '复制会话' } },
     body: { elements: [
-      cardKitButtonRow([{ text: `复制会话（${toolDefinition(current).label}）`, value: { cmd: 'fork.same', arg: token }, style: 'primary' }]),
-      ...(alternatives.length ? [cardKitButtonRow(alternatives.map(tool => ({
+      cardKitButtonRow([{ text: toolDefinition(current).label, value: { cmd: 'fork.same', arg: token }, style: 'primary' }], '复制会话：'),
+      ...(tools.length ? [cardKitButtonRow(tools.map(tool => ({
         text: toolDefinition(tool.id).label, value: { cmd: 'fork.to', arg: tool.token },
-      })))] : []),
+      })), '在新工具中创建会话：')] : []),
     ] },
   };
 }
