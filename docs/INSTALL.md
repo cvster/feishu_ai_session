@@ -1,6 +1,6 @@
 # 从 GitHub 安装与完整配置
 
-本指引适用于 `cvster/CodexFeishu`。不要用同名上游 npm 包代替本仓库构建。飞书桥接不需要 Web 子项目的 Python、nginx、数据库或前端依赖。
+本指引适用于 [`cvster/feishu_ai_session`](https://github.com/cvster/feishu_ai_session)。不要用同名上游 npm 包代替本仓库构建。飞书桥接不需要 Web 子项目的 Python、nginx、数据库或前端依赖。
 
 ## 1. 选择工具和系统
 
@@ -28,7 +28,7 @@ Linux 用户级 systemd 是完整自动后台部署的主要支持环境。macOS
 先安装 Node 24（含 npm）和 Git，然后下载到长期保留的目录：
 
 ```bash
-git clone https://github.com/cvster/CodexFeishu.git
+git clone https://github.com/cvster/feishu_ai_session.git CodexFeishu
 cd CodexFeishu
 
 # 三选一；--install-clis 允许安装缺失的外部 CLI
@@ -40,7 +40,7 @@ bash install.sh --agents both --install-clis
 Windows PowerShell：
 
 ```powershell
-git clone https://github.com/cvster/CodexFeishu.git
+git clone https://github.com/cvster/feishu_ai_session.git CodexFeishu
 cd CodexFeishu
 powershell -ExecutionPolicy Bypass -File .\install.ps1 --agents both --install-clis
 ```

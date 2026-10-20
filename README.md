@@ -50,7 +50,7 @@ Claude/ZCode/Kilo 独立 worker 的系统服务和重启恢复目前以 Linux �
 先安装 Node 24（含 npm）和 Git，然后：
 
 ```bash
-git clone https://github.com/cvster/CodexFeishu.git
+git clone https://github.com/cvster/feishu_ai_session.git CodexFeishu
 cd CodexFeishu
 bash install.sh --agents codex --install-clis
 # Claude 单独使用：--agents claude；两个都用：--agents both
@@ -72,7 +72,7 @@ Codex、Claude 和 ZCode 至少配置一个，也可以同时存在。ZCode 单�
 在计划长期保留的目录安装，不要把后台服务指向 `npx` 临时缓存。
 
 ```bash
-git clone https://github.com/cvster/CodexFeishu.git
+git clone https://github.com/cvster/feishu_ai_session.git CodexFeishu
 cd CodexFeishu
 
 corepack enable
