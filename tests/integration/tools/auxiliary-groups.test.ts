@@ -140,7 +140,7 @@ describe('auxiliary owner linking and lifecycle', () => {
     await sync(); expect(create).toHaveBeenCalledTimes(1);
     await Promise.all([h.catalog.flush(), h.sessions.flush(), h.workspaces.flush(), h.groups.flush()]);
   });
-  it.each(['codex', 'claude'] as const)('only lists %s sessions bound to an existing personal workgroup', async toolId => {
+  it.each(['codex', 'claude'] as const)('lists all original %s sessions with personal workgroups before other sessions', async toolId => {
     const h = await harness(toolId);
     const tool = h.tools.get(toolId);
     const original = (await tool.listSessions())[0]!;
@@ -156,21 +156,39 @@ describe('auxiliary owner linking and lifecycle', () => {
     vi.mocked(h.channel.listChats).mockResolvedValue(['oc_original', 'oc_archived', 'oc_other', 'oc_ff'].map(id => ({ id, name: id })));
     await h.groups.joined(joined); await h.groups.action(h.event());
     const labels = h.cards.at(-1).body.elements.filter((e: any) => e.tag === 'button').map((e: any) => e.text.content);
-    expect(labels.filter((label: string) => label.includes(' · '))).toEqual([`原会话 · ${h.cwd}`]);
-    expect(JSON.stringify(h.cards.at(-1))).toContain('仅显示已有个人工作群对应的会话');
+    expect(labels.filter((label: string) => label.includes(' · '))).toEqual(
+      ['原会话', 'archived-group', 'missing-group', 'other-source', 'topic', 'unbound'].map(name => `${name} · ${h.cwd}`));
+    expect(JSON.stringify(h.cards.at(-1))).toContain('同类按最近更新排序');
   });
-  it('explains an empty list when personal workgroups no longer exist', async () => {
+  it('still lists and binds original sessions when personal workgroups no longer exist', async () => {
     const h = await harness(); vi.mocked(h.channel.listChats).mockResolvedValue([]);
     await h.groups.joined(joined); await h.groups.action(h.event());
-    expect(JSON.stringify(h.cards.at(-1))).toContain('暂无可关联的个人工作群会话');
-    expect(h.cards.at(-1).body.elements.some((e: any) => e.text?.content?.includes(' · '))).toBe(false);
+    expect(JSON.stringify(h.cards.at(-1))).toContain('原会话');
+    await h.groups.action(h.event());
+    expect(h.groups.isActive('oc_aux')).toBe(true);
   });
-  it('does not show history sessions when the current group list cannot be fetched', async () => {
+  it('falls back to AA and recency ordering when group discovery fails', async () => {
     const h = await harness(); vi.mocked(h.channel.listChats).mockRejectedValue(new Error('unavailable'));
     await h.groups.joined(joined);
-    await expect(h.groups.action(h.event())).rejects.toThrow('暂时无法获取个人工作群');
+    await h.groups.action(h.event());
     expect(h.groups.get('oc_aux')?.status).toBe('pending');
-    expect(h.cards).toHaveLength(1);
+    expect(JSON.stringify(h.cards.at(-1))).toContain('群列表暂不可用');
+  });
+  it('ranks AA sessions before other personal sessions and unbound history, then paginates', async () => {
+    const h = await harness('codex'); const tool = h.tools.get('codex'); const original = (await tool.listSessions())[0]!;
+    vi.mocked(tool.listSessions).mockResolvedValue([
+      { ...original, name: '普通个人会话', updatedAtMs: 2 },
+      ...['AA-first', '  AA-second', 'history-a', 'history-b', 'history-c', 'history-d'].map((name, i) =>
+        ({ ...original, nativeId: name, name, updatedAtMs: i < 2 ? 1 : 100 + i })),
+      { ...original, nativeId: 'archived-native', name: 'AA-archived', archived: true, updatedAtMs: 9999 },
+    ]);
+    await h.groups.joined(joined); await h.groups.action(h.event());
+    const labels = () => h.cards.at(-1).body.elements.filter((e: any) => e.tag === 'button').map((e: any) => e.text.content);
+    expect(labels().filter((s: string) => s.includes(' · ')).map((s: string) => s.split(' · ')[0]))
+      .toEqual(['  AA-second', 'AA-first', '普通个人会话', 'history-d', 'history-c', 'history-b']);
+    const next = h.cards.at(-1).body.elements.find((e: any) => e.text?.content === '下一页').behaviors[0].value;
+    await h.groups.action(h.event(next));
+    expect(labels().filter((s: string) => s.includes(' · '))).toEqual([`history-a · ${h.cwd}`]);
   });
   it.each(['codex', 'claude'] as const)('links %s privately to an independent FF binding and inherits cwd/model', async tool => {
     const h = await harness(tool); await h.activate();

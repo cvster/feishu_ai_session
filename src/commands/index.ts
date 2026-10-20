@@ -4,6 +4,8 @@ import { controlsForTool } from '../tools/context';
 import { routeCommandContext } from '../tools/context';
 import type { ToolRegistry } from '../tools/types';
 import type { ToolBindingStore } from '../tools/bindings';
+import type { CopiedSessionSource } from '../tools/bindings';
+import { currentCopySource, readCopiedSession, sessionCopyChoice, showSessionCopyMenu } from './session-copy';
 import { randomUUID } from 'node:crypto';
 import { CodexQueueContinuationError, stopCodexSubmissions, stopScopedCodexSubmissions, waitForCodexIntake } from '../bot/codex-submission-stop';
 import { resolveSharedCodexEndpoint } from '../../packages/codex-core/src/queue';
@@ -41,6 +43,7 @@ import {
   managedGroupsCard,
   newChatCreationCard,
   newChatWorkspaceCard,
+  copiedSessionCard,
   newSessionConfirmationCard,
   panelConfirmationCard,
   resumeCard,
@@ -114,6 +117,8 @@ import { fetchKnownChats, type KnownChat } from '../bot/lark-info';
 import { applyLarkCliIdentityPolicy, hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
 
 export interface Controls {
+  /** Reuse normal intake, authorization, durable queue and reply delivery for user-requested card messages. */
+  submitMessage?(message: NormalizedMessage): Promise<void>;
   auxiliary?: import('../bot/auxiliary-groups').AuxiliaryGroups;
   auxiliaryApprovals?: import('../bot/auxiliary-approvals').AuxiliaryApprovals;
   toolRegistry?: ToolRegistry;
@@ -492,13 +497,13 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
     const cwd = String(ctx.formValue?.cwd ?? '').trim();
     const rawTool = String(ctx.formValue?.agent_kind ?? ctx.controls.defaultToolId ?? ctx.controls.profileConfig.agentKind);
     if (!isToolId(rawTool)) return reply(ctx, '❌ 无效的执行工具，请重新创建会话。');
-    return handleNewChat(groupName, ctx, cwd, rawTool);
+    await handleNewChat(groupName, ctx, cwd, rawTool); return;
   }
 
   // /new chat [name]  — spin up a fresh group chat bound to a fresh session
   if (trimmed === 'chat' || trimmed.startsWith('chat ')) {
     const rawName = trimmed === 'chat' ? '' : trimmed.slice(5).trim();
-    return handleNewChat(rawName, ctx);
+    await handleNewChat(rawName, ctx); return;
   }
 
   resetNativeReservation(ctx);
@@ -916,7 +921,8 @@ async function handleNewChat(
   ctx: CommandContext,
   requestedCwd?: string,
   selectedTool?: ToolId,
-): Promise<void> {
+  options: { copiedFrom?: CopiedSessionSource; uuid?: string } = {},
+): Promise<{ chatId: string; name: string } | undefined> {
   const toolId = selectedTool ?? ctx.controls.defaultToolId ?? ctx.controls.profileConfig.agentKind;
   const tool = ctx.controls.toolRegistry?.get(toolId);
   const targetAgent = tool?.agent ?? ctx.agent;
@@ -951,6 +957,7 @@ async function handleNewChat(
       name,
       inviteOpenId: ctx.msg.senderId,
       toolId,
+      uuid: options.uuid,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -959,7 +966,10 @@ async function handleNewChat(
   }
 
   if (ctx.controls.toolBindings && tool) {
-    ctx.controls.toolBindings.set(created.chatId, { toolId, sourceId: tool.sourceId, name: created.name, nativeId: tool.reserveSessionId?.(), nativeCreated: false,
+    const previousCopy = options.copiedFrom ? ctx.controls.toolBindings.get(created.chatId) : undefined;
+    if (previousCopy && previousCopy.copiedFrom?.copyId !== options.copiedFrom?.copyId) throw new Error('建群返回了其他会话的群，未更改绑定。');
+    ctx.controls.toolBindings.set(created.chatId, previousCopy ?? { toolId, sourceId: tool.sourceId, name: created.name, nativeId: tool.reserveSessionId?.(), nativeCreated: false,
+      ...(options.copiedFrom ? { copiedFrom: options.copiedFrom } : {}),
       model: toolId === ctx.controls.profileConfig.agentKind ? ctx.controls.profileConfig.preferences.model ?? 'default' : 'default',
       reasoningEffort: toolId === 'codex' ? ctx.controls.profileConfig.preferences.reasoningEffort ?? DEFAULT_REASONING : undefined });
     await ctx.controls.toolBindings.flush();
@@ -968,6 +978,7 @@ async function handleNewChat(
   // same workspace; otherwise it'll fall back to $HOME.
   if (sourceCwd) {
     ctx.workspaces.setCwd(created.chatId, sourceCwd);
+    await ctx.workspaces.flush();
   }
 
   await saveAccessConfig(ctx, (current) => ({
@@ -993,10 +1004,13 @@ async function handleNewChat(
     );
   }
 
+  if (options.copiedFrom) await sendManagedCard(ctx.channel, created.chatId, copiedSessionCard(options.copiedFrom));
+
   await reply(
     ctx,
     `✓ 已创建群 **${created.name}**，去新群里继续。`,
   );
+  return created;
 }
 
 async function refreshKnownChatsForNaming(ctx: CommandContext): Promise<KnownChat[]> {
@@ -1616,7 +1630,32 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
   await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
 }
 
-async function handleFork(_args: string, ctx: CommandContext): Promise<void> {
+async function handleFork(args: string, ctx: CommandContext): Promise<void> {
+  const [action, token] = args.trim().split(/\s+/);
+  try {
+    if (action === 'read') { await readCopiedSession(ctx, token ?? ''); return; }
+    if (!action) { await showSessionCopyMenu(ctx); return; }
+    if (action !== 'same' && action !== 'to') return reply(ctx, '请重新打开复制会话面板。');
+    const choice = token ? await sessionCopyChoice(ctx, token) : undefined;
+    if (action === 'same' && (!choice || choice.target === ctx.controls.profileConfig.agentKind) && toolDefinition(ctx.controls.profileConfig.agentKind).fork) {
+      await handleNativeFork(ctx); return;
+    }
+    if (!choice || (action === 'same' && choice.target !== ctx.controls.profileConfig.agentKind)) throw new Error('复制入口已失效，请重新打开。');
+    if (choice.creating) return reply(ctx, '正在创建会话，请稍候。');
+    if (choice.created) return reply(ctx, '此会话已创建，请到新群继续。');
+    if (!ctx.controls.toolBindings || !ctx.controls.toolRegistry) throw new Error('工具会话管理尚未就绪。');
+    choice.creating = true;
+    try {
+      const source = await currentCopySource(ctx);
+      const name = choice.name ??= uniqueSessionGroupName(`${source.name}（${toolDefinition(choice.target).label}）`,
+        (await refreshKnownChatsForNaming(ctx)).map(c => c.name));
+      const created = await handleNewChat(name, ctx, source.cwd, choice.target, { copiedFrom: choice.source, uuid: choice.source.copyId });
+      if (created) choice.created = true;
+    } finally { choice.creating = false; }
+  } catch (error) { await reply(ctx, `❌ ${errorText(error)}`); }
+}
+
+async function handleNativeFork(ctx: CommandContext): Promise<void> {
   const toolId = ctx.controls.profileConfig.agentKind;
   const tool = ctx.controls.toolRegistry?.get(toolId);
   const nativeFork = tool?.sessions?.fork;

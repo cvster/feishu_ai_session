@@ -422,26 +422,26 @@ export class AuxiliaryGroups {
       await this.deps.channel.send(row.ownerId, { text: `「${row.name}」已关联。成员在群内 @我发送“私聊”，即可创建包含该成员和你的私聊群。` });
       return;
     }
-    let description = '选择执行工具，再选择已有个人工作群对应的会话。原会话保持独立，关联同一来源的群共用 FF 辅助会话。';
+    let description = '选择执行工具，再选择会话。AA 会话优先，其次是其他个人工作群会话，最后是未绑定个人工作群的会话。关联同一来源的群共用 FF 辅助会话。';
     if (toolId) {
       const tool = this.deps.tools.get(toolId);
       const chats = await fetchKnownChatsResult(this.deps.channel);
-      if (!chats.ok) throw new Error('暂时无法获取个人工作群，请稍后重新选择。');
       const chatIds = new Set(chats.chats.map(chat => chat.id));
       const personalSessions = new Set(this.deps.bindings.entries()
         .filter(([scope, binding]) => !scope.includes(':') && chatIds.has(scope) && !this.isAuxiliary(scope) &&
           !binding.linkedSource && !binding.sharedScope && !binding.auxiliaryWorkgroup && !this.deps.catalog?.isScopeArchived(scope) &&
           binding.toolId === toolId && binding.sourceId === tool.sourceId)
         .map(([, binding]) => binding.nativeId));
-      const sessions = (await tool.listSessions()).filter(s => personalSessions.has(s.nativeId) && !s.archived && !s.name?.startsWith('FF-') && !this.isAuxiliaryNative(toolId, tool.sourceId, s.nativeId) &&
-        !this.deps.bindings.isArchived(toolId, tool.sourceId, s.nativeId)).sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+      const rank = (s: { name?: string; nativeId: string }) => s.name?.trimStart().startsWith('AA') ? 0 : personalSessions.has(s.nativeId) ? 1 : 2;
+      const sessions = (await tool.listSessions()).filter(s => !s.archived && !s.name?.startsWith('FF-') && !this.isAuxiliaryNative(toolId, tool.sourceId, s.nativeId) &&
+        !this.deps.bindings.isArchived(toolId, tool.sourceId, s.nativeId)).sort((a, b) => rank(a) - rank(b) || b.updatedAtMs - a.updatedAtMs || a.nativeId.localeCompare(b.nativeId));
       for (const s of sessions.slice(page * 6, page * 6 + 6)) buttons.push(this.button(`${s.name || s.nativeId.slice(0, 12)} · ${s.cwd}`, { ...base, nativeId: s.nativeId }));
       if (page > 0) buttons.push(this.button('上一页', { ...base, page: page - 1 }));
       if ((page + 1) * 6 < sessions.length) buttons.push(this.button('下一页', { ...base, page: page + 1 }));
       buttons.push(this.button('返回工具选择', { ...base, toolId: undefined, page: 0 }));
       description = sessions.length
-        ? `${tool.label}：仅显示已有个人工作群对应的会话。将继承项目目录，并在每次 @ 时读取其最新内容。`
-        : `${tool.label}：暂无可关联的个人工作群会话，请先创建或关联个人工作群，再重新打开选择。`;
+        ? `${tool.label}：AA 会话 → 其他个人工作群会话 → 其他会话；同类按最近更新排序。将继承项目目录，并在每次 @ 时读取其最新内容。${chats.ok ? '' : '\n群列表暂不可用，其他会话统一按最近更新排序。'}`
+        : `${tool.label}：暂无可关联的未归档会话。`;
     } else for (const tool of this.deps.tools.all()) buttons.push(this.button(tool.label, { ...base, toolId: tool.id }));
     await sendManagedCard(this.deps.channel, row.ownerId, { schema: '2.0',
       header: { title: { tag: 'plain_text', content: `关联辅助群：${row.name}` } },

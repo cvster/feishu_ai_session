@@ -139,6 +139,26 @@ export function newChatWorkspaceCard(
   };
 }
 
+export function sessionCopyCard(current: ToolId, token: string, alternatives: { id: ToolId; token: string }[]): object {
+  return {
+    schema: '2.0',
+    header: { title: { tag: 'plain_text', content: '复制会话' } },
+    body: { elements: [
+      cardKitButtonRow([{ text: `复制会话（${toolDefinition(current).label}）`, value: { cmd: 'fork.same', arg: token }, style: 'primary' }]),
+      ...(alternatives.length ? [cardKitButtonRow(alternatives.map(tool => ({
+        text: toolDefinition(tool.id).label, value: { cmd: 'fork.to', arg: tool.token },
+      })))] : []),
+    ] },
+  };
+}
+
+export function copiedSessionCard(source: { toolId: ToolId; copyId: string }): object {
+  return { schema: '2.0', body: { elements: [
+    { tag: 'markdown', content: `当前会话从“${toolDefinition(source.toolId).label}”复制。` },
+    cardKitButton({ text: '读取原会话内容', value: { cmd: 'fork.read', arg: source.copyId }, style: 'primary' }),
+  ] } };
+}
+
 export interface TaskPanelInfo {
   agentKind: ToolId;
   chatName: string;

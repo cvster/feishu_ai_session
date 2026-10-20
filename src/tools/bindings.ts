@@ -8,12 +8,20 @@ export interface LinkedSession extends SessionRef {
   historyPath: string;
 }
 
+/** A one-time, user-requested history import; unlike linkedSource this is not an FF binding. */
+export interface CopiedSessionSource extends SessionRef {
+  copyId: string;
+  name: string;
+  cwd: string;
+}
+
 export interface ToolBinding {
   /** Personal owner workgroup for an FF session; never an auxiliary source. */
   auxiliaryWorkgroup?: boolean;
   /** Canonical auxiliary binding; chat aliases retain their own routing scope. */
   sharedScope?: string;
   linkedSource?: LinkedSession;
+  copiedFrom?: CopiedSessionSource;
   toolId: AgentKind;
   sourceId: string;
   name?: string;
@@ -43,6 +51,9 @@ export class ToolBindingStore {
         if (value.sharedScope !== undefined && (typeof value.sharedScope !== 'string' || !value.sharedScope)) throw new Error('Invalid shared scope');
         if (value.linkedSource && (!isToolId(value.linkedSource.toolId) ||
           ![value.linkedSource.sourceId, value.linkedSource.nativeId, value.linkedSource.historyPath].every(v => typeof v === 'string' && v.length > 0))) throw new Error('Invalid linked source');
+        if (value.copiedFrom && (!isToolId(value.copiedFrom.toolId) ||
+          ![value.copiedFrom.sourceId, value.copiedFrom.nativeId, value.copiedFrom.copyId, value.copiedFrom.name, value.copiedFrom.cwd]
+            .every(v => typeof v === 'string' && v.length > 0))) throw new Error('Invalid copied source');
         this.bindings[scope] = value;
       }
       for (const scope of Object.keys(this.bindings)) this.get(scope); // validate shared aliases before accepting state

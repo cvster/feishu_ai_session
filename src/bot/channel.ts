@@ -488,6 +488,12 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // Counter for stdout reconnect escalation; reset on `reconnected`.
   let consecutiveReconnects = 0;
 
+  controls.submitMessage = async msg => {
+    if (disconnecting) throw new Error('桥接正在重连，请稍后再试。');
+    await intakeMessage({ channel, agent, sessions, sessionCatalog, workspaces, activeRuns, pending, msg, controls,
+      chatModeCache, logThreadModeOverride, executor, pool });
+  };
+
   channel.on({
     botAdded: evt => { void controls.auxiliary?.joined(evt).catch(error => log.warn('auxiliary', 'join-failed', { error: String(error) })); },
     message: async (msg) => {
@@ -687,7 +693,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           runtime.inbox!.markQueued(entry.scope, entry.message); pending.push(entry.scope, entry.message);
         }
       },
-      renderOptions: job => ({ ...controls.runControlIcons, supportsFork: toolDefinition(tool.id).fork,
+      renderOptions: job => ({ ...controls.runControlIcons, supportsFork: true,
         ...(controls.auxiliary?.isAuxiliary(job.options.delivery?.scope ?? '') ? { auxiliary: true, auxiliaryRunId: job.id, auxiliaryScope: job.options.delivery?.scope } : {}),
         ...(callbackAuth && job.options.delivery && !controls.auxiliary?.isAuxiliary(job.options.delivery.scope) ? { signCallback: action => callbackAuth.sign({
           runId: job.id, scope: job.options.delivery!.scope, chatId: job.options.delivery!.chatId,

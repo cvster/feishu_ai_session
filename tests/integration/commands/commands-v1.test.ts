@@ -260,7 +260,7 @@ describe('Bridge command contracts', () => {
     const source = prepareForkSource(h);
     const forkThread = vi.fn(async () => ({ threadId: 'fork-non-aa', name: 'project (1)', cwd: source.cwdRealpath }));
     Object.assign(h.agent, { forkThread });
-    await h.run('/fork', { chatMode: 'group' });
+    await h.run('/fork same', { chatMode: 'group' });
     expect(forkThread).toHaveBeenCalledWith(source.threadId);
     expect(h.channel.createdChats[0]?.options).toMatchObject({ name: 'project (1)' });
     expect(h.sessionCatalog.activeFor(source)?.threadId).toBe('source-thread');
@@ -282,9 +282,9 @@ describe('Bridge command contracts', () => {
       sessions: { historyPath: async () => undefined, rename: async () => {}, archive: async () => {}, fork } });
     h.controls.toolRegistry = tools;
     vi.spyOn(h.channel.rawClient.im.v1.chat, 'create').mockRejectedValueOnce(new Error('temporary group failure'));
-    await h.run('/fork', { chatMode: 'group' });
+    await h.run('/fork same', { chatMode: 'group' });
     expect(fork).toHaveBeenCalledWith('sess_original'); expect(lastMarkdown(h.channel)).toContain('建群尚未完成');
-    await h.run('/fork', { chatMode: 'group' });
+    await h.run('/fork same', { chatMode: 'group' });
     expect(fork).toHaveBeenCalledTimes(1);
     expect(h.channel.createdChats[0]?.options).toMatchObject({ name: 'AA-ZCode (1)' });
     expect(bindings.get('oc_fake_1')).toMatchObject({ toolId: 'zcode', sourceId: 'source-zcode', nativeId: 'sess_child' });
@@ -299,9 +299,9 @@ describe('Bridge command contracts', () => {
     const forkThread = vi.fn(async () => ({ threadId: 'fork-retry', name: 'retry (1)', cwd: source.cwdRealpath }));
     Object.assign(h.agent, { forkThread });
     vi.spyOn(h.channel.rawClient.im.v1.chat, 'create').mockRejectedValueOnce(new Error('network failed'));
-    await h.run('/fork', { chatMode: 'group' });
+    await h.run('/fork same', { chatMode: 'group' });
     expect(lastMarkdown(h.channel)).toContain('建群尚未完成');
-    await h.run('/fork', { chatMode: 'group' });
+    await h.run('/fork same', { chatMode: 'group' });
     expect(forkThread).toHaveBeenCalledTimes(1);
     expect(h.channel.createdChats).toHaveLength(1);
   });
@@ -324,7 +324,7 @@ describe('Bridge command contracts', () => {
       expect(paused).toBe(true);
       return create(input);
     });
-    await h.run('/fork', { chatMode: 'group' });
+    await h.run('/fork same', { chatMode: 'group' });
     expect(forkThread).toHaveBeenCalledTimes(1);
     expect(h.channel.createdChats).toHaveLength(1);
     expect(h.channel.createdChats[0]?.options).toMatchObject({ name: 'AA-test (1)' });
@@ -341,7 +341,7 @@ describe('Bridge command contracts', () => {
     const name = `project-${'x'.repeat(50)} (2)`;
     h.controls.knownChats = [{ id: 'unrelated-group', name }];
     Object.assign(h.agent, { forkThread: vi.fn(async () => ({ threadId: 'fork-exact-title', name, cwd: source.cwdRealpath })) });
-    await h.run('/fork', { chatMode: 'group' });
+    await h.run('/fork same', { chatMode: 'group' });
     expect(h.channel.createdChats[0]?.options).toMatchObject({ name });
     expect(h.sessionCatalog.entries().find((entry) => entry.scopeId === 'oc_fake_1')?.threadId)
       .toBe('fork-exact-title');
@@ -354,7 +354,7 @@ describe('Bridge command contracts', () => {
     h.sessionCatalog.upsertActive({ ...source, botAppId: 'other-bot' });
     const forkThread = vi.fn();
     Object.assign(h.agent, { forkThread });
-    await h.run('/fork', { chatMode: 'group' });
+    await h.run('/fork same', { chatMode: 'group' });
     expect(forkThread).not.toHaveBeenCalled();
     expect(lastMarkdown(h.channel)).toContain('尚未绑定本机器人');
   });

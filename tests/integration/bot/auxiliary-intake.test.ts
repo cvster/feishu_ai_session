@@ -20,6 +20,7 @@ vi.mock('../../../src/bot/codex-turn-sync', () => ({ startCodexTurnSync: async (
 vi.mock('../../../src/bot/codex-user-input', () => ({ startCodexUserInput: async () => ({ stop: async () => {} }) }));
 import { startChannel } from '../../../src/bot/channel';
 import { commandSessionCatalogIdentity } from '../../../src/bot/session-catalog-identity';
+import { runCommandHandler } from '../../../src/commands';
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const f of cleanups.splice(0).reverse()) await f(); });
 const originalId = '11111111-1111-4111-8111-111111111111';
@@ -93,6 +94,24 @@ it('accepts direct owner messages in the FF personal workgroup using the same FF
   expect(h.submit.mock.calls[0]![0].prompt).toContain('当前飞书应用所有者本人请求');
   expect(h.submit.mock.calls[0]![0].prompt).toContain('直接继续本次调试');
   expect(h.controls.auxiliary?.isAuxiliary('oc_ffowner')).toBe(false);
+});
+it('routes a copied-session read through normal intake and the durable Codex submission queue', async () => {
+  const h = await harness(); const sourceId = h.controls.toolRegistry!.get('codex').sourceId;
+  const copiedFrom = { copyId: 'copy-test', toolId: 'codex' as const, sourceId, nativeId: originalId, name: '来源会话', cwd: h.cwd };
+  h.controls.toolBindings!.set('oc_copy', { toolId: 'codex', sourceId, nativeCreated: false, name: '新会话', copiedFrom });
+  h.workspaces.setCwd('oc_copy', h.cwd);
+  h.controls.toolRegistry!.get('codex').sessions = { historyPath: async () => h.history, rename: async () => {}, archive: async () => {} };
+  const ctx = { channel: h.channel, controls: h.controls, scope: 'oc_copy', chatMode: 'group' as const, fromCardAction: true,
+    msg: { messageId: 'om_provenance', chatId: 'oc_copy', chatType: 'group', senderId: 'ou_owner' },
+    workspaces: h.workspaces, sessionCatalog: h.catalog } as any;
+  await runCommandHandler('fork', 'read copy-test', ctx);
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledOnce(), { timeout: 3000 });
+  expect(h.submit.mock.calls[0]![0].prompt).toContain("/来源会话' 的内容");
+  expect(h.submit.mock.calls[0]![0].prompt).toContain(h.history);
+  expect(h.submit.mock.calls[0]![0].threadId).not.toBe(originalId);
+  expect(h.controls.codexSubmissions?.records().find(r => r.scope === 'oc_copy')?.messages[0]?.messageId).toBe('om_provenance');
+  await runCommandHandler('fork', 'read copy-test', ctx);
+  await new Promise(r => setTimeout(r, 100)); expect(h.submit).toHaveBeenCalledOnce();
 });
 it('ignores non-mentions, @all and bot senders even when global mention requirement is off', async () => {
   const h = await harness(); await h.message({ mentionedBot: false }); await h.message({ mentionedBot: false, mentionAll: true });

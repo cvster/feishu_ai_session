@@ -1,4 +1,3 @@
-import { toolDefinition } from './definitions';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
 import { canUseDm, canUseGroup } from '../policy/access';
 import type { Controls, CommandContext } from '../commands';
@@ -17,7 +16,7 @@ export function controlsForTool(root: Controls, toolId: AgentKind, scope?: strin
       const profile = toolProfile(target.profileConfig, toolId);
       if (binding?.model !== undefined) profile.preferences.model = binding.model === 'default' ? undefined : binding.model;
       if (binding?.reasoningEffort) profile.preferences.reasoningEffort = binding.reasoningEffort;
-      if (key === 'runControlIcons') return { ...target.runControlIcons, supportsFork: toolDefinition(toolId).fork, ...(binding?.linkedSource ? { auxiliary: true } : {}) };
+      if (key === 'runControlIcons') return { ...target.runControlIcons, supportsFork: true, ...(binding?.linkedSource ? { auxiliary: true } : {}) };
       if (key === 'profileConfig') return profile;
       if (key === 'cfg') return { ...target.cfg, agentKind: toolId,
         preferences: { ...target.cfg.preferences, model: profile.preferences.model, reasoningEffort: profile.preferences.reasoningEffort } };

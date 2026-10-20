@@ -1,7 +1,7 @@
 import { NativeSessionLocks } from '../../../src/tools/locks';
 import { sessionRefKey } from '../../../src/tools/bindings';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { LarkChannel } from '@larksuite/channel';
@@ -21,9 +21,11 @@ import { startRunFlow } from '../../../src/bot/run-flow';
 import { claudeCapability } from '../../../src/agent/capability';
 import { syncAaSessionGroupsOnce } from '../../../src/bot/aa-session-groups';
 import { runCommandHandler, type Controls, type CommandContext } from '../../../src/commands';
+import { copiedSessionCard } from '../../../src/card/templates';
 
 const clean: string[] = [];
-afterEach(async () => { await Promise.all(clean.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
+const flushes: (() => Promise<unknown>)[] = [];
+afterEach(async () => { await Promise.all(flushes.splice(0).map(f => f())); await Promise.all(clean.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 async function harness() {
   const dir = await mkdtemp(join(tmpdir(), 'personal-tools-')); clean.push(dir);
   const groups: { id: string; name: string }[] = [];
@@ -51,6 +53,7 @@ async function harness() {
   const catalog = new SessionCatalog(join(dir, 'catalog.json')); await catalog.load();
   const sessions = new SessionStore(join(dir, 'sessions.json')); await sessions.load();
   const workspaces = new WorkspaceStore(join(dir, 'workspaces.json')); await workspaces.load();
+  flushes.push(() => Promise.all([bindings.flush(), catalog.flush(), sessions.flush(), workspaces.flush()]));
   const activeRuns = new ActiveRuns(); const pool = new ProcessPool(() => 2);
   const executors = new Map<AgentKind, RunExecutor>();
   const nativeSessionLocks = new NativeSessionLocks();
@@ -75,6 +78,80 @@ async function harness() {
 }
 
 describe('personal multi-tool workflows', () => {
+  function copyButton(h: Awaited<ReturnType<typeof harness>>, label: string) {
+    const card = vi.mocked(h.channel.createCard).mock.calls.at(-1)![0] as any;
+    const buttons = card.body.elements.flatMap((row: any) => row.columns?.flatMap((c: any) => c.elements) ?? []);
+    return buttons.find((b: any) => b.text?.content === label)?.behaviors[0].value;
+  }
+  it('opens a two-row copy menu with available alternatives and omits the current tool', async () => {
+    const h = await harness(); await h.sync();
+    for (const id of ['zcode', 'kilo', 'dsh'] as const) h.registry.register({ id, sourceId: id+'-home', label: id,
+      agent: { ...h.registry.get('claude').agent, id, isAvailable: async () => id === 'dsh' ? Promise.reject(Error('offline')) : id === 'kilo' }, listSessions: async () => [] });
+    await runCommandHandler('fork', '', h.context(h.groups[0]!.id, 'group'));
+    expect(copyButton(h, '复制会话（Codex）')).toMatchObject({ cmd: 'fork.same' });
+    expect(copyButton(h, 'Claude Code')).toMatchObject({ cmd: 'fork.to' });
+    expect(copyButton(h, 'Kilo')).toMatchObject({ cmd: 'fork.to' });
+    expect(copyButton(h, 'Codex')).toBeUndefined(); expect(copyButton(h, 'ZCode')).toBeUndefined(); expect(copyButton(h, 'DeepSeek Harness')).toBeUndefined();
+    expect(h.groups).toHaveLength(2);
+  });
+  it('creates a fresh cross-tool group with the same cwd, persists provenance, and only imports history on click after restart', async () => {
+    const h = await harness(); await h.sync();
+    const source = h.groups[0]!.id; const before = h.bindings.get(source);
+    await runCommandHandler('fork', '', h.context(source, 'group'));
+    const value = copyButton(h, 'Claude Code');
+    await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group'));
+    expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
+    expect(h.workspaces.cwdFor(target)).toBe(h.dir);
+    expect(h.bindings.get(target)).toMatchObject({ toolId: 'claude', nativeCreated: false, model: 'default',
+      copiedFrom: { toolId: 'codex', sourceId: 'codex-home', nativeId: 'same-uuid', name: 'AA-同名', cwd: h.dir } });
+    expect(h.bindings.get(source)).toEqual(before); expect(h.runs).toEqual([]);
+    const provenance = h.bindings.get(target)!.copiedFrom!;
+    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('当前会话从“Codex”复制');
+    expect(JSON.stringify(copiedSessionCard(provenance))).toContain('fork.read');
+    const restored = new ToolBindingStore(join(h.dir, 'tools.json')); await restored.load(); h.controls.toolBindings = restored;
+    const history = join(h.dir, 'latest-history.json'); await writeFile(history, 'latest source content');
+    const historyPath = vi.fn(async () => history);
+    h.registry.get('codex').sessions = { historyPath, rename: async () => {}, archive: async () => {} };
+    const submit = vi.fn(async () => {}); h.controls.submitMessage = submit;
+    const ctx = h.context(target, 'group'); ctx.fromCardAction = true;
+    await runCommandHandler('fork', `read ${provenance.copyId}`, ctx);
+    expect(historyPath).toHaveBeenCalledWith('same-uuid');
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({ chatId: target, messageId: 'msg', chatType: 'group', senderId: 'ou_owner', mentionedBot: true,
+      content: `读取codex '${h.dir.split('/').at(-1)}/AA-同名' 的内容\n会话记录：${history}`, raw: { bridgeCallbackId: `copy-read-${provenance.copyId}` } }));
+    await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group')); expect(h.groups).toHaveLength(3);
+  });
+  it('offers same-tool creation with a read button when the original tool has no native fork', async () => {
+    const h = await harness(); await h.sync(); const group = h.groups[1]!.id;
+    await runCommandHandler('fork', '', h.context(group, 'group'));
+    const value = copyButton(h, '复制会话（Claude Code）');
+    await runCommandHandler('fork', `same ${value.arg}`, h.context(group, 'group'));
+    expect(h.groups).toHaveLength(3); expect(h.bindings.get(h.groups[2]!.id)).toMatchObject({ toolId: 'claude', nativeCreated: false, copiedFrom: { toolId: 'claude' } });
+  });
+  it('rejects a forwarded copy choice, changed source binding, and an alternative that became unavailable', async () => {
+    const h = await harness(); await h.sync(); const group = h.groups[0]!.id;
+    await runCommandHandler('fork', '', h.context(group, 'group')); const value = copyButton(h, 'Claude Code');
+    const stranger = h.context(group, 'group'); stranger.msg.senderId = 'ou_other';
+    await runCommandHandler('fork', `to ${value.arg}`, stranger); expect(h.groups).toHaveLength(2);
+    h.registry.get('claude').agent.isAvailable = async () => false;
+    await runCommandHandler('fork', `to ${value.arg}`, h.context(group, 'group')); expect(h.groups).toHaveLength(2);
+    h.bindings.set(group, { ...h.bindings.get(group)!, nativeId: 'changed-session', name: 'changed' });
+    h.catalog.archiveScope(group, 'changed');
+    await runCommandHandler('fork', `to ${value.arg}`, h.context(group, 'group')); expect(h.groups).toHaveLength(2); await h.bindings.flush();
+  });
+  it('does not submit a history read when the persisted source account changes or history is unavailable', async () => {
+    const h = await harness(); await h.sync(); const group = h.groups[0]!.id;
+    await runCommandHandler('fork', '', h.context(group, 'group')); const value = copyButton(h, 'Claude Code');
+    await runCommandHandler('fork', `to ${value.arg}`, h.context(group, 'group'));
+    const target = h.groups[2]!.id; const source = h.bindings.get(target)!.copiedFrom!;
+    const submit = vi.fn(async () => {}); h.controls.submitMessage = submit;
+    const ctx = h.context(target, 'group'); ctx.fromCardAction = true;
+    h.registry.get('codex').sourceId = 'another-account';
+    await runCommandHandler('fork', `read ${source.copyId}`, ctx); expect(submit).not.toHaveBeenCalled();
+    h.registry.get('codex').sourceId = source.sourceId;
+    h.registry.get('codex').sessions = { historyPath: async () => undefined, rename: async () => {}, archive: async () => {} };
+    await runCommandHandler('fork', `read ${source.copyId}`, ctx); expect(submit).not.toHaveBeenCalled();
+    await runCommandHandler('fork', 'read forged-copy', ctx); expect(submit).not.toHaveBeenCalled();
+  });
   it('archives a pending Claude reservation before its first init event and stops a recovered worker task', async () => {
     const h = await harness(); h.registry.get('claude').reserveSessionId = () => 'same-uuid';
     const stopScope = vi.fn(async () => true);
