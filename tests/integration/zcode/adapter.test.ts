@@ -94,6 +94,17 @@ it('reads fresh history and durable bridge labels through session operations wit
   expect((await h.read()).some(c => c.method === 'session/send')).toBe(false);
   expect(await provider.historyPath('../../file')).toBeUndefined();
 });
+it('uses native titles in paired mode and delegates renames with the original project directory', async () => {
+  const h=await fixture();const state=join(h.root,'state');
+  await new ZcodeSessionProvider(h.options,state).rename('sess_test','outdated bridge label');
+  const calls:unknown[]=[];
+  const provider=new ZcodeSessionProvider({...h.options,remoteControlFile:'/private/pair.link'},state,
+    async(...args)=>{calls.push(args);});
+  expect((await provider.listSessions())[0]?.name).toBe('AA-zcode');
+  await provider.rename('sess_test','AA-new');
+  expect(calls).toEqual([['sess_test','AA-new',h.root]]);
+  expect((await h.read()).some(c=>c.method==='session/send')).toBe(false);
+});
 it('reads current desktop session_ IDs as well as legacy sess_ IDs',async()=>{
   const h=await fixture();const cli=join(h.root,'cli.cjs');
   await writeFile(cli,(await readFile(cli,'utf8')).replaceAll("'sess_test'","'session_desktop'"));

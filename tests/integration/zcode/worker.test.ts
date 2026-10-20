@@ -31,6 +31,26 @@ it('serializes paired model discovery against active runs without replacing thei
   expect(listModels).toHaveBeenCalledTimes(1);
   await h.client.stop(running.id);h.finish();
 });
+it('serializes native renames against active jobs and requires the local bearer token', async () => {
+  const h=await fixture('zcode');const renameSession=vi.fn(async()=>{});
+  Object.assign(h.raw,{desktopRemoteEnabled:true,renameSession});
+  expect(await h.client.health()).toMatchObject({zcodeSessionNames:true});
+  const e=JSON.parse(await readFile(join(h.stateDir,'endpoint.json'),'utf8'));
+  expect((await fetch(e.url+'/session-name',{method:'POST',body:'{}'})).status).toBe(401);
+  await h.client.renameSession('session_native','AA-copy',h.dir);
+  expect(renameSession).toHaveBeenCalledWith('session_native','AA-copy',h.dir);
+  const job=await h.client.submit({requestKey:'active-rename',options:h.options});
+  await vi.waitFor(()=>expect(h.calls).toHaveLength(1));
+  await expect(h.client.renameSession('session_native','changed',h.dir)).rejects.toThrow('正在执行');
+  expect(renameSession).toHaveBeenCalledTimes(1);
+  await h.client.stop(job.id);h.finish();
+});
+it('blocks named creation on a paired worker without native naming support', async () => {
+  const h=await fixture('zcode');
+  Object.assign(h.raw,{desktopRemoteEnabled:true});
+  await expect(h.adapter.prepareRun({...h.options,sessionName:'AA-copy'})).rejects.toThrow('原生会话命名版本');
+  expect(h.calls).toHaveLength(0);
+});
 it.each(['zcode', 'kilo'] as const)('keeps %s running across bridge detach and recovers exactly one result in its own group', async toolId => {
   const h = await fixture(toolId);
   const options = { ...h.options, initialSessionId: 'sess_ff' };

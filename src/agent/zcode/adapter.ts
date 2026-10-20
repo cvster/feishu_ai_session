@@ -33,6 +33,12 @@ export class ZcodeAdapter implements AgentAdapter {
     if (this.options.remoteControlFile) return options.cwd ? listZcodeRemoteModels(this.options.remoteControlFile, options.cwd, zcodeDesktopCredentialFile(this.options.modelConfigPath)) : Promise.resolve([]);
     return listZcodeModelCapabilities(this.options);
   }
+  async renameSession(id: string, name: string, cwd: string): Promise<void> {
+    if (!this.options.remoteControlFile) throw new Error('ZCode 原生标题同步需要桌面配对模式');
+    const client = new ZcodeRemoteClient(this.options.remoteControlFile, cwd, undefined, zcodeDesktopCredentialFile(this.options.modelConfigPath));
+    try { await client.request('session/rename', { sessionId: id, title: name }); }
+    finally { await client.close(); }
+  }
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) throw new Error('ZCode requires a project directory');
     const client = this.options.remoteControlFile ? new ZcodeRemoteClient(this.options.remoteControlFile, opts.cwd, undefined, zcodeDesktopCredentialFile(this.options.modelConfigPath)) : new ZcodeClient(this.options, opts.cwd);
@@ -101,6 +107,8 @@ export class ZcodeAdapter implements AgentAdapter {
         if (opts.sessionId && runtimeModel) await client.request('session/setModel', { sessionId, model: runtimeModel.model, runtimeModel });
         const selected = runtimeModel?.model ?? snapshot.settings?.model?.current ?? snapshot.session?.model;
         push({ type: 'system', sessionId, cwd: opts.cwd, ...(selected?.providerId && selected?.modelId ? { model: `${selected.providerId}/${selected.modelId}` } : {}) });
+        if (!opts.sessionId && opts.sessionName?.trim() && this.options.remoteControlFile)
+          await client.request('session/rename', { sessionId, title: opts.sessionName.trim() });
         await client.request('session/setMode', { sessionId, mode });
         if (effort) {
           await client.request('session/setThoughtLevel', { sessionId, thoughtLevel: effort });

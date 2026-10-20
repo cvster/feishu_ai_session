@@ -38,6 +38,7 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
   cleanup.push(async () => { for (const s of server.clients) s.terminate(); await new Promise<void>(resolve => server.close(() => resolve())); await new Promise<void>(resolve=>http.close(()=>resolve())); });
   const address = http.address(); if (!address || typeof address === 'string') throw new Error('invalid fixture');
   const calls: Array<{ method: string; args: any }> = [], wire: string[] = [];
+  let nativeTitle = '新会话';
   let emit!: (value: any) => void, connection: WebSocket | undefined, subscribeId: number | undefined;
   server.on('connection', (socket,request) => {
     if(options.v2) expect(new URL(request.url!,'http://localhost').searchParams.get('token')).toBe('A'.repeat(22));
@@ -79,7 +80,8 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
         if (method === 'helloConversationV4') response = { kind: 'hello', protocolVersion: 2, clientMode: 'web-remote-replayable' };
         if (method === 'resumeSession' || method === 'createSession') response = { session: { sessionId: body[0].sessionId ?? 'sess_new' } };
         if(method==='listSessions')response=[{sessionId:'sess_original',workspace:{workspacePath:dir}}];
-        if(method==='readSession')response={session:{sessionId:body[0].sessionId},settings:{model:{current:{providerId:'account:native',modelId:'native-model'},available:[{ref:{providerId:'account:native',modelId:'native-model'},label:'Native Model',reasoning:{enabled:true,levels:[{value:'native-level',label:'Native Level'}],defaultLevel:'native-level'}}]}}};
+        if(method==='renameTask') { nativeTitle=body[0].title;response={title:nativeTitle}; }
+        if(method==='readSession')response={session:{sessionId:body[0].sessionId,title:nativeTitle},settings:{model:{current:{providerId:'account:native',modelId:'native-model'},available:[{ref:{providerId:'account:native',modelId:'native-model'},label:'Native Model',reasoning:{enabled:true,levels:[{value:'native-level',label:'Native Level'}],defaultLevel:'native-level'}}]}}};
         if (method === 'sendPrompt') {
           if (options.closeOnSend) { socket.terminate(); return; }
           response = { accepted: true };
@@ -101,6 +103,27 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
   return { client, calls, wire, file, dir, httpCalls, credentialFile, relay:harness.relay, emit: (value: any) => emit(value), disconnect: () => connection?.terminate() };
 }
 describe('ZCode desktop remote attachment', () => {
+  it('names a copied session before sending input and preserves the native title when resuming', async () => {
+    const f=await fixture({v2:true,complete:true});
+    await f.client.request('workspace/updateProviderRegistry',{});await f.client.close();
+    const adapter=new ZcodeAdapter({modelConfigPath:f.dir,remoteControlFile:f.file});
+    for (const resumed of [false, true]) {
+      const run=adapter.run({runId:`named-${resumed}`,cwd:f.dir,prompt:'hello',sessionName:resumed?'stale binding':'AA-项目（ZCode）',...(resumed?{sessionId:'sess_new'}:{})});
+      const events:AgentEvent[]=[];for await(const event of run.events) events.push(event);
+      expect(await run.waitForExit(3000)).toBe(true);
+      expect(events.at(-1)).toMatchObject({type:'done'});
+    }
+    const renames=f.calls.filter(c=>c.method==='renameTask');
+    expect(renames).toHaveLength(1);
+    expect(renames[0]!.args[0]).toMatchObject({taskId:'sess_new',title:'AA-项目（ZCode）',workspacePath:f.dir});
+    expect(f.calls.findIndex(c=>c.method==='renameTask')).toBeLessThan(f.calls.findIndex(c=>c.method==='sendPrompt'));
+  });
+  it('renames native desktop metadata without creating a session or sending input', async () => {
+    const f=await fixture();
+    await f.client.request('session/rename',{sessionId:'sess_original',title:'AA-新名字'});
+    expect(f.calls.filter(c=>c.method==='readSession')).toHaveLength(2);
+    expect(f.calls.some(c=>['createSession','sendPrompt','sendConversationCommandV4'].includes(c.method))).toBe(false);
+  });
   it('discovers native desktop models and reasoning without injecting a CLI registry or creating a new session',async()=>{
     const f=await fixture({v2:true});await f.client.request('workspace/updateProviderRegistry',{});await f.client.close();
     expect(await listZcodeRemoteModels(f.file,f.dir,f.credentialFile,f.relay)).toEqual([{value:'account:native/native-model',label:'account:native / Native Model',isDefault:true,reasoningEfforts:[{value:'native-level',label:'Native Level'}],defaultReasoningEffort:'native-level'}]);

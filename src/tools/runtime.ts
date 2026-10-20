@@ -48,10 +48,15 @@ export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, prim
   const zcodeConfig = profile.zcode;
   const zcodeHome = zcodeStorageDir(zcodeConfig);
   const zcodeOptions = { binary: zcodeConfig?.binaryPath, args: zcodeConfig?.args, dataDir: zcodeConfig?.dataDir, modelConfigPath: zcodeConfig?.modelConfigPath, remoteControlFile: zcodeConfig?.remoteControlFile, larkChannel };
-  const zcodeSessions = new ZcodeSessionProvider(zcodeOptions, join(paths.profileDir, 'zcode-sessions'));
+  const zcodeWorker = new WorkerClient(join(paths.profileDir, workerStateDirName('zcode')), zcodeHome, profile.accounts.app.id, 'zcode');
+  const zcodeAgent = new DurableAgentAdapter(zcodeWorker, primary.id === 'zcode' ? primary : new ZcodeAdapter(zcodeOptions));
+  const zcodeSessions = new ZcodeSessionProvider(zcodeOptions, join(paths.profileDir, 'zcode-sessions'), async (id, name, cwd) => {
+    await zcodeAgent.prepareRun();
+    if (!(await zcodeWorker.health()).zcodeSessionNames) throw new Error('ZCode worker 尚未升级到原生会话命名版本');
+    await zcodeWorker.renameSession(id, name, cwd);
+  });
   registry.register({ id: 'zcode', label: 'ZCode', sourceId: zcodeHome,
-    agent: new DurableAgentAdapter(new WorkerClient(join(paths.profileDir, workerStateDirName('zcode')), zcodeHome, profile.accounts.app.id, 'zcode'),
-      primary.id === 'zcode' ? primary : new ZcodeAdapter(zcodeOptions)), sessions: zcodeSessions, listSessions: () => zcodeSessions.listSessions() });
+    agent: zcodeAgent, sessions: zcodeSessions, listSessions: () => zcodeSessions.listSessions() });
   const kiloOptions = { binary: profile.kilo?.binaryPath, args: profile.kilo?.args, dataHome: profile.kilo?.dataHome, editorSync: profile.kilo?.editorSync, larkChannel };
   const kiloHome = kiloStorageDir(kiloOptions);
   const kiloSessions = new KiloSessionProvider(kiloOptions, join(paths.profileDir, 'kilo-sessions'));

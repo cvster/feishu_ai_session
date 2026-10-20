@@ -127,6 +127,20 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     const expected = Buffer.from(`Bearer ${token}`);
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new HttpError(401, 'Unauthorized');
     const url = new URL(req.url ?? '/', 'http://localhost');
+    if (req.method === 'POST' && url.pathname === '/session-name' && options.agent.id === 'zcode') {
+      let body = '', bytes = 0;
+      for await (const chunk of req) { bytes += chunk.length; if (bytes > 16384) throw new HttpError(413, 'Request too large'); body += chunk; }
+      const value = JSON.parse(body);
+      if (typeof value.id !== 'string' || !/^(?:sess|session)_[A-Za-z0-9_-]+$/.test(value.id) ||
+        typeof value.name !== 'string' || !value.name.trim() || value.name.length > 2048 ||
+        typeof value.cwd !== 'string' || !value.cwd || value.cwd.length > 4096) throw new HttpError(400, 'Invalid session name');
+      await exclusive(async () => {
+        if (closing || tasks.size) throw new HttpError(429, 'ZCode 正在执行，稍后自动重试名称同步');
+        if (!options.agent.renameSession) throw new HttpError(404, 'Native naming unavailable');
+        await options.agent.renameSession(value.id, value.name, value.cwd);
+      });
+      return reply(res, 200, { ok: true });
+    }
     if (req.method === 'GET' && url.pathname === '/models' && options.agent.id === 'zcode' && 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true) {
       const cwd = url.searchParams.get('cwd') ?? '';
       if (cwd.length > 4096) throw new HttpError(400, 'Invalid workspace');
@@ -137,7 +151,7 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       });
       return reply(res, 200, models);
     }
-    if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { version: 1, toolId: options.agent.id, sourceId: options.sourceId, botAppId: options.botAppId, nativeReasoningEfforts: true, ...(options.agent.id === 'zcode' ? { zcodeRegistryResume: true, zcodeDesktopRemote: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true, zcodeDesktopRemoteConfigId: 'desktopRemoteConfigId' in options.agent ? options.agent.desktopRemoteConfigId : undefined } : {}), ...(options.agent.id === 'kilo' ? { kiloEditorSync: true, kiloDesktopSync: true, kiloNativeInputOrigin: true } : {}) });
+    if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { version: 1, toolId: options.agent.id, sourceId: options.sourceId, botAppId: options.botAppId, nativeReasoningEfforts: true, ...(options.agent.id === 'zcode' ? { zcodeRegistryResume: true, zcodeSessionNames: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.renameSession === 'function', zcodeDesktopRemote: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true, zcodeDesktopRemoteConfigId: 'desktopRemoteConfigId' in options.agent ? options.agent.desktopRemoteConfigId : undefined } : {}), ...(options.agent.id === 'kilo' ? { kiloEditorSync: true, kiloDesktopSync: true, kiloNativeInputOrigin: true } : {}) });
     if (req.method === 'GET' && url.pathname === '/jobs') return reply(res, 200, store.list());
     if (req.method === 'POST' && url.pathname === '/jobs') {
       let body = '', bytes = 0;

@@ -33,6 +33,8 @@ export class DurableAgentAdapter implements AgentAdapter {
       (this.cli.desktopRemoteEnabled === true) !== (capabilities?.zcodeDesktopRemote === true) ||
       (this.cli.desktopRemoteEnabled === true && 'desktopRemoteConfigId' in this.cli && this.cli.desktopRemoteConfigId !== capabilities?.zcodeDesktopRemoteConfigId)
     )) throw new RunRejected('execution-worker-unavailable', 'ZCode worker 的桌面配对模式与配置不一致，请单独升级或重启 ZCode worker；本次未执行。');
+    if (this.id === 'zcode' && capabilities?.zcodeDesktopRemote && options?.sessionName && !options.sessionId && !capabilities.zcodeSessionNames)
+      throw new RunRejected('execution-worker-unavailable', 'ZCode worker 尚未升级到原生会话命名版本，请单独升级；本次未创建会话。');
     const effort = resolveReasoningEffort(options?.reasoningEffort);
     // Old Claude workers preserve these exact tokens, but coerce unknown levels to high.
     const legacySafe = this.id === 'claude' && ['low', 'medium', 'high', 'xhigh', 'max'].includes(effort ?? '');

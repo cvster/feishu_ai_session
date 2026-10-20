@@ -6,7 +6,7 @@ import { CodexNameSync, SessionNameSync } from '../../../src/bot/thread-name.js'
 import type { SessionCatalogEntry } from '../../../src/session/catalog.js';
 import { normalizeCodexThreadSnapshot } from '../../../src/session/codex-thread-reader.js';
 
-describe.each(['codex', 'kilo'] as const)('bidirectional %s / Feishu naming', (toolId) => {
+describe.each(['codex', 'kilo', 'zcode'] as const)('bidirectional %s / Feishu naming', (toolId) => {
   const cleanup: string[] = [];
   afterEach(async () => {
     await Promise.all(cleanup.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -148,8 +148,8 @@ describe.each(['codex', 'kilo'] as const)('bidirectional %s / Feishu naming', (t
       { ...f.entry, botAppId: 'other' }, { ...f.entry, botAppId: undefined },
       { ...f.entry, scopeId: 'oc_group:topic' }, { ...f.entry, status: 'archived' },
       { ...f.entry, threadId: 'other', sessionId: 'other' },
-      { ...f.entry, agentId: toolId === 'kilo' ? 'codex' : 'kilo' },
-      ...(toolId === 'kilo' ? [{ ...f.entry, sourceId: 'other' }, { ...f.entry, sourceId: undefined }] : []),
+      { ...f.entry, agentId: toolId !== 'codex' ? 'codex' : 'kilo' },
+      ...(toolId !== 'codex' ? [{ ...f.entry, sourceId: 'other' }, { ...f.entry, sourceId: undefined }] : []),
     ]);
     expect(f.getChatInfo).not.toHaveBeenCalled();
   });

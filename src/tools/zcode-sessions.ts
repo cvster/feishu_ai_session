@@ -13,7 +13,8 @@ export class ZcodeSessionProvider implements ToolSessionOperations {
   private labels: Record<string, string> = {};
   private loaded = false;
   private saving = Promise.resolve();
-  constructor(private options: ZcodeOptions, private stateDir: string) {}
+  constructor(private options: ZcodeOptions, private stateDir: string,
+    private nativeRename?: (id: string, name: string, cwd: string) => Promise<void>) {}
   private async load() {
     if (this.loaded) return;
     try { this.labels = JSON.parse(await readFile(join(this.stateDir, 'labels.json'), 'utf8')); }
@@ -27,7 +28,7 @@ export class ZcodeSessionProvider implements ToolSessionOperations {
       const result = await client.request('session/list', { limit: 10000 });
       if (!Array.isArray(result.sessions)) throw new Error('ZCode 会话列表格式不兼容');
       return result.sessions.filter((s: any) => s.sessionKind === 'interactive' || s.sessionKind === 'fork').map((s: any) => ({
-        nativeId: s.sessionId, name: this.labels[s.sessionId] ?? s.title, cwd: s.workspace.workspacePath,
+        nativeId: s.sessionId, name: this.options.remoteControlFile ? s.title : this.labels[s.sessionId] ?? s.title, cwd: s.workspace.workspacePath,
         createdAtMs: s.createdAt, updatedAtMs: s.updatedAt, archived: !!s.archivedAt,
       }));
     } finally { await client.close(); }
@@ -46,6 +47,13 @@ export class ZcodeSessionProvider implements ToolSessionOperations {
     } finally { await client.close(); }
   }
   async rename(nativeId: string, name: string): Promise<void> {
+    if (this.options.remoteControlFile) {
+      const source = (await this.listSessions()).find(row => row.nativeId === nativeId);
+      if (!source?.cwd || source.archived) throw new Error('ZCode 会话不存在或已归档');
+      if (!this.nativeRename) throw new Error('ZCode 原生改名执行入口尚未就绪');
+      await this.nativeRename(nativeId, name, source.cwd);
+      return;
+    }
     await this.load(); this.labels[nativeId] = name;
     await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
     const text = JSON.stringify(this.labels);

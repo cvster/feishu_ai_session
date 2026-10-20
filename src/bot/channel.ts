@@ -1,3 +1,4 @@
+import { startToolNameSync } from './tool-name-sync';
 import { toolDefinition, workerInboxName, workerRepliesName, type ToolId } from '../tools/definitions';
 import { auxiliaryLinkError } from './auxiliary-membership';
 import { AuxiliaryApprovals } from './auxiliary-approvals';
@@ -666,6 +667,17 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         })
       : undefined;
 
+  const zcodeTool = controls.toolRegistry?.all().find(tool => tool.id === 'zcode');
+  let zcodeNameSync: Awaited<ReturnType<typeof startToolNameSync>> | undefined;
+  if (zcodeTool?.agent instanceof DurableAgentAdapter && zcodeTool.sessions && controls.profileConfig.zcode?.remoteControlFile && sessionCatalog && deps.appPaths?.profileDir) {
+    const workerAgent = zcodeTool.agent; const worker = workerAgent.client;
+    try {
+      zcodeNameSync = await startToolNameSync({ channel, controls, catalog: sessionCatalog, tool: zcodeTool,
+        statePath: join(deps.appPaths.profileDir, 'zcode-name-sync.json'),
+        ready: async () => { await workerAgent.prepareRun(); return (await worker.health()).zcodeSessionNames === true; } });
+    } catch (error) { log.warn('session', 'zcode-name-sync-disabled', { error: String(error) }); }
+  }
+
   const kiloTool = controls.toolRegistry?.all().find(tool => tool.id === 'kilo');
   let kiloTurnSync: Awaited<ReturnType<typeof startKiloTurnSync>> | undefined;
   if (kiloTool?.agent instanceof DurableAgentAdapter && sessionCatalog && deps.appPaths?.profileDir) {
@@ -807,6 +819,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       controls.codexUserInput = undefined;
       await codexTurnSync?.stop();
       await kiloTurnSync?.stop();
+      await zcodeNameSync?.stop();
       controls.nativeReplySync = undefined;
       controls.codexReplySync = undefined;
       controls.refreshMirroredRunCard = undefined;
