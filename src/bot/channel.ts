@@ -92,6 +92,8 @@ import { configureGroupNotifications } from './group-notifications';
 import { CodexNameSync } from './thread-name';
 import { startAaSessionGroupSync } from './aa-session-groups';
 import { startCodexTurnSync } from './codex-turn-sync';
+import { startKiloTurnSync } from './kilo-turn-sync';
+import { KiloNativeConversationReader } from '../agent/kilo/conversation';
 import { DurableAgentAdapter } from '../worker/adapter';
 import { startWorkerReplies } from '../worker/replies';
 import { messageRequestId } from '../worker/identity';
@@ -664,9 +666,20 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         })
       : undefined;
 
-  controls.refreshMirroredRunCard = codexTurnSync
-    ? (scope, messageId) => codexTurnSync.refreshMessage(scope, messageId)
-    : undefined;
+  const kiloTool = controls.toolRegistry?.all().find(tool => tool.id === 'kilo');
+  let kiloTurnSync: Awaited<ReturnType<typeof startKiloTurnSync>> | undefined;
+  if (kiloTool?.agent instanceof DurableAgentAdapter && sessionCatalog && deps.appPaths?.profileDir) {
+    const worker = kiloTool.agent.client, options = controls.profileConfig.kilo;
+    try {
+      kiloTurnSync = await startKiloTurnSync({ channel, controls, catalog: sessionCatalog, sourceId: kiloTool.sourceId,
+        statePath: join(deps.appPaths.profileDir, 'kilo-turn-sync.json'),
+        reader: new KiloNativeConversationReader({ binary: options?.binaryPath, args: options?.args, dataHome: options?.dataHome, editorSync: options?.editorSync }),
+        ready: async () => (await worker.health()).kiloNativeInputOrigin === true });
+    } catch (error) { log.warn('kilo-turn-sync', 'disabled', { error: String(error) }); }
+  }
+  controls.nativeReplySync = kiloTurnSync;
+  controls.refreshMirroredRunCard = async (scope, messageId) =>
+    await codexTurnSync?.refreshMessage(scope, messageId) || await kiloTurnSync?.refreshMessage(scope, messageId) || false;
   controls.codexReplySync = controls.profileConfig.agentKind === 'codex' ? codexTurnSync : undefined;
   controls.codexUserInput = controls.profileConfig.agentKind === 'codex' && sessionCatalog && deps.appPaths?.profileDir
     ? await startCodexUserInput({ channel, controls, sessionCatalog, profileStateDir: deps.appPaths.profileDir })
@@ -777,6 +790,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       await controls.codexUserInput?.stop();
       controls.codexUserInput = undefined;
       await codexTurnSync?.stop();
+      await kiloTurnSync?.stop();
+      controls.nativeReplySync = undefined;
       controls.codexReplySync = undefined;
       controls.refreshMirroredRunCard = undefined;
       keepalive.stop();

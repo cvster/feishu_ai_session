@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { kiloBridgeTextPart } from './conversation';
 import { resolve } from 'node:path';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { resolveReasoningEffort } from '../models';
@@ -135,7 +136,7 @@ export class KiloAdapter implements AgentAdapter {
         if (stopping) { push({ type: 'done', sessionId, terminationReason: 'interrupted' }); return; }
         sent = true;
         await client.request('POST', `/session/${sessionId}/prompt_async`, { messageID: inputId,
-          parts: [{ type: 'text', text: opts.prompt }], ...(model ? { model: splitKiloModel(model) } : {}), ...(effort ? { variant: effort } : {}),
+          parts: [kiloBridgeTextPart(opts.prompt)], ...(model ? { model: splitKiloModel(model) } : {}), ...(effort ? { variant: effort } : {}),
         }, opts.cwd);
         await finished; await chain;
       } catch (error) { fail(error instanceof Error ? error.message : 'Kilo 执行失败', error instanceof KiloHttpError && error.status < 500 ? false : sent); }

@@ -133,6 +133,7 @@ export interface Controls {
   codexUserInput?: import('../bot/codex-user-input').CodexInputHandle;
   /** Refresh a persisted mirrored CardKit delivery using its original sequence owner. */
   refreshMirroredRunCard?(scope: string, messageId: string): Promise<boolean>;
+  nativeReplySync?: { stopScope(scope: string): Promise<boolean> };
   /** Codex replies have one owner, keyed by thread/turn/scope, for all input sources. */
   codexReplySync?: {
     isThreadArchived?(threadId: string): Promise<boolean>;
@@ -1833,6 +1834,7 @@ async function handleStop(args: string, ctx: CommandContext, strict = false): Pr
     ok = true;
   } else ok = ctx.activeRuns.interrupt(scope);
   if (!ok && ctx.controls.workerReplySync) ok = await ctx.controls.workerReplySync.stopScope(scope);
+  if (!ok && ctx.controls.nativeReplySync) ok = await ctx.controls.nativeReplySync.stopScope(scope);
   if (!ok && ctx.controls.codexSubmissions) {
     const threadId = ctx.sessionCatalog?.entries().filter(e => e.scopeId === scope && e.agentId === 'codex' && e.status === 'active')
       .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.threadId;

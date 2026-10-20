@@ -16,7 +16,7 @@ it('authenticates its loopback child, scopes streamed events to its own input, a
   expect(events).toContainEqual({ type: 'tool_result', id: 'tool_read', output: 'OK', isError: false });
   expect(events.at(-1)).toMatchObject({ type: 'done', sessionId: 'ses_created' });
   const calls = await h.read(); const sent = calls.find(r => r.path.endsWith('/prompt_async'));
-  expect(sent.body.parts).toEqual([{ type: 'text', text: '原样 <tag>\n第二行' }]);
+  expect(sent.body.parts).toEqual([{ type: 'text', text: '原样 <tag>\n第二行', metadata: { 'lark-channel-bridge': { version: 1, origin: 'feishu' } } }]);
   expect(sent.body).not.toHaveProperty('system'); expect(calls.every(c => c.authenticated)).toBe(true);
   expect(calls.find(c => c.method === 'POST' && c.path === '/session').body.permission).toEqual([{ permission: '*', action: 'allow', pattern: '*' }]);
 });
