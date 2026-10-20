@@ -27,6 +27,8 @@ node bin/lark-channel-bridge.mjs setup --profile my-bot
 }
 ```
 
+桥接会按原生 CLI 的真实路径识别随包供应商配置（包括桌面安装的 `resources/config/provider/zcode-builtin.json`），不复制其中内容。已显式设置 `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` 时保留该设置；桌面升级后若会话发现失败，先确认该路径仍有效。
+
 以上字段合入现有 profile，保留其他配置。已有 Codex/Claude profile 无须修改 `agentKind`；它只决定默认工具。新 profile 可使用 `profile create --agent zcode`。
 
 模型列表和账号配置动态读取，默认读取桌面当前的 `~/.zcode/v2` 配置目录（兼容新旧格式）；无需把供应商和密钥复制到独立 CLI。可通过 `zcode.modelConfigPath` 显式指定配置来源。完整来源优先级、刷新和失效处理见 [动态模型列表](MODELS.md)。独立 CLI 的 `~/.zcode/cli/config.json` 仍受支持，权限设为 `600`，示意：

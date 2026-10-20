@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline';
-import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { spawnProcess, mergeProcessEnv } from '../../platform/spawn';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
@@ -19,6 +19,18 @@ export function zcodeCommand(options: ZcodeOptions = {}): { binary: string; args
   }
   return { binary: 'zcode', args: [...(options.args ?? [])] };
 }
+/** Desktop bundles place provider assets outside glm/; the CLI's standalone
+ * package lookup does not cover this layout. Never replace an explicit config. */
+export function zcodeProviderEnv(command: { binary: string; args: readonly string[] }, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  if (env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE?.trim()) return {};
+  const entry = [command.args[0], command.binary].find(path => path && /^zcode\.(?:cjs|mjs|js)$/.test(basename(path)));
+  if (!entry) return {};
+  let directory: string;
+  try { directory = dirname(realpathSync(entry)); } catch { return {}; }
+  const file = [join(directory, 'provider', 'zcode-builtin.json'),
+    resolve(directory, '../config/provider/zcode-builtin.json')].find(path => existsSync(path));
+  return file ? { ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: file } : {};
+}
 export class ZcodeRpcError extends Error { constructor(readonly code: number, message: string) { super(message); } }
 
 /** ZCode Protocol is NDJSON without JSON-RPC's jsonrpc field. Never resend timed-out mutations. */
@@ -33,7 +45,7 @@ export class ZcodeClient {
   constructor(options: ZcodeOptions = {}, cwd?: string) {
     const command = zcodeCommand(options);
     this.child = spawnProcess(command.binary, [...command.args, 'app-server'], { cwd,
-      env: mergeProcessEnv(process.env, { ...buildLarkChannelEnv(options.larkChannel), ...(options.dataDir ? { ZCODE_STORAGE_DIR: zcodeStorageDir(options), ZCODE_DATA_BASE_DIR: zcodeStorageDir(options) } : {}) }),
+      env: mergeProcessEnv(process.env, { ...zcodeProviderEnv(command), ...buildLarkChannelEnv(options.larkChannel), ...(options.dataDir ? { ZCODE_STORAGE_DIR: zcodeStorageDir(options), ZCODE_DATA_BASE_DIR: zcodeStorageDir(options) } : {}) }),
       stdio: ['pipe', 'pipe', 'pipe'] });
     const lines = createInterface({ input: this.child.stdout! });
     // stderr is drained, never logged: upstream diagnostics can contain credentials or full prompts.
