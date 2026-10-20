@@ -93,7 +93,7 @@ export interface ProfileConfig {
   codex?: CodexConfig;
   dsh?: { binaryPath: string; args?: string[]; homeDir?: string };
   kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean };
-  zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string };
+  zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string; remoteControlFile?: string };
   attachments: AttachmentConfig;
   comments: CommentConfig;
   larkCli: LarkCliConfig;
@@ -122,7 +122,7 @@ export interface CreateDefaultProfileConfigInput {
   codex?: CodexConfig;
   dsh?: { binaryPath: string; args?: string[]; homeDir?: string };
   kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean };
-  zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string };
+  zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string; remoteControlFile?: string };
   secrets?: SecretsConfig;
 }
 
@@ -159,7 +159,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     codex?: CodexConfig & { flags?: unknown };
     dsh?: { binaryPath?: unknown; args?: unknown; homeDir?: unknown };
     kilo?: { binaryPath?: unknown; args?: unknown; dataHome?: unknown; editorSync?: unknown };
-    zcode?: { binaryPath?: unknown; args?: unknown; dataDir?: unknown; modelConfigPath?: unknown };
+    zcode?: { binaryPath?: unknown; args?: unknown; dataDir?: unknown; modelConfigPath?: unknown; remoteControlFile?: unknown };
     attachments?: Partial<AttachmentConfig>;
     comments?: unknown;
     larkCli?: unknown;
@@ -360,12 +360,13 @@ function numberOr(value: unknown, fallback: number): number {
     : fallback;
 }
 
-function normalizeZcode(input: { binaryPath?: unknown; args?: unknown; dataDir?: unknown; modelConfigPath?: unknown }): NonNullable<ProfileConfig['zcode']> {
+function normalizeZcode(input: { binaryPath?: unknown; args?: unknown; dataDir?: unknown; modelConfigPath?: unknown; remoteControlFile?: unknown }): NonNullable<ProfileConfig['zcode']> {
   if (typeof input.binaryPath !== 'string' || !input.binaryPath.trim() ||
       (input.args !== undefined && (!Array.isArray(input.args) || !input.args.every(v => typeof v === 'string'))) ||
       (input.dataDir !== undefined && typeof input.dataDir !== 'string') ||
-      (input.modelConfigPath !== undefined && typeof input.modelConfigPath !== 'string')) throw new Error('Invalid zcode configuration');
-  return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.dataDir ? { dataDir: input.dataDir as string } : {}), ...(input.modelConfigPath ? { modelConfigPath: input.modelConfigPath as string } : {}) };
+      (input.modelConfigPath !== undefined && typeof input.modelConfigPath !== 'string') ||
+      (input.remoteControlFile !== undefined && (typeof input.remoteControlFile !== 'string' || !input.remoteControlFile.trim()))) throw new Error('Invalid zcode configuration');
+  return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.dataDir ? { dataDir: input.dataDir as string } : {}), ...(input.modelConfigPath ? { modelConfigPath: input.modelConfigPath as string } : {}), ...(input.remoteControlFile ? { remoteControlFile: input.remoteControlFile as string } : {}) };
 }
 
 function normalizeKilo(input: { binaryPath?: unknown; args?: unknown; dataHome?: unknown; editorSync?: unknown }): NonNullable<ProfileConfig['kilo']> {

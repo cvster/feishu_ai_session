@@ -441,7 +441,7 @@ export function createRuntimeAgent(
   }
   if (profileConfig.agentKind === 'dsh') return new DshAdapter({ binary: profileConfig.dsh?.binaryPath, args: profileConfig.dsh?.args, homeDir: profileConfig.dsh?.homeDir, larkChannel });
   if (profileConfig.agentKind === 'kilo') return new KiloAdapter({ binary: profileConfig.kilo?.binaryPath, args: profileConfig.kilo?.args, dataHome: profileConfig.kilo?.dataHome, editorSync: profileConfig.kilo?.editorSync, larkChannel });
-  if (profileConfig.agentKind === 'zcode') return new ZcodeAdapter({ binary: profileConfig.zcode?.binaryPath, args: profileConfig.zcode?.args, dataDir: profileConfig.zcode?.dataDir, modelConfigPath: profileConfig.zcode?.modelConfigPath, larkChannel });
+  if (profileConfig.agentKind === 'zcode') return new ZcodeAdapter({ binary: profileConfig.zcode?.binaryPath, args: profileConfig.zcode?.args, dataDir: profileConfig.zcode?.dataDir, modelConfigPath: profileConfig.zcode?.modelConfigPath, remoteControlFile: profileConfig.zcode?.remoteControlFile, larkChannel });
   return new ClaudeAdapter({ larkChannel, binary: process.env.LARK_CHANNEL_CLAUDE_BIN });
 }
 

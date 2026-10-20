@@ -15,6 +15,12 @@ const app = {
 };
 
 describe('profile schema', () => {
+  it('preserves a private ZCode pairing file reference and rejects an empty reference', () => {
+    const profile = createDefaultProfileConfig({ agentKind: 'zcode', accounts: { app },
+      zcode: { binaryPath: '/usr/bin/node', remoteControlFile: '/private/zcode.link' } });
+    expect(normalizeProfileConfig(JSON.parse(JSON.stringify(profile))).zcode?.remoteControlFile).toBe('/private/zcode.link');
+    expect(() => normalizeProfileConfig({ ...profile, zcode: { ...profile.zcode, remoteControlFile: '' } })).toThrow('Invalid zcode');
+  });
   it('defaults Claude sandbox to danger-full-access through canonical permissions', () => {
     const cfg = createDefaultProfileConfig({
       agentKind: 'claude',

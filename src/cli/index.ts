@@ -28,6 +28,7 @@ import { runWorker, workerService } from './commands/worker';
 import { runA2A, type A2AOptions } from './commands/a2a';
 import { runDoctor } from '../setup/checks';
 import { runSetup } from './commands/setup';
+import { runZcodePair } from './commands/zcode-remote';
 
 const program = new Command();
 
@@ -88,6 +89,11 @@ const profile = program
   .description('Manage local bridge profiles');
 
 const worker = program.command('worker').description('Manage the independent tool execution workers');
+program.command('zcode').description('ZCode desktop remote-control integration')
+  .command('pair').description('Read an official remote-control link from stdin; save private credentials without restarting services')
+  .option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
+  .option('--workspace <path>', 'verify the connection against this open local desktop workspace (no model input)')
+  .action(runZcodePair);
 const a2a = program.command('a2a').description('Manage FF project-assistant A2A HTTP endpoints (never restarts services)');
 for (const action of ['configure', 'list', 'enable', 'disable', 'alias', 'grant', 'revoke'] as const) {
   const command = a2a.command(['configure', 'list'].includes(action) ? action : `${action} <session>`)

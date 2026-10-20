@@ -11,6 +11,15 @@ import { startWorkerReplies } from '../../../src/worker/replies';
 import { createFakeChannel } from '../../helpers/fake-channel';
 import type { Controls } from '../../../src/commands';
 import type { LarkChannel } from '@larksuite/channel';
+import { ZcodeAdapter } from '../../../src/agent/zcode/adapter';
+import { DurableAgentAdapter } from '../../../src/worker/adapter';
+
+it('rejects a paired bridge against a worker still using independent execution', async () => {
+  const h = await fixture('zcode');
+  const adapter = new DurableAgentAdapter(h.client, new ZcodeAdapter({ remoteControlFile: '/private/pair.link' }));
+  await expect(adapter.prepareRun(h.options)).rejects.toThrow('桌面配对模式与配置不一致');
+  expect(h.calls).toHaveLength(0);
+});
 it.each(['zcode', 'kilo'] as const)('keeps %s running across bridge detach and recovers exactly one result in its own group', async toolId => {
   const h = await fixture(toolId);
   const options = { ...h.options, initialSessionId: 'sess_ff' };

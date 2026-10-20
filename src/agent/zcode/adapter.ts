@@ -1,9 +1,11 @@
 import { listZcodeModelCapabilities, loadZcodeProviderRegistry, loadZcodeRuntimeModel } from './model-config';
 import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { resolveReasoningEffort } from '../models';
-import { checkAgentAvailability } from '../preflight';
+import { AgentPreflightError, checkAgentAvailability, type AgentPreflightDiagnostic } from '../preflight';
 import { ZcodeClient, zcodeCommand, type ZcodeOptions } from './client';
+import { ZcodeRemoteClient, readZcodePairing } from './remote-client';
 
 export function zcodeWorkspace(cwd: string) {
   return { workspacePath: cwd, workspaceKey: createHash('sha256').update(cwd).digest('hex') };
@@ -11,8 +13,17 @@ export function zcodeWorkspace(cwd: string) {
 /** The independent worker owns this connection; bridge restarts only detach observers. */
 export class ZcodeAdapter implements AgentAdapter {
   readonly id = 'zcode'; readonly displayName = 'ZCode';
+  get desktopRemoteEnabled() { return !!this.options.remoteControlFile; }
+  get desktopRemoteConfigId() { return this.options.remoteControlFile ? createHash('sha256').update(resolve(this.options.remoteControlFile)).digest('hex') : undefined; }
   constructor(readonly options: ZcodeOptions = {}) {}
   async checkAvailability() {
+    if (this.options.remoteControlFile) {
+      try { await readZcodePairing(this.options.remoteControlFile); }
+      catch {
+        const diagnostic: AgentPreflightDiagnostic = { code: 'agent-binary-not-readable', agentId: 'zcode', agentName: 'ZCode', command: 'desktop-remote', field: 'zcode.remoteControlFile' };
+        return { ok: false as const, diagnostic, error: new AgentPreflightError(diagnostic, 'ZCode 远控配对文件不可用，请重新配对') };
+      }
+    }
     const command = zcodeCommand(this.options);
     return checkAgentAvailability({ agentId: 'zcode', agentName: 'ZCode', command: command.binary, binaryPath: command.binary, args: [...command.args, '--version'] });
   }
@@ -20,7 +31,7 @@ export class ZcodeAdapter implements AgentAdapter {
   listModels() { return listZcodeModelCapabilities(this.options); }
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) throw new Error('ZCode requires a project directory');
-    const client = new ZcodeClient(this.options, opts.cwd);
+    const client = this.options.remoteControlFile ? new ZcodeRemoteClient(this.options.remoteControlFile, opts.cwd) : new ZcodeClient(this.options, opts.cwd);
     const queue: AgentEvent[] = []; let wake: (() => void) | undefined;
     let ended = false, stopping = false, sessionId: string | undefined, sent = false, currentTurn: string | undefined;
     const inputId = `bridge-${opts.runId}`;
@@ -28,7 +39,9 @@ export class ZcodeAdapter implements AgentAdapter {
     const push = (event: AgentEvent) => { if (!ended) { queue.push(event); if (event.type === 'done' || event.type === 'error') { ended = true; finish(); } wake?.(); } };
     let response = '';
     let finish!: () => void; const finished = new Promise<void>(resolve => { finish = resolve; });
-    client.onInteraction = method => push({ type: 'error', terminationReason: 'failed', message: `ZCode 请求尚未适配的交互 ${method}，桥接未自动同意。` });
+    client.onInteraction = method => push({ type: 'error', terminationReason: 'failed',
+      ...(this.options.remoteControlFile ? { submissionStatus: sent ? 'unknown' as const : 'rejected' as const } : {}),
+      message: this.options.remoteControlFile ? `ZCode 桌面请求交互 ${method}，请在桌面处理。本次飞书观察结束，桌面任务未取消；桥接未自动同意或重发。` : `ZCode 请求尚未适配的交互 ${method}，桥接未自动同意。` });
     client.onNotification((method, params) => {
       const event = params?.event ?? params;
       if (method !== 'session/event' || !event || event.sessionId !== sessionId || !sent) return;

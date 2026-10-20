@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { spawnProcess, mergeProcessEnv } from '../../platform/spawn';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
 
-export interface ZcodeOptions { binary?: string; args?: readonly string[]; dataDir?: string; modelConfigPath?: string; larkChannel?: LarkChannelEnvContext }
+export interface ZcodeOptions { binary?: string; args?: readonly string[]; dataDir?: string; modelConfigPath?: string; remoteControlFile?: string; larkChannel?: LarkChannelEnvContext }
 export function zcodeStorageDir(options: Pick<ZcodeOptions, 'dataDir'> = {}): string {
   return resolve(options.dataDir ?? process.env.ZCODE_STORAGE_DIR ?? join(homedir(), '.zcode', 'cli'));
 }

@@ -47,7 +47,7 @@ export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, prim
     listSessions: () => claudeHistory.listSessions() });
   const zcodeConfig = profile.zcode;
   const zcodeHome = zcodeStorageDir(zcodeConfig);
-  const zcodeOptions = { binary: zcodeConfig?.binaryPath, args: zcodeConfig?.args, dataDir: zcodeConfig?.dataDir, modelConfigPath: zcodeConfig?.modelConfigPath, larkChannel };
+  const zcodeOptions = { binary: zcodeConfig?.binaryPath, args: zcodeConfig?.args, dataDir: zcodeConfig?.dataDir, modelConfigPath: zcodeConfig?.modelConfigPath, remoteControlFile: zcodeConfig?.remoteControlFile, larkChannel };
   const zcodeSessions = new ZcodeSessionProvider(zcodeOptions, join(paths.profileDir, 'zcode-sessions'));
   registry.register({ id: 'zcode', label: 'ZCode', sourceId: zcodeHome,
     agent: new DurableAgentAdapter(new WorkerClient(join(paths.profileDir, workerStateDirName('zcode')), zcodeHome, profile.accounts.app.id, 'zcode'),
