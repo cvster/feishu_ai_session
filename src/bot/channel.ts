@@ -89,7 +89,7 @@ import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import { isSoloUserBotChat } from './group';
 import { configureGroupNotifications } from './group-notifications';
-import { CodexNameSync } from './thread-name';
+import { CodexNameSync, SessionNameSync } from './thread-name';
 import { startAaSessionGroupSync } from './aa-session-groups';
 import { startCodexTurnSync } from './codex-turn-sync';
 import { startKiloTurnSync } from './kilo-turn-sync';
@@ -670,8 +670,24 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   let kiloTurnSync: Awaited<ReturnType<typeof startKiloTurnSync>> | undefined;
   if (kiloTool?.agent instanceof DurableAgentAdapter && sessionCatalog && deps.appPaths?.profileDir) {
     const worker = kiloTool.agent.client, options = controls.profileConfig.kilo;
+    let kiloNameSync: SessionNameSync | undefined;
+    if (kiloTool.sessions) {
+      const sessions = kiloTool.sessions;
+      kiloNameSync = new SessionNameSync({ channel, toolId: 'kilo', sourceId: kiloTool.sourceId, appId: cfg.accounts.app.id,
+        statePath: join(deps.appPaths.profileDir, 'kilo-name-sync.json'), knownChats: () => controls.knownChats ?? [],
+        renameSession: (id, name) => sessions.rename(id, name),
+        onSynchronized: async (scope, id, name) => {
+          const binding = controls.toolBindings?.get(scope);
+          if (!binding || binding.toolId !== 'kilo' || binding.sourceId !== kiloTool.sourceId || binding.nativeId !== id ||
+            binding.linkedSource || binding.auxiliaryWorkgroup || sessionCatalog.isScopeArchived(scope)) return;
+          if (binding.name !== name) { controls.toolBindings!.set(scope, { ...binding, name }); await controls.toolBindings!.flush(); }
+        } });
+      try { await kiloNameSync.load(); }
+      catch (error) { log.warn('session', 'kilo-name-sync-disabled', { error: String(error) }); kiloNameSync = undefined; }
+    }
     try {
       kiloTurnSync = await startKiloTurnSync({ channel, controls, catalog: sessionCatalog, sourceId: kiloTool.sourceId,
+        nameSync: kiloNameSync,
         statePath: join(deps.appPaths.profileDir, 'kilo-turn-sync.json'),
         reader: new KiloNativeConversationReader({ binary: options?.binaryPath, args: options?.args, dataHome: options?.dataHome, editorSync: options?.editorSync }),
         ready: async () => (await worker.health()).kiloNativeInputOrigin === true });

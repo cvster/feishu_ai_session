@@ -3,8 +3,7 @@ import type { LarkChannel } from '@larksuite/channel';
 import type { AgentAdapter } from '../agent/types';
 import { log } from '../core/logger';
 import { writeFileAtomic } from '../platform/atomic-write';
-import type { SessionCatalogEntry } from '../session/catalog';
-import type { CodexThreadSnapshot } from '../session/codex-thread-reader';
+import type { SessionCatalogEntry, CatalogAgentId } from '../session/catalog';
 import { renameChat } from './group';
 import type { KnownChat } from './lark-info';
 
@@ -27,15 +26,23 @@ export interface CodexNameSyncOptions {
   now?: () => number;
 }
 
-/** Reuses thread/read polling; no extra Codex reader, task or prompt. */
-export class CodexNameSync {
+export interface SessionNameSyncOptions extends Omit<CodexNameSyncOptions, 'agent'> {
+  toolId: CatalogAgentId;
+  sourceId?: string;
+  renameSession?(id: string, name: string): Promise<void>;
+  onSynchronized?(scope: string, id: string, name: string): Promise<void>;
+}
+export interface NamedSessionSnapshot { id: string; name?: string }
+
+/** Reuses native snapshot polling without creating a task or sending a prompt. */
+export class SessionNameSync {
   private readonly states = new Map<string, NameState>();
   private readonly nextCheck = new Map<string, number>();
   private readonly modes = new Map<string, string>();
   private readonly retryAfter = new Map<string, number>();
   private dirty = false;
 
-  constructor(private readonly options: CodexNameSyncOptions) {}
+  constructor(private readonly options: SessionNameSyncOptions) {}
 
   async load(): Promise<void> {
     try {
@@ -51,21 +58,23 @@ export class CodexNameSync {
     }
   }
 
-  async observe(snapshot: CodexThreadSnapshot, entries: SessionCatalogEntry[], isActive: (scope: string) => boolean = () => true): Promise<void> {
-    if (!this.options.agent.setThreadName) return;
+  async observe<T extends NamedSessionSnapshot>(snapshot: T, entries: SessionCatalogEntry[], isActive: (scope: string) => boolean = () => true): Promise<void> {
+    if (!this.options.renameSession) return;
     const seen = new Set<string>();
     for (const entry of entries) {
+      const nativeId = this.options.toolId === 'codex' ? entry.threadId : entry.sessionId ?? entry.threadId;
       if (!isActive(entry.scopeId)) continue;
       // Topic-scoped threads do not own the parent group's name. Never rename
       // another bot's group from a legacy/cross-host binding.
       if (entry.botAppId !== this.options.appId || entry.status !== 'active' ||
-        entry.agentId !== 'codex' || entry.threadId !== snapshot.id ||
+        entry.agentId !== this.options.toolId || nativeId !== snapshot.id ||
+        (this.options.sourceId !== undefined && entry.sourceId !== this.options.sourceId) ||
         !/^oc_[A-Za-z0-9]+$/.test(entry.scopeId) || seen.has(entry.scopeId)) continue;
       seen.add(entry.scopeId);
       try {
         await this.sync(entry.scopeId, snapshot, () => isActive(entry.scopeId));
       } catch (err) {
-        this.retryAfter.set(JSON.stringify([this.options.appId, entry.scopeId, snapshot.id]),
+        this.retryAfter.set(this.stateKey(entry.scopeId, snapshot.id),
           (this.options.now ?? Date.now)() + CHAT_CHECK_INTERVAL_MS);
         log.warn('session', 'name-sync-failed', {
           chatId: entry.scopeId, threadId: snapshot.id,
@@ -75,8 +84,15 @@ export class CodexNameSync {
     }
   }
 
-  private async sync(chatId: string, snapshot: CodexThreadSnapshot, isActive: () => boolean): Promise<void> {
-    const key = JSON.stringify([this.options.appId, chatId, snapshot.id]);
+  private stateKey(chatId: string, nativeId: string): string {
+    // Preserve the existing Codex ledger on upgrade. Other tools are keyed by
+    // their own identity and data source, even when native IDs happen to match.
+    return this.options.toolId === 'codex' ? JSON.stringify([this.options.appId, chatId, nativeId])
+      : JSON.stringify([this.options.appId, this.options.toolId, this.options.sourceId, chatId, nativeId]);
+  }
+
+  private async sync(chatId: string, snapshot: NamedSessionSnapshot, isActive: () => boolean): Promise<void> {
+    const key = this.stateKey(chatId, snapshot.id);
     let state = this.states.get(key);
     const threadName = snapshot.name?.trim() ?? '';
     const now = (this.options.now ?? Date.now)();
@@ -110,11 +126,13 @@ export class CodexNameSync {
     if (!state || (groupName !== state.groupName && groupName !== state.previousGroupName)) {
       // First binding, or a new group rename: group wins this observation.
       // If both sides changed between checks, this is the deterministic tie-break.
-      if (threadName !== groupName) await this.options.agent.setThreadName!(snapshot.id, groupName);
+      if (threadName !== groupName) await this.options.renameSession!(snapshot.id, groupName);
       await this.save(key, {
         groupName, threadName: groupName,
         ...(threadName !== groupName ? { previousThreadName: threadName } : {}),
       });
+      this.updateKnownChat(chatId, groupName);
+      if (isActive()) await this.options.onSynchronized?.(chatId, snapshot.id, groupName);
       log.info('session', 'thread-name-synced', { threadId: snapshot.id, name: groupName });
     } else if (threadChanged) {
       if (groupName !== threadName) await renameChat(this.options.channel, chatId, threadName);
@@ -123,6 +141,7 @@ export class CodexNameSync {
         ...(groupName !== threadName ? { previousGroupName: groupName } : {}),
       });
       this.updateKnownChat(chatId, threadName);
+      if (isActive()) await this.options.onSynchronized?.(chatId, snapshot.id, threadName);
       log.info('session', 'group-name-synced', { chatId, name: threadName });
     } else {
       const confirmed = { ...state };
@@ -148,5 +167,12 @@ export class CodexNameSync {
       version: 1, bindings: [...this.states],
     }) + '\n');
     this.dirty = false;
+  }
+}
+
+/** Backwards-compatible Codex facade, including its existing persistent keys. */
+export class CodexNameSync extends SessionNameSync {
+  constructor(options: CodexNameSyncOptions) {
+    super({ ...options, toolId: 'codex', renameSession: options.agent.setThreadName?.bind(options.agent) });
   }
 }

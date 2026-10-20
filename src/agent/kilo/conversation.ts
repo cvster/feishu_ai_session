@@ -19,6 +19,7 @@ export interface KiloConversationTurn {
 }
 export interface KiloConversationSnapshot {
   id: string;
+  name?: string;
   cwd: string;
   archived: boolean;
   turns: KiloConversationTurn[];
@@ -70,7 +71,7 @@ export function projectKiloConversation(info: any, rows: any[], busy: boolean): 
     return { id, createdAtMs: user.info.time.created, bridge: isKiloBridgeInput(user),
       input: (user.parts ?? []).filter((p: any) => p.type === 'text' && !p.synthetic && typeof p.text === 'string').map((p: any) => p.text).join('\n'), state };
   });
-  return { id: info.id, cwd: info.directory, archived: !!info.time?.archived, turns };
+  return { id: info.id, name: typeof info.title === 'string' ? info.title : undefined, cwd: info.directory, archived: !!info.time?.archived, turns };
 }
 
 /** Read bound native sessions only. Cached clients detach without stopping UI processes. */

@@ -8,6 +8,7 @@ import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import { ToolBindingStore } from '../../../src/tools/bindings';
 import { SessionCatalog } from '../../../src/session/catalog';
 import { startKiloTurnSync } from '../../../src/bot/kilo-turn-sync';
+import { SessionNameSync } from '../../../src/bot/thread-name';
 import { initialState } from '../../../src/card/run-state';
 import { type KiloConversationSnapshot, type KiloConversationTurn } from '../../../src/agent/kilo/conversation';
 
@@ -39,11 +40,11 @@ async function fixture(mode: 'card' | 'markdown' | 'text' = 'card') {
   let clock = 1000;
   const statePath = join(dir, 'sync.json');
   const ready = vi.fn(async () => true);
-  const start = async () => {
-    const handle = await startKiloTurnSync({ channel, controls, catalog, sourceId: 'local-kilo', reader, statePath, intervalMs: 60_000, now: () => clock, ready });
+  const start = async (nameSync?: Pick<SessionNameSync, 'observe'>) => {
+    const handle = await startKiloTurnSync({ channel, controls, catalog, sourceId: 'local-kilo', reader, statePath, intervalMs: 60_000, now: () => clock, ready, nameSync });
     cleanup.push(() => handle.stop()); return handle;
   };
-  return { dir, bindings, catalog, add, controls, snapshots, reader, create, patch, channel, start, statePath, ready, advance: (value: number) => { clock = value; } };
+  return { dir, bindings, catalog, add, controls, snapshots, reader, create, patch, channel, start, statePath, ready, now: () => clock, advance: (value: number) => { clock = value; } };
 }
 it('baselines old history, mirrors an external turn once and continues the same card after restart', async () => {
   const h = await fixture(), first = await h.start(); expect(h.create).not.toHaveBeenCalled();
@@ -129,4 +130,34 @@ it('never mirrors from an archived native session or a catalog pointing at anoth
   h.snapshots.ses_native!.archived = false;
   const entry = h.catalog.entries().find(row => row.scopeId === 'oc_group')!;
   h.catalog.upsertActive({ ...entry, sourceId: 'different-source' }); await sync.runNow(); expect(h.create).not.toHaveBeenCalled();
+});
+
+it('synchronizes personal group names in both directions, including the pre-install rename, without starting a model turn', async () => {
+  const h = await fixture(); let groupName = '群里刚改的名字'; h.snapshots.ses_native!.name = '原会话名';
+  h.channel.getChatMode = vi.fn(async () => 'group') as any;
+  h.channel.getChatInfo = vi.fn(async () => ({ name: groupName })) as any;
+  const update = vi.fn(async (request: any) => { groupName = request.data.name; return { code: 0 }; });
+  (h.channel.rawClient.im.v1 as any).chat = { update };
+  const renameSession = vi.fn(async (id: string, name: string) => { h.snapshots[id]!.name = name; });
+  const syncNames = () => new SessionNameSync({ channel: h.channel, toolId: 'kilo', sourceId: 'local-kilo', appId: 'cli_test',
+    statePath: join(h.dir, 'names.json'), renameSession, now: h.now });
+  let names = syncNames(); await names.load(); const first = await h.start(names);
+  expect(renameSession).toHaveBeenCalledWith('ses_native', '群里刚改的名字'); expect(h.create).not.toHaveBeenCalled();
+  groupName = '再次改群名'; h.advance(12000); await first.runNow(); expect(h.snapshots.ses_native!.name).toBe('再次改群名');
+  h.snapshots.ses_native!.name = '桌面改的名字'; await first.runNow(); expect(groupName).toBe('桌面改的名字');
+  expect(update).toHaveBeenCalledOnce(); await first.stop();
+  names = syncNames(); await names.load(); const resumed = await h.start(names); await resumed.runNow();
+  expect(renameSession).toHaveBeenCalledTimes(2); expect(update).toHaveBeenCalledOnce(); expect(h.create).not.toHaveBeenCalled();
+});
+it('does not let multiple personal groups fight over one native title and never includes FF audiences', async () => {
+  const h = await fixture(); h.add('oc_ff', 'ses_native');
+  h.bindings.set('oc_ff', { ...h.bindings.get('oc_ff')!, linkedSource: { toolId: 'kilo', sourceId: 'local-kilo', nativeId: 'ses_source', historyPath: '/history' } });
+  const observe = vi.fn(async (..._args: any[]) => {}); const sync = await h.start({ observe });
+  expect(observe).toHaveBeenCalledOnce(); expect(observe.mock.calls[0]![1].map((e: any) => e.scopeId)).toEqual(['oc_group']);
+  observe.mockClear(); h.add('oc_duplicate', 'ses_native'); await sync.runNow(); expect(observe).not.toHaveBeenCalled();
+});
+it('continues reply mirroring when the independent name synchronization fails', async () => {
+  const h = await fixture(); const observe = vi.fn(async () => { throw Error('name service offline'); });
+  const sync = await h.start({ observe }); h.advance(3000); h.snapshots.ses_native!.turns.push(turn()); await sync.runNow();
+  expect(observe).toHaveBeenCalled(); expect(h.create).toHaveBeenCalledTimes(2);
 });

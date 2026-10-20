@@ -2,11 +2,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CodexNameSync } from '../../../src/bot/thread-name.js';
+import { CodexNameSync, SessionNameSync } from '../../../src/bot/thread-name.js';
 import type { SessionCatalogEntry } from '../../../src/session/catalog.js';
 import { normalizeCodexThreadSnapshot } from '../../../src/session/codex-thread-reader.js';
 
-describe('bidirectional Codex / Feishu naming', () => {
+describe.each(['codex', 'kilo'] as const)('bidirectional %s / Feishu naming', (toolId) => {
   const cleanup: string[] = [];
   afterEach(async () => {
     await Promise.all(cleanup.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -25,16 +25,18 @@ describe('bidirectional Codex / Feishu naming', () => {
       agent: { setThreadName }, appId: 'bot', statePath: join(dir, 'names.json'),
       now: () => now, knownChats: () => knownChats,
     };
-    const entry: SessionCatalogEntry = { key: 'key', scopeId: 'oc_group', threadId: 'thread',
-      botAppId: 'bot', agentId: 'codex', status: 'active', cwdRealpath: dir, policyFingerprint: 'p', updatedAt: 1 };
-    let sync = new CodexNameSync(options); await sync.load();
+    const entry: SessionCatalogEntry = { key: 'key', scopeId: 'oc_group',
+      ...(toolId === 'codex' ? { threadId: 'thread' } : { sessionId: 'thread' }), sourceId: 'native-source',
+      botAppId: 'bot', agentId: toolId, status: 'active', cwdRealpath: dir, policyFingerprint: 'p', updatedAt: 1 };
+    const create = () => toolId === 'codex' ? new CodexNameSync(options) : new SessionNameSync({ ...options, toolId, sourceId: 'native-source', renameSession: setThreadName });
+    let sync = create(); await sync.load();
     return {
       getChatInfo, getChatMode, setThreadName, update, knownChats, entry,
       group: (name: string) => { groupName = name; },
       thread: (name: string) => { threadName = name; },
       advance: (ms = 10_000) => { now += ms; },
       observe: (entries = [entry], isActive?: (scope: string) => boolean) => sync.observe({ id: 'thread', name: threadName, turns: [] }, entries, isActive),
-      restart: async () => { sync = new CodexNameSync(options); await sync.load(); },
+      restart: async () => { sync = create(); await sync.load(); },
     };
   }
 
@@ -145,7 +147,9 @@ describe('bidirectional Codex / Feishu naming', () => {
     await f.observe([
       { ...f.entry, botAppId: 'other' }, { ...f.entry, botAppId: undefined },
       { ...f.entry, scopeId: 'oc_group:topic' }, { ...f.entry, status: 'archived' },
-      { ...f.entry, threadId: 'other' },
+      { ...f.entry, threadId: 'other', sessionId: 'other' },
+      { ...f.entry, agentId: toolId === 'kilo' ? 'codex' : 'kilo' },
+      ...(toolId === 'kilo' ? [{ ...f.entry, sourceId: 'other' }, { ...f.entry, sourceId: undefined }] : []),
     ]);
     expect(f.getChatInfo).not.toHaveBeenCalled();
   });

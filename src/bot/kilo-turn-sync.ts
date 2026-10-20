@@ -10,6 +10,7 @@ import { renderText } from '../card/text-renderer';
 import { getMessageReplyMode, getShowToolCalls } from '../config/schema';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { log } from '../core/logger';
+import type { SessionNameSync } from './thread-name';
 
 interface Delivery {
   createdAtMs: number;
@@ -36,6 +37,7 @@ export interface KiloTurnSyncDeps {
   ready?(): Promise<boolean>;
   intervalMs?: number;
   now?(): number;
+  nameSync?: Pick<SessionNameSync, 'observe'>;
 }
 const keyFor = (scope: string, sourceId: string, id: string) => JSON.stringify([scope, sourceId, id]);
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -133,6 +135,16 @@ export async function startKiloTurnSync(deps: KiloTurnSyncDeps) {
       try {
         const snapshot = await deps.reader.read(id);
         if (snapshot.id !== id || snapshot.archived) continue;
+        // Only a unique personal group owns the native title. Shared FF
+        // audiences and ambiguous legacy bindings must never fight over it.
+        const nameEntries = deps.catalog.entries().filter(row => scopes.includes(row.scopeId) && active(row.scopeId, id) &&
+          row.agentId === 'kilo' && row.status === 'active' && (row.sessionId ?? row.threadId) === id &&
+          row.sourceId === deps.sourceId && row.botAppId === deps.controls.profileConfig.accounts.app.id &&
+          resolve(row.cwdRealpath) === resolve(snapshot.cwd));
+        if (new Set(nameEntries.map(row => row.scopeId)).size === 1) {
+          try { await deps.nameSync?.observe(snapshot, nameEntries, scope => !stopped && active(scope, id)); }
+          catch (error) { log.warn('kilo-turn-sync', 'name-sync-failed', { sessionId: id, error: String(error) }); }
+        }
         for (const scope of scopes) {
           if (!active(scope, id)) continue;
           const entry = deps.catalog.entries().find(row => row.scopeId === scope && row.agentId === 'kilo' && row.status === 'active' && (row.sessionId ?? row.threadId) === id);
