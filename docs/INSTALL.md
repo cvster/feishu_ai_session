@@ -148,6 +148,12 @@ node bin/lark-channel-bridge.mjs worker run --profile my-bot
 
 worker 必须与桥接使用同一 profile、飞书应用、Claude 账号目录和 OS 用户。`worker stop` 会中断其 Claude 任务；普通更新只重启桥接。这里不要求另装 Python、Redis 或队列数据库。
 
+### ZCode（可选）
+
+ZCode 需单独安装；上述安装脚本不会安装它。按 [ZCode 安装与配对指引](ZCODE.md) 配置原生 Agent CLI、账号和项目目录。只使用 ZCode 的新安装，第 4 节创建 profile 时使用 `--agent zcode`；已有 profile 保留原默认工具。
+
+如需飞书输入在 ZCode 桌面实时显示，先在桌面开启“移动端远程控制”，再按该指引通过 stdin 导入配对链接。独立 CLI 执行与桌面实时同步是两种模式，仅读取同一历史数据库不会启用实时同步。配对后启动 ZCode 专用 worker，再启动桥接；已有 worker 则按指引单独停止、启动以加载配置。远控模式需要桌面保持运行、登录并打开对应本地项目，通信经过 ZCode 官方中继。
+
 ## 7. 配置飞书权限与发布
 
 完整申请列表、事件和卡片回调见 [FEISHU_PERMISSIONS.md](FEISHU_PERMISSIONS.md)。必须完成：

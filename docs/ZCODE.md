@@ -4,6 +4,16 @@
 
 ## 安装和配置
 
+首次安装先完成 [完整安装指引](INSTALL.md) 中的源码构建、profile、后台环境和飞书权限配置，再按本页配置 ZCode。只使用 ZCode 的新 profile 可执行：
+
+```bash
+node bin/lark-channel-bridge.mjs profile create my-bot \
+  --agent zcode --workspace /absolute/path/to/project
+node bin/lark-channel-bridge.mjs setup --profile my-bot
+```
+
+已有 profile 跳过创建步骤，所有命令中的 `my-bot` 换成自己的 profile 名。想让飞书输入实时显示在桌面，完成本节原生 CLI 配置后，再完成下方“桌面实时同步：原生远控配对”，最后启动服务。配对不需要额外申请飞书权限。
+
 先安装并配置 [官方 ZCode](https://github.com/zai-org/ZCode)。独立执行验证基线为 Linux、ZCode Agent CLI **0.16.5 / 0.17.0**；桌面配对已在 ZCode **3.16.2 / Agent CLI 0.17.0** 验证。安装脚本的 `--install-clis` 仍只安装 Codex/Claude，ZCode 需单独准备。
 
 `/usr/bin/zcode` 可能是桌面启动器，不能作为 Agent CLI。桥接在常见安装路径找到桌面附带的 `resources/glm/zcode.cjs` 后，使用 Node 运行它；也可以在 profile 中显式配置：
@@ -71,6 +81,27 @@ node bin/lark-channel-bridge.mjs zcode pair --profile my-bot \
 ```
 
 命令保存独立的 `600` 连接文件，profile 中只保存 `zcode.remoteControlFile` 路径，不回显链接。新版账号登录态从 `zcode.modelConfigPath` 旁的 `credentials.json` 读取，默认 `~/.zcode/v2/credentials.json`；按原生 `enc:v1:` 格式解密，保持原文件不变。登录 JWT 只用于官方 HTTPS 授权接口，不进入链接、配置、提示词或日志，短期 terminal token 只在内存使用。只读验证仍会建立一个远控终端，可能替换已连接的手机远控；不要同时使用桥接和手机争用同一个配对入口。重新导入时写入新的凭据文件，已经加载旧配置的 worker 不受导入动作直接影响。命令不重启服务；配置后需单独升级 / 重启 ZCode worker，并重启桥接。旧 worker 或执行模式不匹配时拒绝派发。
+
+首次安装且尚未启动服务时，完成配对后执行：
+
+```bash
+node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool zcode
+node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool zcode
+node bin/lark-channel-bridge.mjs start --profile my-bot
+```
+
+已有部署切换配对模式或升级 ZCode 执行代码时，先将构建产物部署到服务实际使用的目录，再从该目录执行以下命令。停止 ZCode worker 会中断其任务，应作为单独升级操作；其他工具的 worker 无需重启。`worker start` 对运行中的服务是幂等操作，不能代替重启：
+
+```bash
+node bin/lark-channel-bridge.mjs stop --profile my-bot
+node bin/lark-channel-bridge.mjs worker stop --profile my-bot --tool zcode
+node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool zcode
+node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool zcode
+node bin/lark-channel-bridge.mjs start --profile my-bot
+node bin/lark-channel-bridge.mjs status --profile my-bot
+```
+
+非 Linux 环境由自己的进程管理器按相同顺序重启 `worker run --profile my-bot --tool zcode` 和桥接。首次验收在 ZCode 桌面打开相同的本地项目，再从对应飞书工作群发送简单问题，检查同一会话的输入、回复与停止操作；桌面直接发起的消息不会自动回推飞书。
 
 支持两种官方链接：旧版含 `hash/t`，使用原生 HMAC challenge；3.16.2 链接只含设备标识，使用账号授权 V2。V2 在每次连接前读取桌面现有登录态，先通过官方接口确认该设备属于当前账号且在线，再申请短期 `terminal` token，连接官方 `/api/v1/remote/ws2`；不注册 / 删除设备，不申请 `device` token。JWT 只发送给固定官方授权接口，短期 token 仅用于原生 WebSocket 握手，不写入链接文件、profile、提示词或日志。账号与凭据目录默认使用 `~/.zcode/v2`，也可沿用 `zcode.modelConfigPath` 所指目录；自定义原生凭据加密密钥仍需通过 `ZCODE_CREDENTIAL_SECRET` 提供。桌面登录失效时由用户在桌面重新登录，桥接不修改或导出桌面凭据。
 
