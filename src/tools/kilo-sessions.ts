@@ -22,7 +22,7 @@ export class KiloSessionProvider implements ToolSessionOperations {
   }
   async historyPath(id: string): Promise<string | undefined> {
     try { kiloSessionId(id); } catch { return undefined; }
-    const client = new KiloClient(this.options);
+    const client = new KiloClient(this.options, undefined, id);
     try {
       const session = await client.request('GET', `/session/${id}`);
       if (session.id !== id) throw new Error('Kilo 返回了不匹配的会话记录');
@@ -34,14 +34,19 @@ export class KiloSessionProvider implements ToolSessionOperations {
     } finally { await client.close(); }
   }
   private async update(id: string, body: unknown) {
-    const client = new KiloClient(this.options);
-    try { const result = await client.request('PATCH', `/session/${kiloSessionId(id)}`, body); if (result.id !== id) throw new Error('Kilo 返回了不匹配的会话'); }
+    const client = new KiloClient(this.options, undefined, id);
+    try {
+      const session = await client.request('GET', `/session/${kiloSessionId(id)}`);
+      if (session.id !== id || typeof session.directory !== 'string') throw new Error('Kilo 返回了不匹配的会话');
+      const result = await client.request('PATCH', `/session/${id}`, body, session.directory);
+      if (result.id !== id) throw new Error('Kilo 返回了不匹配的会话');
+    }
     finally { await client.close(); }
   }
   rename(id: string, title: string) { return this.update(id, { title }); }
   archive(id: string) { return this.update(id, { time: { archived: Date.now() } }); }
   async fork(id: string): Promise<{ nativeId: string; name: string; cwd: string }> {
-    const client = new KiloClient(this.options);
+    const client = new KiloClient(this.options, undefined, id);
     try {
       const source = await client.request('GET', `/session/${kiloSessionId(id)}`);
       if (source.id !== id || source.time.archived) throw new Error('Kilo 原会话不存在或已归档');
@@ -50,6 +55,9 @@ export class KiloSessionProvider implements ToolSessionOperations {
       const result = await client.request('POST', `/session/${id}/fork`, {}, source.directory);
       const nativeId = kiloSessionId(result.id);
       if (nativeId === id || result.directory !== source.directory) throw new Error('Kilo 返回了不匹配的复制会话');
+      if (source.metadata?.['kilo-desktop'] && !result.metadata?.['kilo-desktop']) {
+        await client.request('PATCH', `/session/${nativeId}`, { metadata: { ...result.metadata, 'kilo-desktop': source.metadata['kilo-desktop'] } }, source.directory);
+      }
       return { nativeId, name: result.title, cwd: result.directory };
     } finally { await client.close(); }
   }

@@ -119,13 +119,15 @@ it('registers Kilo as an independent worker without reusing an existing tool ser
   expect(unit).not.toContain('ZCODE_STORAGE_DIR');
 });
 
-it('requires the Kilo editor sync capability before dispatching to an old worker', async () => {
+it('requires the Kilo editor and desktop sync capabilities before dispatching to an old worker', async () => {
   const h = await fixture('kilo');
-  expect(await h.client.health()).toMatchObject({ kiloEditorSync: true });
+  expect(await h.client.health()).toMatchObject({ kiloEditorSync: true, kiloDesktopSync: true });
   const health = vi.spyOn(h.client, 'health').mockResolvedValue({ nativeReasoningEfforts: true });
-  await expect(h.adapter.prepareRun(h.options)).rejects.toThrow('编辑器实时同步');
+  await expect(h.adapter.prepareRun(h.options)).rejects.toThrow('桌面 App 实时同步');
   expect(h.calls).toHaveLength(0); expect(h.stop).not.toHaveBeenCalled();
   health.mockResolvedValue({ nativeReasoningEfforts: true, kiloEditorSync: true });
+  await expect(h.adapter.prepareRun(h.options)).rejects.toThrow('桌面 App 实时同步');
+  health.mockResolvedValue({ nativeReasoningEfforts: true, kiloEditorSync: true, kiloDesktopSync: true });
   await expect(h.adapter.prepareRun(h.options)).resolves.toBeUndefined();
 });
 

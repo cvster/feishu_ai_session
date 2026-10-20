@@ -40,7 +40,7 @@ export async function fixture(kind = 'normal') {
       if (pathname === '/experimental/session') return reply(Object.values(s.sessions));
       if (pathname === '/session') {
         if (req.method === 'GET') return reply(Object.values(s.sessions));
-        const session = { id: 'ses_created', title: body.title, directory: url.searchParams.get('directory'), time: { created: 3, updated: 4 } };
+        const session = { id: 'ses_created', title: body.title, directory: url.searchParams.get('directory'), time: { created: 3, updated: 4 }, ...(body.metadata ? { metadata: body.metadata } : {}) };
         s.sessions[session.id] = session; save(s); return reply(session);
       }
       const match = /^\\/session\\/(ses_[\\w-]+)(.*)$/.exec(pathname);
@@ -53,6 +53,7 @@ export async function fixture(kind = 'normal') {
       if (suffix === '/message') return reply(s.messages[id] || []);
       if (suffix === '/fork') {
         const copy = { ...s.sessions[id], id: 'ses_copy', title: s.sessions[id].title+' (fork)' };
+        if (kind === 'fork-without-metadata') delete copy.metadata;
         s.sessions[copy.id] = copy; s.messages[copy.id] = s.messages[id] || []; save(s); return reply(copy);
       }
       if (suffix === '/abort') return reply(true);

@@ -23,7 +23,7 @@ export class KiloAdapter implements AgentAdapter {
   listModels(options: { cwd?: string } = {}) { return listKiloModels(this.options, options.cwd); }
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) throw new Error('Kilo requires a project directory');
-    const client = new KiloClient(this.options, opts.cwd);
+    const client = new KiloClient(this.options, opts.cwd, opts.sessionId);
     const inputId = `msg_${Date.now().toString(16)}${randomBytes(12).toString('hex')}`;
     const queue: AgentEvent[] = []; let wake: (() => void) | undefined;
     let ended = false, stopping = false, sent = false, sessionId: string | undefined;
@@ -122,7 +122,10 @@ export class KiloAdapter implements AgentAdapter {
         if (requestedEffort && !option?.reasoningEfforts?.some(row => row.value === requestedEffort)) throw new Error('Kilo 已选模型的推理档位不可用，请刷新 /config');
         const permission = kiloPermissions(opts.accessMode ?? opts.sandbox);
         if (stopping) { push({ type: 'done', terminationReason: 'interrupted' }); return; }
-        info ??= await client.request('POST', '/session', { title: opts.sessionName ?? '飞书会话', permission }, opts.cwd);
+        if (!info) {
+          const metadata = await client.sessionCreationMetadata();
+          info = await client.request('POST', '/session', { title: opts.sessionName ?? '飞书会话', permission, ...(metadata ? { metadata } : {}) }, opts.cwd);
+        }
         sessionId = kiloSessionId(info.id);
         if (opts.sessionId && sessionId !== opts.sessionId) throw new Error('Kilo 返回了不匹配的会话');
         if (opts.sessionId) await client.request('PATCH', `/session/${sessionId}`, { permission }, opts.cwd);

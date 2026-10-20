@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { spawnProcess, mergeProcessEnv } from '../../platform/spawn';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
-import { findKiloEditorServer } from './editor-server';
+import { findKiloEditorServer, type KiloEditorServer } from './editor-server';
 
 export interface KiloOptions { binary?: string; args?: readonly string[]; dataHome?: string; editorSync?: boolean; larkChannel?: LarkChannelEnvContext }
 export function kiloStorageDir(options: KiloOptions = {}): string {
@@ -40,17 +40,18 @@ export class KiloClient {
   private closed = false;
   readonly exited: Promise<void>;
   private exit!: () => void;
-  constructor(options: KiloOptions = {}, cwd?: string) {
+  private attached?: KiloEditorServer;
+  constructor(options: KiloOptions = {}, cwd?: string, sessionId?: string) {
     this.exited = new Promise(done => { this.exit = done; });
-    this.ready = this.connect(options, cwd);
+    this.ready = this.connect(options, cwd, sessionId);
     void this.ready.catch(() => {}); // Preserve the specific discovery/startup rejection for request callers.
   }
-  private async connect(options: KiloOptions, cwd?: string): Promise<string> {
+  private async connect(options: KiloOptions, cwd?: string, sessionId?: string): Promise<string> {
     const command = kiloCommand(options);
-    const editor = cwd && options.editorSync !== false && !command.args.length
-      ? await findKiloEditorServer(command.binary, cwd, options.dataHome) : undefined;
+    const editor = options.editorSync !== false && !command.args.length
+      ? await findKiloEditorServer(command.binary, cwd, options.dataHome, {}, sessionId) : undefined;
     if (this.closed) throw new Error('Kilo 连接已关闭');
-    if (editor) { this.authorization = editor.authorization; return editor.url; }
+    if (editor) { this.attached = editor; this.authorization = editor.authorization; return editor.url; }
     this.child = spawnProcess(command.binary, [...command.args, 'serve', '--hostname', '127.0.0.1', '--port', '0'], {
       cwd, env: mergeProcessEnv(process.env, { ...buildLarkChannelEnv(options.larkChannel),
         KILO_SERVER_USERNAME: 'kilo', KILO_SERVER_PASSWORD: Buffer.from(this.authorization.slice(6), 'base64').toString().slice(5),
@@ -72,6 +73,11 @@ export class KiloClient {
     this.child.once('error', () => this.exit());
     this.child.once('close', () => { lines.close(); this.exit(); });
     return ready;
+  }
+  async sessionCreationMetadata(): Promise<Record<string, unknown> | undefined> {
+    await this.ready;
+    if (this.attached?.client === 'desktop' && !this.attached.sessionMetadata) throw new Error('请先在 Kilo 桌面 App 为此项目创建一个会话，再从飞书关联或创建，确保新会话可在桌面工作区显示。');
+    return this.attached?.sessionMetadata;
   }
   async request<T = any>(method: string, path: string, body?: unknown, cwd?: string): Promise<T> {
     const url = new URL(path, await this.ready);

@@ -3,6 +3,7 @@ import { request } from 'node:http';
 import { afterEach, expect, it, vi } from 'vitest';
 import { fixture } from './fixture';
 import { KiloAdapter } from '../../../src/agent/kilo/adapter';
+import { KiloSessionProvider } from '../../../src/tools/kilo-sessions';
 import { KiloClient } from '../../../src/agent/kilo/client';
 const discovery = vi.hoisted(() => ({ find: vi.fn() }));
 vi.mock('../../../src/agent/kilo/editor-server', () => ({ findKiloEditorServer: discovery.find }));
@@ -62,4 +63,42 @@ it('does not fall back to another server after editor discovery fails', async ()
   const events = []; for await (const event of run.events) events.push(event);
   expect(events.at(-1)).toMatchObject({ type: 'error', message: 'editor unavailable', submissionStatus: 'rejected' });
   expect(await run.waitForExit(3000)).toBe(true);
+});
+
+it('creates fresh desktop sessions with native workspace metadata and routes existing runs by source ID', async () => {
+  const h = await editor();
+  const metadata = { 'kilo-desktop': { workspaceId: 'desktop-workspace', workspaceFolders: [{ path: h.root }] } };
+  discovery.find.mockResolvedValue({ url: h.url, authorization: h.authorization, pid: h.child.pid, client: 'desktop', sessionMetadata: metadata });
+  const run = h.agent.run({ runId: 'desktop-fresh', cwd: h.root, prompt: 'from Feishu' });
+  const events = []; for await (const event of run.events) events.push(event);
+  expect(events.at(-1)).toMatchObject({ type: 'done', sessionId: 'ses_created' });
+  expect((await h.read()).find(c => c.method === 'POST' && c.path === '/session').body.metadata).toEqual(metadata);
+  const resumed = h.agent.run({ runId: 'desktop-resume', cwd: h.root, sessionId: 'ses_created', prompt: 'again' });
+  for await (const _ of resumed.events) { /* consume */ }
+  expect(discovery.find).toHaveBeenLastCalledWith('/nonexistent/should-not-spawn-kilo', h.root, undefined, {}, 'ses_created');
+  expect(h.child.killed).toBe(false);
+});
+it('rejects new desktop sessions without a native workspace instead of creating an invisible conversation', async () => {
+  const h = await editor();
+  discovery.find.mockResolvedValue({ url: h.url, authorization: h.authorization, pid: h.child.pid, client: 'desktop' });
+  const run = h.agent.run({ runId: 'desktop-missing-workspace', cwd: h.root, prompt: 'must not run' });
+  const events = []; for await (const event of run.events) events.push(event);
+  expect(events.at(-1)).toMatchObject({ type: 'error', submissionStatus: 'rejected', message: expect.stringContaining('桌面 App') });
+  expect((await h.read()).some(c => c.method === 'POST' && (c.path === '/session' || c.path.endsWith('/prompt_async')))).toBe(false);
+  expect(h.child.killed).toBe(false);
+});
+it('scopes desktop rename/archive events to the native project and preserves workspace metadata on copies', async () => {
+  const h = await editor('fork-without-metadata');
+  const metadata = { 'kilo-desktop': { workspaceId: 'desktop-workspace', workspaceFolders: [{ path: h.root }] } };
+  await h.update(s => { s.sessions.ses_source.metadata = metadata; });
+  discovery.find.mockResolvedValue({ url: h.url, authorization: h.authorization, pid: h.child.pid, client: 'desktop', sessionMetadata: metadata });
+  const sessions = new KiloSessionProvider({ binary: '/nonexistent/should-not-spawn-kilo' }, h.root);
+  await sessions.rename('ses_source', 'AA-renamed');
+  const copy = await sessions.fork('ses_source'); expect(copy.nativeId).toBe('ses_copy');
+  await sessions.archive(copy.nativeId);
+  const calls = await h.read(), changes = calls.filter(c => c.method === 'PATCH');
+  expect(changes.length).toBe(3); expect(changes.every(c => c.query.directory === h.root)).toBe(true);
+  expect(changes.find(c => c.body.metadata)?.body.metadata).toEqual(metadata);
+  expect(calls.some(c => c.path.endsWith('/prompt_async'))).toBe(false);
+  expect(h.child.killed).toBe(false);
 });
