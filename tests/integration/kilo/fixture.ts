@@ -22,8 +22,8 @@ export async function fixture(kind = 'normal') {
     const save = value => fs.writeFileSync(statePath, JSON.stringify(value));
     let streams = [], seq = 0;
     const emit = (type, properties, id) => {
-      const frame = 'data: '+JSON.stringify({ id: id || 'evt_'+(++seq), type, properties })+'\\n\\n';
-      for (const stream of streams) stream.write(frame);
+      const payload = { id: id || 'evt_'+(++seq), type, properties };
+      for (const stream of streams) stream.write('data: '+JSON.stringify(stream.globalEvent ? { directory: ${JSON.stringify(root)}, payload } : payload)+'\\n\\n');
     };
     const server = http.createServer(async (req, res) => {
       if (req.headers.authorization !== 'Basic '+Buffer.from('kilo:'+process.env.KILO_SERVER_PASSWORD).toString('base64')) { res.writeHead(401); res.end(); return; }
@@ -32,7 +32,7 @@ export async function fixture(kind = 'normal') {
       body = body ? JSON.parse(body) : undefined;
       fs.appendFileSync(callsPath, JSON.stringify({ method: req.method, path: pathname, query: Object.fromEntries(url.searchParams), body, authenticated: true })+'\\n');
       const s = load(), reply = value => { res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(value)); };
-      if (pathname === '/event') { res.writeHead(200, { 'Content-Type':'text/event-stream' }); res.write('data: {"type":"server.connected"}\\n\\n'); streams.push(res); req.on('close', () => streams = streams.filter(r => r !== res)); return; }
+      if (pathname === '/event' || pathname === '/global/event') { res.globalEvent = pathname === '/global/event'; res.writeHead(200, { 'Content-Type':'text/event-stream' }); res.write('data: {"type":"server.connected"}\\n\\n'); streams.push(res); req.on('close', () => streams = streams.filter(r => r !== res)); return; }
       if (pathname === '/provider') return reply(s.providers);
       if (pathname === '/config') return reply(s.config);
       if (pathname === '/config/model-state') return reply({ recent: [], model: {}, variant: {} });

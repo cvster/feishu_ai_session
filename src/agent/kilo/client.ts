@@ -7,8 +7,9 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { spawnProcess, mergeProcessEnv } from '../../platform/spawn';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
+import { findKiloEditorServer } from './editor-server';
 
-export interface KiloOptions { binary?: string; args?: readonly string[]; dataHome?: string; larkChannel?: LarkChannelEnvContext }
+export interface KiloOptions { binary?: string; args?: readonly string[]; dataHome?: string; editorSync?: boolean; larkChannel?: LarkChannelEnvContext }
 export function kiloStorageDir(options: KiloOptions = {}): string {
   return resolve(join(options.dataHome ?? process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'kilo'));
 }
@@ -30,16 +31,26 @@ export function kiloSessionId(id: string): string {
   return id;
 }
 
-/** Only owns its own authenticated loopback child; never attaches to or stops the editor server. */
+/** Prefers the matching editor backend for realtime UI events; never owns or stops that process. */
 export class KiloClient {
-  private child;
-  private readonly authorization = `Basic ${Buffer.from(`kilo:${randomBytes(32).toString('hex')}`).toString('base64')}`;
+  private child?: ReturnType<typeof spawnProcess>;
+  private authorization = `Basic ${Buffer.from(`kilo:${randomBytes(32).toString('hex')}`).toString('base64')}`;
   private readonly ready: Promise<string>;
   private readonly streams = new Set<ClientRequest>();
   private closed = false;
   readonly exited: Promise<void>;
+  private exit!: () => void;
   constructor(options: KiloOptions = {}, cwd?: string) {
+    this.exited = new Promise(done => { this.exit = done; });
+    this.ready = this.connect(options, cwd);
+    void this.ready.catch(() => {}); // Preserve the specific discovery/startup rejection for request callers.
+  }
+  private async connect(options: KiloOptions, cwd?: string): Promise<string> {
     const command = kiloCommand(options);
+    const editor = cwd && options.editorSync !== false && !command.args.length
+      ? await findKiloEditorServer(command.binary, cwd, options.dataHome) : undefined;
+    if (this.closed) throw new Error('Kilo 连接已关闭');
+    if (editor) { this.authorization = editor.authorization; return editor.url; }
     this.child = spawnProcess(command.binary, [...command.args, 'serve', '--hostname', '127.0.0.1', '--port', '0'], {
       cwd, env: mergeProcessEnv(process.env, { ...buildLarkChannelEnv(options.larkChannel),
         KILO_SERVER_USERNAME: 'kilo', KILO_SERVER_PASSWORD: Buffer.from(this.authorization.slice(6), 'base64').toString().slice(5),
@@ -48,21 +59,19 @@ export class KiloClient {
     });
     this.child.stderr!.on('data', () => {}); // Native diagnostics may contain provider secrets; never forward them.
     const lines = createInterface({ input: this.child.stdout! });
-    this.ready = new Promise((resolveReady, reject) => {
+    const ready = new Promise<string>((resolveReady, reject) => {
       const timer = setTimeout(() => { reject(new Error('Kilo 服务启动超时')); void this.close(); }, 30_000);
       const finish = (error?: Error, url?: string) => { clearTimeout(timer); error ? reject(error) : resolveReady(url!); };
       lines.on('line', line => {
         const match = /server listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(line);
         if (match) finish(undefined, match[1]);
       });
-      this.child.once('error', () => finish(new Error('Kilo 服务无法启动，请检查可执行文件')));
-      this.child.once('close', () => finish(new Error('Kilo 服务已退出')));
+      this.child!.once('error', () => finish(new Error('Kilo 服务无法启动，请检查可执行文件')));
+      this.child!.once('close', () => finish(new Error('Kilo 服务已退出')));
     });
-    void this.ready.catch(() => {});
-    this.exited = new Promise(resolveExit => {
-      this.child.once('error', () => resolveExit());
-      this.child.once('close', () => { lines.close(); resolveExit(); });
-    });
+    this.child.once('error', () => this.exit());
+    this.child.once('close', () => { lines.close(); this.exit(); });
+    return ready;
   }
   async request<T = any>(method: string, path: string, body?: unknown, cwd?: string): Promise<T> {
     const url = new URL(path, await this.ready);
@@ -126,8 +135,10 @@ export class KiloClient {
   async close(): Promise<void> {
     if (this.closed) return; this.closed = true;
     for (const req of this.streams) req.destroy();
+    if (!this.child) { this.exit(); return; }
     this.child.kill('SIGTERM');
-    const timer = setTimeout(() => this.child.kill('SIGKILL'), 5000); timer.unref();
+    const child = this.child;
+    const timer = setTimeout(() => child.kill('SIGKILL'), 5000); timer.unref();
     await this.exited; clearTimeout(timer);
   }
 }

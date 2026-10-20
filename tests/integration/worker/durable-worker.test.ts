@@ -119,6 +119,16 @@ it('registers Kilo as an independent worker without reusing an existing tool ser
   expect(unit).not.toContain('ZCODE_STORAGE_DIR');
 });
 
+it('requires the Kilo editor sync capability before dispatching to an old worker', async () => {
+  const h = await fixture('kilo');
+  expect(await h.client.health()).toMatchObject({ kiloEditorSync: true });
+  const health = vi.spyOn(h.client, 'health').mockResolvedValue({ nativeReasoningEfforts: true });
+  await expect(h.adapter.prepareRun(h.options)).rejects.toThrow('编辑器实时同步');
+  expect(h.calls).toHaveLength(0); expect(h.stop).not.toHaveBeenCalled();
+  health.mockResolvedValue({ nativeReasoningEfforts: true, kiloEditorSync: true });
+  await expect(h.adapter.prepareRun(h.options)).resolves.toBeUndefined();
+});
+
 it('starts DSH through its own service and preserves its native home and binary', () => {
   const unit = buildWorkerUnit({ node: '/node', entry: '/bridge/entry.mjs', profile: 'p', config: '/state/config.json', envPath: '/bin',
     toolId: 'dsh', dshBinary: '/native/dsh', dshHome: '/native/dsh-home' });

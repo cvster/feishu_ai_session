@@ -52,7 +52,7 @@ export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, prim
   registry.register({ id: 'zcode', label: 'ZCode', sourceId: zcodeHome,
     agent: new DurableAgentAdapter(new WorkerClient(join(paths.profileDir, workerStateDirName('zcode')), zcodeHome, profile.accounts.app.id, 'zcode'),
       primary.id === 'zcode' ? primary : new ZcodeAdapter(zcodeOptions)), sessions: zcodeSessions, listSessions: () => zcodeSessions.listSessions() });
-  const kiloOptions = { binary: profile.kilo?.binaryPath, args: profile.kilo?.args, dataHome: profile.kilo?.dataHome, larkChannel };
+  const kiloOptions = { binary: profile.kilo?.binaryPath, args: profile.kilo?.args, dataHome: profile.kilo?.dataHome, editorSync: profile.kilo?.editorSync, larkChannel };
   const kiloHome = kiloStorageDir(kiloOptions);
   const kiloSessions = new KiloSessionProvider(kiloOptions, join(paths.profileDir, 'kilo-sessions'));
   registry.register({ id: 'kilo', label: 'Kilo', sourceId: kiloHome,

@@ -25,6 +25,7 @@ export class DurableAgentAdapter implements AgentAdapter {
     try { capabilities = await this.client.health(); }
     catch { throw new RunRejected('execution-worker-unavailable', `${this.displayName} 执行服务不可用，本次请求未执行。请先启动对应工具的独立 worker 服务。`); }
     if (this.id === 'zcode' && !capabilities?.zcodeRegistryResume) throw new RunRejected('model-unavailable', 'ZCode worker 尚未升级到保留原会话供应商的版本，本次未执行。请单独升级 ZCode worker。');
+    if (this.id === 'kilo' && !capabilities?.kiloEditorSync) throw new RunRejected('model-unavailable', 'Kilo worker 尚未升级到编辑器实时同步版本，本次未执行。请单独升级 Kilo worker。');
     const effort = resolveReasoningEffort(options?.reasoningEffort);
     // Old Claude workers preserve these exact tokens, but coerce unknown levels to high.
     const legacySafe = this.id === 'claude' && ['low', 'medium', 'high', 'xhigh', 'max'].includes(effort ?? '');
