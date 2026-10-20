@@ -159,7 +159,12 @@ export class ZcodeRemoteClient {
       clientId: this.clientId, clientKind: 'mobileRemote', appVersion: 'feishu-bridge' }]);
   }
   private receivePayload(value: any) {
-    if (value?.zcode_type === 'bridge-degraded') throw new Error('ZCode remote bridge degraded');
+    if (value?.zcode_type === 'bridge-degraded') {
+      // The desktop can replay faults for a previous terminal attachment.
+      // Only this connection's workspace bridge can invalidate our transport.
+      if (value.bridgeSessionId === this.frames.bridgeSessionId) throw new Error('ZCode remote bridge degraded');
+      return;
+    }
     if (value?.zcode_type === 'rpc-frame' || value?.zcode_type === 'rpc-frame-ack') {
       const { bytes, ack } = this.frames.accept(value);
       if (ack) this.payload(ack);
@@ -205,14 +210,19 @@ export class ZcodeRemoteClient {
         if (!params.title?.trim()) throw new Error('ZCode 会话名不能为空');
         const before = await this.call('readSession', [target]);
         if (before.session?.sessionId !== params.sessionId) throw new Error('ZCode 原生会话不存在，未改名');
-        result = await this.call('renameTask', [{ workspacePath: target.workspacePath, taskId: params.sessionId, title: params.title }], 'zcode-task');
-        // The task facade also projects the rename into the V4 session store.
+        // Empty native sessions do not yet have a legacy task-index entry.
+        // Rename through the same V4 command as the desktop conversation header.
+        result = await this.call('sendConversationCommandV4', [{ ...target, envelope: {
+          commandId: randomUUID(), clientId: this.clientId, sessionId: params.sessionId, issuedAt: Date.now(),
+          type: 'renameSession', payload: { title: params.title },
+        } }]);
+        if (!['accepted', 'noop', 'duplicate'].includes(result?.status)) throw new Error('ZCode 桌面未确认改名');
         const snapshot = await this.call('readSession', [target]);
         if (snapshot.session?.sessionId !== params.sessionId || snapshot.session?.title !== params.title)
           throw new Error('ZCode 原生会话标题尚未确认，未将改名标记为成功');
         break;
       }
-      case 'session/create': result = await this.call('createSession', [{ ...target, mode: params.mode, titleGenerationEnabled: false, ...(params.runtimeModel ? { model: params.runtimeModel.model } : {}) }]); break;
+      case 'session/create': result = await this.call('createSession', [{ ...target, mode: params.mode, persistence: 'immediate', titleGenerationEnabled: false, ...(params.runtimeModel ? { model: params.runtimeModel.model } : {}) }]); break;
       case 'session/setMode': result = await this.call('setMode', [{ ...target, mode: params.mode }]); break;
       case 'session/setModel': result = await this.call('setModel', [{ ...target, model: params.model }]); break;
       case 'session/setThoughtLevel': result = await this.call('setThoughtLevel', [{ ...target, thoughtLevel: params.thoughtLevel }]); break;

@@ -1,3 +1,4 @@
+import { log } from '../../core/logger';
 import { listZcodeModelCapabilities, loadZcodeProviderRegistry, loadZcodeRuntimeModel } from './model-config';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -107,8 +108,6 @@ export class ZcodeAdapter implements AgentAdapter {
         if (opts.sessionId && runtimeModel) await client.request('session/setModel', { sessionId, model: runtimeModel.model, runtimeModel });
         const selected = runtimeModel?.model ?? snapshot.settings?.model?.current ?? snapshot.session?.model;
         push({ type: 'system', sessionId, cwd: opts.cwd, ...(selected?.providerId && selected?.modelId ? { model: `${selected.providerId}/${selected.modelId}` } : {}) });
-        if (!opts.sessionId && opts.sessionName?.trim() && this.options.remoteControlFile)
-          await client.request('session/rename', { sessionId, title: opts.sessionName.trim() });
         await client.request('session/setMode', { sessionId, mode });
         if (effort) {
           await client.request('session/setThoughtLevel', { sessionId, thoughtLevel: effort });
@@ -120,6 +119,12 @@ export class ZcodeAdapter implements AgentAdapter {
         // Attachment context and any FF JSON envelope are supplied by the caller.
         const result = await client.request('session/send', { sessionId, inputId, content: opts.prompt, ...modelParams });
         if (result.accepted !== true) throw new Error('ZCode did not acknowledge task acceptance');
+        if (!opts.sessionId && opts.sessionName?.trim() && this.options.remoteControlFile) {
+          // Some desktop builds persist empty legacy sessions only on first input.
+          // A metadata failure must not end observation of an already accepted turn.
+          try { await client.request('session/rename', { sessionId, title: opts.sessionName.trim() }); }
+          catch { log.warn('zcode', 'session-name-deferred', { sessionId }); }
+        }
         await finished;
       } catch (error) {
         push({ type: 'error', terminationReason: stopping ? 'interrupted' : 'failed', submissionStatus: sent ? 'unknown' : 'rejected',

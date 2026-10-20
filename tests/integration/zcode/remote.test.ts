@@ -19,7 +19,7 @@ vi.mock('../../../src/agent/zcode/remote-client', async importOriginal => {
 
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-async function fixture(options: { error?: boolean; workspace?: string; closeOnSend?: boolean; complete?: boolean; wait?: boolean; v2?: boolean; foreignDevice?: boolean; autoHeaders?: boolean } = {}) {
+async function fixture(options: { error?: boolean; workspace?: string; closeOnSend?: boolean; complete?: boolean; wait?: boolean; v2?: boolean; foreignDevice?: boolean; autoHeaders?: boolean; staleDegraded?: boolean; ownDegraded?: boolean; renameFailure?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'zcode-remote-')); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const file = join(dir, 'pair.link');
   await writeFile(file, options.v2 ? 'https://zcode.z.ai/remote/v4?sid=device-1&app_version=3.16.2' : 'https://zcode.z.ai/remote/v4?sid=device-1&hash=dGVzdF9oYXNo&t=123&app_version=3.10.2', { mode: 0o600 });
@@ -63,10 +63,12 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
       }
       if (message.type !== 'data') return;
       const p = message.payload;
+      if (p.zcode_type === 'bootstrap-request' && options.staleDegraded) payload({zcode_type:'bridge-degraded',bridgeSessionId:'previous-terminal',reason:'rpc-transport-fault'});
       if (p.zcode_type === 'bootstrap-request') payload({ zcode_type: 'bootstrap-response', requestId: p.requestId, success: true,
         result: { workspaces: [{ workspacePath: options.workspace ?? dir, workspaceKey: options.workspace ?? dir, kind: 'local' }], tasks: [] } });
       if (p.zcode_type === 'workspace-bridge-open') {
         frames = new RemoteFrames(p.bridgeSessionId);
+        if(options.ownDegraded){payload({zcode_type:'bridge-degraded',bridgeSessionId:p.bridgeSessionId,reason:'rpc-transport-fault'});return;}
         rpc([200]); // Host initializes before bridge-ready; must not lose it.
         payload({ zcode_type: 'workspace-bridge-ready', requestId: p.requestId, bridge: { bridgeSessionId: p.bridgeSessionId, kind: 'local', workspacePath: dir } });
       }
@@ -80,7 +82,7 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
         if (method === 'helloConversationV4') response = { kind: 'hello', protocolVersion: 2, clientMode: 'web-remote-replayable' };
         if (method === 'resumeSession' || method === 'createSession') response = { session: { sessionId: body[0].sessionId ?? 'sess_new' } };
         if(method==='listSessions')response=[{sessionId:'sess_original',workspace:{workspacePath:dir}}];
-        if(method==='renameTask') { nativeTitle=body[0].title;response={title:nativeTitle}; }
+        if(method==='renameTask') throw new Error('Fresh native sessions have no legacy task-index entry');
         if(method==='readSession')response={session:{sessionId:body[0].sessionId,title:nativeTitle},settings:{model:{current:{providerId:'account:native',modelId:'native-model'},available:[{ref:{providerId:'account:native',modelId:'native-model'},label:'Native Model',reasoning:{enabled:true,levels:[{value:'native-level',label:'Native Level'}],defaultLevel:'native-level'}}]}}};
         if (method === 'sendPrompt') {
           if (options.closeOnSend) { socket.terminate(); return; }
@@ -92,7 +94,7 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
             if (options.complete) emit({ type: 'session.event', event: { sessionId: body[0].sessionId, seq: 3, type: 'turn.completed', turnId: 'turn-own', payload: { inputId: body[0].inputId, response: 'REMOTE_OK', resultType: 'success' } } });
           }
         }
-        if (method === 'sendConversationCommandV4') response = { status: 'accepted' };
+        if (method === 'sendConversationCommandV4') { response = { status: 'accepted' }; if(body[0].envelope.type==='renameSession'){if(options.renameFailure)response={status:'failed'};else nativeTitle=body[0].envelope.payload.title;} }
         rpc([201, id], response);
       }
     });
@@ -103,7 +105,15 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
   return { client, calls, wire, file, dir, httpCalls, credentialFile, relay:harness.relay, emit: (value: any) => emit(value), disconnect: () => connection?.terminate() };
 }
 describe('ZCode desktop remote attachment', () => {
-  it('names a copied session before sending input and preserves the native title when resuming', async () => {
+  it('ignores replayed faults from an old terminal, but fails on its own workspace bridge fault', async () => {
+    const stale=await fixture({staleDegraded:true});
+    await expect(stale.client.request('workspace/updateProviderRegistry',{})).resolves.toEqual({});
+    expect(stale.calls.some(c=>c.method==='sendPrompt')).toBe(false);
+    const own=await fixture({ownDegraded:true});
+    await expect(own.client.request('workspace/updateProviderRegistry',{})).rejects.toThrow('远控连接失败');
+    expect(own.calls.some(c=>c.method==='sendPrompt')).toBe(false);
+  });
+  it('names a copied session after input persistence and preserves the native title when resuming', async () => {
     const f=await fixture({v2:true,complete:true});
     await f.client.request('workspace/updateProviderRegistry',{});await f.client.close();
     const adapter=new ZcodeAdapter({modelConfigPath:f.dir,remoteControlFile:f.file});
@@ -113,16 +123,26 @@ describe('ZCode desktop remote attachment', () => {
       expect(await run.waitForExit(3000)).toBe(true);
       expect(events.at(-1)).toMatchObject({type:'done'});
     }
-    const renames=f.calls.filter(c=>c.method==='renameTask');
+    const renames=f.calls.filter(c=>c.method==='sendConversationCommandV4'&&c.args[0].envelope.type==='renameSession');
     expect(renames).toHaveLength(1);
-    expect(renames[0]!.args[0]).toMatchObject({taskId:'sess_new',title:'AA-项目（ZCode）',workspacePath:f.dir});
-    expect(f.calls.findIndex(c=>c.method==='renameTask')).toBeLessThan(f.calls.findIndex(c=>c.method==='sendPrompt'));
+    expect(renames[0]!.args[0]).toMatchObject({sessionId:'sess_new',workspacePath:f.dir,envelope:{type:'renameSession',sessionId:'sess_new',payload:{title:'AA-项目（ZCode）'}}});
+    expect(f.calls.findIndex(c=>c.method==='sendConversationCommandV4'&&c.args[0].envelope.type==='renameSession')).toBeGreaterThan(f.calls.findIndex(c=>c.method==='sendPrompt'));
+  });
+  it('keeps observing an accepted turn when a deferred empty-session title cannot yet be written', async () => {
+    const f=await fixture({v2:true,complete:true,renameFailure:true});
+    await f.client.request('workspace/updateProviderRegistry',{});await f.client.close();
+    const adapter=new ZcodeAdapter({modelConfigPath:f.dir,remoteControlFile:f.file});
+    const run=adapter.run({runId:'deferred-title',cwd:f.dir,prompt:'hello',sessionName:'AA-copy'});
+    const events:AgentEvent[]=[];for await(const event of run.events)events.push(event);
+    expect(await run.waitForExit(3000)).toBe(true);
+    expect(events.at(-1)).toMatchObject({type:'done',terminationReason:'normal'});
+    expect(f.calls.filter(c=>c.method==='sendPrompt')).toHaveLength(1);
   });
   it('renames native desktop metadata without creating a session or sending input', async () => {
     const f=await fixture();
     await f.client.request('session/rename',{sessionId:'sess_original',title:'AA-新名字'});
     expect(f.calls.filter(c=>c.method==='readSession')).toHaveLength(2);
-    expect(f.calls.some(c=>['createSession','sendPrompt','sendConversationCommandV4'].includes(c.method))).toBe(false);
+    expect(f.calls.some(c=>['createSession','sendPrompt','renameTask'].includes(c.method))).toBe(false);
   });
   it('discovers native desktop models and reasoning without injecting a CLI registry or creating a new session',async()=>{
     const f=await fixture({v2:true});await f.client.request('workspace/updateProviderRegistry',{});await f.client.close();
@@ -139,6 +159,7 @@ describe('ZCode desktop remote attachment', () => {
     expect(events.at(-1)).toMatchObject({type:'done',terminationReason:'normal'});
     const creation=f.calls.find(c=>c.method==='createSession');
     expect(creation?.args[0]).not.toHaveProperty('model');
+    expect(creation?.args[0]).toHaveProperty('persistence','immediate');
     expect(f.calls.filter(c=>c.method==='sendPrompt')).toHaveLength(1);
   });
   it('uses current account authorization for V2 links, scopes the device and keeps the login JWT off the relay', async () => {
