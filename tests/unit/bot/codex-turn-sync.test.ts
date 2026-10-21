@@ -183,6 +183,29 @@ describe('Codex desktop turn sync', () => {
     } finally { release(); await handle.stop(); await catalog.flush(); }
   });
 
+  it('excludes migrated FF owner groups from AA title ownership, including changes during synchronization', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'codex-name-owner-')); cleanup.push(dir);
+    const catalog = new SessionCatalog(join(dir, 'catalog.json'));
+    for (const scopeId of ['oc_original', 'oc_ffowner', 'oc_open', 'oc_alias']) catalog.upsertActive({ scopeId, agentId: 'codex',
+      cwdRealpath: dir, policyFingerprint: scopeId, threadId: 'shared', botAppId: 'bot' });
+    const controls = controlsForCodex();
+    const bindings: Record<string, any> = { oc_original: {}, oc_ffowner: { auxiliaryWorkgroup: true },
+      oc_open: { linkedSource: {} }, oc_alias: { sharedScope: 'aux_shared' } };
+    controls.toolBindings = { get: (scope: string) => bindings[scope] } as any;
+    controls.auxiliary = { isAuxiliary: () => false } as any;
+    const observe = vi.fn(async (_snapshot, entries, active) => {
+      expect(entries.map((e: SessionCatalogEntry) => e.scopeId)).toEqual(['oc_original']);
+      expect(active('oc_original')).toBe(true);
+      bindings.oc_original = { auxiliaryWorkgroup: true };
+      expect(active('oc_original')).toBe(false);
+    });
+    const handle = await startCodexTurnSync({ channel: createFakeChannel() as unknown as LarkChannel, controls,
+      sessionCatalog: catalog, profileStateDir: dir, intervalMs: 60_000, nameSync: { observe },
+      reader: { readThread: async () => ({ id: 'shared', name: 'AA-original', turns: [] }), stop: async () => {} } });
+    try { await handle.runNow(); expect(observe).toHaveBeenCalledOnce(); }
+    finally { await handle.stop(); await catalog.flush(); }
+  });
+
   it('reuses snapshots for name sync without making name failures block reply delivery', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codex-name-poll-')); cleanup.push(dir);
     const channel = createFakeChannel(); const controls = controlsForCodex();

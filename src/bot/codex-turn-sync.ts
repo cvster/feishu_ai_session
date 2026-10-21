@@ -288,9 +288,16 @@ async function syncOnce(
     }
     // Name failures must not prevent reply delivery or other thread polling.
     try {
-      const nameEntries = currentEntries(deps, threadId, liveEntries).filter(e => !deps.controls.auxiliary?.isAuxiliary(e.scopeId));
+      // Only original personal workgroups own native titles. Legacy FF owner
+      // groups now share the AA ID, but must never write their FF names to it.
+      const ownsName = (scope: string) => {
+        const binding = deps.controls.toolBindings?.get(scope);
+        return !deps.controls.auxiliary?.isAuxiliary(scope) && !binding?.linkedSource &&
+          !binding?.sharedScope && !binding?.auxiliaryWorkgroup;
+      };
+      const nameEntries = currentEntries(deps, threadId, liveEntries).filter(e => ownsName(e.scopeId));
       if (nameEntries.length > 0) await deps.nameSync?.observe(snapshot, nameEntries,
-        (scope) => currentEntries(deps, threadId, nameEntries).some((entry) => entry.scopeId === scope));
+        (scope) => ownsName(scope) && currentEntries(deps, threadId, nameEntries).some((entry) => entry.scopeId === scope));
     } catch (err) {
       log.warn('codex-turn-sync', 'name-sync-failed', { threadId, err: errorText(err) });
     }
