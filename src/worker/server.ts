@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import * as lockfile from 'proper-lockfile';
 import type { AgentAdapter, AgentRun } from '../agent/types';
 import { JobStore, jobIdFor, submissionFingerprint } from './store';
-import { isJobActive, type WorkerJob, type WorkerSubmission } from './protocol';
+import { isJobActive, type WorkerJob, type WorkerSubmission, type WorkerSessionService } from './protocol';
+import { handleWorkerToolRequest, workerCapabilities, readWorkerBody, WorkerApiError, type WorkerToolApi } from './tool-api';
 import { writeFileAtomic } from '../platform/atomic-write';
 
 export interface WorkerServerOptions {
@@ -14,8 +15,13 @@ export interface WorkerServerOptions {
   sourceId: string;
   botAppId: string;
   maxConcurrent?: number;
+  sessions?: WorkerSessionService;
 }
-class HttpError extends Error { constructor(readonly status: number, message: string, readonly retryable = status === 429 || status === 503) { super(message); } }
+class HttpError extends WorkerApiError {
+  constructor(status: number, message: string, retryable = status === 429 || status === 503) {
+    super(status, message, status === 400 || status === 413 || status === 405 ? 'invalid-request' : status === 401 ? 'unauthorized' : status === 404 ? 'not-found' : status === 429 ? 'busy' : status === 409 ? 'conflict' : status === 503 ? 'unavailable' : 'internal-error', retryable);
+  }
+}
 
 export async function startWorkerServer(options: WorkerServerOptions) {
   await mkdir(options.stateDir, { recursive: true, mode: 0o700 });
@@ -42,6 +48,20 @@ export async function startWorkerServer(options: WorkerServerOptions) {
   let serial: Promise<unknown> = Promise.resolve();
   const exclusive = <T>(fn: () => Promise<T>): Promise<T> => {
     const task = serial.then(fn); serial = task.catch(() => {}); return task;
+  };
+  const toolApi: WorkerToolApi = {
+    agent: options.agent, sessions: options.sessions, exclusive,
+    connectionExclusive: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true,
+    assertIdle(nativeId) {
+      if (closing) throw new HttpError(503, '执行服务正在停止');
+      const busy = nativeId === undefined ? tasks.size > 0 : store.list().some(job => {
+        if (!isJobActive(job)) return false;
+        if ([job.options.sessionId, job.options.initialSessionId].includes(nativeId)) return true;
+        return store.snapshot(job.id)?.events.some(row => row.event.type === 'system' &&
+          (row.event.sessionId === nativeId || row.event.threadId === nativeId));
+      });
+      if (busy) throw new HttpError(429, `${options.agent.displayName} 正在执行，请完成或停止后重试；未替换其连接`);
+    },
   };
   const persistStatus = async (job: WorkerJob, status: WorkerJob['status'], error?: string) =>
     store.put({ ...job, status, updatedAt: Date.now(), ...(error ? { error } : {}) });
@@ -119,59 +139,21 @@ export async function startWorkerServer(options: WorkerServerOptions) {
   });
   const token = randomBytes(32).toString('hex');
   const server = createServer((req, res) => {
-    void handle(req, res).catch(error => reply(res, error instanceof HttpError ? error.status : 500,
-      { error: error instanceof Error ? error.message : String(error), retryable: error instanceof HttpError && error.retryable }));
+    void handle(req, res).catch(error => reply(res, error instanceof WorkerApiError ? error.status : 500,
+      { error: error instanceof Error ? error.message : String(error), code: error instanceof WorkerApiError ? error.code : 'internal-error', retryable: error instanceof WorkerApiError && error.retryable }));
   });
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const supplied = Buffer.from(req.headers.authorization ?? '');
     const expected = Buffer.from(`Bearer ${token}`);
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new HttpError(401, 'Unauthorized');
     const url = new URL(req.url ?? '/', 'http://localhost');
-    if (req.method === 'POST' && url.pathname === '/native-turn-stop' && options.agent.id === 'zcode') {
-      let body = '', bytes = 0;
-      for await (const chunk of req) { bytes += chunk.length; if (bytes > 16384) throw new HttpError(413, 'Request too large'); body += chunk; }
-      const value = JSON.parse(body);
-      if (typeof value.id !== 'string' || !/^(?:sess|session)_[A-Za-z0-9_-]+$/.test(value.id) ||
-        typeof value.turnId !== 'string' || !value.turnId || value.turnId.length > 256 ||
-        typeof value.cwd !== 'string' || !value.cwd || value.cwd.length > 4096) throw new HttpError(400, 'Invalid native stop target');
-      const stopped = await exclusive(async () => {
-        if (closing || tasks.size) throw new HttpError(429, 'ZCode worker 正在处理飞书任务，未替换其连接；请稍后重试停止桌面任务');
-        if (!('desktopRemoteEnabled' in options.agent) || options.agent.desktopRemoteEnabled !== true || !options.agent.stopNativeTurn)
-          throw new HttpError(404, 'ZCode 桌面停止入口不可用，请检查配对并单独升级 worker');
-        return options.agent.stopNativeTurn(value.id, value.turnId, value.cwd);
-      });
-      return reply(res, 200, { stopped });
-    }
-    if (req.method === 'POST' && url.pathname === '/session-name' && options.agent.id === 'zcode') {
-      let body = '', bytes = 0;
-      for await (const chunk of req) { bytes += chunk.length; if (bytes > 16384) throw new HttpError(413, 'Request too large'); body += chunk; }
-      const value = JSON.parse(body);
-      if (typeof value.id !== 'string' || !/^(?:sess|session)_[A-Za-z0-9_-]+$/.test(value.id) ||
-        typeof value.name !== 'string' || !value.name.trim() || value.name.length > 2048 ||
-        typeof value.cwd !== 'string' || !value.cwd || value.cwd.length > 4096) throw new HttpError(400, 'Invalid session name');
-      await exclusive(async () => {
-        if (closing || tasks.size) throw new HttpError(429, 'ZCode 正在执行，稍后自动重试名称同步');
-        if (!options.agent.renameSession) throw new HttpError(404, 'Native naming unavailable');
-        await options.agent.renameSession(value.id, value.name, value.cwd);
-      });
-      return reply(res, 200, { ok: true });
-    }
-    if (req.method === 'GET' && url.pathname === '/models' && options.agent.id === 'zcode' && 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true) {
-      const cwd = url.searchParams.get('cwd') ?? '';
-      if (cwd.length > 4096) throw new HttpError(400, 'Invalid workspace');
-      const models = await exclusive(async () => {
-        if (closing || tasks.size) throw new HttpError(429, 'ZCode 正在执行，请完成或停止后刷新桌面模型列表');
-        if (!options.agent.listModels) throw new HttpError(404, 'Model discovery unavailable');
-        return options.agent.listModels({ cwd: cwd || undefined });
-      });
-      return reply(res, 200, models);
-    }
-    if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { version: 1, toolId: options.agent.id, sourceId: options.sourceId, botAppId: options.botAppId, nativeReasoningEfforts: true, ...(options.agent.id === 'zcode' ? { zcodeRegistryResume: true, zcodeNativeStop: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.stopNativeTurn === 'function', zcodeSessionNames: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.renameSession === 'function', zcodeDesktopRemote: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true, zcodeDesktopRemoteConfigId: 'desktopRemoteConfigId' in options.agent ? options.agent.desktopRemoteConfigId : undefined } : {}), ...(options.agent.id === 'kilo' ? { kiloEditorSync: true, kiloDesktopSync: true, kiloNativeInputOrigin: true } : {}) });
+    // Compute transport exclusivity dynamically for capability changes in adapters.
+    toolApi.connectionExclusive = 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true;
+    if (await handleWorkerToolRequest(req, res, url, toolApi)) return;
+    if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { version: 1, toolId: options.agent.id, sourceId: options.sourceId, botAppId: options.botAppId, capabilities: workerCapabilities(toolApi), nativeReasoningEfforts: true, ...(options.agent.id === 'zcode' ? { zcodeRegistryResume: true, zcodeNativeStop: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.stopNativeTurn === 'function', zcodeSessionNames: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.renameSession === 'function', zcodeDesktopRemote: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true, zcodeDesktopRemoteConfigId: 'desktopRemoteConfigId' in options.agent ? options.agent.desktopRemoteConfigId : undefined } : {}), ...(options.agent.id === 'kilo' ? { kiloEditorSync: true, kiloDesktopSync: true, kiloNativeInputOrigin: true } : {}) });
     if (req.method === 'GET' && url.pathname === '/jobs') return reply(res, 200, store.list());
     if (req.method === 'POST' && url.pathname === '/jobs') {
-      let body = '', bytes = 0;
-      for await (const chunk of req) { bytes += chunk.length; if (bytes > 2_000_000) throw new HttpError(413, 'Request too large'); body += chunk; }
-      return reply(res, 200, await submit(JSON.parse(body)));
+      return reply(res, 200, await submit(await readWorkerBody(req, 2_000_000) as unknown as WorkerSubmission));
     }
     const match = /^\/jobs\/([a-f0-9]{64})(\/stop)?$/.exec(url.pathname);
     if (!match || !store.get(match[1]!)) throw new HttpError(404, 'Task not found');

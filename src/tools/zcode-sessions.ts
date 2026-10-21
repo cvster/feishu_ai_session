@@ -10,6 +10,7 @@ import { writeFileAtomic } from '../platform/atomic-write';
 /** Public protocol reads; transcript snapshots are references, never execution input to the source. */
 export class ZcodeSessionProvider implements ToolSessionOperations {
   readonly historyMode = 'snapshot';
+  readonly nativeArchive = false;
   private labels: Record<string, string> = {};
   private loaded = false;
   private saving = Promise.resolve();

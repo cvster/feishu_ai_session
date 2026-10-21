@@ -17,6 +17,10 @@ export class DurableAgentAdapter implements AgentAdapter {
     return this.client.health().then(() => true, () => false);
   }
   async listModels(options?: { cwd?: string }) {
+    const capabilities = await this.client.capabilities();
+    if (capabilities) { await this.prepareRun(); return this.client.models(options?.cwd); }
+    // Installed v1 workers only expose paired ZCode models. Preserve that
+    // compatibility path until the worker is upgraded independently.
     if (this.id === 'zcode' && 'desktopRemoteEnabled' in this.cli && this.cli.desktopRemoteEnabled === true) {
       await this.prepareRun(); return this.client.models(options?.cwd);
     }

@@ -15,6 +15,7 @@ import { loadRootConfig, readActiveProfile } from '../../config/profile-store';
 import { configureLogger } from '../../core/logger';
 import { startWorkerServer } from '../../worker/server';
 import { WorkerClient } from '../../worker/client';
+import { createWorkerSessions } from '../../worker/sessions';
 import { getMaxConcurrentRuns } from '../../config/schema';
 import { loadRuntimeEnv } from '../../config/runtime-env';
 
@@ -64,6 +65,7 @@ export async function runWorker(options: WorkerOptions): Promise<void> {
     larkChannel: { profile: paths.profile, rootDir: paths.rootDir, configPath: paths.configFile,
       larkCliConfigDir: paths.larkCliConfigDir, larkCliSourceConfigFile: paths.larkCliSourceConfigFile } });
   const worker = await startWorkerServer({ stateDir, agent, sourceId, botAppId: selected.accounts.app.id,
+    sessions: createWorkerSessions({ toolId, sourceId, profileDir: paths.profileDir, profile: selected, agent }),
     maxConcurrent: toolId === 'zcode' && selected.zcode?.remoteControlFile ? 1 : getMaxConcurrentRuns({ preferences: selected.preferences } as Parameters<typeof getMaxConcurrentRuns>[0]) });
   console.log(`${toolDefinition(toolId).label} execution worker ready (${paths.profile})`);
   let stopping = false;

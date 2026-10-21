@@ -14,6 +14,8 @@ export interface ToolSession {
 /** Provider-specific formats and protocols stay behind this interface. */
 export interface ToolSessionOperations {
   readonly historyMode?: 'file' | 'snapshot';
+  /** False when archive only affects the bridge catalog, not native storage. */
+  readonly nativeArchive?: boolean;
   historyPath(nativeId: string): Promise<string | undefined>;
   rename(nativeId: string, name: string): Promise<void>;
   archive(nativeId: string): Promise<void>;

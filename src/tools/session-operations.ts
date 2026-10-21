@@ -20,6 +20,7 @@ export async function findNativeHistory(toolId: ToolId, sourceId: string, native
 export function nativeSessionOperations(tool: Pick<AgentTool, 'id' | 'sourceId' | 'agent'>): ToolSessionOperations {
   return {
     historyMode: 'file',
+    nativeArchive: tool.id === 'codex',
     historyPath: id => findNativeHistory(tool.id, tool.sourceId, id),
     async rename(id, name) {
       if (tool.id === 'codex') { if (!tool.agent.setThreadName) throw new Error('Codex 未提供会话改名能力'); await tool.agent.setThreadName(id, name); return; }

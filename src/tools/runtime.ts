@@ -22,6 +22,7 @@ import { listCodexThreadHistory } from '../session/codex-history';
 import { ToolRegistry } from './types';
 import { ClaudeSessionProvider } from './claude-sessions';
 import { WorkerClient } from '../worker/client';
+import { WorkerSessionClient } from '../worker/session-client';
 
 export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, primary: AgentAdapter): ToolRegistry {
   const registry = new ToolRegistry();
@@ -70,7 +71,16 @@ export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, prim
     reserveSessionId: () => `session-${randomUUID()}`,
     agent: new DurableAgentAdapter(new WorkerClient(join(paths.profileDir, workerStateDirName('dsh')), dshHome, profile.accounts.app.id, 'dsh'),
       primary.id === 'dsh' ? primary : new DshAdapter(dshOptions)), sessions: dshSessions, listSessions: () => dshSessions.listSessions() });
-  for (const tool of registry.all()) tool.sessions ??= nativeSessionOperations(tool);
+  for (const tool of registry.all()) {
+    tool.sessions ??= nativeSessionOperations(tool);
+    if (tool.agent instanceof DurableAgentAdapter) {
+      const agent = tool.agent;
+      const sessions = new WorkerSessionClient(tool.agent.client, tool.listSessions, tool.sessions,
+        join(paths.profileDir, 'worker-history', tool.id), () => agent.prepareRun());
+      tool.sessions = sessions;
+      tool.listSessions = () => sessions.listSessions();
+    }
+  }
   return registry;
 }
 
