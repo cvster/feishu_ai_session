@@ -33,7 +33,7 @@ async function fixture() {
     await symlink('socket:[12345]', join(path, 'fd/10'));
     await writeFile(join(path, 'net/tcp'), `header\n0: ${overrides.address ?? '0100007F'}:${port.toString(16).toUpperCase()} 00000000:0000 0A 0:0 0:0 0 1000 0 12345\n`);
   }
-  const discover = (path: string | undefined = cwd, sessionId?:string) => findKiloEditorServer(process.execPath, path, dataHome, { procRoot, uid: 1000, platform: 'linux' },sessionId);
+  const discover = (path: string | undefined = cwd, sessionId?:string, preferredClient?: 'vscode' | 'desktop') => findKiloEditorServer(process.execPath, path, dataHome, { procRoot, uid: 1000, platform: 'linux' },sessionId,preferredClient);
   return { cwd, dataHome, root, processEntry, discover, calls: () => calls, unhealthy: () => { healthy = false; },desktopSession:()=>{desktopSession=true;} };
 }
 it('authenticates an editor-owned same-user server for the same database and workspace', async () => {
@@ -88,4 +88,30 @@ it('finds a desktop workspace context despite the App server starting from its r
 it('ignores a process impersonating Desktop without the expected installed parent',async()=>{
   const h=await fixture();await h.processEntry(101,{...desktop,parentExe:'/tmp/not-kilo-desktop'});
   expect(await h.discover()).toBeUndefined();expect(h.calls()).toBe(0);
+});
+
+it.each(['vscode', 'desktop'] as const)('uses %s preference to choose a client for a fresh session', async preferred => {
+  const h = await fixture(); h.desktopSession();
+  await h.processEntry(100); await h.processEntry(101, { ...desktop, cwd: h.root });
+  expect(await h.discover(h.cwd, undefined, preferred)).toMatchObject({ pid: preferred === 'desktop' ? 101 : 100, client: preferred });
+});
+it('keeps the default VS Code preference for fresh sessions', async () => {
+  const h = await fixture(); h.desktopSession();
+  await h.processEntry(100); await h.processEntry(101, { ...desktop, cwd: h.root });
+  expect(await h.discover()).toMatchObject({ pid: 100, client: 'vscode' });
+});
+it.each(['vscode', 'desktop'] as const)('uses a lone %s backend even when the other client is preferred', async client => {
+  const h = await fixture(); h.desktopSession();
+  await h.processEntry(100, client === 'desktop' ? { ...desktop, cwd: h.root } : {});
+  expect(await h.discover(h.cwd, undefined, client === 'desktop' ? 'vscode' : 'desktop')).toMatchObject({ pid: 100, client });
+});
+it('does not move an existing VS Code session to Desktop when Desktop is preferred', async () => {
+  const h = await fixture(); await h.processEntry(100); await h.processEntry(101, { ...desktop, cwd: h.root });
+  expect(await h.discover(h.cwd, 'ses_existing', 'desktop')).toMatchObject({ pid: 100, client: 'vscode' });
+});
+it('does not guess between equally matching VS Code windows when VS Code is preferred', async () => {
+  const h = await fixture(); await h.processEntry(100); await h.processEntry(102);
+  await h.processEntry(101, { ...desktop, cwd: h.root });
+  await expect(h.discover(h.cwd, undefined, 'vscode')).rejects.toThrow('多个 Kilo 编辑器后端');
+  expect(h.calls()).toBe(0);
 });

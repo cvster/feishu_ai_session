@@ -75,7 +75,7 @@ it('creates fresh desktop sessions with native workspace metadata and routes exi
   expect((await h.read()).find(c => c.method === 'POST' && c.path === '/session').body.metadata).toEqual(metadata);
   const resumed = h.agent.run({ runId: 'desktop-resume', cwd: h.root, sessionId: 'ses_created', prompt: 'again' });
   for await (const _ of resumed.events) { /* consume */ }
-  expect(discovery.find).toHaveBeenLastCalledWith('/nonexistent/should-not-spawn-kilo', h.root, undefined, {}, 'ses_created');
+  expect(discovery.find).toHaveBeenLastCalledWith('/nonexistent/should-not-spawn-kilo', h.root, undefined, {}, 'ses_created', undefined);
   expect(h.child.killed).toBe(false);
 });
 it('rejects new desktop sessions without a native workspace instead of creating an invisible conversation', async () => {
@@ -100,5 +100,15 @@ it('scopes desktop rename/archive events to the native project and preserves wor
   expect(changes.length).toBe(3); expect(changes.every(c => c.query.directory === h.root)).toBe(true);
   expect(changes.find(c => c.body.metadata)?.body.metadata).toEqual(metadata);
   expect(calls.some(c => c.path.endsWith('/prompt_async'))).toBe(false);
+  expect(h.child.killed).toBe(false);
+});
+
+it('passes the configured client preference through native connection discovery', async () => {
+  const h = await editor();
+  const client = new KiloClient({ binary: '/nonexistent/should-not-spawn-kilo', preferredClient: 'desktop' }, h.root);
+  try {
+    await client.request('GET', '/config');
+    expect(discovery.find).toHaveBeenCalledWith('/nonexistent/should-not-spawn-kilo', h.root, undefined, {}, undefined, 'desktop');
+  } finally { await client.close(); }
   expect(h.child.killed).toBe(false);
 });

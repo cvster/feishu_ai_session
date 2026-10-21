@@ -38,11 +38,11 @@ describe('start runtime agent factory', () => {
   });
 
   it('creates the Kilo runtime without falling back to Claude or Codex', () => {
-    const profile = createDefaultProfileConfig({ agentKind: 'kilo', accounts: appAccount(), kilo: { binaryPath: '/native/kilo', dataHome: '/native/data-home', editorSync: false } });
+    const profile = createDefaultProfileConfig({ agentKind: 'kilo', accounts: appAccount(), kilo: { binaryPath: '/native/kilo', dataHome: '/native/data-home', editorSync: false, preferredClient: 'desktop' } });
     const agent = createRuntimeAgent(profile, { profileDir: tmpdir() });
     expect(agent.id).toBe('kilo');
     expect(agent.displayName).toBe('Kilo');
-    expect((agent as unknown as { options: unknown }).options).toMatchObject({ editorSync: false });
+    expect((agent as unknown as { options: unknown }).options).toMatchObject({ editorSync: false, preferredClient: 'desktop' });
   });
 
   it('creates CodexAdapter from canonical workspace permissions', () => {

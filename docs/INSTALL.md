@@ -100,6 +100,12 @@ bash install.sh --agents both --install-clis --configure \
 
 该过程仍需人工扫码/输入凭据，不能替代飞书审批与发布。
 
+### Kilo 客户端优先级
+
+Kilo 需先自行安装并登录 [VS Code 插件或 Kilo App](KILO.md)。在 `~/.lark-channel/config.json` 的 `profiles.<profile>.kilo` 中合入 `"preferredClient": "vscode"`（默认，当前使用插件优先）；改为 `"desktop"` 则优先在 Kilo App 中创建会话，保留已有 `binaryPath` 等配置。完整示例见 [Kilo 配置](KILO.md#本机准备)。
+
+仅新建会话遇到多个可用 Kilo 后端时使用此优先级；只有一个时直接使用。已有会话继续使用原客户端，同类窗口仍需唯一匹配。选择 App 时，先在 App 为该项目创建过会话，以便识别桌面工作区。修改后需更新并重启 Kilo worker 及桥接，不必重启 Kilo 界面。
+
 ## 5. 统一前台和后台环境
 
 复制 [环境模板](../config/runtime.env.example) 到：

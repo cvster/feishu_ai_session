@@ -544,3 +544,9 @@ describe('profile schema', () => {
     });
   });
 });
+
+it.each(['vscode', 'desktop'] as const)('preserves Kilo client preference %s', preferredClient => {
+  const profile = createDefaultProfileConfig({ agentKind: 'kilo', accounts: { app }, kilo: { binaryPath: '/native/kilo', preferredClient } });
+  expect(normalizeProfileConfig(JSON.parse(JSON.stringify(profile))).kilo?.preferredClient).toBe(preferredClient);
+  expect(() => normalizeProfileConfig({ ...profile, kilo: { ...profile.kilo, preferredClient: 'other' } })).toThrow('Invalid kilo');
+});

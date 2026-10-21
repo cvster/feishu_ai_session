@@ -701,7 +701,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       kiloTurnSync = await startKiloTurnSync({ channel, controls, catalog: sessionCatalog, sourceId: kiloTool.sourceId,
         nameSync: kiloNameSync,
         statePath: join(deps.appPaths.profileDir, 'kilo-turn-sync.json'),
-        reader: new KiloNativeConversationReader({ binary: options?.binaryPath, args: options?.args, dataHome: options?.dataHome, editorSync: options?.editorSync }),
+        reader: new KiloNativeConversationReader({ binary: options?.binaryPath, args: options?.args, dataHome: options?.dataHome, editorSync: options?.editorSync, preferredClient: options?.preferredClient }),
         ready: async () => (await worker.health()).kiloNativeInputOrigin === true });
     } catch (error) { log.warn('kilo-turn-sync', 'disabled', { error: String(error) }); }
   }

@@ -7,9 +7,9 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { spawnProcess, mergeProcessEnv } from '../../platform/spawn';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
-import { findKiloEditorServer, type KiloEditorServer } from './editor-server';
+import { findKiloEditorServer, type KiloEditorServer, type KiloPreferredClient } from './editor-server';
 
-export interface KiloOptions { binary?: string; args?: readonly string[]; dataHome?: string; editorSync?: boolean; larkChannel?: LarkChannelEnvContext }
+export interface KiloOptions { binary?: string; args?: readonly string[]; dataHome?: string; editorSync?: boolean; preferredClient?: KiloPreferredClient; larkChannel?: LarkChannelEnvContext }
 export function kiloStorageDir(options: KiloOptions = {}): string {
   return resolve(join(options.dataHome ?? process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'kilo'));
 }
@@ -49,7 +49,7 @@ export class KiloClient {
   private async connect(options: KiloOptions, cwd?: string, sessionId?: string): Promise<string> {
     const command = kiloCommand(options);
     const editor = options.editorSync !== false && !command.args.length
-      ? await findKiloEditorServer(command.binary, cwd, options.dataHome, {}, sessionId) : undefined;
+      ? await findKiloEditorServer(command.binary, cwd, options.dataHome, {}, sessionId, options.preferredClient) : undefined;
     if (this.closed) throw new Error('Kilo 连接已关闭');
     if (editor) { this.attached = editor; this.authorization = editor.authorization; return editor.url; }
     this.child = spawnProcess(command.binary, [...command.args, 'serve', '--hostname', '127.0.0.1', '--port', '0'], {

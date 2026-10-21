@@ -3,6 +3,8 @@ import { request } from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
+export type KiloPreferredClient = 'vscode' | 'desktop';
+
 export interface KiloEditorServer { url: string; authorization: string; pid: number; client?: 'vscode' | 'desktop'; sessionMetadata?: Record<string, unknown> }
 
 function contains(root: string, cwd: string): boolean {
@@ -51,7 +53,7 @@ async function readServer(server: KiloEditorServer, path: string): Promise<any> 
  * Desktop sessions carry native kilo-desktop workspace metadata; use it before workspace ranking.
  */
 export async function findKiloEditorServer(binary: string, cwd?: string, dataHome?: string,
-  test: { procRoot?: string; uid?: number; platform?: string } = {}, sessionId?: string): Promise<KiloEditorServer | undefined> {
+  test: { procRoot?: string; uid?: number; platform?: string } = {}, sessionId?: string, preferredClient: KiloPreferredClient = 'vscode'): Promise<KiloEditorServer | undefined> {
   if ((test.platform ?? process.platform) !== 'linux') return;
   const proc = test.procRoot ?? '/proc', uid = test.uid ?? process.getuid?.();
   if (uid === undefined) return;
@@ -116,6 +118,9 @@ export async function findKiloEditorServer(binary: string, cwd?: string, dataHom
     const longest = Math.max(...selected.map(c => c.root.length));
     selected = selected.filter(c => c.root.length === longest);
   }
+  // Preference breaks ties between client types for new sessions only.
+  // Existing sessions retain their native origin; a lone client is always usable.
+  if (!sessionId && preferredClient === 'desktop' && desktops.length) selected = desktops;
   if (!selected.length) selected = desktops;
   if (!selected.length) return;
   if (selected.length !== 1) throw new Error('同一项目有多个 Kilo 编辑器后端，无法确定实时同步目标；请关闭重复窗口后重试。');

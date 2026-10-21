@@ -57,7 +57,7 @@ export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, prim
   });
   registry.register({ id: 'zcode', label: 'ZCode', sourceId: zcodeHome,
     agent: zcodeAgent, sessions: zcodeSessions, listSessions: () => zcodeSessions.listSessions() });
-  const kiloOptions = { binary: profile.kilo?.binaryPath, args: profile.kilo?.args, dataHome: profile.kilo?.dataHome, editorSync: profile.kilo?.editorSync, larkChannel };
+  const kiloOptions = { binary: profile.kilo?.binaryPath, args: profile.kilo?.args, dataHome: profile.kilo?.dataHome, editorSync: profile.kilo?.editorSync, preferredClient: profile.kilo?.preferredClient, larkChannel };
   const kiloHome = kiloStorageDir(kiloOptions);
   const kiloSessions = new KiloSessionProvider(kiloOptions, join(paths.profileDir, 'kilo-sessions'));
   registry.register({ id: 'kilo', label: 'Kilo', sourceId: kiloHome,
