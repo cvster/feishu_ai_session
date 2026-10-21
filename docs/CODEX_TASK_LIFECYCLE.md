@@ -67,6 +67,13 @@ pagination, before reply/name synchronization. Ordinary group input performs
 a fresh check before submission; a failed lookup rejects input with a retry
 notice instead of starting a new thread.
 
+An app-server rejection of one stored thread (for example, invalid paginated
+history lineage after history maintenance) is confined to that RPC request.
+The reusable reader stays connected so concurrent archive checks and healthy
+thread reads can finish. Only transport failures/timeouts reset the owned
+reader connection. This does not repair the rejected history or bypass the
+fresh archive check.
+
 Archive tombstones live in `<session-catalog-path>.archives.json`, beside the
 existing catalog. They survive history GC and bridge restarts. Keep this file
 when backing up or migrating a profile. A malformed archive ledger prevents

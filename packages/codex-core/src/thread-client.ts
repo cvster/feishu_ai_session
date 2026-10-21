@@ -194,7 +194,9 @@ export class CodexThreadReader {
         includeTurns: true,
       });
     } catch (err) {
-      this.abortCurrentProcess(err);
+      // A thread-specific server rejection is not a transport failure. Resetting
+      // this shared reader would reject unrelated in-flight archive/status reads.
+      if (!(err instanceof CodexRpcError)) this.abortCurrentProcess(err);
       throw err;
     }
     const result = recordValue(response.result);
@@ -221,7 +223,7 @@ export class CodexThreadReader {
         sourceKinds: ['cli', 'vscode', 'exec', 'appServer', 'unknown'],
       });
     } catch (err) {
-      this.abortCurrentProcess(err);
+      if (!(err instanceof CodexRpcError)) this.abortCurrentProcess(err);
       throw err;
     }
     const result = recordValue(response.result);

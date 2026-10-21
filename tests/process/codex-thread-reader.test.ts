@@ -51,6 +51,45 @@ describe('CodexThreadReader', () => {
     expect(requests.some((r) => ['thread/resume', 'thread/start', 'turn/start'].includes(r.method))).toBe(false);
   });
 
+  it('isolates a damaged history RPC rejection from concurrent archive lookup and healthy thread reads', async () => {
+    const fake = await createFakeCodex(null, true); cleanup.push(fake.dir);
+    const reader = new CodexThreadReader({ binary: fake.path, profileStateDir: fake.dir, inheritCodexHome: true, timeoutMs: 2_000 });
+    try {
+      await reader.connect();
+      const [bad, archives, healthy] = await Promise.allSettled([
+        reader.readThread('damaged-history'), reader.listArchivedThreadIds(), reader.readThread('healthy-thread'),
+      ]);
+      expect(bad).toMatchObject({ status: 'rejected', reason: { message: 'invalid paginated history lineage: source rollout is not paginated' } });
+      expect(archives).toEqual({ status: 'fulfilled', value: ['archived-a', 'archived-b'] });
+      expect(healthy).toMatchObject({ status: 'fulfilled', value: { id: 'healthy-thread' } });
+      await expect(reader.listArchivedThreadIds()).resolves.toEqual(['archived-a', 'archived-b']);
+    } finally { await reader.stop(); }
+    expect((await readFile(fake.startsPath, 'utf8')).trim().split(/\r?\n/)).toHaveLength(1);
+  });
+
+  it('isolates a recent-list RPC rejection without resetting concurrent read-only requests', async () => {
+    const fake = await createFakeCodex(null, true); cleanup.push(fake.dir);
+    const reader = new CodexThreadReader({ binary: fake.path, profileStateDir: fake.dir, inheritCodexHome: true, timeoutMs: 2_000 });
+    try {
+      await reader.connect();
+      const [list, archives] = await Promise.allSettled([reader.listRecentThreads(1), reader.listArchivedThreadIds()]);
+      expect(list).toMatchObject({ status: 'rejected', reason: { message: 'thread list rejected' } });
+      expect(archives).toEqual({ status: 'fulfilled', value: ['archived-a', 'archived-b'] });
+    } finally { await reader.stop(); }
+    expect((await readFile(fake.startsPath, 'utf8')).trim().split(/\r?\n/)).toHaveLength(1);
+  });
+
+  it('still resets and recovers the owned reader after a transport timeout', async () => {
+    const fake = await createFakeCodex(); cleanup.push(fake.dir);
+    const reader = new CodexThreadReader({ binary: fake.path, profileStateDir: fake.dir, inheritCodexHome: true, timeoutMs: 150 });
+    try {
+      await reader.connect();
+      await expect(reader.readThread('timeout-thread')).rejects.toThrow('timed out');
+      await expect(reader.listArchivedThreadIds()).resolves.toEqual(['archived-a', 'archived-b']);
+    } finally { await reader.stop(); }
+    expect((await readFile(fake.startsPath, 'utf8')).trim().split(/\r?\n/)).toHaveLength(2);
+  });
+
   it.each(['AA-test (8)', null, 'AA-test'])('forks through app-server and preserves or completes its name: %s', async (name) => {
     const fake = await createFakeCodex(name);
     cleanup.push(fake.dir);
@@ -70,7 +109,7 @@ describe('CodexThreadReader', () => {
   });
 });
 
-async function createFakeCodex(forkName: string | null = null): Promise<{ dir: string; path: string; startsPath: string; requestsPath: string }> {
+async function createFakeCodex(forkName: string | null = null, delaySuccess = false): Promise<{ dir: string; path: string; startsPath: string; requestsPath: string }> {
   const dir = await mkdtemp(join(tmpdir(), 'codex-thread-reader-'));
   const startsPath = join(dir, 'starts.txt');
   const requestsPath = join(dir, 'requests.jsonl');
@@ -80,7 +119,10 @@ async function createFakeCodex(forkName: string | null = null): Promise<{ dir: s
 import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 appendFileSync(${JSON.stringify(startsPath)}, process.pid + '\\n');
-const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n');
+const send = (value) => {
+  const write = () => process.stdout.write(JSON.stringify(value) + '\\n');
+  if (${delaySuccess} && !value.error) setTimeout(write, 20); else write();
+};
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on('line', (line) => {
   const request = JSON.parse(line);
@@ -91,6 +133,11 @@ rl.on('line', (line) => {
   }
   if (request.method === 'thread/read') {
     const threadId = request.params.threadId;
+    if (threadId === 'timeout-thread') return;
+    if (threadId === 'damaged-history') {
+      send({ id: request.id, error: { code: -32000, message: 'invalid paginated history lineage: source rollout is not paginated' } });
+      return;
+    }
     send({ id: request.id, result: { thread: {
       id: threadId,
       name: 'AA-test', cwd: ${JSON.stringify(dir)},
@@ -99,6 +146,10 @@ rl.on('line', (line) => {
     return;
   }
   if (request.method === 'thread/list') {
+    if (!request.params.archived && request.params.limit === 1) {
+      send({ id: request.id, error: { code: -32000, message: 'thread list rejected' } });
+      return;
+    }
     if (request.params.archived && !request.params.searchTerm) {
       send({ id: request.id, result: request.params.cursor
         ? { data: [{ id: 'archived-b' }], nextCursor: null }
