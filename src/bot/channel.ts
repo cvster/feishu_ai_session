@@ -94,6 +94,8 @@ import { CodexNameSync, SessionNameSync } from './thread-name';
 import { startAaSessionGroupSync } from './aa-session-groups';
 import { startCodexTurnSync } from './codex-turn-sync';
 import { startKiloTurnSync } from './kilo-turn-sync';
+import { startNativeTurnSync } from './native-turn-sync';
+import { ZcodeNativeConversationReader } from '../agent/zcode/conversation';
 import { KiloNativeConversationReader } from '../agent/kilo/conversation';
 import { DurableAgentAdapter } from '../worker/adapter';
 import { startWorkerReplies } from '../worker/replies';
@@ -678,6 +680,17 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     } catch (error) { log.warn('session', 'zcode-name-sync-disabled', { error: String(error) }); }
   }
 
+  let zcodeTurnSync: Awaited<ReturnType<typeof startNativeTurnSync>> | undefined;
+  if (zcodeTool && sessionCatalog && deps.appPaths?.profileDir) {
+    const options = controls.profileConfig.zcode;
+    try {
+      zcodeTurnSync = await startNativeTurnSync({ channel, controls, catalog: sessionCatalog,
+        toolId: 'zcode', displayName: 'ZCode', sourceId: zcodeTool.sourceId,
+        statePath: join(deps.appPaths.profileDir, 'zcode-turn-sync.json'),
+        reader: new ZcodeNativeConversationReader({ binary: options?.binaryPath, args: options?.args, dataDir: options?.dataDir }) });
+    } catch (error) { log.warn('zcode-turn-sync', 'disabled', { error: String(error) }); }
+  }
+
   const kiloTool = controls.toolRegistry?.all().find(tool => tool.id === 'kilo');
   let kiloTurnSync: Awaited<ReturnType<typeof startKiloTurnSync>> | undefined;
   if (kiloTool?.agent instanceof DurableAgentAdapter && sessionCatalog && deps.appPaths?.profileDir) {
@@ -707,7 +720,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   }
   controls.nativeReplySync = kiloTurnSync;
   controls.refreshMirroredRunCard = async (scope, messageId) =>
-    await codexTurnSync?.refreshMessage(scope, messageId) || await kiloTurnSync?.refreshMessage(scope, messageId) || false;
+    await codexTurnSync?.refreshMessage(scope, messageId) || await kiloTurnSync?.refreshMessage(scope, messageId) || await zcodeTurnSync?.refreshMessage(scope, messageId) || false;
   controls.codexReplySync = controls.profileConfig.agentKind === 'codex' ? codexTurnSync : undefined;
   controls.codexUserInput = controls.profileConfig.agentKind === 'codex' && sessionCatalog && deps.appPaths?.profileDir
     ? await startCodexUserInput({ channel, controls, sessionCatalog, profileStateDir: deps.appPaths.profileDir })
@@ -819,6 +832,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       controls.codexUserInput = undefined;
       await codexTurnSync?.stop();
       await kiloTurnSync?.stop();
+      await zcodeTurnSync?.stop();
       await zcodeNameSync?.stop();
       controls.nativeReplySync = undefined;
       controls.codexReplySync = undefined;

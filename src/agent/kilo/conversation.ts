@@ -1,4 +1,4 @@
-import type { RunState } from '../../card/run-state';
+import type { NativeConversationReader, NativeConversationSnapshot, NativeConversationTurn } from '../native-conversation';
 import { initialState, projectNameFromCwd, reduce, startRunRuntime } from '../../card/run-state';
 import { KiloClient, kiloSessionId, type KiloOptions } from './client';
 
@@ -10,24 +10,10 @@ export const isKiloBridgeInput = (user: { parts?: any[] }) => (user.parts ?? [])
   return part.type === 'text' && origin?.version === 1 && origin.origin === 'feishu';
 });
 
-export interface KiloConversationTurn {
-  id: string;
-  createdAtMs: number;
-  bridge: boolean;
-  input: string;
-  state: RunState;
-}
-export interface KiloConversationSnapshot {
-  id: string;
-  name?: string;
-  cwd: string;
-  archived: boolean;
-  turns: KiloConversationTurn[];
-}
-export interface KiloConversationReader {
-  read(id: string): Promise<KiloConversationSnapshot>;
+export type KiloConversationTurn = NativeConversationTurn;
+export type KiloConversationSnapshot = NativeConversationSnapshot;
+export interface KiloConversationReader extends NativeConversationReader {
   stopTurn(id: string, turnId: string): Promise<boolean>;
-  close(): Promise<void>;
 }
 
 export function projectKiloConversation(info: any, rows: any[], busy: boolean): KiloConversationSnapshot {
