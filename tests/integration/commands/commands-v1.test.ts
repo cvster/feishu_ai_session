@@ -21,6 +21,7 @@ import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js'
 
 interface RunOverrides {
   fromCardAction?: boolean;
+  nativeMirrorAction?: boolean;
   messageId?: string;
   scope?: string;
   senderId?: string;
@@ -814,6 +815,24 @@ describe('Bridge command contracts', () => {
     }
   });
 
+  it('does not let a stale native card interrupt a later active worker task', async () => {
+    const h = await createHarness();
+    const stopScope = vi.fn(async () => false), workerStop = vi.fn(async () => true);
+    h.controls.nativeReplySync = { ownsMessage: () => true, stopScope };
+    h.controls.workerReplySync = { stopScope: workerStop } as any;
+    const interrupt = vi.spyOn(h.activeRuns, 'interrupt');
+    await h.run('/stop', { chatMode: 'group', fromCardAction: true, messageId: 'om_native_old' });
+    expect(stopScope).toHaveBeenCalledWith('chat-1', 'om_native_old');
+    expect(interrupt).not.toHaveBeenCalled(); expect(workerStop).not.toHaveBeenCalled();
+    expect(lastMarkdown(h.channel)).toContain('未停止其他任务');
+  });
+
+  it('keeps a marked native stop isolated even after its delivery record expires', async () => {
+    const h = await createHarness(), interrupt = vi.spyOn(h.activeRuns, 'interrupt');
+    await h.run('/stop', { chatMode: 'group', fromCardAction: true, nativeMirrorAction: true, messageId: 'om_expired_native' });
+    expect(interrupt).not.toHaveBeenCalled(); expect(lastMarkdown(h.channel)).toContain('未停止其他任务');
+  });
+
   it.each(['win32', 'linux'] as const)('explains unavailable stop control appropriately on %s and preserves unsent input', async (platform) => {
     const h = await createHarness();
     prepareForkSource(h);
@@ -955,6 +974,7 @@ async function createHarness(): Promise<Harness> {
       controls,
       formValue: overrides.formValue,
       fromCardAction: overrides.fromCardAction,
+      nativeMirrorAction: overrides.nativeMirrorAction,
       dmGroupCreationOnly: overrides.dmGroupCreationOnly,
       codexHistoryProvider: overrides.codexHistoryProvider,
     });

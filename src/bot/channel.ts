@@ -683,11 +683,15 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   let zcodeTurnSync: Awaited<ReturnType<typeof startNativeTurnSync>> | undefined;
   if (zcodeTool && sessionCatalog && deps.appPaths?.profileDir) {
     const options = controls.profileConfig.zcode;
+    const workerAgent = zcodeTool.agent instanceof DurableAgentAdapter ? zcodeTool.agent : undefined;
     try {
       zcodeTurnSync = await startNativeTurnSync({ channel, controls, catalog: sessionCatalog,
         toolId: 'zcode', displayName: 'ZCode', sourceId: zcodeTool.sourceId,
         statePath: join(deps.appPaths.profileDir, 'zcode-turn-sync.json'),
-        reader: new ZcodeNativeConversationReader({ binary: options?.binaryPath, args: options?.args, dataDir: options?.dataDir }) });
+        reader: new ZcodeNativeConversationReader({ binary: options?.binaryPath, args: options?.args, dataDir: options?.dataDir },
+          options?.remoteControlFile && workerAgent ? async (id, turnId, cwd) => {
+            await workerAgent.prepareRun(); return workerAgent.client.stopNativeTurn(id, turnId, cwd);
+          } : undefined) });
     } catch (error) { log.warn('zcode-turn-sync', 'disabled', { error: String(error) }); }
   }
 
@@ -718,7 +722,14 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         ready: async () => (await worker.health()).kiloNativeInputOrigin === true });
     } catch (error) { log.warn('kilo-turn-sync', 'disabled', { error: String(error) }); }
   }
-  controls.nativeReplySync = kiloTurnSync;
+  const nativeSyncForScope = (scope: string, messageId?: string) =>
+    messageId && zcodeTurnSync?.ownsMessage(scope, messageId) ? zcodeTurnSync :
+      messageId && kiloTurnSync?.ownsMessage(scope, messageId) ? kiloTurnSync :
+        toolForScope(controls, scope) === 'zcode' ? zcodeTurnSync : kiloTurnSync;
+  controls.nativeReplySync = {
+    ownsMessage: (scope, messageId) => nativeSyncForScope(scope, messageId)?.ownsMessage(scope, messageId) ?? false,
+    stopScope: async (scope, messageId) => await nativeSyncForScope(scope, messageId)?.stopScope(scope, messageId) ?? false,
+  };
   controls.refreshMirroredRunCard = async (scope, messageId) =>
     await codexTurnSync?.refreshMessage(scope, messageId) || await kiloTurnSync?.refreshMessage(scope, messageId) || await zcodeTurnSync?.refreshMessage(scope, messageId) || false;
   controls.codexReplySync = controls.profileConfig.agentKind === 'codex' ? codexTurnSync : undefined;

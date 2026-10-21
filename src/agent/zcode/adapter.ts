@@ -40,6 +40,12 @@ export class ZcodeAdapter implements AgentAdapter {
     try { await client.request('session/rename', { sessionId: id, title: name }); }
     finally { await client.close(); }
   }
+  async stopNativeTurn(id: string, turnId: string, cwd: string): Promise<boolean> {
+    if (!this.options.remoteControlFile) throw new Error('停止 ZCode 桌面任务需要先配置桌面配对');
+    const client = new ZcodeRemoteClient(this.options.remoteControlFile, cwd, undefined, zcodeDesktopCredentialFile(this.options.modelConfigPath));
+    try { return (await client.request('session/stopNative', { sessionId: id, turnId })).stopped === true; }
+    finally { await client.close(); }
+  }
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) throw new Error('ZCode requires a project directory');
     const client = this.options.remoteControlFile ? new ZcodeRemoteClient(this.options.remoteControlFile, opts.cwd, undefined, zcodeDesktopCredentialFile(this.options.modelConfigPath)) : new ZcodeClient(this.options, opts.cwd);

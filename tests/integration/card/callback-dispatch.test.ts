@@ -31,6 +31,15 @@ describe('signed card callback dispatch', () => {
     expect(h.pending.cancel('oc_group').map(m => m.messageId)).toEqual(['next']);
   });
 
+  it('routes a marked native stop without interrupting a later run when its ledger entry is unavailable', async () => {
+    const h = await createHarness();
+    const later = h.agent.run({ runId: 'later-worker', prompt: 'running' }) as FakeAgentRun;
+    h.activeRuns.register('oc_group', later);
+    await h.dispatch({ cmd: 'stop', nativeMirror: true });
+    expect(later.stopped).toBe(false);
+    expect(JSON.stringify(h.channel.sent)).toContain('未停止其他任务');
+  });
+
   it('routes Codex form answers to the live request without queueing or launching a run', async () => {
     const h = await createHarness();
     const handleAction = vi.fn(async () => {});

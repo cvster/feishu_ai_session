@@ -99,6 +99,8 @@ export interface AgentAdapter {
   listModels?(options?: { cwd?: string }): Promise<import('./models').ModelOption[]>;
   /** Update native metadata without submitting model input. */
   renameSession?(id: string, name: string, cwd: string): Promise<void>;
+  /** Stop only the confirmed native desktop input; never an unscoped session interrupt. */
+  stopNativeTurn?(id: string, turnId: string, cwd: string): Promise<boolean>;
   prepareRun?(opts: AgentRunOptions): Promise<void>;
   run(opts: AgentRunOptions): AgentRun;
   /** Queue acceptance only; subsequent execution belongs to the shared writer. */

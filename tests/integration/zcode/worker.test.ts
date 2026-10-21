@@ -90,3 +90,22 @@ it.each(['zcode', 'kilo'] as const)('keeps %s running across bridge detach and r
     expect(channel.sent).toHaveLength(1); expect(h.calls).toHaveLength(1);
   } finally { await publisher.stop(); await Promise.all([bindings.flush(), catalog.flush(), sessions.flush()]); }
 });
+
+it('authenticates and serializes native desktop stop without replacing active worker connections', async () => {
+  const h = await fixture('zcode'); const stopNativeTurn = vi.fn(async () => true);
+  Object.assign(h.raw, { desktopRemoteEnabled: true, stopNativeTurn });
+  expect(await h.client.health()).toMatchObject({ zcodeNativeStop: true });
+  const e = JSON.parse(await readFile(join(h.stateDir, 'endpoint.json'), 'utf8'));
+  expect((await fetch(e.url + '/native-turn-stop', { method: 'POST', body: '{}' })).status).toBe(401);
+  expect(await h.client.stopNativeTurn('sess_native', 'msg_desktop', h.dir)).toBe(true);
+  expect(stopNativeTurn).toHaveBeenCalledWith('sess_native', 'msg_desktop', h.dir);
+  const job = await h.client.submit({ requestKey: 'active-native-stop', options: h.options });
+  await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+  await expect(h.client.stopNativeTurn('sess_native', 'msg_desktop', h.dir)).rejects.toThrow('未替换其连接');
+  expect(stopNativeTurn).toHaveBeenCalledTimes(1);
+  await h.client.stop(job.id); h.finish();
+});
+it('reports an old/unpaired worker rather than sending a native stop to another endpoint', async () => {
+  const h = await fixture('zcode');
+  await expect(h.client.stopNativeTurn('sess_native', 'msg_desktop', h.dir)).rejects.toThrow('单独升级');
+});

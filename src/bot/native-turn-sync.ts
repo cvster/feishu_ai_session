@@ -104,7 +104,7 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
     const mode = getMessageReplyMode(deps.controls.cfg);
     if (mode === 'text' && view.terminal === 'running') return false;
     if (mode === 'card' || delivery.cardId) {
-      const card = renderCard(view, { ...deps.controls.runControlIcons, supportsFork: true, showStopButton: !!deps.reader.stopTurn });
+      const card = renderCard(view, { ...deps.controls.runControlIcons, supportsFork: true, nativeMirror: true, showStopButton: !!deps.reader.stopTurn });
       (card as { config: { streaming_mode: boolean } }).config.streaming_mode = false;
       if (!delivery.cardId) { delivery.cardId = (await deps.channel.createCard(card)).cardId; await save(); }
       if (!active(scope, id) || stopped) return false;
@@ -199,14 +199,18 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
       running = sync({ scope, messageId }).then(result => { refreshed = result; }).finally(() => { running = undefined; });
       await running; return refreshed;
     },
-    async stopScope(scope: string): Promise<boolean> {
+    ownsMessage(scope: string, messageId: string): boolean {
+      return Object.entries(state.bindings).some(([key, binding]) => JSON.parse(key)[0] === scope &&
+        Object.values(binding.turns).some(delivery => delivery.messageId === messageId));
+    },
+    async stopScope(scope: string, messageId?: string): Promise<boolean> {
       while (running) await running;
       const id = deps.controls.toolBindings?.get(scope)?.nativeId;
       if (!deps.reader.stopTurn || !id || stopped || !active(scope, id)) return false;
       const snapshot = await deps.reader.read(id), turn = snapshot.turns.at(-1);
       if (!turn || turn.bridge || !active(scope, id) || snapshot.archived || turn.state.terminal !== 'running') return false;
       const delivery = state.bindings[keyFor(scope, deps.sourceId, id)]?.turns[turn.id];
-      if (!delivery || delivery.skipped || !delivery.messageId) return false;
+      if (!delivery || delivery.skipped || !delivery.messageId || (messageId && delivery.messageId !== messageId)) return false;
       const stoppedTurn = await deps.reader.stopTurn(id, turn.id); await runNow(); return stoppedTurn;
     },
     async stop() { if (stopped) return; stopped = true; clearInterval(timer); await running; await save(); await deps.reader.close(); },

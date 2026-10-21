@@ -137,6 +137,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
       controls: deps.controls,
       formValue,
       fromCardAction: true,
+      nativeMirrorAction: cmd === 'stop' && payload.nativeMirror === true,
       dmGroupCreationOnly: deps.dmGroupCreationOnly ?? true,
     };
 

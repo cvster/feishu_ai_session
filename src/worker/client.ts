@@ -17,10 +17,14 @@ export class WorkerClient {
     if (!result.ok) throw new WorkerRequestError(result.status, (value as { error: string }).error, (value as { retryable?: boolean }).retryable === true);
     return value as T;
   }
-  async health(): Promise<{ nativeReasoningEfforts?: boolean; zcodeRegistryResume?: boolean; zcodeSessionNames?: boolean; zcodeDesktopRemote?: boolean; zcodeDesktopRemoteConfigId?: string; kiloEditorSync?: boolean; kiloDesktopSync?: boolean; kiloNativeInputOrigin?: boolean }> {
-    const value = await this.request<{ version: number; toolId: string; sourceId: string; botAppId: string; nativeReasoningEfforts?: boolean; zcodeRegistryResume?: boolean; zcodeSessionNames?: boolean; zcodeDesktopRemote?: boolean; zcodeDesktopRemoteConfigId?: string; kiloEditorSync?: boolean; kiloDesktopSync?: boolean; kiloNativeInputOrigin?: boolean }>('/health');
+  async health(): Promise<{ nativeReasoningEfforts?: boolean; zcodeRegistryResume?: boolean; zcodeSessionNames?: boolean; zcodeNativeStop?: boolean; zcodeDesktopRemote?: boolean; zcodeDesktopRemoteConfigId?: string; kiloEditorSync?: boolean; kiloDesktopSync?: boolean; kiloNativeInputOrigin?: boolean }> {
+    const value = await this.request<{ version: number; toolId: string; sourceId: string; botAppId: string; nativeReasoningEfforts?: boolean; zcodeRegistryResume?: boolean; zcodeSessionNames?: boolean; zcodeNativeStop?: boolean; zcodeDesktopRemote?: boolean; zcodeDesktopRemoteConfigId?: string; kiloEditorSync?: boolean; kiloDesktopSync?: boolean; kiloNativeInputOrigin?: boolean }>('/health');
     if (value.version !== 1 || value.toolId !== this.toolId || value.sourceId !== this.sourceId || value.botAppId !== this.botAppId) throw new Error('执行服务的工具、账户目录或飞书应用不匹配');
-    return { nativeReasoningEfforts: value.nativeReasoningEfforts, zcodeRegistryResume: value.zcodeRegistryResume, zcodeSessionNames: value.zcodeSessionNames, zcodeDesktopRemote: value.zcodeDesktopRemote, zcodeDesktopRemoteConfigId: value.zcodeDesktopRemoteConfigId, kiloEditorSync: value.kiloEditorSync, kiloDesktopSync: value.kiloDesktopSync, kiloNativeInputOrigin: value.kiloNativeInputOrigin };
+    return { nativeReasoningEfforts: value.nativeReasoningEfforts, zcodeRegistryResume: value.zcodeRegistryResume, zcodeSessionNames: value.zcodeSessionNames, zcodeNativeStop: value.zcodeNativeStop, zcodeDesktopRemote: value.zcodeDesktopRemote, zcodeDesktopRemoteConfigId: value.zcodeDesktopRemoteConfigId, kiloEditorSync: value.kiloEditorSync, kiloDesktopSync: value.kiloDesktopSync, kiloNativeInputOrigin: value.kiloNativeInputOrigin };
+  }
+  async stopNativeTurn(id: string, turnId: string, cwd: string): Promise<boolean> {
+    if (!(await this.health()).zcodeNativeStop) throw new Error('ZCode worker 尚未支持桌面停止按钮，请单独升级 ZCode worker');
+    return (await this.request<{ stopped: boolean }>('/native-turn-stop', { id, turnId, cwd }, 60_000)).stopped;
   }
   async renameSession(id: string, name: string, cwd: string): Promise<void> { await this.health(); await this.request('/session-name', { id, name, cwd }, 60_000); }
   async list(): Promise<WorkerJob[]> { await this.health(); return this.request('/jobs'); }

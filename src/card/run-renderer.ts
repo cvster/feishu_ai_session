@@ -21,6 +21,8 @@ export interface RunCardRenderOptions extends RunControlIcons {
   signCallback?: (action: string) => string;
   /** External Codex turns have no bridge-owned RunHandle to interrupt. */
   showStopButton?: boolean;
+  /** Keep expired native mirror buttons from falling through to unrelated runs. */
+  nativeMirror?: boolean;
 }
 
 export function renderCard(state: RunState, options: RunCardRenderOptions = {}): object {
@@ -251,7 +253,7 @@ interface RunControl {
 }
 
 function stopButton(options: RunCardRenderOptions): RunControl {
-  const value: Record<string, unknown> = { cmd: 'stop', ...(options.auxiliary ? { auxiliaryRunId: options.auxiliaryRunId ?? '' } : {}) };
+  const value: Record<string, unknown> = { cmd: 'stop', ...(options.nativeMirror ? { nativeMirror: true } : {}), ...(options.auxiliary ? { auxiliaryRunId: options.auxiliaryRunId ?? '' } : {}) };
   if (options.signCallback) {
     value.__bridge_cb = true;
     value.bridge_token = options.signCallback('stop');

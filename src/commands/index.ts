@@ -133,7 +133,7 @@ export interface Controls {
   codexUserInput?: import('../bot/codex-user-input').CodexInputHandle;
   /** Refresh a persisted mirrored CardKit delivery using its original sequence owner. */
   refreshMirroredRunCard?(scope: string, messageId: string): Promise<boolean>;
-  nativeReplySync?: { stopScope(scope: string): Promise<boolean> };
+  nativeReplySync?: { stopScope(scope: string, messageId?: string): Promise<boolean>; ownsMessage?(scope: string, messageId: string): boolean };
   /** Codex replies have one owner, keyed by thread/turn/scope, for all input sources. */
   codexReplySync?: {
     isThreadArchived?(threadId: string): Promise<boolean>;
@@ -203,6 +203,7 @@ export interface CommandContext {
    * text command. Determines whether to update the existing card vs send a
    * new one. */
   fromCardAction?: boolean;
+  nativeMirrorAction?: boolean;
   /** Production DM policy: private chat is only a launcher for workspace groups. */
   dmGroupCreationOnly?: boolean;
 }
@@ -1825,6 +1826,14 @@ async function handleStop(args: string, ctx: CommandContext, strict = false): Pr
     return;
   }
   const scope = targetScope || ctx.scope;
+  // A native mirror card owns exactly one turn. Do not fall through to a
+  // newer worker task or another session after that card's turn has ended.
+  if (ctx.fromCardAction && (ctx.nativeMirrorAction || ctx.controls.nativeReplySync?.ownsMessage?.(scope, ctx.msg.messageId))) {
+    const stopped = await ctx.controls.nativeReplySync?.stopScope(scope, ctx.msg.messageId) ?? false;
+    log.info('command', 'native-stop', { scope, messageId: ctx.msg.messageId, interrupted: stopped });
+    if (!stopped) await reply(ctx, '该条桌面回复已结束或当前轮次已变化，未停止其他任务。');
+    return;
+  }
   const handle = strict ? ctx.activeRuns.get(scope) : undefined;
   let ok: boolean;
   if (handle) {

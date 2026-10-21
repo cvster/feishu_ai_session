@@ -127,6 +127,21 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     const expected = Buffer.from(`Bearer ${token}`);
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new HttpError(401, 'Unauthorized');
     const url = new URL(req.url ?? '/', 'http://localhost');
+    if (req.method === 'POST' && url.pathname === '/native-turn-stop' && options.agent.id === 'zcode') {
+      let body = '', bytes = 0;
+      for await (const chunk of req) { bytes += chunk.length; if (bytes > 16384) throw new HttpError(413, 'Request too large'); body += chunk; }
+      const value = JSON.parse(body);
+      if (typeof value.id !== 'string' || !/^(?:sess|session)_[A-Za-z0-9_-]+$/.test(value.id) ||
+        typeof value.turnId !== 'string' || !value.turnId || value.turnId.length > 256 ||
+        typeof value.cwd !== 'string' || !value.cwd || value.cwd.length > 4096) throw new HttpError(400, 'Invalid native stop target');
+      const stopped = await exclusive(async () => {
+        if (closing || tasks.size) throw new HttpError(429, 'ZCode worker 正在处理飞书任务，未替换其连接；请稍后重试停止桌面任务');
+        if (!('desktopRemoteEnabled' in options.agent) || options.agent.desktopRemoteEnabled !== true || !options.agent.stopNativeTurn)
+          throw new HttpError(404, 'ZCode 桌面停止入口不可用，请检查配对并单独升级 worker');
+        return options.agent.stopNativeTurn(value.id, value.turnId, value.cwd);
+      });
+      return reply(res, 200, { stopped });
+    }
     if (req.method === 'POST' && url.pathname === '/session-name' && options.agent.id === 'zcode') {
       let body = '', bytes = 0;
       for await (const chunk of req) { bytes += chunk.length; if (bytes > 16384) throw new HttpError(413, 'Request too large'); body += chunk; }
@@ -151,7 +166,7 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       });
       return reply(res, 200, models);
     }
-    if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { version: 1, toolId: options.agent.id, sourceId: options.sourceId, botAppId: options.botAppId, nativeReasoningEfforts: true, ...(options.agent.id === 'zcode' ? { zcodeRegistryResume: true, zcodeSessionNames: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.renameSession === 'function', zcodeDesktopRemote: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true, zcodeDesktopRemoteConfigId: 'desktopRemoteConfigId' in options.agent ? options.agent.desktopRemoteConfigId : undefined } : {}), ...(options.agent.id === 'kilo' ? { kiloEditorSync: true, kiloDesktopSync: true, kiloNativeInputOrigin: true } : {}) });
+    if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { version: 1, toolId: options.agent.id, sourceId: options.sourceId, botAppId: options.botAppId, nativeReasoningEfforts: true, ...(options.agent.id === 'zcode' ? { zcodeRegistryResume: true, zcodeNativeStop: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.stopNativeTurn === 'function', zcodeSessionNames: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.renameSession === 'function', zcodeDesktopRemote: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true, zcodeDesktopRemoteConfigId: 'desktopRemoteConfigId' in options.agent ? options.agent.desktopRemoteConfigId : undefined } : {}), ...(options.agent.id === 'kilo' ? { kiloEditorSync: true, kiloDesktopSync: true, kiloNativeInputOrigin: true } : {}) });
     if (req.method === 'GET' && url.pathname === '/jobs') return reply(res, 200, store.list());
     if (req.method === 'POST' && url.pathname === '/jobs') {
       let body = '', bytes = 0;

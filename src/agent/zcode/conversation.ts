@@ -74,15 +74,23 @@ export function projectZcodeConversation(snapshot: any): NativeConversationSnaps
 
 /** Owns an independent local CLI reader, not the desktop's remote terminal.
  * Resume only materializes this reader; no send, model/registry update, stop or
- * remote operation is issued. Subsequent read snapshots refresh persisted rows.
+ * remote operation is issued by polling. Explicit stop delegates to the paired
+ * worker; subsequent read snapshots refresh persisted rows.
  */
 export class ZcodeNativeConversationReader implements NativeConversationReader {
   private client?: ZcodeClient;
   private loaded = new Set<string>();
-  constructor(private options: ZcodeOptions = {}, private createClient = () => new ZcodeClient(options)) {}
+  readonly stopTurn?: (id: string, turnId: string) => Promise<boolean>;
+  constructor(private options: ZcodeOptions = {}, stopNativeTurn?: (id: string, turnId: string, cwd: string) => Promise<boolean>) {
+    if (stopNativeTurn) this.stopTurn = async (id, turnId) => {
+      const snapshot = await this.read(id), turn = snapshot.turns.at(-1);
+      if (snapshot.archived || turn?.id !== turnId || turn.bridge || turn.state.terminal !== 'running') return false;
+      return stopNativeTurn(id, turnId, snapshot.cwd);
+    };
+  }
   async read(id: string): Promise<NativeConversationSnapshot> {
     if (!validId(id)) throw new Error('ZCode 原生会话 ID 无效');
-    const client = this.client ??= this.createClient();
+    const client = this.client ??= new ZcodeClient(this.options);
     try {
       const snapshot = await client.request(this.loaded.has(id) ? 'session/read' : 'session/resume', { sessionId: id });
       if (snapshot?.session?.sessionId !== id) throw new Error('ZCode 原生会话身份不匹配');

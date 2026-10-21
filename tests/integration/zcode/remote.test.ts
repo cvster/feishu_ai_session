@@ -19,7 +19,7 @@ vi.mock('../../../src/agent/zcode/remote-client', async importOriginal => {
 
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-async function fixture(options: { error?: boolean; workspace?: string; closeOnSend?: boolean; complete?: boolean; wait?: boolean; v2?: boolean; foreignDevice?: boolean; autoHeaders?: boolean; staleDegraded?: boolean; ownDegraded?: boolean; renameFailure?: boolean } = {}) {
+async function fixture(options: { error?: boolean; workspace?: string; closeOnSend?: boolean; complete?: boolean; wait?: boolean; v2?: boolean; foreignDevice?: boolean; autoHeaders?: boolean; staleDegraded?: boolean; ownDegraded?: boolean; renameFailure?: boolean; nativeStop?: boolean; missingExecution?: boolean; wrongMessage?: boolean; changedTurn?: boolean; rejectStop?: boolean; idle?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'zcode-remote-')); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const file = join(dir, 'pair.link');
   await writeFile(file, options.v2 ? 'https://zcode.z.ai/remote/v4?sid=device-1&app_version=3.16.2' : 'https://zcode.z.ai/remote/v4?sid=device-1&hash=dGVzdF9oYXNo&t=123&app_version=3.10.2', { mode: 0o600 });
@@ -39,6 +39,7 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
   const address = http.address(); if (!address || typeof address === 'string') throw new Error('invalid fixture');
   const calls: Array<{ method: string; args: any }> = [], wire: string[] = [];
   let nativeTitle = '新会话';
+  let nativeReads = 0;
   let emit!: (value: any) => void, connection: WebSocket | undefined, subscribeId: number | undefined;
   server.on('connection', (socket,request) => {
     if(options.v2) expect(new URL(request.url!,'http://localhost').searchParams.get('token')).toBe('A'.repeat(22));
@@ -84,6 +85,16 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
         if(method==='listSessions')response=[{sessionId:'sess_original',workspace:{workspacePath:dir}}];
         if(method==='renameTask') throw new Error('Fresh native sessions have no legacy task-index entry');
         if(method==='readSession')response={session:{sessionId:body[0].sessionId,title:nativeTitle},settings:{model:{current:{providerId:'account:native',modelId:'native-model'},available:[{ref:{providerId:'account:native',modelId:'native-model'},label:'Native Model',reasoning:{enabled:true,levels:[{value:'native-level',label:'Native Level'}],defaultLevel:'native-level'}}]}}};
+        if (method === 'readSession' && options.nativeStop) {
+          nativeReads++;
+          response = { session: { sessionId: body[0].sessionId },
+            runtime: { eventSeq: 15000, activeTurnId: options.idle ? undefined : options.changedTurn && nativeReads > 1 ? 'turn-new' : 'turn-desktop' },
+            messages: [{ info: { messageId: options.wrongMessage ? 'msg-new' : 'msg-desktop', role: 'user', metadata: {
+              inputIntent: { inputOrigin: 'desktop', sourceCommandId: 'desktop-command' },
+            } } }] };
+        }
+        if (method === 'readSessionEvents') response = [{ sessionId: body[0].sessionId, type: 'turn.started', turnId: 'turn-desktop',
+          payload: { messageId: 'msg-desktop', ...(options.missingExecution ? {} : { foregroundExecutionId: 'exec-desktop' }) } }];
         if (method === 'sendPrompt') {
           if (options.closeOnSend) { socket.terminate(); return; }
           response = { accepted: true };
@@ -94,7 +105,7 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
             if (options.complete) emit({ type: 'session.event', event: { sessionId: body[0].sessionId, seq: 3, type: 'turn.completed', turnId: 'turn-own', payload: { inputId: body[0].inputId, response: 'REMOTE_OK', resultType: 'success' } } });
           }
         }
-        if (method === 'sendConversationCommandV4') { response = { status: 'accepted' }; if(body[0].envelope.type==='renameSession'){if(options.renameFailure)response={status:'failed'};else nativeTitle=body[0].envelope.payload.title;} }
+        if (method === 'sendConversationCommandV4') { response = { status: options.rejectStop && body[0].envelope.type === 'stop' ? 'failed' : 'accepted' }; if(body[0].envelope.type==='renameSession'){if(options.renameFailure)response={status:'failed'};else nativeTitle=body[0].envelope.payload.title;} }
         rpc([201, id], response);
       }
     });
@@ -230,6 +241,27 @@ describe('ZCode desktop remote attachment', () => {
     await f.client.request('session/subscribe', { sessionId: 'sess_a' });
     await expect(f.client.request('session/send', { sessionId: 'sess_a', inputId: 'input-a', content: 'hello' })).rejects.toThrow('未自动重发');
     expect(f.calls.filter(c => c.method === 'sendPrompt')).toHaveLength(1);
+  });
+  it('stops a mirrored desktop input through the adapter with its exact foreground identity and no prompt', async () => {
+    const f = await fixture({ nativeStop: true }); await f.client.request('workspace/updateProviderRegistry', {}); await f.client.close();
+    const adapter = new ZcodeAdapter({ remoteControlFile: f.file, modelConfigPath: f.dir });
+    expect(await adapter.stopNativeTurn('sess_original', 'msg-desktop', f.dir)).toBe(true);
+    const stop = f.calls.find(c => c.method === 'sendConversationCommandV4');
+    expect(stop?.args[0]).toMatchObject({ sessionId: 'sess_original', envelope: { type: 'stop', payload: { expectedForegroundExecutionId: 'exec-desktop' } } });
+    expect(f.calls.filter(c => c.method === 'sendConversationCommandV4')).toHaveLength(1);
+    expect(f.calls.find(c => c.method === 'readSessionEvents')?.args[0]).toMatchObject({ afterSeq: 5000, limit: 10000 });
+    expect(f.calls.some(c => ['sendPrompt', 'createSession', 'resumeSession', 'setMode', 'setModel'].includes(c.method))).toBe(false);
+  });
+  it.each(['missingExecution', 'wrongMessage', 'changedTurn', 'rejectStop'] as const)('refuses unconfirmed native stop (%s) without an unscoped fallback or retry', async failure => {
+    const f = await fixture({ nativeStop: true, [failure]: true });
+    await expect(f.client.request('session/stopNative', { sessionId: 'sess_original', turnId: 'msg-desktop' })).rejects.toThrow();
+    expect(f.calls.filter(c => c.method === 'sendConversationCommandV4')).toHaveLength(failure === 'rejectStop' ? 1 : 0);
+    expect(f.calls.some(c => ['stopSession', 'sendPrompt', 'resumeSession'].includes(c.method))).toBe(false);
+  });
+  it('does nothing when the desktop task has already completed', async () => {
+    const f = await fixture({ nativeStop: true, idle: true });
+    expect(await f.client.request('session/stopNative', { sessionId: 'sess_original', turnId: 'msg-desktop' })).toEqual({ stopped: false });
+    expect(f.calls.some(c => c.method === 'sendConversationCommandV4')).toBe(false);
   });
   it('refuses stop before an owned execution identity is known', async () => {
     const f = await fixture();

@@ -1,3 +1,4 @@
+import { isZcodeDesktopInput } from './conversation';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { createHmac, randomUUID } from 'node:crypto';
@@ -262,6 +263,33 @@ export class ZcodeRemoteClient {
           ...(params.runtimeModel ? { modelSelection: { ...params.runtimeModel.model,
             ...(params.runtimeModel.thoughtLevel ? { options: { reasoningLevel: params.runtimeModel.thoughtLevel } } : {}) } } : {}) }]);
         break;
+      case 'session/stopNative': {
+        const before = await this.call('readSession', [target]);
+        if (before.session?.sessionId !== params.sessionId || before.session?.archivedAt)
+          throw new Error('ZCode 原生会话身份不匹配或已归档，未停止');
+        const user = [...(before.messages ?? [])].reverse().find((row: any) => row.info?.role === 'user' && isZcodeDesktopInput(row.info));
+        const activeTurn = before.runtime?.activeTurnId;
+        if (!activeTurn) { result = { stopped: false }; break; }
+        if (!user || user.info.messageId !== params.turnId)
+          throw new Error('ZCode 当前输入已变化，未停止其他任务');
+        const seq = before.runtime?.eventSeq;
+        const afterSeq = Number.isSafeInteger(seq) ? Math.max(0, seq - 10000) : 0;
+        const events = await this.call('readSessionEvents', [{ ...target, afterSeq, limit: 10000 }]);
+        const started = Array.isArray(events) ? [...events].reverse().find(event => event.type === 'turn.started' &&
+          event.sessionId === params.sessionId && event.turnId === activeTurn && event.payload?.messageId === params.turnId) : undefined;
+        const executionId = started?.payload?.foregroundExecutionId;
+        if (typeof executionId !== 'string' || !executionId) throw new Error('尚未确认桌面执行身份，未停止其他任务');
+        const current = await this.call('readSession', [target]);
+        if (current.session?.sessionId !== params.sessionId || current.runtime?.activeTurnId !== activeTurn)
+          throw new Error('ZCode 当前轮次已变化，未停止其他任务');
+        const ack = await this.call('sendConversationCommandV4', [{ ...target, envelope: {
+          commandId: randomUUID(), clientId: this.clientId, sessionId: params.sessionId, issuedAt: Date.now(),
+          type: 'stop', payload: { expectedForegroundExecutionId: executionId },
+        } }]);
+        if (!['accepted', 'noop'].includes(ack?.status)) throw new Error('ZCode 桌面未确认停止，未自动重发');
+        result = { stopped: true };
+        break;
+      }
       case 'session/stop': {
         if (!this.executionId) throw new Error('尚未确认本次桌面执行身份，未停止其他任务');
         result = await this.call('sendConversationCommandV4', [{ ...target, envelope: {
