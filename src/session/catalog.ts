@@ -78,6 +78,8 @@ export class SessionCatalog {
   // Separate from GC'd history: an archive must not expire into a new task.
   private archivedThreads = new Set<string>();
   private archivedScopes = new Map<string, string>();
+  private dissolvedChats = new Set<string>();
+  private suppressedAutoGroups = new Set<string>();
   private saving: Promise<void> = Promise.resolve();
   private persistenceError: unknown;
   private readonly path: string;
@@ -113,6 +115,13 @@ export class SessionCatalog {
       }
       this.archivedThreads = new Set(state.threads);
       this.archivedScopes = new Map(state.scopes);
+      for (const field of ['dissolvedChats', 'suppressedAutoGroups']) {
+        if (state[field] !== undefined && (!Array.isArray(state[field]) || !state[field].every((v: unknown) => typeof v === 'string'))) {
+          throw new Error('Invalid dissolved chat state');
+        }
+      }
+      this.dissolvedChats = new Set(state.dissolvedChats ?? []);
+      this.suppressedAutoGroups = new Set(state.suppressedAutoGroups ?? []);
     } catch (err) {
       // A damaged archive ledger must fail closed, not silently reopen groups.
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
@@ -133,8 +142,22 @@ export class SessionCatalog {
     this.schedulePersist();
   }
 
-  isScopeArchived(scopeId: string): boolean { return this.archivedScopes.has(scopeId); }
+  isScopeArchived(scopeId: string): boolean { return this.archivedScopes.has(scopeId) || this.dissolvedChats.has(scopeId.split(':')[0]!); }
   isThreadArchived(threadId: string): boolean { return this.archivedThreads.has(threadId); }
+  isChatDissolved(chatId: string): boolean { return this.dissolvedChats.has(chatId); }
+  dissolvedChatIds(): string[] { return [...this.dissolvedChats]; }
+  isAutoGroupSuppressed(agentId: CatalogAgentId, sourceId: string, nativeId: string): boolean {
+    return this.suppressedAutoGroups.has(JSON.stringify([agentId, sourceId, nativeId]));
+  }
+
+  /** Close bridge routes without archiving a native conversation shared elsewhere. */
+  markChatDissolved(chatId: string, personalSessions: Array<{ agentId: CatalogAgentId; sourceId: string; nativeId: string }>): void {
+    this.dissolvedChats.add(chatId);
+    this.archiveScope(chatId, 'dissolved');
+    for (const entry of this.data.values()) if (entry.scopeId.startsWith(`${chatId}:`)) this.archiveScope(entry.scopeId, 'dissolved');
+    for (const ref of personalSessions) this.suppressedAutoGroups.add(JSON.stringify([ref.agentId, ref.sourceId, ref.nativeId]));
+    this.schedulePersist();
+  }
 
   /** Actual Codex archival, unlike retiring an obsolete bridge binding. */
   archiveCodexThread(threadId: string, now = Date.now()): void {
@@ -179,6 +202,7 @@ export class SessionCatalog {
 
   upsertActive(input: UpsertSessionCatalogInput): SessionCatalogEntry {
     assertAgentIdentity(input);
+    if (this.isChatDissolved(input.scopeId.split(':')[0]!)) throw new Error('飞书群已解散，不能重新绑定。');
     if (input.agentId === 'codex' && input.threadId && this.isThreadArchived(input.threadId)) {
       throw new Error('会话已归档，不能重新绑定。');
     }
@@ -356,6 +380,7 @@ export class SessionCatalog {
     await mkdir(dirname(this.path), { recursive: true });
     await writeFileAtomic(`${this.path}.archives.json`, `${JSON.stringify({
       threads: [...this.archivedThreads], scopes: [...this.archivedScopes],
+      dissolvedChats: [...this.dissolvedChats], suppressedAutoGroups: [...this.suppressedAutoGroups],
     })}\n`);
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}\n`;

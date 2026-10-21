@@ -233,6 +233,17 @@ export class AuxiliaryGroups {
     row.notified = true; await this.save();
   }
   isAuxiliary(chatId: string): boolean { return !!this.get(chatId); }
+  groupIds(): string[] { return Object.keys(this.records).filter(id => id.startsWith('oc_') && !id.includes(':')); }
+  /** Passive dissolution closes this entrance only; native sources and peers survive. */
+  async closeDissolvedChat(chatId: string): Promise<void> {
+    await this.serial(chatId, async () => {
+      const row = this.records[chatId];
+      if (!row || row.status === 'archived') return;
+      const close = async () => { row.status = 'archived'; delete row.running; await this.save(); };
+      if (row.source) await this.serial(`source:${this.sourceKey(row.source)}`, close);
+      else await close();
+    });
+  }
   private sourceKey(source: LinkedSession): string { return sessionRefKey(source.toolId, source.sourceId, source.nativeId); }
   /** Migrate routing only: keep native FF transcripts, stable API aliases and archive state. */
   private async migrateSharedBindings(): Promise<void> {
@@ -357,6 +368,7 @@ export class AuxiliaryGroups {
     const owner = this.deps.ownerId();
     if (!owner || event.operator.openId !== owner) return;
     await this.serial(event.chatId, async () => {
+      if (this.deps.catalog?.isChatDissolved(event.chatId)) return;
       const old = this.get(event.chatId);
       if (old?.privateGroup || Object.values(this.privateCreations).some(i => i.chatId === event.chatId)) return;
       if (old && old.status !== 'archived') { if (old.status === 'pending' && !old.notified) await this.notify(old); return; }
@@ -447,7 +459,7 @@ export class AuxiliaryGroups {
     if (await this.deps.channel.getChatMode(event.chatId) !== 'p2p') return true;
     await this.serial(choice.chatId, async () => {
       const row = this.get(choice.chatId);
-      if (!row || row.generation !== choice.generation) return;
+      if (!row || row.generation !== choice.generation || this.deps.catalog?.isChatDissolved(row.chatId)) return;
       if (row.status !== 'pending') return;
       if (!choice.nativeId || !choice.toolId) { await this.notify(row, choice.toolId, choice.page); return; }
       const tool = this.deps.tools.get(choice.toolId);
@@ -459,7 +471,7 @@ export class AuxiliaryGroups {
       const linkedSource: LinkedSession = { toolId: tool.id, sourceId: tool.sourceId, nativeId: source.nativeId };
       const original = this.deps.bindings.entries().find(([, b]) => b.toolId === tool.id && b.sourceId === tool.sourceId && b.nativeId === source.nativeId)?.[1];
       const activated = await this.serial(`source:${this.sourceKey(linkedSource)}`, async () => {
-        if (row.status !== 'pending' || row.generation !== choice.generation) return false;
+        if (row.status !== 'pending' || row.generation !== choice.generation || this.deps.catalog?.isChatDissolved(row.chatId)) return false;
         const peer = Object.values(this.records).find(r => r.chatId !== row.chatId && r.ownerId === row.ownerId && r.source &&
           this.sourceKey(r.source) === this.sourceKey(linkedSource) && (r.status === 'active' || (r.status === 'leaving' && !r.archivedNative)));
         const peerBinding = peer ? this.deps.bindings.get(peer.chatId) : undefined;

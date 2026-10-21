@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
@@ -48,4 +48,18 @@ it('rejects all inputs from an exiting group, including queued/deferred items, w
   await h.inbox.rejectScope('group');
   const restored = new WorkerInbox(h.path); await restored.load();
   expect(restored.available().map(e => e.message.messageId)).toEqual(['peer']);
+});
+
+it('rejects dissolved group intake including unmaterialized topics while preserving accepted receipts and peer groups', async () => {
+  const h = await inboxFixture();
+  await h.inbox.receive('oc_dead', msg('root'));
+  await h.inbox.receive('oc_dead:new-topic', msg('topic')); h.inbox.markQueued('oc_dead:new-topic', msg('topic'));
+  await h.inbox.receive('oc_dead:accepted', msg('accepted'));
+  await h.inbox.reconcile([{ options: { delivery: { scope: 'oc_dead:accepted', messageIds: ['accepted'] } } } as WorkerJob]);
+  await h.inbox.receive('oc_dead_other:topic', msg('peer'));
+  await h.inbox.rejectChat('oc_dead');
+  const restored = new WorkerInbox(h.path); await restored.load();
+  expect(restored.available().map(e => e.message.messageId)).toEqual(['peer']);
+  const states = Object.values(JSON.parse(await readFile(h.path, 'utf8')).entries) as { message: NormalizedMessage; status: string }[];
+  expect(states.find(e => e.message.messageId === 'accepted')?.status).toBe('accepted');
 });

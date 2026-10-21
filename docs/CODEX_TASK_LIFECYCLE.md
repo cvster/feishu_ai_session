@@ -78,3 +78,27 @@ archived. It does not submit tasks, reopen the conversation, or recreate its
 AA group. Stale creation cards cannot create a group for a known archived
 thread. Only an explicit resume selection of another unarchived thread clears
 the group's tombstone; late system events from the old task are ignored.
+
+## Dissolved groups lose their live bridge routes
+
+At startup and every minute, the bridge checks up to 50 associated Feishu
+groups using `im.v1.chat.get`, rotating batches when there are more groups.
+Only explicit `dissolved` / `dissolved_save` statuses or error `232009` confirm
+dissolution. Absence from the chat list, invalid IDs, bot removal, missing
+permissions, network failures, and unknown/partial responses preserve bindings
+and are retried. Groups tagged for another bot are not checked.
+
+Confirmed dissolution closes the group and all its topic scopes, rejects
+bridge intake that has not been submitted, removes session/tool/workspace
+routes and the explicit allowed-chat entry, and closes the auxiliary entrance
+if present. It does not archive native conversations, interrupt accepted
+tasks, delete native history or project files, or close other linked groups.
+Shared canonical tool entries needed by other entrances are retained.
+
+The catalog retains archived relationship records. Dissolved-chat markers and
+automatic-group suppression are written to `<session-catalog-path>.archives.json`
+before route cleanup; they survive GC and restart, and incomplete cleanup is
+retried. A manually dissolved personal AA group is not automatically replaced.
+The native conversation can still be explicitly attached to a new group.
+An owned binding missing from a partial chat list is held until this check,
+rather than creating a replacement group immediately.

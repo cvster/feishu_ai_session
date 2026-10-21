@@ -305,6 +305,13 @@ describe('AA session automatic groups', () => {
     );
   });
 
+  it('waits for cleanup to verify an owned group missing from the chat list instead of replacing it', async () => {
+    const h = createHarness([historyThread('thread-aa', 'AA-owned', 2)],
+      { entries: [catalogEntry('oc_missing', 'thread-aa', 'cli_test')] });
+    await syncAaSessionGroupsOnce(h.deps);
+    expect(h.created).toHaveLength(0);
+  });
+
   it('does not accept a visible binding tagged for another bot app', async () => {
     const h = createHarness(
       [historyThread('thread-aa', 'AA-共享群任务', 2)],

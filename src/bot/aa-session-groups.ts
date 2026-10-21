@@ -101,6 +101,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
   const nativeId = (entry: SessionCatalogEntry) => nativeSessionId(toolId, entry);
   const isBinding = (entry: SessionCatalogEntry) => entry.agentId === toolId && (!entry.sourceId || entry.sourceId === sourceId) && isCurrentBotBinding(entry, currentBotAppId, knownChatIds);
   const isArchived = (id: string) => deps.controls.toolBindings?.isArchived(toolId, sourceId, id) || (toolId === 'codex' && deps.sessionCatalog.isThreadArchived?.(id));
+  const isSuppressed = (id: string) => deps.sessionCatalog.isAutoGroupSuppressed?.(toolId, sourceId, id);
 
   const inviteOpenIds = concreteInviteOpenIds(deps.controls);
   const actorId = deps.controls.botOwnerId ?? inviteOpenIds[0];
@@ -133,6 +134,12 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
   const knownChatIds = new Set(knownChatsResult.chats.map((chat) => chat.id));
   const currentBotAppId = deps.controls.profileConfig.accounts.app.id;
   const catalogEntries = deps.sessionCatalog.entries();
+  // An owned group missing from a partial/visibility-limited list must first be
+  // checked by group cleanup, rather than immediately replaced by this scanner.
+  const unverifiedOwnedThreads = new Set(catalogEntries.filter(entry => entry.agentId === toolId &&
+    entry.botAppId === currentBotAppId && entry.status === 'active' &&
+    (!entry.sourceId || entry.sourceId === sourceId) && !knownChatIds.has(entry.scopeId))
+    .map(entry => nativeId(entry)).filter(Boolean));
   const boundThreadIds = new Set(
     catalogEntries
       .filter((entry) =>
@@ -149,7 +156,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
   const aaCandidates = latestVersionSessions(history).filter(
     (thread) => isAaSession(thread) && !deps.controls.auxiliary?.isAuxiliaryNative(toolId, sourceId, thread.threadId) && !boundThreadIds.has(thread.threadId) &&
       !deps.controls.toolBindings?.hasNativeBinding(toolId, sourceId, thread.threadId, knownChatIds) &&
-      !isArchived(thread.threadId),
+      !isArchived(thread.threadId) && !isSuppressed(thread.threadId) && !unverifiedOwnedThreads.has(thread.threadId),
   );
   const candidates = aaCandidates;
   if (candidates.length === 0) return;
@@ -158,7 +165,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
   const historyByThreadId = new Map(history.map((thread) => [thread.threadId, thread]));
 
   for (const thread of candidates) {
-    if (isArchived(thread.threadId)) continue;
+    if (isArchived(thread.threadId) || isSuppressed(thread.threadId)) continue;
     // Another timer/manual action may have bound it while this sync was awaiting I/O.
     if (deps.sessionCatalog.entries().some(
       (entry) =>
@@ -273,7 +280,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
     let created;
     try {
       if ((toolId === 'codex' && await deps.controls.codexReplySync?.isThreadArchived?.(thread.threadId)) ||
-          isArchived(thread.threadId)) continue;
+          isArchived(thread.threadId) || isSuppressed(thread.threadId)) continue;
       created = await createBoundChat({
         channel: deps.channel,
         name,

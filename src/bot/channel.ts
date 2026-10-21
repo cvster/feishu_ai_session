@@ -92,6 +92,7 @@ import { isSoloUserBotChat } from './group';
 import { configureGroupNotifications } from './group-notifications';
 import { CodexNameSync, SessionNameSync } from './thread-name';
 import { startAaSessionGroupSync } from './aa-session-groups';
+import { createGroupCleanup } from './group-cleanup';
 import { startCodexTurnSync } from './codex-turn-sync';
 import { startKiloTurnSync } from './kilo-turn-sync';
 import { startNativeTurnSync } from './native-turn-sync';
@@ -627,6 +628,20 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
   });
   await ownerRefresh.start();
+  const groupCleanup = sessionCatalog ? createGroupCleanup({
+    channel, controls, catalog: sessionCatalog, sessions, workspaces,
+    cancelPending: async scope => {
+      const matches = (other: string) => other === scope || (!scope.includes(':') && other.startsWith(`${scope}:`));
+      for (const item of pending.snapshot()) if (matches(item.scope)) pending.cancel(item.scope);
+      for (const runtime of controls.workerRuntimes?.values() ?? []) {
+        if (scope.includes(':')) await runtime.inbox.rejectScope(scope);
+        else await runtime.inbox.rejectChat(scope);
+      }
+      for (const record of controls.codexSubmissions?.records() ?? []) if (matches(record.scope) && record.status === 'pending')
+        await controls.codexSubmissions!.mark(record.id, { status: 'rejected', error: '飞书群已解散' }, ['pending']);
+    },
+  }) : undefined;
+  await groupCleanup?.start();
   await controls.auxiliary?.recover().catch(error => log.warn('auxiliary', 'recovery-failed', { error: String(error) }));
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
   const aaSessionGroupSync =
@@ -827,6 +842,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     channel,
     disconnect: async () => {
       disconnecting = true;
+      await groupCleanup?.stop();
       activeRuns.pauseNewRuns('bridge-disconnect');
       await a2a?.close();
       pending.cancelAll();

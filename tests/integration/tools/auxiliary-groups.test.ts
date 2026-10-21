@@ -75,6 +75,17 @@ async function harness(toolId: 'codex' | 'claude' = 'claude') {
 }
 
 describe('auxiliary owner linking and lifecycle', () => {
+  it('passively closes a dissolved group while keeping its original and other linked entrances', async () => {
+    const h = await harness(); await h.activate(); await h.activate('oc_aux_2');
+    await h.groups.closeDissolvedChat('oc_aux');
+    expect(h.groups.get('oc_aux')?.status).toBe('archived');
+    expect(h.groups.isActive('oc_aux')).toBe(false); expect(h.groups.isActive('oc_aux_2')).toBe(true);
+    expect(h.archive).not.toHaveBeenCalled(); expect(h.leave).not.toHaveBeenCalled();
+    await h.groups.flush(); const reloaded = new AuxiliaryGroups(h.deps); await reloaded.load();
+    expect(reloaded.isActive('oc_aux')).toBe(false); expect(reloaded.isActive('oc_aux_2')).toBe(true);
+    h.catalog.markChatDissolved('oc_aux', []); await h.catalog.flush();
+    await reloaded.joined(joined); expect(reloaded.get('oc_aux')?.status).toBe('archived');
+  });
   it('mutes the owner of an externally named FF group only after successful association', async () => {
     const h = await harness();
     const run = vi.fn(async (args: string[], _data?: unknown): Promise<unknown> => args[0] === 'auth'

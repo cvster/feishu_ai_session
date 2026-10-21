@@ -43,6 +43,10 @@ export class WorkerInbox {
   async rejectScope(scope: string): Promise<void> {
     await this.reject(scope, Object.values(this.entries).filter(e => e.scope === scope && e.status === 'pending').map(e => e.message));
   }
+  async rejectChat(chatId: string): Promise<void> {
+    const scopes = new Set(Object.values(this.entries).filter(e => e.scope.split(':')[0] === chatId && e.status === 'pending').map(e => e.scope));
+    for (const scope of scopes) await this.rejectScope(scope);
+  }
   async reject(scope: string, messages: NormalizedMessage[]): Promise<void> {
     for (const message of messages) {
       const key = this.key(scope, message), entry = this.entries[key];

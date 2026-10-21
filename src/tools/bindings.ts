@@ -117,6 +117,16 @@ export class ToolBindingStore {
   hasNativeBinding(toolId: AgentKind, sourceId: string, nativeId: string, knownChats: Set<string>): boolean {
     return this.entries().some(([scope, b]) => knownChats.has(scope.split(':')[0]!) && b.toolId === toolId && b.sourceId === sourceId && b.nativeId === nativeId);
   }
+  /** Drop group/topic routes, retaining a canonical entry if live aliases need it. */
+  removeChat(chatId: string): void {
+    for (const scope of Object.keys(this.bindings)) {
+      if (scope !== chatId && !scope.startsWith(`${chatId}:`)) continue;
+      if (Object.entries(this.bindings).some(([peer, b]) => peer !== scope && b.sharedScope === scope &&
+          peer !== chatId && !peer.startsWith(`${chatId}:`))) continue;
+      delete this.bindings[scope];
+    }
+    this.persist();
+  }
   archive(toolId: AgentKind, sourceId: string, nativeId: string): void {
     this.archived.add(sessionRefKey(toolId, sourceId, nativeId)); this.persist();
   }
