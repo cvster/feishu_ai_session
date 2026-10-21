@@ -137,6 +137,38 @@ codex app-server daemon version
 
 按所装版本的帮助配置并启动，或在 `runtime.env` 设置 `CODEX_QUEUE_REMOTE` 指向现有公开端点。默认发现 `CODEX_HOME/app-server-control/app-server-control.sock`。不要将另一进程私有连接地址当成公开共享端点；不要为日常桥接更新停止/重启现有 writer。版本和目录必须与登录账号、历史所在目录一致。doctor 只连公开端点做握手/只读 account/read，不提交任务、不读任务列表、不启动新 writer。
 
+#### 旧版 CLI 与桌面 App 未共用 app-server
+
+部分旧版 Codex CLI 与桌面 App 会各自启动 app-server；PATH 指向旧 CLI、后台服务使用另一份可执行文件，或另起独立 daemon，也可能出现同样的情况。**同一账号、相同 `CODEX_HOME`、能读取同一份历史，不代表共用同一个运行中的 app-server。** 这类问题不是飞书权限或 AA 群绑定错误。
+
+常见现象：飞书输入已执行，但桌面会话不实时刷新，重新打开后才看到历史；桌面正在执行，桥接却显示找不到活跃轮次、停止按钮无法停止桌面任务，或桌面交互问题无法在飞书回答。若旧 CLI 不支持所需队列/共享连接能力，也可能直接提交失败。单独启动一个 daemon 并不保证桌面会连接它。
+
+按以下顺序排查和处理：
+
+1. **确认真正使用的 CLI。** 终端执行下面的只读检查，同时核对 profile 的 `codex.binaryPath`、后台服务 PATH 和运行 OS 用户。Windows 用 `where.exe codex`，不要只看当前终端能运行哪个版本。
+
+   ```bash
+   command -v codex
+   codex --version
+   codex queue --help
+   codex app-server daemon version
+   ```
+
+   `queue --help` 应提供 `--remote`；不认识命令或参数时，先更新 CLI 至本文支持基线并重新做能力检查。`daemon version` 中的 `cliVersion`、`appServerVersion`、`socketPath` 可辅助判断版本与连接来源；这份输出本身不能证明桌面使用同一实例。
+
+2. **统一安装来源与账号目录。** 将 profile 的 `codex.binaryPath` 指向已验证兼容的 CLI 的绝对路径；桌面与桥接使用相同账号和预期的 `CODEX_HOME`。升级 CLI 后检查后台仍引用的旧路径。不同版本号不一定有问题，最终以协议能力和实际连接为准。
+
+3. **连接桌面实际使用的公开共享 writer。** 按所装桌面版本支持的方式启用共享连接，在桥接的 `runtime.env` 中指定该公开端点，例如：
+
+   ```text
+   CODEX_HOME='/absolute/path/to/.codex'
+   CODEX_QUEUE_REMOTE='unix:///absolute/path/to/.codex/app-server-control/app-server-control.sock'
+   ```
+
+   路径须替换为本机真实值；仅当该 socket 确实属于桌面使用的共享 writer 时，这个配置才解决运行时不同步。端点格式见 [官方 app-server 传输说明](https://learn.chatgpt.com/docs/app-server)。若旧桌面只提供自己的私有连接，先升级到兼容版本并按该版本支持的共享方式配置；不能只靠修改桥接端点强行接入私有连接，也不要猜测桌面启动参数。暂时使用独立 daemon 时，飞书可独立执行，但不应把桌面实时同步视为已验收。
+
+4. **重启桥接并验收。** 保存配置后只重启桥接，先执行 `node bin/lark-channel-bridge.mjs doctor --profile my-bot --agents codex --runtime --network` 检查公开端点，再在同一个个人工作群和桌面会话分别发送一条测试消息，确认双向显示、停止与交互都作用于同一会话。doctor 通过只证明连接与认证，不证明桌面已共用该实例。确需升级/重启桌面或 writer 时，另行安排维护；日常桥接部署不要连带重启它们，也不要删除会话、队列或回复账本来修复连接问题。
+
 ### Claude
 
 Linux：
@@ -229,6 +261,7 @@ Linux 若需退出登录后继续运行，由管理员为部署账户开启 syst
 | 前台正常后台失败 | 核对 runtime.env、服务 Node 路径、CLI 路径及运行 OS 用户 |
 | Claude worker 身份不匹配 | 同一 profile/app 和 CLAUDE_CONFIG_DIR，不能跨用户读取别人的 worker |
 | Codex 只有历史没有执行 | 核对真实 writer、公开端点及目录；不是重装 npm 依赖能解决 |
+| 飞书能执行但 Codex 桌面不刷新，停止/交互无法作用于桌面任务 | 排查旧 CLI 或不同 app-server；见第 6 节“旧版 CLI 与桌面 App 未共用 app-server” |
 | 飞书已连接却没事件/按钮无效 | 核对权限、消息事件、卡片回调、发布和可用范围 |
 | 工具登录状态通过但推理失败 | 核对模型权限、账号额度、提供方配置和模型服务网络 |
 
