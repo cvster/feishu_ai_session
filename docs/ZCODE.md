@@ -121,7 +121,7 @@ node bin/lark-channel-bridge.mjs status --profile my-bot
 
 协议来源：[官方远控架构](https://github.com/zai-org/ZCode/blob/main/docs/web-remote-control/web-remote-control-architecture.md)、[relay 协议与工作区入口](https://github.com/zai-org/ZCode/blob/main/packages/shared/src/web-remote-control.ts)、[Channel RPC 格式](https://github.com/zai-org/ZCode/blob/main/packages/rpc/src/serialization.ts)。实现没有打补丁或注入桌面进程。
 
-将机器人拉入协作群后，所有者可选择任意未归档的原始 ZCode 会话，不要求先创建个人工作群。列表按 AA 会话、其他个人工作群会话、其余会话排序，同类按最近更新排序。同一来源共享一个 FF 会话，FF 工作群和私聊群不会成为新的来源而递归建群。每次提问通过原生协议读取最新来源记录，在本机生成上下文快照，不向来源提交消息。A2A 的配置和用法见 [接口文档](A2A_API.md)。
+将机器人拉入协作群后，所有者可选择任意未归档的原始 ZCode 会话，不要求先创建个人工作群。列表按 AA 会话、其他个人工作群会话、其余会话排序，同类按最近更新排序。直接续聊所选原会话，不创建 FF、读取来源快照或另建 FF 工作群。已有 FF 入口升级后改绑原会话，旧历史保留。A2A 的配置和用法见 [接口文档](A2A_API.md)。
 
 ## 会话名与群名
 

@@ -22,7 +22,7 @@ it('configures only the local 10.88 interface and default port, issues owner-bou
   await saveRootConfig({ schemaVersion: 2, activeProfile: 'test', preferences: {}, profiles: { test: selected } }, configPath);
   const shared = 'aux_11111111-1111-4111-8111-111111111111';
   const bindings = new ToolBindingStore(join(profileDir, 'tool-bindings.json')); await bindings.load();
-  bindings.set(shared, { toolId: 'codex', sourceId: root, name: 'FF-project', linkedSource: { toolId: 'codex', sourceId: root, nativeId: 'original', historyPath: '/history' } }); await bindings.flush();
+  bindings.set(shared, { toolId: 'codex', sourceId: root, name: 'AA-project', nativeId: 'original', nativeCreated: true, linkedSource: { toolId: 'codex', sourceId: root, nativeId: 'original', historyPath: '/history' } }); await bindings.flush();
   const output = vi.spyOn(console, 'log').mockImplementation(() => {}), options = { config: configPath, profile: 'test' };
   await runA2A('configure', undefined, { ...options, namespace: 'TestUser' });
   expect(await loadA2AConfig(join(profileDir, 'a2a.json'))).toMatchObject({ namespace: 'TestUser', host: '10.88.1.2', port: DEFAULT_A2A_PORT, enabled: true });

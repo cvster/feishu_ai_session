@@ -5,7 +5,7 @@ import type { SessionCatalog } from '../session/catalog';
 import { writeFileAtomic } from '../platform/atomic-write';
 
 export interface LinkedSession extends SessionRef {
-  historyPath: string;
+  historyPath?: string;
 }
 
 /** A one-time, user-requested history import; unlike linkedSource this is not an FF binding. */
@@ -50,7 +50,8 @@ export class ToolBindingStore {
         if (!value || !isToolId(value.toolId) || typeof value.sourceId !== 'string') throw new Error('Invalid tool binding');
         if (value.sharedScope !== undefined && (typeof value.sharedScope !== 'string' || !value.sharedScope)) throw new Error('Invalid shared scope');
         if (value.linkedSource && (!isToolId(value.linkedSource.toolId) ||
-          ![value.linkedSource.sourceId, value.linkedSource.nativeId, value.linkedSource.historyPath].every(v => typeof v === 'string' && v.length > 0))) throw new Error('Invalid linked source');
+          ![value.linkedSource.sourceId, value.linkedSource.nativeId].every(v => typeof v === 'string' && v.length > 0) ||
+          (value.linkedSource.historyPath !== undefined && (typeof value.linkedSource.historyPath !== 'string' || !value.linkedSource.historyPath)))) throw new Error('Invalid linked source');
         if (value.copiedFrom && (!isToolId(value.copiedFrom.toolId) ||
           ![value.copiedFrom.sourceId, value.copiedFrom.nativeId, value.copiedFrom.copyId, value.copiedFrom.name, value.copiedFrom.cwd]
             .every(v => typeof v === 'string' && v.length > 0))) throw new Error('Invalid copied source');

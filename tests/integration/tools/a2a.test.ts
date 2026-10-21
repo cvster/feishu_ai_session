@@ -29,7 +29,7 @@ const roots: string[] = [], cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const f of cleanup.splice(0)) await f(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 const shared = 'aux_11111111-1111-4111-8111-111111111111';
 const originalId = '22222222-2222-4222-8222-222222222222';
-const nativeId = '33333333-3333-4333-8333-333333333333';
+const nativeId = originalId;
 async function freePort() {
   const server = createServer(); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as { port: number }).port; await new Promise<void>(resolve => server.close(() => resolve())); return port;
@@ -103,7 +103,7 @@ async function setup(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' | 'dsh' = 'co
   };
 }
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs %s in the shared FF with both aliases, owner-bound member keys and no IM delivery', async toolId => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs %s in the original conversation with both aliases, owner-bound member keys and no IM delivery', async toolId => {
   const h = await setup(toolId);
   const accepted = await h.request('/message:send', h.ask()); expect(accepted.status).toBe(200);
   const id = accepted.body.task.id, result = await h.finished(id);

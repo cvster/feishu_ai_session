@@ -50,9 +50,7 @@ beforeEach(() => {
 const prompts = [
   ['direct', '原样输入 <tag>\n第二行'],
   ['context', '<lark_context>\n{"quotes":[{"content":"引用"}]}\n</lark_context>\n\n请看引用'],
-  ...(['full', 'brief'] as const).map(mode => [mode, wrapAuxiliaryPrompt(
-    { toolId: 'codex', nativeId: 'source' }, '/history', '检查', false, { mode, chatId: 'oc_target' },
-  )]),
+  ['group', wrapAuxiliaryPrompt('检查', false, { chatId: 'oc_target' })],
 ];
 
 describe.each(['claude', 'codex'] as const)('%s prompt delivery', tool => {

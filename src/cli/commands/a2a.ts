@@ -50,10 +50,10 @@ export async function runA2A(action: 'configure' | 'list' | 'enable' | 'disable'
     }
     if (!config) throw new Error('请先执行 a2a configure');
     const scope = (target && endpointForAlias(config, target)?.[0]) ?? sessions.find(([s]) => s === target || defaultAlias(s) === target)?.[0];
-    if (!scope) throw new Error('FF 不存在，请通过 a2a list 选择默认别名或内部 ID');
+    if (!scope) throw new Error('会话入口不存在，请通过 a2a list 选择默认别名或内部 ID');
     const binding = bindings.get(scope)!;
-    if (!binding.linkedSource || binding.sharedScope || binding.nativeId === binding.linkedSource.nativeId) throw new Error('不是共享 FF 会话');
-    if (binding.nativeId && bindings.isArchived(binding.toolId, binding.sourceId, binding.nativeId)) throw new Error('FF 已归档');
+    if (!binding.linkedSource || binding.sharedScope || binding.nativeId !== binding.linkedSource.nativeId) throw new Error('不是原会话共享入口');
+    if (binding.nativeId && bindings.isArchived(binding.toolId, binding.sourceId, binding.nativeId)) throw new Error('原会话已归档');
     const endpoint = config.endpoints[scope] ??= { enabled: false, keys: [] };
     if (action === 'enable') { endpoint.enabled = true; if (options.alias) setAlias(config, scope, options.alias); }
     if (action === 'disable') endpoint.enabled = false;

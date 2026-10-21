@@ -20,8 +20,8 @@ it('authenticates its loopback child, scopes streamed events to its own input, a
   expect(sent.body).not.toHaveProperty('system'); expect(calls.every(c => c.authenticated)).toBe(true);
   expect(calls.find(c => c.method === 'POST' && c.path === '/session').body.permission).toEqual([{ permission: '*', action: 'allow', pattern: '*' }]);
 });
-it.each(['full', 'brief'] as const)('passes the %s FF envelope intact', async mode => {
-  const h = await fixture(); const prompt = wrapAuxiliaryPrompt({ toolId: 'kilo', nativeId: 'ses_source' }, '/history', '检查', false, { mode, chatId: 'oc_group' });
+it('passes the group envelope intact', async () => {
+  const h = await fixture(); const prompt = wrapAuxiliaryPrompt('检查', false, { chatId: 'oc_group' });
   await collect(h, { prompt });
   const sent = (await h.read()).find(r => r.path.endsWith('/prompt_async'));
   expect(sent.body.parts[0].text).toBe(prompt);

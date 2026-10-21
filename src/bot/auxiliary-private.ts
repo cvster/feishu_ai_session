@@ -7,11 +7,6 @@ export function isRetiredPrivateInput(text: string): boolean {
   try { return JSON.parse(value)?.protocol === 'ff-dm-v1'; } catch { return false; }
 }
 
-export function auxiliarySessionName(name: string): string {
-  const title = name.trimStart();
-  return title.startsWith('AA') ? `FF${title.slice(2)}` : `FF-${name}`;
-}
-
 /** IDs are returned under this bot's app identity, matching received sender IDs. */
 export async function auxiliaryUserIsMember(channel: LarkChannel, chatId: string, actorId: string): Promise<boolean> {
   let pageToken: string | undefined;

@@ -35,6 +35,27 @@ describe('Codex desktop turn sync', () => {
     } finally { await sync.stop(); await catalog.flush(); }
   });
 
+  it.each(['group', 'a2a'] as const)('keeps %s requests out of the original AA workgroup when sharing its native ID', async transport => {
+    const dir = await mkdtemp(join(tmpdir(), 'codex-direct-source-')); cleanup.push(dir);
+    const catalog = new SessionCatalog(join(dir, 'catalog.json'));
+    for (const scopeId of ['oc_original', 'oc_open']) catalog.upsertActive({ scopeId, agentId: 'codex', cwdRealpath: dir, policyFingerprint: scopeId, threadId: 'original' });
+    const prompt = JSON.stringify({ type: 'group_request', version: 2, context: transport === 'a2a' ? { channel: 'a2a' } : { chat_id: 'oc_open' }, user_input: '检查' });
+    const turns = [externalTurn('request', 'inProgress', prompt, '执行中')];
+    const controls = controlsForCodex();
+    const channel = createFakeChannel();
+    const deps = { channel: channel as unknown as LarkChannel, controls, sessionCatalog: catalog, profileStateDir: dir, intervalMs: 60_000,
+      reader: { readThread: async () => ({ id: 'original', turns }), stop: async () => {} } };
+    const sync = await startCodexTurnSync(deps);
+    try {
+      await sync.runNow();
+      expect(channel.sent.every(m => m.chatId === 'oc_open')).toBe(true);
+      if (transport === 'a2a') expect(channel.sent).toEqual([]);
+      else expect(channel.sent).toHaveLength(1);
+      turns[0]!.status = 'completed'; await sync.runNow();
+      expect(channel.sent.every(m => m.chatId === 'oc_open')).toBe(true);
+    } finally { await sync.stop(); await catalog.flush(); }
+  });
+
   it('delivers a fast completed submission on the first snapshot and preserves one card across restart', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'codex-fast-submit-')); cleanup.push(dir);
     const catalog = new SessionCatalog(join(dir, 'catalog.json'));

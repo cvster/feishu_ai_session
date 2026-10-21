@@ -176,10 +176,10 @@ it('refuses native copy while a task is running', async () => {
   expect((await h.read()).some(c => c.method === 'session/fork')).toBe(false);
 });
 
-it.each(['direct', 'full', 'brief'] as const)('preserves %s input without a global bridge prefix on fresh and resumed sessions', async kind => {
+it.each(['direct', 'group'] as const)('preserves %s input without a global bridge prefix on fresh and resumed sessions', async kind => {
   const h = await fixture();
   const prompt = kind === 'direct' ? '你好 <tag>\n请继续' : wrapAuxiliaryPrompt(
-    { toolId: 'zcode', nativeId: 'source' }, '/history', '检查', false, { mode: kind, chatId: 'oc_target' },
+    '检查', false, { chatId: 'oc_target' },
   );
   for (const resumed of [false, true]) {
     const run = h.agent.run({ runId: `prompt-${kind}-${resumed}`, cwd: h.root, prompt,
@@ -192,14 +192,14 @@ it.each(['direct', 'full', 'brief'] as const)('preserves %s input without a glob
   }
 });
 
-it.each(['direct', 'full'] as const)('keeps attachment context inside the %s prompt without appending text outside FF JSON', async kind => {
+it.each(['direct', 'group'] as const)('keeps attachment context inside the %s prompt without appending text outside FF JSON', async kind => {
   const h = await fixture();
   const path = join(h.root, '调试 report.png');
   const input = buildDirectUserPrompt({ userInput: '看图', attachments: [
     { path, kind: 'image', decision: 'accepted' },
   ] });
   const prompt = kind === 'direct' ? input : wrapAuxiliaryPrompt(
-    { toolId: 'zcode', nativeId: 'source' }, '/history', input, false, { mode: kind, chatId: 'oc_target' },
+    input, false, { chatId: 'oc_target' },
   );
   const run = h.agent.run({ runId: 'attachment', cwd: h.root, prompt, attachmentPaths: [path] });
   for await (const _event of run.events) { /* drain */ }
@@ -207,5 +207,5 @@ it.each(['direct', 'full'] as const)('keeps attachment context inside the %s pro
   const content = (await h.read()).find(call => call.method === 'session/send').params.content;
   expect(content).toBe(prompt);
   expect(content).not.toContain('按外传限制使用');
-  expect(kind === 'full' ? JSON.parse(content).user_input : content).toContain(path);
+  expect(kind === 'group' ? JSON.parse(content).user_input : content).toContain(path);
 });

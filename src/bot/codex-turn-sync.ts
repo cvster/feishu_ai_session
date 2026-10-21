@@ -408,7 +408,11 @@ async function syncThreadSnapshot(
       }
     }
 
+    const groupRequest = groupRequestContext(turn);
     for (const scope of scopes) {
+      // Shared AA history must not broadcast private-group/API requests to the owner workgroup.
+      // This envelope can only suppress delivery, never create a new routing target.
+      if (groupRequest && (groupRequest.channel === 'a2a' || groupRequest.chat_id !== scope)) continue;
       const delivery = stored.deliveries[scope];
       if (!isScopeActive(scope)) continue;
       if (delivery?.status === 'skipped') continue;
@@ -650,9 +654,16 @@ function isCliCandidate(record: CodexSubmissionRecord, turn: CodexThreadTurn): b
     externalUserText(turn) === record.prompt?.trim();
 }
 
+function groupRequestContext(turn: CodexThreadTurn): { chat_id?: string; channel?: string } | undefined {
+  try {
+    const input = JSON.parse(externalUserText(turn));
+    if (input?.type === 'group_request' && input.version === 2 && input.context && typeof input.context === 'object') return input.context;
+  } catch { /* Ordinary direct messages have no group envelope. */ }
+}
+
 function isBridgeTurn(threadId: string, turn: CodexThreadTurn): boolean {
   const user = turn.items.find((item) => item.type === 'userMessage');
-  if (isCodexBridgeClientMessageId(user?.clientId)) return true;
+  if (isCodexBridgeClientMessageId(user?.clientId) || groupRequestContext(turn)) return true;
   // Legacy bridge turns created before clientUserMessageId was wired used a
   // prompt wrapper. Keep recognizing those so an upgrade does not mirror old
   // Feishu messages back into the same group.

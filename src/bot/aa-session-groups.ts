@@ -140,13 +140,8 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
       )
       .map((entry) => nativeId(entry)!),
   );
-  const ffSessions = new Map((deps.controls.auxiliary?.personalGroupSessions?.(toolId, sourceId) ?? []).map(s => [s.nativeId, s]));
   const isPersonalScope = (scope: string) => !scope.includes(':') && !deps.controls.auxiliary?.isAuxiliary(scope) &&
     !deps.controls.toolBindings?.get(scope)?.linkedSource;
-  const hasPersonalGroup = (id: string) => deps.sessionCatalog.entries().some(entry =>
-    isBinding(entry) && isPersonalScope(entry.scopeId) && nativeId(entry) === id) ||
-    deps.controls.toolBindings?.entries().some(([scope, b]) => knownChatIds.has(scope) && isPersonalScope(scope) &&
-      b.toolId === toolId && b.sourceId === sourceId && b.nativeId === id);
   const personalChats = new Set(catalogEntries.filter(entry => isBinding(entry) && isPersonalScope(entry.scopeId) &&
     !deps.sessionCatalog.isScopeArchived?.(entry.scopeId)).map(entry => entry.scopeId));
   for (const chatId of personalChats) await ensureSessionGroupAvatar(deps.channel, toolId, chatId).catch(error =>
@@ -156,20 +151,18 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
       !deps.controls.toolBindings?.hasNativeBinding(toolId, sourceId, thread.threadId, knownChatIds) &&
       !isArchived(thread.threadId),
   );
-  const candidates = [...aaCandidates, ...history.filter(thread => ffSessions.has(thread.threadId) && !hasPersonalGroup(thread.threadId) && !isArchived(thread.threadId))
-    .map(thread => ({ ...thread, name: ffSessions.get(thread.threadId)!.name, cwd: ffSessions.get(thread.threadId)!.cwd }))];
+  const candidates = aaCandidates;
   if (candidates.length === 0) return;
 
   const usedNames = new Set(knownChatsResult.chats.map((chat) => chat.name.trim()));
   const historyByThreadId = new Map(history.map((thread) => [thread.threadId, thread]));
 
   for (const thread of candidates) {
-    const ff = ffSessions.get(thread.threadId);
     if (isArchived(thread.threadId)) continue;
     // Another timer/manual action may have bound it while this sync was awaiting I/O.
     if (deps.sessionCatalog.entries().some(
       (entry) =>
-        nativeId(entry) === thread.threadId && isBinding(entry) && (!ff || isPersonalScope(entry.scopeId)),
+        nativeId(entry) === thread.threadId && isBinding(entry),
     )) continue;
 
     const workspace = await resolveWorkingDirectory(thread.cwd);
@@ -180,7 +173,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
       });
       continue;
     }
-    const previous = ff ? undefined : findPreviousVersionBinding(
+    const previous = findPreviousVersionBinding(
       thread,
       deps.sessionCatalog.entries().filter((entry) => isBinding(entry) && !deps.sessionCatalog.isScopeArchived?.(entry.scopeId)).map(entry => ({ ...entry, threadId: nativeId(entry) })),
       historyByThreadId,
@@ -284,7 +277,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
       created = await createBoundChat({
         channel: deps.channel,
         name,
-        inviteOpenIds: ff ? [deps.controls.botOwnerId!] : inviteOpenIds,
+        inviteOpenIds,
         toolId,
         description: `自动绑定 ${toolDefinition(toolId).label} 会话 ${thread.threadId}`,
       });
@@ -322,10 +315,8 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
     }
     // Retire bindings for this thread that belonged to a previous bot before
     // recording the newly created group for the authenticated bot.
-    if (!ff) {
-      if (toolId === 'codex') deps.sessionCatalog.archiveThread(thread.threadId);
-      else deps.sessionCatalog.archiveNativeSession(toolId, thread.threadId, sourceId);
-    }
+    if (toolId === 'codex') deps.sessionCatalog.archiveThread(thread.threadId);
+    else deps.sessionCatalog.archiveNativeSession(toolId, thread.threadId, sourceId);
     deps.sessionCatalog.upsertActive({
       scopeId: created.chatId,
       agentId: toolId,
@@ -334,10 +325,9 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
       policyFingerprint: policy.policyFingerprint,
       ...nativeSessionFields(toolId, thread.threadId),
       botAppId: currentBotAppId,
-      recentTurnReplayCount: !ff && toolId === 'codex' ? AA_RECENT_TURN_REPLAY_COUNT : undefined,
+      recentTurnReplayCount: toolId === 'codex' ? AA_RECENT_TURN_REPLAY_COUNT : undefined,
     });
-    deps.controls.toolBindings?.set(created.chatId, { toolId, sourceId, nativeId: thread.threadId, nativeCreated: true, name: created.name,
-      ...(ff ? { auxiliaryWorkgroup: true, model: ff.model, reasoningEffort: ff.reasoningEffort } : {}) });
+    deps.controls.toolBindings?.set(created.chatId, { toolId, sourceId, nativeId: thread.threadId, nativeCreated: true, name: created.name });
     await deps.controls.toolBindings?.flush();
     await Promise.all([deps.workspaces.flush(), deps.sessionCatalog.flush()]);
     await persistAllowedChat(deps.controls, created.chatId).catch((err) =>

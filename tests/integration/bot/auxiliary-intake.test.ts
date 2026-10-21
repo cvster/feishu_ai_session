@@ -62,8 +62,8 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
   } as unknown as Controls;
   const agent = new FakeAgentAdapter({ id: 'codex' });
   const submit = vi.fn(async (opts: any, beforeSend: any) => {
-    await beforeSend({ threadId: 'ff-independent', knownTurnIds: [], transport: 'rpc' });
-    return { status: 'accepted' as const, submissionId: opts.runId, threadId: 'ff-independent', transport: 'rpc' as const };
+    await beforeSend({ threadId: originalId, knownTurnIds: [], transport: 'rpc' });
+    return { status: 'accepted' as const, submissionId: opts.runId, threadId: originalId, transport: 'rpc' as const };
   }); Object.assign(agent, { submit });
   const catalog = new SessionCatalog(join(tmp.profile, 'catalog.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
@@ -78,19 +78,19 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
   }
   return { controls, channel, submit, message, download, history, memberGet, createGroup, catalog, workspaces, cwd: tmp.workspace, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
 }
-it('accepts direct owner messages in the FF personal workgroup using the same FF session and normal permissions', async () => {
+it('accepts direct owner messages in the FF personal workgroup using the original session and normal permissions', async () => {
   const h = await harness();
   const original = h.controls.toolBindings!.get('oc_aux')!;
   h.controls.toolBindings!.set('oc_ffowner', { toolId: 'codex', sourceId: original.sourceId,
-    nativeId: 'ff-independent', nativeCreated: true, name: 'FF-原会话', auxiliaryWorkgroup: true });
+    nativeId: originalId, nativeCreated: true, name: 'FF-原会话', auxiliaryWorkgroup: true });
   h.workspaces.setCwd('oc_ffowner', h.cwd);
   const msg = { chatId: 'oc_ffowner', senderId: 'ou_owner', chatType: 'group' } as NormalizedMessage;
   const identity = await commandSessionCatalogIdentity({ msg, scope: 'oc_ffowner', mode: 'group', workspaces: h.workspaces,
     controls: h.controls, access: { ok: true, reason: 'owner' } });
-  h.catalog.upsertActive({ ...identity!, sourceId: original.sourceId, threadId: 'ff-independent', botAppId: 'cli_test' });
+  h.catalog.upsertActive({ ...identity!, sourceId: original.sourceId, threadId: originalId, botAppId: 'cli_test' });
   await h.message({ chatId: 'oc_ffowner', senderId: 'ou_owner', threadId: undefined, mentionedBot: false, content: '直接继续本次调试' });
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledOnce(), { timeout: 3000 });
-  expect(h.submit.mock.calls[0]![0]).toMatchObject({ threadId: 'ff-independent' });
+  expect(h.submit.mock.calls[0]![0]).toMatchObject({ threadId: originalId });
   expect(h.submit.mock.calls[0]![0].prompt).toContain('当前飞书应用所有者本人请求');
   expect(h.submit.mock.calls[0]![0].prompt).toContain('直接继续本次调试');
   expect(h.controls.auxiliary?.isAuxiliary('oc_ffowner')).toBe(false);
@@ -136,16 +136,16 @@ it('keeps pending group requests out of model and attachment handling', async ()
   expect(h.submit).not.toHaveBeenCalled(); expect(h.download).not.toHaveBeenCalled();
   expect(h.controls.codexSubmissions?.records()).toHaveLength(0);
 });
-it('wraps every real mention and reuses one FF session across topics without resuming the source', async () => {
+it('wraps every real mention and reuses the original session across topics by resuming the original', async () => {
   const h = await harness(); await h.message({ content: '第一个问题', threadId: 'topic-a' });
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
   await h.message({ content: '第二个问题', threadId: 'topic-b' });
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
   const opts = h.submit.mock.calls.map(([o]) => o);
-  expect(opts[0].threadId).toBeUndefined(); expect(opts[1].threadId).toBe('ff-independent');
-  expect(opts.every(o => o.prompt.includes(h.history) && o.prompt.includes('不修改项目源码'))).toBe(true);
+  expect(opts[0].threadId).toBe(originalId); expect(opts[1].threadId).toBe(originalId);
+  expect(opts.every(o => !o.prompt.includes(h.history) && o.prompt.includes('不修改项目源码'))).toBe(true);
   expect(opts.map(o => JSON.parse(o.prompt).context.chat_id)).toEqual(['oc_aux', 'oc_aux']);
-  expect(opts.map(o => JSON.parse(o.prompt).mode)).toEqual(['full', 'brief']);
+  expect(opts.every(o => !('source' in JSON.parse(o.prompt)))).toBe(true);
   expect(opts[0].prompt).toContain('第一个问题'); expect(opts[1].prompt).toContain('第二个问题');
   expect(h.controls.codexSubmissions?.records().every(r => r.scope === 'oc_aux')).toBe(true);
 });
@@ -176,7 +176,7 @@ it.each([['ou_owner', 'ou_colleague'], ['ou_colleague', 'ou_owner']])('splits ow
   }
 });
 
-it('queues simultaneous group requests against one shared FF native conversation', async () => {
+it('queues simultaneous group requests against one shared original conversation', async () => {
   const h = await harness('active', true);
   const implementation = h.submit.getMockImplementation()!;
   let release!: () => void; const waiting = new Promise<void>(resolve => { release = resolve; });
@@ -184,12 +184,12 @@ it('queues simultaneous group requests against one shared FF native conversation
   await Promise.all([h.message({ chatId: 'oc_aux', content: 'A 群的问题' }), h.message({ chatId: 'oc_aux_2', content: 'B 群的问题' })]);
   try {
     await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
-    expect(h.controls.toolBindings?.get('oc_aux_2')?.nativeCreated).toBe(false);
+    expect(h.controls.toolBindings?.get('oc_aux_2')?.nativeCreated).toBe(true);
   } finally { release(); }
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
-  expect(h.submit.mock.calls[0]?.[0].threadId).toBeUndefined();
-  expect(h.submit.mock.calls[1]?.[0].threadId).toBe('ff-independent');
-  expect(h.submit.mock.calls.map(([opts]) => opts.sessionName)).toEqual(['FF-原会话', 'FF-原会话']);
+  expect(h.submit.mock.calls[0]?.[0].threadId).toBe(originalId);
+  expect(h.submit.mock.calls[1]?.[0].threadId).toBe(originalId);
+  expect(h.submit.mock.calls.every(([opts]) => opts.threadId === originalId)).toBe(true);
   expect(JSON.parse(h.submit.mock.calls[0]?.[0].prompt).context.chat_id).toBe('oc_aux');
   expect(JSON.parse(h.submit.mock.calls[1]?.[0].prompt).context.chat_id).toBe('oc_aux_2');
   expect(h.controls.codexSubmissions?.records().map(r => r.scope).sort()).toEqual(['oc_aux', 'oc_aux_2']);
@@ -213,7 +213,7 @@ it('creates a private group only for an actual human @bot 私聊 without invokin
   expect(h.createGroup).toHaveBeenCalledOnce(); expect(h.submit).not.toHaveBeenCalled();
   expect(JSON.stringify(h.channel.sent)).toContain('已经是私聊群');
 });
-it('routes private group questions to the shared FF while keeping replies and permissions in that group', async () => {
+it('routes private group questions to the original while keeping replies and permissions in that group', async () => {
   const h = await harness(); await h.message({ content: '私聊' });
   await h.message({ chatId: 'oc_privategroup', threadId: undefined, content: '只在新群调试' });
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledOnce(), { timeout: 3000 });
@@ -225,7 +225,7 @@ it('routes private group questions to the shared FF while keeping replies and pe
   expect(h.controls.codexSubmissions!.records()[0]?.scope).toBe('oc_privategroup');
   await h.message({ content: '在原群继续' });
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
-  expect(h.submit.mock.calls[1]![0].threadId).toBe('ff-independent');
+  expect(h.submit.mock.calls[1]![0].threadId).toBe(originalId);
   expect(JSON.parse(h.submit.mock.calls[1]![0].prompt).context.chat_id).toBe('oc_aux');
 });
 it('returns a migration notice for retired bot-DM requests without entering the model or console', async () => {

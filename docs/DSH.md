@@ -39,15 +39,15 @@ node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool dsh
 
 Linux 服务为 `lark-channel-worker.dsh.my-bot.service`，状态目录为 profile 下的 `execution-worker-dsh`。其他系统可用 `worker run --profile my-bot --tool dsh` 自行托管。新增 DSH 只需启动它的 worker、更新桥接；已有 Claude、ZCode、Kilo worker 不需要重启。
 
-私聊机器人选择“新建会话”→ **DeepSeek Harness** → 项目目录。已有 DSH 会话改为 `AA` 开头也可自动建群。使用独立的蓝底 DSH 鲸鱼头像，支持停止和复制会话按钮。工作群、共享 FF、辅助私聊群、权限确认与 A2A 复用现有机制，不需新增飞书权限。
+私聊机器人选择“新建会话”→ **DeepSeek Harness** → 项目目录。已有 DSH 会话改为 `AA` 开头也可自动建群。使用独立的蓝底 DSH 鲸鱼头像，支持停止和复制会话按钮。工作群、共用原会话的开放群、辅助私聊群、权限确认与 A2A 复用现有机制，不需新增飞书权限。
 
 ## 动态模型和会话
 
 - `/config` 刷新时调用 DSH 原生 `session/modelCatalog`，逐个保留供应商、模型 ID 和模型自己的 reasoning efforts；不使用其他工具的模型清单，也不硬编码模型或档位。
 - 值为 `供应商ID/模型ID`，模型 ID 内的斜杠保留。同名供应商附带实际 ID。删除已选模型或档位后拒绝提交并提示重选，不静默换供应商。
 - 恢复会话优先使用 DSH 会话记录中的模型和档位。显式选择通过原生 `session/selectModel`，该接口也会按 DSH 自身行为保存默认模型；其他已有群仍保留自己的会话选择。
-- 改名、复制、归档分别使用原生 Session / Workspace 接口。归档保留历史，不删除会话或项目文件。FF 读取来源时只使用冷读取接口，并生成本机私有历史快照，不向来源发送消息。
-- 普通消息原样提交，FF 保持完整/精简 JSON 提示周期。附件当前通过本机文件路径上下文提供，不宣称已接入 DSH 的原生图片上传协议。
+- 改名、复制、归档分别使用原生 Session / Workspace 接口。归档保留历史，不删除会话或项目文件。开放群直接续聊所选原会话，不创建 FF 或生成来源快照。
+- 普通消息原样提交，开放群每次使用简短 JSON 权限与投递提示。附件当前通过本机文件路径上下文提供，不宣称已接入 DSH 的原生图片上传协议。
 
 ## 执行边界
 

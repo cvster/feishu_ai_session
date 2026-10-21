@@ -25,7 +25,7 @@ async function setup(privateGroup = false, toolId: 'codex' | 'claude' = 'codex')
   const path = join(dir, 'approvals.json'); const source = { toolId, sourceId: dir,
     nativeId: '11111111-1111-4111-8111-111111111111', historyPath: join(dir, 'history') }; await writeFile(source.historyPath, 'source');
   const bindings = new ToolBindingStore(join(dir, 'bindings')); await bindings.load();
-  bindings.set('aux_shared', { toolId, sourceId: dir, nativeId: 'ff-native', nativeCreated: true, linkedSource: source, name: 'FF-test' });
+  bindings.set('aux_shared', { toolId, sourceId: dir, nativeId: '11111111-1111-4111-8111-111111111111', nativeCreated: true, linkedSource: source, name: 'FF-test' });
   bindings.linkAuxiliary('oc_group', 'aux_shared'); await bindings.flush();
   const groupsPath = join(dir, 'groups'); await writeFile(groupsPath, JSON.stringify({ version: 1, appId: 'cli_bot', groups: {
     oc_group: { chatId: 'oc_group', name: '测试群', generation: 'g1', ownerId: 'ou_owner', status: 'active', source, cwd: dir },
@@ -95,7 +95,7 @@ it('posts private-group confirmations in that group and continues only there', a
   const prompt = JSON.parse(await h.auxiliary.wrapPrompt(h.scope, '继续', ['ou_member'], { id: grant.id, action: grant.action, ownerId: grant.ownerId }));
   expect(prompt.context).toMatchObject({ actor: 'member', chat_id: 'oc_privategroup', approval: { action: '修改本机项目源码 src/main.ts' } });
   expect(prompt.rules.permissions).toContain('仅对context.approval.action'); expect(prompt.rules.permissions).toContain('其余操作仍受限');
-  expect(prompt.mode).toBe('full');
+  expect(prompt).not.toHaveProperty('mode');
 });
 it('rejects a denial, expired card, changed owner, changed FF or archived private group', async () => {
   const denied = await setup(); await denied.approvals.review(denied.scope, 'run', 'om_question', state());
@@ -148,15 +148,15 @@ it('parses only explicit complete permission requests, including JSON fences', (
 it('turns a completed Codex permission response into an owner card instead of exposing control JSON', async () => {
   const h = await setup();
   const catalog = new SessionCatalog(join(h.dir, 'catalog')); await catalog.load();
-  catalog.upsertActive({ scopeId: h.scope, agentId: 'codex', cwdRealpath: h.dir, policyFingerprint: 'p', threadId: 'ff-native' });
+  catalog.upsertActive({ scopeId: h.scope, agentId: 'codex', cwdRealpath: h.dir, policyFingerprint: 'p', threadId: '11111111-1111-4111-8111-111111111111' });
   const submissions = new CodexSubmissionStore(join(h.dir, 'submissions')); await submissions.load();
   await submissions.prepare({ id: 's1', scope: h.scope, messages: [h.message], status: 'accepted', createdAtMs: 1, updatedAtMs: 1,
-    threadId: 'ff-native', clientUserMessageId: 'client-approval', prompt: '请修改源码', replyTo: 'om_question' });
+    threadId: '11111111-1111-4111-8111-111111111111', clientUserMessageId: 'client-approval', prompt: '请修改源码', replyTo: 'om_question' });
   await catalog.flush();
   const profile = createDefaultProfileConfig({ agentKind: 'codex', codex: { binaryPath: 'codex' }, accounts: { app: { id: 'cli_bot', secret: 's', tenant: 'feishu' } } });
   const sync = await startCodexTurnSync({ channel: h.channel, sessionCatalog: catalog, profileStateDir: h.dir, intervalMs: 60_000,
     controls: { profileConfig: profile, cfg: profile, auxiliary: h.auxiliary, auxiliaryApprovals: h.approvals } as any, submissionStore: submissions,
-    reader: { readThread: async () => ({ id: 'ff-native', turns: [{ id: 'turn-needs-approval', status: 'completed', items: [
+    reader: { readThread: async () => ({ id: '11111111-1111-4111-8111-111111111111', turns: [{ id: 'turn-needs-approval', status: 'completed', items: [
       { type: 'userMessage', id: 'u', clientId: 'client-approval', content: [{ type: 'inputText', text: '请修改源码' }] },
       { type: 'agentMessage', id: 'a', text: requestText },
     ] }] }), stop: async () => {} } });
@@ -173,7 +173,7 @@ it.each([false, true])('routes a completed Claude permission response to the cor
   const reply = vi.fn(async (..._args: unknown[]) => ({ code: 0, data: { message_id: 'om_result' } }));
   Object.assign(h.channel.rawClient.im.v1.message, { reply });
   const profile = createDefaultProfileConfig({ agentKind: 'claude', accounts: { app: { id: 'cli_bot', secret: 's', tenant: 'feishu' } } });
-  const job = { id: 'claude-job', status: 'completed', createdAt: 1000, options: { sessionId: 'ff-native', cwd: h.dir,
+  const job = { id: 'claude-job', status: 'completed', createdAt: 1000, options: { sessionId: '11111111-1111-4111-8111-111111111111', cwd: h.dir,
     delivery: { scope: h.scope, chatId: h.message.chatId, replyTo: 'om_question', operatorOpenId: 'ou_member', botAppId: 'cli_bot', sourceId: h.dir } } };
   const snapshot = { job, events: [{ seq: 1, event: { type: 'text', delta: requestText } }, { seq: 2, event: { type: 'done', terminationReason: 'normal' } }] };
   const publisher = await startWorkerReplies({ adapter: { id: 'claude', client: { sourceId: h.dir, list: async () => [job], snapshot: async () => snapshot } } as any,

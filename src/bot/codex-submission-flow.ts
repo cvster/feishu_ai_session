@@ -59,7 +59,7 @@ export async function submitFeishuCodex(input: StartRunFlowInput, batch: Normali
         policy: prepared.policy, event: { type: 'system', threadId: value.threadId } });
       const currentBinding = controls.toolBindings?.get(input.scopeId);
       if (currentBinding?.sharedScope) {
-        if (value.threadId === currentBinding.linkedSource?.nativeId) throw new Error('拒绝绑定到原会话');
+        if (value.threadId !== currentBinding.linkedSource?.nativeId) throw new Error('原会话身份已变化');
         controls.toolBindings!.set(input.scopeId, { ...currentBinding, nativeId: value.threadId, nativeCreated: true });
         await controls.toolBindings!.flush();
       }

@@ -19,7 +19,7 @@ export function createA2ARunner(deps: { controls: Controls; sessions: SessionSto
     return auxiliary.withRun(task.scope, async () => {
       if (!await context.valid()) throw new Error('API 授权已失效');
       const session = auxiliary.apiSession(task.sharedScope), binding = root.toolBindings!.get(task.scope);
-      if (!session || !binding || binding.sharedScope !== task.sharedScope || binding.sourceId !== root.toolRegistry!.get(binding.toolId).sourceId) throw new Error('FF 会话身份已变化');
+      if (!session || !binding || binding.sharedScope !== task.sharedScope || binding.sourceId !== root.toolRegistry!.get(binding.toolId).sourceId) throw new Error('原会话身份已变化');
       workspaces.setCwd(task.scope, session.cwd);
       const controls = controlsForTool(root, binding.toolId, task.scope);
       const capability = capabilityForTool(binding.toolId, controls.profileConfig);
@@ -42,7 +42,7 @@ export function createA2ARunner(deps: { controls: Controls; sessions: SessionSto
         observability: { profile: root.profile, agent: binding.toolId, source: 'a2a', stage: 'submit' },
       };
       // Seed a routing entry under this task's own policy identity, so the existing
-      // run flow resumes exactly the shared FF, never the linked original AA.
+      // run flow resumes exactly the linked original conversation.
       const prepared = await prepareRunFlow(flowInput);
       if (!prepared.ok) return { state: 'TASK_STATE_FAILED', text: '', notice: prepared.rejectReason.userVisible };
       await auxiliary.prepareScope(task.scope, { scopeId: task.scope, agentId: binding.toolId,
@@ -65,7 +65,7 @@ export function createA2ARunner(deps: { controls: Controls; sessions: SessionSto
             const nativeId = nativeSessionId(binding.toolId, event);
             const current = root.toolBindings!.get(task.scope)!;
             if (nativeId) {
-              if (nativeId === current.linkedSource?.nativeId) throw new Error('拒绝恢复原会话');
+              if (nativeId !== current.linkedSource?.nativeId) throw new Error('原会话身份已变化');
               root.toolBindings!.set(task.scope, { ...current, nativeId, nativeCreated: true });
             }
           }
