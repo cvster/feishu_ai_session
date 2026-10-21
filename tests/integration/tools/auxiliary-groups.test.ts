@@ -229,6 +229,42 @@ describe('auxiliary owner linking and lifecycle', () => {
     const again = new AuxiliaryGroups(h.deps); await again.load();
     expect(again.get('oc_aux')!.generation).toBe(restored.get('oc_aux')!.generation);
   });
+  it('recovers after interruption between the canonical update and FF owner migration', async () => {
+    const h = await harness('codex'); await h.activate();
+    h.bindings.set('oc_aux', { ...h.bindings.get('oc_aux')!, nativeId: freshId });
+    h.bindings.set('oc_owner_ff', { toolId: 'codex', sourceId: h.home, nativeId: freshId, auxiliaryWorkgroup: true });
+    await h.bindings.flush();
+    const interrupted = new AuxiliaryGroups({ ...h.deps, cancelPending: async () => { await h.bindings.flush(); throw new Error('simulated exit'); } });
+    await expect(interrupted.load()).rejects.toThrow('simulated exit');
+    const ledger = JSON.parse(await readFile(h.deps.path, 'utf8'));
+    expect(Object.values(ledger.legacySources)).toContainEqual(expect.objectContaining({ nativeId: sourceId }));
+    const bindings = new ToolBindingStore(join(h.root, 'bindings.json')); await bindings.load();
+    expect(bindings.get('oc_aux')?.nativeId).toBe(sourceId);
+    expect(bindings.get('oc_owner_ff')?.nativeId).toBe(freshId);
+    const restored = new AuxiliaryGroups({ ...h.deps, bindings }); await restored.load();
+    expect(bindings.get('oc_owner_ff')?.nativeId).toBe(sourceId);
+    expect(h.sessions.getRaw('oc_owner_ff')?.sessionId).toBe(sourceId);
+    expect(h.archive).not.toHaveBeenCalled();
+  });
+  it('recovers an old partial upgrade from raw aliases even before a catalog was materialized', async () => {
+    const h = await harness('codex'); await h.activate();
+    const b = h.bindings.get('oc_aux')!, scope = b.sharedScope!;
+    h.bindings.set('oc_aux', { ...b, nativeId: freshId });
+    h.bindings.set('oc_owner_ff', { toolId: 'codex', sourceId: h.home, nativeId: freshId, auxiliaryWorkgroup: true });
+    h.bindings.set(scope, { ...h.bindings.get(scope)!, nativeId: sourceId }); await h.bindings.flush();
+    expect(h.bindings.get('oc_aux')?.nativeId).toBe(sourceId);
+    const restored = new AuxiliaryGroups(h.deps); await restored.load();
+    expect(h.bindings.get('oc_owner_ff')?.nativeId).toBe(sourceId);
+  });
+  it('recovers an older interrupted upgrade using the active group catalog', async () => {
+    const h = await harness('codex'); await h.activate();
+    h.bindings.set('oc_owner_ff', { toolId: 'codex', sourceId: h.home, nativeId: freshId, auxiliaryWorkgroup: true });
+    h.catalog.upsertActive({ scopeId: 'oc_aux', agentId: 'codex', sourceId: h.home, cwdRealpath: h.cwd, policyFingerprint: 'old', threadId: freshId });
+    await Promise.all([h.bindings.flush(), h.catalog.flush()]);
+    const restored = new AuxiliaryGroups(h.deps); await restored.load();
+    expect(h.bindings.get('oc_owner_ff')?.nativeId).toBe(sourceId);
+    expect(h.catalog.entries().find(e => e.status === 'active' && e.scopeId === 'oc_aux')?.threadId).toBe(sourceId);
+  });
   it('keeps an archived original closed after migrating its old FF owner workgroup', async () => {
     const h = await harness('codex'); await h.activate();
     h.bindings.set('oc_aux', { ...h.bindings.get('oc_aux')!, nativeId: freshId });

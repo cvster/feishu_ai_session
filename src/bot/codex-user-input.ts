@@ -1,3 +1,4 @@
+import { associateSubmissions, externalUserText, groupRequestContext } from './codex-turn-sync';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -48,6 +49,8 @@ export async function startCodexUserInput(deps: CodexInputDeps): Promise<CodexIn
   const path = join(deps.profileStateDir, 'codex-user-input.json');
   const stored = new Map<string, StoredInput>();
   const live = new Map<string, LiveInput>();
+  const snapshots = new Map<string, CodexThreadSnapshot>();
+  const provenanceReads = new Map<string, Promise<void>>();
   const deliveryQueued = new Set<string>();
   const writerAvailability = new Map<string, { available: boolean; checkedAt: number }>();
   const writerProbes = new Map<string, Promise<boolean>>();
@@ -140,6 +143,8 @@ export async function startCodexUserInput(deps: CodexInputDeps): Promise<CodexIn
   const handle: CodexInputHandle = {
     observeSnapshot(snapshot) {
       if (stopped) return;
+      snapshots.set(snapshot.id, snapshot);
+      if (snapshots.size > 300) snapshots.delete(snapshots.keys().next().value!);
       // Old/history questions are never resurrected. Async controls live only
       // in the current in-flight turn, just as they do in Desktop.
       const latest = snapshot.turns.at(-1);
@@ -185,13 +190,43 @@ export async function startCodexUserInput(deps: CodexInputDeps): Promise<CodexIn
     accept(prompt, source, target) {
       if (stopped) return;
       const allowed = bindings(prompt.request.threadId);
-      const submission = deps.controls.codexSubmissions?.records().find(r => r.threadId === prompt.request.threadId && r.turnId === prompt.request.turnId);
+      const records = deps.controls.codexSubmissions?.records() ?? [];
+      const snapshot = snapshots.get(prompt.request.threadId);
+      const turn = snapshot?.turns.find(t => t.id === prompt.request.turnId);
+      const matched = snapshot ? associateSubmissions(snapshot, records).find(pair => pair.turn.id === prompt.request.turnId)?.record : undefined;
+      const submission = matched ?? records.find(r => r.threadId === prompt.request.threadId && r.turnId === prompt.request.turnId);
       const ownTarget = target ?? (submission ? { scope: submission.scope, replyTo: submission.replyTo, replyInThread: submission.replyInThread } : undefined);
+      const context = turn && groupRequestContext(turn);
+      const key = codexInputKey(prompt.request);
+      // Never let an API turn publish interactive cards in any Feishu group.
+      if (context?.channel === 'a2a') { live.delete(key); return; }
+      const sharedAudience = allowed.some(entry => {
+        const b = deps.controls.toolBindings?.get(entry.scopeId);
+        return deps.controls.auxiliary?.isAuxiliary(entry.scopeId) || b?.linkedSource || b?.sharedScope || b?.auxiliaryWorkgroup;
+      }) || deps.controls.toolBindings?.entries?.().some(([, b]) => b.linkedSource && b.nativeId === prompt.request.threadId);
+      if ((!ownTarget && context) || (!ownTarget && sharedAudience && (!turn || !externalUserText(turn)))) {
+        // Wait for a native snapshot and a trusted receipt; JSON may only restrict an audience.
+        live.set(key, { source, prompt, target });
+        if (!context && !provenanceReads.has(prompt.request.threadId) && reader?.readThread) {
+          const reading = reader.readThread(prompt.request.threadId).then(current => {
+            if (stopped) return;
+            handle.observeSnapshot(current);
+            const currentTurn = current.turns.find(t => t.id === prompt.request.turnId);
+            if (currentTurn && externalUserText(currentTurn)) handle.accept(prompt, source, target);
+          }).catch(() => { /* Retry on the next poll; never broadcast on lookup failure. */ })
+            .finally(() => { provenanceReads.delete(prompt.request.threadId); });
+          provenanceReads.set(prompt.request.threadId, reading);
+        }
+        return;
+      }
+      if (context && ownTarget?.scope !== context.chat_id) return;
       const targets = ownTarget ? allowed.filter(entry => entry.scopeId === ownTarget.scope &&
         (!deps.controls.auxiliary?.isAuxiliary(entry.scopeId) || deps.controls.auxiliary.isActive(entry.scopeId)))
-        : allowed.filter(entry => !deps.controls.auxiliary?.isAuxiliary(entry.scopeId));
+        : allowed.filter(entry => {
+          const b = deps.controls.toolBindings?.get(entry.scopeId);
+          return !deps.controls.auxiliary?.isAuxiliary(entry.scopeId) && !b?.linkedSource && !b?.sharedScope && !b?.auxiliaryWorkgroup;
+        });
       if (!targets.length) return;
-      const key = codexInputKey(prompt.request);
       const previous = stored.get(key);
       // Replay may race a response we already sent. Never resurrect it.
       if (previous?.status === 'resolved' || previous?.status === 'submitted' || previous?.status === 'submitting' || previous?.status === 'unconfirmed') return;
@@ -282,7 +317,7 @@ export async function startCodexUserInput(deps: CodexInputDeps): Promise<CodexIn
       stopped = true;
       clearInterval(timer);
       await reader?.stop();
-      await Promise.allSettled(writerProbes.values());
+      await Promise.allSettled([...writerProbes.values(), ...provenanceReads.values()]);
       await tail;
       await persist();
     },

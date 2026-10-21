@@ -1,3 +1,5 @@
+import { controlsForTool } from '../../../src/tools/context';
+import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import { it, expect, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -67,4 +69,33 @@ it('persists shared auxiliary aliases and propagates native creation without mer
   expect(() => store.linkAuxiliary('personal', 'aux_canonical')).toThrow('不能覆盖');
   expect(() => store.linkAuxiliary('oc_c', 'missing')).toThrow('Invalid');
   await store.flush();
+});
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('shared %s entries follow original model settings live and clear old overrides', async toolId => {
+  const root = await mkdtemp(join(tmpdir(), 'shared-model-')); clean.push(root);
+  const store = new ToolBindingStore(join(root, 'bindings')); await store.load();
+  store.set('oc_original', { toolId, sourceId: root, nativeId: 'original', model: 'model-v1', reasoningEffort: 'high' });
+  store.set('aux_shared', { toolId, sourceId: root, nativeId: 'original', model: 'stale-model', reasoningEffort: 'stale-effort',
+    linkedSource: { toolId, sourceId: root, nativeId: 'original' } });
+  store.linkAuxiliary('oc_open', 'aux_shared'); store.linkAuxiliary('a2a_task', 'aux_shared');
+  store.set('oc_ffowner', { toolId, sourceId: root, nativeId: 'original', auxiliaryWorkgroup: true, model: 'stale-owner' });
+  const profileConfig = createDefaultProfileConfig({ agentKind: 'codex', codex: { binaryPath: 'fake' },
+    preferences: { model: 'global-default', reasoningEffort: 'medium' }, accounts: { app: { id: 'cli_test', secret: 's', tenant: 'feishu' } } });
+  const controls = { profileConfig, toolBindings: store } as any;
+  const views = ['oc_open', 'a2a_task', 'oc_ffowner'].map(scope => controlsForTool(controls, toolId, scope));
+  expect(views.map(view => view.profileConfig.preferences.model)).toEqual(Array(3).fill('model-v1'));
+  store.set('oc_original', { ...store.get('oc_original')!, model: 'model-v2', reasoningEffort: 'low' });
+  for (const view of views) expect(view.profileConfig.preferences).toMatchObject({ model: 'model-v2', reasoningEffort: 'low' });
+  expect(store.settingsScope('oc_ffowner')).toBe('oc_original');
+  store.set('oc_original', { ...store.get('oc_original')!, model: 'default', reasoningEffort: undefined });
+  for (const view of views) { expect(view.profileConfig.preferences.model).toBeUndefined(); expect(view.profileConfig.preferences.reasoningEffort).toBeUndefined(); }
+  await store.flush();
+});
+it('does not guess model ownership when the original workgroup is absent or ambiguous', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'shared-model-owner-')); clean.push(root);
+  const store = new ToolBindingStore(join(root, 'bindings')); await store.load();
+  store.set('aux_shared', { toolId: 'codex', sourceId: root, nativeId: 'original', linkedSource: { toolId: 'codex', sourceId: root, nativeId: 'original' } });
+  store.linkAuxiliary('oc_open', 'aux_shared'); expect(store.settingsScope('oc_open')).toBeUndefined();
+  for (const scope of ['oc_a', 'oc_b']) store.set(scope, { toolId: 'codex', sourceId: root, nativeId: 'original' });
+  expect(store.settingsScope('oc_open')).toBeUndefined(); await store.flush();
 });

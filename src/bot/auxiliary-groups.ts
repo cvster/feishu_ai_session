@@ -1,4 +1,4 @@
-import { nativeSessionFields } from '../tools/definitions';
+import { isToolId, nativeSessionFields } from '../tools/definitions';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -66,6 +66,7 @@ export class AuxiliaryGroups {
   private privateCreations: Record<string, { uuid: string; startedAt: number; name: string; chatId?: string }> = {};
   private apiRequests: Record<string, AuxiliaryApiRequest> = {};
   private choices = new Map<string, Choice>();
+  private legacySources: Record<string, LinkedSession> = {};
   private saving: Promise<void> = Promise.resolve();
   private chains = new Map<string, Promise<unknown>>();
   constructor(private readonly deps: Deps) {}
@@ -87,6 +88,16 @@ export class AuxiliaryGroups {
           if (!scope.startsWith('a2a_') || r.chatId !== scope || !r.sharedScope || !r.actorId || !r.requestId || !r.ownerId || !r.source || !r.cwd) throw new Error('Invalid API FF request');
         }
         this.apiRequests = raw.apiRequests;
+      }
+      if (raw.legacySources !== undefined) {
+        if (!raw.legacySources || typeof raw.legacySources !== 'object' || Array.isArray(raw.legacySources)) throw new Error('Invalid migration map');
+        for (const [key, value] of Object.entries(raw.legacySources) as [string, LinkedSession][]) {
+          const ref = JSON.parse(key);
+          if (!Array.isArray(ref) || ref.length !== 3 || !ref.every(v => typeof v === 'string' && !!v) ||
+            !value || !isToolId(value.toolId) || value.toolId !== ref[0] || value.sourceId !== ref[1] || typeof value.nativeId !== 'string' || !value.nativeId)
+            throw new Error('Invalid migration source');
+        }
+        this.legacySources = raw.legacySources;
       }
       // Retire old bot-DM routes without replaying pending input or losing history.
       for (const [scope, old] of Object.entries(raw.privateRequests ?? {}) as [string, AuxiliaryGroup][]) {
@@ -236,6 +247,23 @@ export class AuxiliaryGroups {
       if (!canonical.has(scope)) canonical.set(scope, { ...current, toolId: row.source.toolId,
         sourceId: row.source.sourceId, linkedSource: row.source, sharedScope: undefined });
     }
+    // Write ahead before changing any binding: retain the old FF identity after a crash.
+    // Active pre-migration catalog rows also recover an interrupted older upgrade.
+    let planned = false;
+    const remember = (toolId: AgentKind, sourceId: string, nativeId: string | undefined, source: LinkedSession) => {
+      if (!nativeId || nativeId === source.nativeId) return;
+      const key = sessionRefKey(toolId, sourceId, nativeId), previous = this.legacySources[key];
+      if (previous && this.sourceKey(previous) !== this.sourceKey(source)) throw new Error('FF 迁移来源冲突');
+      if (!previous) { this.legacySources[key] = source; planned = true; }
+    };
+    for (const legacy of this.deps.bindings.legacyNativeSources()) remember(legacy.toolId, legacy.sourceId, legacy.nativeId, legacy.source);
+    for (const [, old] of canonical) remember(old.toolId, old.sourceId, old.nativeId, old.linkedSource!);
+    for (const row of Object.values(this.records)) if (row.source && ['active', 'leaving'].includes(row.status)) {
+      for (const entry of this.deps.catalog?.entries() ?? []) if (entry.scopeId === row.chatId && entry.status === 'active' &&
+        entry.agentId === row.source.toolId && (!entry.sourceId || entry.sourceId === row.source.sourceId))
+        remember(row.source.toolId, row.source.sourceId, entry.threadId ?? entry.sessionId, row.source);
+    }
+    if (planned) await this.save();
     const generations = new Map<string, string>();
     for (const [scope, old] of canonical) {
       const source = old.linkedSource!;
@@ -251,7 +279,9 @@ export class AuxiliaryGroups {
       for (const row of rows.filter(r => ['active', 'leaving'].includes(r.status))) {
         if (!aliases.some(([chat]) => chat === row.chatId)) aliases.push([row.chatId, this.deps.bindings.get(row.chatId) ?? old]);
         const prior = previous.find(([chat]) => chat === row.chatId)?.[1];
-        if (prior?.nativeId !== source.nativeId) {
+        const staleCatalog = this.deps.catalog?.entries().some(e => e.scopeId === row.chatId && e.status === 'active' &&
+          e.agentId === source.toolId && (e.threadId ?? e.sessionId) !== source.nativeId);
+        if (prior?.nativeId !== source.nativeId || staleCatalog) {
           generations.set(row.chatId, row.generation); row.generation = randomUUID(); delete row.running;
           await this.deps.cancelPending(row.chatId);
         }
@@ -259,8 +289,10 @@ export class AuxiliaryGroups {
         if (cwd) row.cwd = cwd;
       }
       // Existing FF owner groups remain usable, but now resume the original AA.
-      for (const [chat, b] of previous) if (b.auxiliaryWorkgroup && old.nativeId && b.nativeId === old.nativeId &&
-        b.toolId === old.toolId && b.sourceId === old.sourceId) {
+      for (const [chat, b] of previous) {
+        if (!b.auxiliaryWorkgroup || !b.nativeId || b.toolId !== source.toolId || b.sourceId !== source.sourceId) continue;
+        const mapped = this.legacySources[sessionRefKey(b.toolId, b.sourceId, b.nativeId)];
+        if (b.nativeId !== source.nativeId && (!mapped || this.sourceKey(mapped) !== this.sourceKey(source))) continue;
         this.deps.bindings.set(chat, { ...b, nativeId: source.nativeId, nativeCreated: true });
         aliases.push([chat, b]);
       }
@@ -313,7 +345,7 @@ export class AuxiliaryGroups {
     return next;
   }
   private save(): Promise<void> {
-    const text = JSON.stringify({ version: 1, appId: this.deps.appId, groups: this.records, privateCreations: this.privateCreations, apiRequests: this.apiRequests }, null, 2);
+    const text = JSON.stringify({ version: 1, appId: this.deps.appId, groups: this.records, legacySources: this.legacySources, privateCreations: this.privateCreations, apiRequests: this.apiRequests }, null, 2);
     this.saving = this.saving.catch(() => {}).then(() => writeFileAtomic(this.deps.path, text + '\n', { mode: 0o600 }));
     return this.saving;
   }

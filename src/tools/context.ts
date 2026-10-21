@@ -14,8 +14,12 @@ export function controlsForTool(root: Controls, toolId: AgentKind, scope?: strin
     get(target, key, receiver) {
       const binding = scope ? target.toolBindings?.get(scope) : undefined;
       const profile = toolProfile(target.profileConfig, toolId);
-      if (binding?.model !== undefined) profile.preferences.model = binding.model === 'default' ? undefined : binding.model;
-      if (binding?.reasoningEffort) profile.preferences.reasoningEffort = binding.reasoningEffort;
+      const shared = binding?.linkedSource || binding?.auxiliaryWorkgroup;
+      const settingsScope = scope && shared ? target.toolBindings?.settingsScope(scope) : scope;
+      const settings = shared ? (settingsScope ? target.toolBindings?.get(settingsScope) : undefined) : binding;
+      if (shared) { profile.preferences.model = undefined; profile.preferences.reasoningEffort = undefined; }
+      if (settings?.model !== undefined) profile.preferences.model = settings.model === 'default' ? undefined : settings.model;
+      if (settings?.reasoningEffort) profile.preferences.reasoningEffort = settings.reasoningEffort;
       if (key === 'runControlIcons') return { ...target.runControlIcons, supportsFork: true, ...(binding?.linkedSource ? { auxiliary: true } : {}) };
       if (key === 'profileConfig') return profile;
       if (key === 'cfg') return { ...target.cfg, agentKind: toolId,

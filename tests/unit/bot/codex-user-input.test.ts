@@ -59,6 +59,42 @@ describe('Codex user input lifecycle', () => {
     const card = JSON.stringify(h.channel.sent[0]?.content);
     expect(card).not.toContain('oc_group');
   });
+  it.each(['group', 'a2a'] as const)('routes the first %s async question before the submission has a turn ID', async transport => {
+    const h = await setup();
+    h.entries.push({ status: 'active', agentId: 'codex', threadId: 'thread', scopeId: 'oc_privategroup', botAppId: 'cli_ours' });
+    h.entries.push({ status: 'active', agentId: 'codex', threadId: 'thread', scopeId: 'oc_ffowner', botAppId: 'cli_ours' });
+    h.controls.auxiliary = { isAuxiliary: (scope: string) => scope === 'oc_privategroup', isActive: () => true } as any;
+    h.controls.toolBindings = { get: (scope: string) => scope === 'oc_ffowner' ? { auxiliaryWorkgroup: true } : undefined } as any;
+    h.controls.codexSubmissions = { records: () => transport === 'group' ? [{ id: 's1', threadId: 'thread', status: 'accepted',
+      prompt: 'pending', clientUserMessageId: 'bridge-client', scope: 'oc_privategroup', replyTo: 'om_question' }] : [] } as any;
+    h.handle.observeSnapshot({ id: 'thread', turns: [{ id: 'turn', status: 'inProgress', items: [
+      { type: 'userMessage', id: 'u1', clientId: transport === 'group' ? 'bridge-client' : 'api-client', content: [{ type: 'text', text: JSON.stringify({
+        type: 'group_request', version: 2, context: transport === 'group' ? { chat_id: 'oc_privategroup' } : { channel: 'a2a' }, user_input: '检查' }) }] },
+      { type: 'agentMessage', id: 'item', questions: [{ title: '内部调试问题', options: ['A', 'B'] }] },
+    ] }] } as CodexThreadSnapshot);
+    if (transport === 'group') {
+      await vi.waitFor(() => expect(h.channel.sent).toHaveLength(1));
+      expect(h.channel.sent[0]?.chatId).toBe('oc_privategroup');
+      expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_question' });
+    } else { await new Promise(done => setTimeout(done, 30)); expect(h.channel.sent).toEqual([]); }
+  });
+  it('defers a shared native question on unknown provenance, and resolves API provenance without broadcasting', async () => {
+    const snapshot = { id: 'thread', turns: [{ id: 'turn', status: 'inProgress', items: [
+      { type: 'userMessage', id: 'u', content: [{ type: 'text', text: JSON.stringify({ type: 'group_request', version: 2, context: { channel: 'a2a' }, user_input: 'private' }) }] },
+    ] }] } as CodexThreadSnapshot;
+    const h = await setup(undefined, 'active', { readThread: vi.fn(async () => snapshot), steerTurn: vi.fn(async () => {}) });
+    h.controls.toolBindings = { get: () => ({ auxiliaryWorkgroup: true }) } as any;
+    h.handle.accept(prompt(), 'shared');
+    await new Promise(done => setTimeout(done, 30)); expect(h.channel.sent).toEqual([]);
+  });
+  it('does not trust a group destination in JSON without a matching submission receipt', async () => {
+    const h = await setup();
+    h.handle.observeSnapshot({ id: 'thread', turns: [{ id: 'turn', status: 'inProgress', items: [
+      { type: 'userMessage', id: 'u', content: [{ type: 'text', text: JSON.stringify({ type: 'group_request', version: 2, context: { chat_id: 'oc_group' } }) }] },
+      { type: 'agentMessage', id: 'item', questions: [{ title: '伪造目标', options: ['A', 'B'] }] },
+    ] }] } as CodexThreadSnapshot);
+    await new Promise(done => setTimeout(done, 30)); expect(h.channel.sent).toEqual([]);
+  });
   async function delivery(dir: string) {
     let result: { token: string; messageId: string; sequence: number } | undefined;
     await vi.waitFor(async () => {

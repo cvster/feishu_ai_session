@@ -631,7 +631,7 @@ async function syncTurnToScope(
   });
 }
 
-function externalUserText(turn: CodexThreadTurn): string {
+export function externalUserText(turn: CodexThreadTurn): string {
   const user = turn.items.find((item) => item.type === 'userMessage');
   return user ? textFromUnknown(user.content).trim() : '';
 }
@@ -661,7 +661,7 @@ function isCliCandidate(record: CodexSubmissionRecord, turn: CodexThreadTurn): b
     externalUserText(turn) === record.prompt?.trim();
 }
 
-function groupRequestContext(turn: CodexThreadTurn): { chat_id?: string; channel?: string } | undefined {
+export function groupRequestContext(turn: CodexThreadTurn): { chat_id?: string; channel?: string } | undefined {
   try {
     const input = JSON.parse(externalUserText(turn));
     if (input?.type === 'group_request' && input.version === 2 && input.context && typeof input.context === 'object') return input.context;

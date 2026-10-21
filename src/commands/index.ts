@@ -3272,7 +3272,10 @@ async function savePreferencesConfig(
 ): Promise<void> {
   const bound = ctx.controls.toolBindings?.get(ctx.scope);
   if (bound) {
-    ctx.controls.toolBindings!.set(ctx.scope, { ...bound, model: preferences.model ?? 'default', reasoningEffort: preferences.reasoningEffort });
+    const settingsScope = ctx.controls.toolBindings!.settingsScope(ctx.scope);
+    if (!settingsScope) throw new Error('无法唯一确定原工作群，请在原工具会话中设置模型。');
+    const settings = ctx.controls.toolBindings!.get(settingsScope)!;
+    ctx.controls.toolBindings!.set(settingsScope, { ...settings, model: preferences.model ?? 'default', reasoningEffort: preferences.reasoningEffort });
     await ctx.controls.toolBindings!.flush();
     const base = await loadRootConfig(ctx.controls.configPath);
     const original = base?.profiles[ctx.controls.profile]?.preferences;

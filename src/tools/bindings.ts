@@ -73,6 +73,21 @@ export class ToolBindingStore {
       sessionRefKey(b.linkedSource.toolId, b.linkedSource.sourceId, b.linkedSource.nativeId)) throw new Error('Invalid shared auxiliary binding');
     return structuredClone({ ...shared, sharedScope: b.sharedScope });
   }
+  /** Raw aliases can retain the old FF ID after only the canonical write committed. */
+  legacyNativeSources(): Array<{ toolId: AgentKind; sourceId: string; nativeId: string; source: LinkedSession }> {
+    return Object.values(this.bindings).flatMap(b => b.linkedSource && b.nativeId && b.nativeId !== b.linkedSource.nativeId
+      ? [{ toolId: b.toolId, sourceId: b.sourceId, nativeId: b.nativeId, source: structuredClone(b.linkedSource) }] : []);
+  }
+  /** Shared entries follow the unique original workgroup's current model settings. */
+  settingsScope(scope: string): string | undefined {
+    const binding = this.get(scope);
+    if (!binding?.linkedSource && !binding?.auxiliaryWorkgroup) return scope;
+    const source = binding.linkedSource ?? binding;
+    if (!source.nativeId) return;
+    const originals = this.entries().filter(([chat, b]) => !chat.includes(':') && !b.linkedSource && !b.sharedScope && !b.auxiliaryWorkgroup &&
+      b.toolId === source.toolId && b.sourceId === source.sourceId && b.nativeId === source.nativeId);
+    return originals.length === 1 ? originals[0]![0] : undefined;
+  }
   set(scope: string, binding: ToolBinding): void {
     const previous = this.get(scope);
     if (previous && (previous.toolId !== binding.toolId || previous.sourceId !== binding.sourceId)) throw new Error('会话创建后不能切换执行工具');
