@@ -1,3 +1,9 @@
+# Product terminology
+
+- Use **会话共享** for sharing an existing AI conversation with other groups, **共享群** for groups using that shared conversation, and **AI助手** for the assistant available in those groups.
+- Use these names in user-facing cards, messages, help and current documentation. Personal workgroups retain their one-to-one native-session binding; shared groups are additional access routes to the existing conversation.
+- Reserve FF for legacy history and migration descriptions. Existing protocol names, callback IDs, `/aux`, and persisted `auxiliary` fields remain compatibility identifiers.
+
 # Operational safety
 
 - When the user requests a bridge deployment or restart, execute it directly on the requested local/remote hosts. Do not check whether Codex tasks are running, inspect task lists or active-run state as a restart gate, or ask for additional restart confirmation. This applies regardless of which conversations are active.

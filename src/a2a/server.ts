@@ -120,7 +120,7 @@ export async function startA2AServer(deps: A2AServerDeps) {
       const task = await store.create({ sharedScope: scope, keyId: key.id, ownerId: owner,
         actorId: key.role === 'owner' ? owner : `api_${key.id}`, callerName: key.name, contextId, messageId: input.messageId, question: input.question, fingerprint });
       try { await deps.auxiliary.acceptApi(scope, task.id, task.actorId); }
-      catch (error) { await store.update(task, { state: 'TASK_STATE_FAILED', notice: 'FF 会话绑定不可用，本次任务未执行。' }); throw error; }
+      catch (error) { await store.update(task, { state: 'TASK_STATE_FAILED', notice: '会话共享入口不可用，本次任务未执行。' }); throw error; }
       launch(task); return { ...input, task };
     });
   }
@@ -135,7 +135,7 @@ export async function startA2AServer(deps: A2AServerDeps) {
     const key = owner ? authenticate(endpoint, req.headers.authorization, owner) : undefined;
     if (!key) throw new ApiError(401, '需要有效的访问密钥', 'UNAUTHENTICATED');
     const session = deps.auxiliary.apiSession(scope);
-    if (!session) throw new ApiError(410, 'FF 会话已归档或不可用', 'NOT_FOUND');
+    if (!session) throw new ApiError(410, '共享会话已归档或不可用', 'NOT_FOUND');
     const path = match[3] ?? '/';
     if (req.method === 'GET' && ['/agent-card.json', '/.well-known/agent-card.json'].includes(path))
       return reply(res, 200, agentCard(config!, scope, endpoint.alias, session.name));
@@ -244,11 +244,11 @@ export function parseSend(value: unknown): { messageId: string; question: string
 }
 export function agentCard(config: A2AConfig, scope: string, alias: string | undefined, name: string) {
   const base = `http://${config.host}:${config.port}/${config.namespace}/agents/${defaultAlias(scope)}`;
-  return { name, description: '有共享项目上下文的项目助手，可问答和执行调试检查。每条消息只提交一个明确任务；勿作为通用模型供应商配置，勿上传完整对话或自动重复执行。权限确认由服务端联系所有者，等待期间继续查询原任务。',
+  return { name, description: '通过会话共享提供项目上下文的AI助手，可问答和执行调试检查。每条消息只提交一个明确任务；勿作为通用模型供应商配置，勿上传完整对话或自动重复执行。权限确认由服务端联系所有者，等待期间继续查询原任务。',
     version: '1.0.0', supportedInterfaces: [{ url: base, protocolBinding: 'HTTP+JSON', protocolVersion: '1.0' }],
     capabilities: { streaming: false, pushNotifications: false, extendedAgentCard: false,
       extensions: [{ uri: 'https://github.com/cvster/CodexFeishu/blob/main/docs/A2A_API.md#project-assistant-v1',
-        description: '共享项目助手及完整任务快照', required: false,
+        description: '共享AI助手及完整任务快照', required: false,
         params: { aliases: [defaultAlias(scope), ...(alias ? [alias] : [])], sharedContext: true, partialArtifacts: true, pollIntervalMs: 1000 } }] },
     securitySchemes: { bearer: { httpAuthSecurityScheme: { scheme: 'Bearer' } } }, securityRequirements: [{ schemes: { bearer: { list: [] } } }],
     defaultInputModes: ['text/plain'], defaultOutputModes: ['text/plain'],

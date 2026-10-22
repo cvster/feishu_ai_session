@@ -217,7 +217,7 @@ export function taskPanelCard(info: TaskPanelInfo): object {
           { text: '工作目录', value: { cmd: 'ws.list' } },
         ]),
         ...(info.chatMode === 'p2p' && info.auxiliaryAvailable ? [cardKitButtonRow([
-          { text: '待关联辅助群', value: { cmd: 'panel.auxiliary' } },
+          { text: '会话共享', value: { cmd: 'panel.auxiliary' } },
         ])] : []),
         cardKitButtonRow([
           { text: '刷新状态', value: { cmd: 'panel.refresh' } },

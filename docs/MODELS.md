@@ -1,6 +1,6 @@
 # 动态模型与推理档位
 
-飞书桥接不内置具体模型名单。个人工作群和 FF 会话在 `/config` 中选择模型，选择按已有的工具绑定保存，FF 继续使用共享 FF 会话的模型设置。
+飞书桥接不内置具体模型名单。个人工作群在 `/config` 中选择模型，选择按已有的工具绑定保存。共享群、AI助手私聊群和 API 跟随原个人工作群的模型与推理档位；没有唯一原工作群时，沿用工具自己的会话设置。
 
 | 工具 | 模型来源 | 保存的模型标识 |
 | --- | --- | --- |
@@ -53,6 +53,6 @@ ZCode 能力读取使用临时目录和独立的短生命周期 Agent CLI，仅�
 
 ## 扩展工具
 
-`AgentAdapter.listModels({ cwd })` 是统一的动态发现接口，独立 worker 代理委托给对应原生 CLI。渲染层接收一次发现的安全投影，执行层在新任务提交前校验选择。模型选项携带各模型的推理档位安全投影；不要在卡片、FF、A2A 或公共运行流程中新增模型或档位白名单。
+`AgentAdapter.listModels({ cwd })` 是统一的动态发现接口，独立 worker 代理委托给对应原生 CLI。渲染层接收一次发现的安全投影，执行层在新任务提交前校验选择。模型选项携带各模型的推理档位安全投影；不要在卡片、会话共享、A2A 或公共运行流程中新增模型或档位白名单。
 
 原生接口参考：[Codex model/list](https://developers.openai.com/codex/app-server/#list-models-modellist)、[Claude Agent SDK 初始化实现](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/query.py)、[ZCode 供应商规则](https://github.com/zai-org/ZCode/blob/main/packages/provider/src/config/rule-data-schema.ts)。兼容性以部署的工具版本实际返回值为准。

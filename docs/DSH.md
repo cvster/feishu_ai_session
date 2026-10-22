@@ -39,22 +39,22 @@ node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool dsh
 
 Linux 服务为 `lark-channel-worker.dsh.my-bot.service`，状态目录为 profile 下的 `execution-worker-dsh`。其他系统可用 `worker run --profile my-bot --tool dsh` 自行托管。新增 DSH 只需启动它的 worker、更新桥接；已有 Claude、ZCode、Kilo worker 不需要重启。
 
-私聊机器人选择“新建会话”→ **DeepSeek Harness** → 项目目录。已有 DSH 会话改为 `AA` 开头也可自动建群。使用独立的蓝底 DSH 鲸鱼头像，支持停止和复制会话按钮。工作群、共用原会话的开放群、辅助私聊群、权限确认与 A2A 复用现有机制，不需新增飞书权限。
+私聊机器人选择“新建会话”→ **DeepSeek Harness** → 项目目录。已有 DSH 会话改为 `AA` 开头也可自动建群。使用独立的蓝底 DSH 鲸鱼头像，支持停止和复制会话按钮。工作群、共用原会话的共享群、AI助手私聊群、权限确认与 A2A 复用现有机制，不需新增飞书权限。
 
 ## 动态模型和会话
 
 - `/config` 刷新时调用 DSH 原生 `session/modelCatalog`，逐个保留供应商、模型 ID 和模型自己的 reasoning efforts；不使用其他工具的模型清单，也不硬编码模型或档位。
 - 值为 `供应商ID/模型ID`，模型 ID 内的斜杠保留。同名供应商附带实际 ID。删除已选模型或档位后拒绝提交并提示重选，不静默换供应商。
 - 恢复会话优先使用 DSH 会话记录中的模型和档位。显式选择通过原生 `session/selectModel`，该接口也会按 DSH 自身行为保存默认模型；其他已有群仍保留自己的会话选择。
-- 改名、复制、归档分别使用原生 Session / Workspace 接口。归档保留历史，不删除会话或项目文件。开放群直接续聊所选原会话，不创建 FF 或生成来源快照。
-- 普通消息原样提交，开放群每次使用简短 JSON 权限与投递提示。附件当前通过本机文件路径上下文提供，不宣称已接入 DSH 的原生图片上传协议。
+- 改名、复制、归档分别使用原生 Session / Workspace 接口。归档保留历史，不删除会话或项目文件。共享群直接续聊所选原会话，不创建 FF 或生成来源快照。
+- 普通消息原样提交，共享群每次使用简短 JSON 权限与投递提示。附件当前通过本机文件路径上下文提供，不宣称已接入 DSH 的原生图片上传协议。
 
 ## 执行边界
 
 - 每次执行由独立 worker 持有一个自己启动的 DSH Web 后端，仅绑定 `127.0.0.1`、使用随机端口和原生登录 cookie。启动 token、cookie、供应商凭据及原生日志不输出到飞书或桥接日志。
 - 先订阅会话流再提交，按本次 `requestId` 的入队凭证和 Session 序号过滤事件；去重实时文本与持久化正文，等待本次 turn 结束及 Agent idle。回执不明、连接断开不自动重发问题。
 - 停止调用本次会话的 `session/cancel`；必要时仅关闭本次拥有的 DSH 子进程，不停止用户自己的 DSH Web/桌面进程。
-- 每次执行按桥接访问模式设置并回读 DSH 原生 `/permission`：`read-only`、`workspace-write`、`danger-full-access`。设置失败不提交问题。具体隔离能力由 DSH 和本机环境决定；FF 业务限制仍为既有提示词约束。
+- 每次执行按桥接访问模式设置并回读 DSH 原生 `/permission`：`read-only`、`workspace-write`、`danger-full-access`。设置失败不提交问题。具体隔离能力由 DSH 和本机环境决定；会话共享的业务限制仍为既有提示词约束。
 - 原生交互问答和权限弹窗尚未转接到飞书，不自动回答或同意。检测到原生问题时停止；桥接的既有超时与停止机制仍可终止等待。
 - 不支持编辑器、独立 DSH Web 与飞书同时写同一原生会话；请使用同一入口串行操作。独立 worker 可跨桥接重启持有执行，worker/主机重启不保证任务继续。
 

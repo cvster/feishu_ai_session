@@ -461,7 +461,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           if (dropped.length) await runtime.inbox.reject(chatId, dropped); await runtime.inbox.rejectScope(chatId);
         }
         for (const r of controls.codexSubmissions?.records() ?? []) if (r.scope === chatId && r.status === 'pending')
-          await controls.codexSubmissions!.mark(r.id, { status: 'rejected', error: '辅助群正在退出' }, ['pending']);
+          await controls.codexSubmissions!.mark(r.id, { status: 'rejected', error: '共享群正在退出' }, ['pending']);
       },
     });
     await controls.auxiliary.load();
@@ -533,7 +533,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       try { if (await controls.auxiliaryApprovals?.action(evt)) return; }
       catch (error) { await channel.send(evt.operator.openId, { text: `权限确认处理未完成：${auxiliaryLinkError(error)}。请查看原请求状态；不会自动重复执行。` }); return; }
       try { if (await controls.auxiliary?.action(evt)) return; }
-      catch (error) { await channel.send(evt.operator.openId, { text: `辅助群关联未完成：${auxiliaryLinkError(error)} 可私聊发送 /aux 重新选择。` }); return; }
+      catch (error) { await channel.send(evt.operator.openId, { text: `会话共享未完成：${auxiliaryLinkError(error)} 可私聊发送 /aux 重新选择。` }); return; }
       await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
         await handleCardAction({
           channel,
@@ -792,7 +792,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   for (const record of submissions?.records() ?? []) {
     if (record.status !== 'pending') continue;
     if (controls.auxiliary?.isAuxiliary(record.scope) && !controls.auxiliary.isActive(record.scope)) {
-      await submissions!.mark(record.id, { status: 'rejected', error: '辅助群未启用' }, ['pending']); continue;
+      await submissions!.mark(record.id, { status: 'rejected', error: '共享群未启用' }, ['pending']); continue;
     }
     for (const message of record.messages) pending.push(record.scope, message);
   }
@@ -972,7 +972,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     const raw = msg.raw as { sender?: { sender_type?: string }; event?: { sender?: { sender_type?: string } } } | undefined;
     const senderType = raw?.sender?.sender_type ?? raw?.event?.sender?.sender_type;
     if (senderType !== 'app' && senderType !== 'bot' && msg.senderId !== channel.botIdentity?.openId)
-      await channel.send(msg.chatId, { text: '旧私聊接口已停用。请在已关联的辅助群中 @我发送“私聊”，创建私聊群后提问。' }, { replyTo: msg.messageId });
+      await channel.send(msg.chatId, { text: '旧私聊接口已停用。请在已关联的共享群中 @我发送“私聊”，创建私聊群后提问。' }, { replyTo: msg.messageId });
     return;
   }
   const auxiliaryGroup = msg.chatType !== 'p2p' ? auxiliary?.get(msg.chatId) : undefined;
@@ -981,8 +981,8 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     const senderType = raw?.sender?.sender_type ?? raw?.event?.sender?.sender_type;
     if (!msg.mentionedBot || msg.mentionAll || senderType === 'app' || senderType === 'bot' || msg.senderId === channel.botIdentity?.openId) return;
     if (!auxiliary!.isActive(msg.chatId) && !(msg.content.trim() === '退出' && msg.senderId === auxiliaryGroup.ownerId)) {
-      await channel.send(msg.chatId, { text: auxiliaryGroup.privateGroup ? '私聊群暂未准备完成或已失效，请回辅助群重新 @我发送“私聊”，或联系所有者检查。'
-        : '辅助群尚未完成关联，或正在退出。请所有者私聊发送 /aux。' }, { replyTo: msg.messageId });
+      await channel.send(msg.chatId, { text: auxiliaryGroup.privateGroup ? '私聊群暂未准备完成或已失效，请回共享群重新 @我发送“私聊”，或联系所有者检查。'
+        : '共享群尚未完成关联，或正在退出。请所有者私聊发送 /aux。' }, { replyTo: msg.messageId });
       return;
     }
     await auxiliary!.noteRequest(msg.chatId, msg.messageId, msg.senderId);
@@ -1321,7 +1321,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     quotes,
     topicContext,
     channel.botIdentity,
-    ownerFFRequest ? [...(extraInstructions ?? []), '本次为当前飞书应用所有者本人请求，按个人工作群正常权限执行；历史辅助群限制及确认要求不适用于本次请求，后续辅助群请求仍按各自规则处理。'] : extraInstructions,
+    ownerFFRequest ? [...(extraInstructions ?? []), '本次为当前飞书应用所有者本人请求，按个人工作群正常权限执行；历史共享群限制及确认要求不适用于本次请求，后续共享群请求仍按各自规则处理。'] : extraInstructions,
     agentKind === 'codex',
   );
   if (controls.auxiliary?.isAuxiliary(scope)) await controls.auxiliaryApprovals?.remember(scope, batch, basePrompt);

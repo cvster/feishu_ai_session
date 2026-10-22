@@ -17,7 +17,7 @@ export interface A2AConfig {
 export const DEFAULT_A2A_PORT = 36999;
 export const validSlug = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(v);
 export function defaultAlias(sharedScope: string): string {
-  if (!/^aux_[\w-]+$/.test(sharedScope)) throw new Error('不是共享 FF 会话 ID');
+  if (!/^aux_[\w-]+$/.test(sharedScope)) throw new Error('不是会话共享入口 ID');
   return `session-${sharedScope.slice(4)}`;
 }
 export function endpointForAlias(config: A2AConfig, alias: string): [string, ApiEndpoint] | undefined {

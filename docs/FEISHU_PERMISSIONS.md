@@ -4,7 +4,7 @@
 
 ## 1. 申请前先确定身份与范围
 
-桥接收发消息、建群、更新卡片和辅助群退群使用 **应用身份**（`tenant_access_token` / `--as bot`）。下表默认均为应用身份权限；只给个人用户授权不能代替应用开通权限。
+桥接收发消息、建群、更新卡片和共享群退群使用 **应用身份**（`tenant_access_token` / `--as bot`）。下表默认均为应用身份权限；只给个人用户授权不能代替应用开通权限。
 
 在 [飞书开发者后台](https://open.feishu.cn/app) 打开自己的应用：
 
@@ -13,7 +13,7 @@
 3. 在“事件与回调”配置长连接、所需事件和卡片回调。
 4. 设置应用可用范围，覆盖实际使用的自己与同事；仅勾选权限不等于用户都能使用。
 5. 创建并发布应用版本；涉及审批时等待通过，再验证权限生效。
-6. 将机器人加入目标群。辅助群还需由应用所有者在私聊完成会话关联。
+6. 将机器人加入目标群。共享群还需由应用所有者在私聊完成会话关联。
 
 桥接默认通过 WebSocket 长连接接收事件，无需为此架设公网回调服务。平台操作说明见 [长连接接收事件](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case)。
 
@@ -29,36 +29,36 @@
 | `im:message:readonly` | 按 ID 读消息、下载消息中的附件；群历史还可能需下一节的全部群消息权限 | [读消息](https://open.feishu.cn/document/server-docs/im-v1/message/get)、[下载资源](https://open.feishu.cn/document/server-docs/im-v1/message/get-2) |
 | `im:resource` | 上传图片和文件，生成卡片按钮图片、群头像及发送文件所需资源 | [上传图片](https://open.feishu.cn/document/server-docs/im-v1/image/create)、[上传文件](https://open.feishu.cn/document/server-docs/im-v1/file/create) |
 | `cardkit:card:write` | 创建和更新 CardKit 2.0 卡片、流式回复 | [创建卡片](https://open.feishu.cn/document/cardkit-v1/card/create)、[更新卡片](https://open.feishu.cn/document/cardkit-v1/card/update) |
-| `im:chat:read` | 查询群名、群模式、群主和成员数量；验证辅助群关联时机器人仍在群内 | [获取群信息](https://open.feishu.cn/document/server-docs/group/chat/get-2) |
+| `im:chat:read` | 查询群名、群模式、群主和成员数量；验证共享群关联时机器人仍在群内 | [获取群信息](https://open.feishu.cn/document/server-docs/group/chat/get-2) |
 | `application:application:self_manage` | 读取本应用信息、识别应用所有者及已授权 scope | [获取应用信息](https://open.feishu.cn/document/server-docs/application-v6/application/get) |
 
 `im:resource:upload` 是上传接口的另一种可选权限；上述组合使用 `im:resource`，不要求两个都申请。更新消息卡片接口接受 `im:message:send_as_bot` 或 `im:message:update` 等权限之一；常规组合已能覆盖，无需为了卡片更新重复申请。
 
 读取应用自身信息优先使用 `application:application:self_manage`，不要仅为识别所有者申请企业级的 `admin:app.info:readonly`。本项目使用 `open_id`，基础桥接不要求读取所有员工邮箱、手机号或申请全量通讯录。
 
-## 3. 个人工作群（含 AA 会话群）与 FF 辅助群
+## 3. 个人工作群（含 AA 会话群）与共享群
 
-启用个人工作群与辅助群生命周期时，在基础组合上增加：
+启用个人工作群与共享群生命周期时，在基础组合上增加：
 
 | 应用权限标识 | 用途 | 对应官方文档 |
 | --- | --- | --- |
-| `im:chat:create` | 从私聊创建个人工作群、为 AA 会话自动建群、辅助群成员请求创建私聊群 | [创建群](https://open.feishu.cn/document/server-docs/group/chat/create) |
+| `im:chat:create` | 从私聊创建个人工作群、为 AA 会话自动建群、共享群成员请求创建私聊群 | [创建群](https://open.feishu.cn/document/server-docs/group/chat/create) |
 | `im:chat:update` | 修改绑定群的名称、头像等可管理信息 | [更新群信息](https://open.feishu.cn/document/server-docs/group/chat/update-2) |
 | `im:chat.members:bot_access` | 订阅机器人入群事件，触发私聊关联流程 | [机器人进群](https://open.feishu.cn/document/server-docs/group/chat-member/event/added-2) |
-| `im:chat.members:write_only` | 所有者要求退出辅助群时，将当前应用机器人自身移出群 | [移出群成员](https://open.feishu.cn/document/server-docs/group/chat-member/delete) |
+| `im:chat.members:write_only` | 所有者要求退出共享群时，将当前应用机器人自身移出群 | [移出群成员](https://open.feishu.cn/document/server-docs/group/chat-member/delete) |
 
 进一步按实际功能选择：
 
 | 应用权限标识 | 何时需要 |
 | --- | --- |
 | `im:chat:operate_as_owner` | 机器人创建群后将群主交给人类，但仍需管理其创建的群时；不是任意群的管理权 |
-| `im:chat.members:read` | 创建或复用 FF 私聊群时核验来源群成员资格和私聊群成员完整性；也用于 CLI 查询群成员列表 |
+| `im:chat.members:read` | 创建或复用AI助手私聊群时核验来源群成员资格和私聊群成员完整性；也用于 CLI 查询群成员列表 |
 
 群管理权限不能代替群内角色校验，不能管理旧机器人或他人创建的任意群。本版归档保留飞书群，由用户自行解散；归档不需要申请 `im:chat:delete`。见 [群成员列表](https://open.feishu.cn/document/server-docs/group/chat-member/get)。
 
 ### 所有者的消息免打扰（用户身份）
 
-新建工作群（含 AA / FF 个人工作群、辅助私聊群）和关联 FF 辅助群时，桥接通过主 `lark-cli` 为当前应用所有者设置 `is_muted=true`。这是所有者自己的普通消息通知偏好，不修改其他成员或 `@所有人` 的提醒设置，也不改变机器人是否处理消息。仅在创建或关联时应用，不会定期覆盖用户之后的手动修改。
+新建个人工作群（含 AA 工作群）、AI助手私聊群或启用共享群的会话共享时，桥接通过主 `lark-cli` 为当前应用所有者设置 `is_muted=true`。这是所有者自己的普通消息通知偏好，不修改其他成员或 `@所有人` 的提醒设置，也不改变机器人是否处理消息。仅在创建或关联时应用，不会定期覆盖用户之后的手动修改。
 
 主 CLI 需绑定同一个应用、以该应用所有者登录，申请并完成用户授权：
 
@@ -71,7 +71,7 @@
 
 ### 可复制的常规组合
 
-覆盖“私聊控制台 + 个人工作群 + FF 关联与退出 + 文件和卡片”的申请标识如下。按上一节判断是否另加群管理权限：
+覆盖“私聊控制台 + 个人工作群 + 会话共享与共享群退出 + 文件和卡片”的申请标识如下。按上一节判断是否另加群管理权限：
 
 ```text
 im:message.p2p_msg:readonly
@@ -90,7 +90,7 @@ im:chat.members:write_only
 
 可以给管理员的用途说明：
 
-> 用于企业内部飞书 AI 编程助手：接收用户私聊和群内 @ 请求，调用本地已登录的 Codex / Claude；以机器人身份回复、传送用户要求的文件、更新进度卡片；创建会话工作群，监听机器人入群并由所有者关联辅助会话，按所有者指令主动退群。权限和数据范围按所启用功能配置。
+> 用于企业内部飞书 AI 编程助手：接收用户私聊和群内 @ 请求，调用本地已登录的 Codex / Claude；以机器人身份回复、传送用户要求的文件、更新进度卡片；创建会话工作群，监听机器人入群并由所有者关联共享会话，按所有者指令主动退群。权限和数据范围按所启用功能配置。
 
 ## 4. 全部群消息、引用历史与表情提示
 
@@ -102,7 +102,7 @@ im:chat.members:write_only
 
 `im:message.group_msg` 是敏感权限，不是仅接收用户 @ 的必要条件。但 [按 ID 获取群消息](https://open.feishu.cn/document/server-docs/im-v1/message/get) 的应用身份调用在基础读消息权限之外还要求全部群消息权限；如果需要引用、话题补全或 CLI 读取历史，应一并申请。资源下载有自己的权限要求，不要把两者混淆。
 
-辅助群的入口始终要求真实 @ 人类消息。即使申请了全部群消息权限，辅助群也不会因此开始响应普通闲聊；普通工作群的响应开关是另一层设置。当前只处理人类提问，无需为此申请接收其他机器人消息的权限。接收规则见 [接收消息](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)。
+共享群的入口始终要求真实 @ 人类消息。即使申请了全部群消息权限，共享群也不会因此开始响应普通闲聊；普通工作群的响应开关是另一层设置。当前只处理人类提问，无需为此申请接收其他机器人消息的权限。接收规则见 [接收消息](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)。
 
 ## 5. 事件与回调清单
 
@@ -112,7 +112,7 @@ im:chat.members:write_only
 | --- | --- | --- |
 | `im.message.receive_v1` | 必需 | 接收私聊和群消息；消息范围由已授权 scope 决定 |
 | `card.action.trigger` | 必需的卡片回调 | 控制台、关联选择、停止、刷新和选项表单 |
-| `im.chat.member.bot.added_v1` | 自动关联辅助群必需 | 机器人被添加到群后通知所有者 |
+| `im.chat.member.bot.added_v1` | 共享群的会话共享设置必需 | 机器人被添加到群后通知所有者 |
 | `im.message.reaction.created_v1` | 按需 | SDK 支持的新增表情事件 |
 | `im.message.reaction.deleted_v1` | 按需 | SDK 支持的删除表情事件 |
 | `drive.notice.comment_add_v1` | 仅云文档评论功能 | 文档评论中 @ 机器人 |
@@ -133,10 +133,10 @@ im:chat.members:write_only
 
 1. **私聊**：所有者发“新建会话”，应收到控制台卡片，按钮能触发操作。
 2. **个人工作群**：创建一个测试群，真实 @ 提问，检查流式回复和刷新。
-3. **辅助关联**：由所有者拉机器人进测试群，收到私聊关联卡片；选择来源会话后在群内 @ 提问。
+3. **会话共享**：由所有者拉机器人进测试群，收到私聊关联卡片；选择来源会话后在群内 @ 提问。
 4. **文件**：发送小图片 / 文件供机器人读取，再要求把一个允许发送的脚本发回本群；以真实附件消息为成功依据。
 5. **折叠**：长回答可展开；结束后状态和按钮在详情区内。
-6. **主动退出**：在专用测试辅助群内由所有者真实 @ 发送“退出”，确认机器人离群；不是解散整个群。
+6. **主动退出**：在专用测试共享群内由所有者真实 @ 发送“退出”，确认机器人离群；不是解散整个群。
 
 按需再测试全部群消息、文档评论等功能。不要通过无关群的管理操作来测试权限。
 
@@ -153,18 +153,18 @@ im:chat.members:write_only
 | `232017` | 群主 / 群创建者等管理身份及 `im:chat:operate_as_owner`，不只是 scope 是否勾选 |
 | 应用能用，但同事找不到 | 应用可用范围、发布 / 审批状态及桥接访问控制 |
 
-本仓库已修复辅助群关联时使用旧 `members/is_in_chat` 导致的 400：现在用 `chat.get` 和 `im:chat:read` 校验机器人在群内，不必为该旧接口额外申请一组旧权限。进群事件仍需要单独的事件权限与订阅。
+本仓库已修复共享群关联时使用旧 `members/is_in_chat` 导致的 400：现在用 `chat.get` 和 `im:chat:read` 校验机器人在群内，不必为该旧接口额外申请一组旧权限。进群事件仍需要单独的事件权限与订阅。
 
 新申请优先使用表中的细粒度 scope。旧应用若已有 `im:chat`、`im:message` 等较宽权限，不必仅为匹配本文重复申请；具体接口通常列有多个可替代 scope，需分别核对。迁移时逐项验证后再移除旧权限。
 
 
-## FF 私聊群
+## AI助手私聊群
 
-成员在已关联辅助群中 `@机器人 私聊`，复用现有建群接口，创建包含请求者、应用所有者和机器人的私有群。桥接应用需要 `im:chat:create`、`im:chat:read`、`im:chat.members:read`，以及现有群 @ 消息接收和机器人发送权限。创建群时通过 `user_id_list` 邀请成员，不额外调用加人接口；退出仍使用 `im:chat.members:write_only`。应用可用范围须包含相关成员及所有者；平台权限需实际发布生效。
+成员在已关联共享群中 `@机器人 私聊`，复用现有建群接口，创建包含请求者、应用所有者和机器人的私有群。桥接应用需要 `im:chat:create`、`im:chat:read`、`im:chat.members:read`，以及现有群 @ 消息接收和机器人发送权限。创建群时通过 `user_id_list` 邀请成员，不额外调用加人接口；退出仍使用 `im:chat.members:write_only`。应用可用范围须包含相关成员及所有者；平台权限需实际发布生效。
 
 创建前核验请求者仍是来源群成员，创建后或复用已有私聊群时核验成员完整；查询失败不按群 ID 直接放行。旧 `ff-dm-v1`、`/ff` 私聊问答已停用，同事无需为此配置机器人搜索或额外用户 CLI 授权。其他 agent 若通过飞书群发送消息，仍须使用各自真实用户身份及相应群消息权限；也可使用独立的 A2A 接口。
 
 
-## FF 受限操作确认
+## 会话共享的受限操作确认
 
-确认使用现有机器人消息与 CardKit 交互能力：发送机器人消息、`cardkit:card:write`、`card.action.trigger` 回调，以及识别应用所有者的应用信息权限。辅助群及私聊群的卡片使用真实所有者 open_id 的 @；A2A API 调用的确认卡发到所有者私聊。无需另申请原生飞书审批权限。确认只能对辅助提示词规则中的具体操作放宽，平台缺失 scope、账号授权或系统文件权限仍需实际开通。
+确认使用现有机器人消息与 CardKit 交互能力：发送机器人消息、`cardkit:card:write`、`card.action.trigger` 回调，以及识别应用所有者的应用信息权限。共享群及私聊群的卡片使用真实所有者 open_id 的 @；A2A API 调用的确认卡发到所有者私聊。无需另申请原生飞书审批权限。确认只能对会话共享提示词规则中的具体操作放宽，平台缺失 scope、账号授权或系统文件权限仍需实际开通。

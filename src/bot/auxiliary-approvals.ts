@@ -234,7 +234,7 @@ export function approvalCard(r: AuxiliaryApproval, privateRequest: boolean): obj
     header: { title: { tag: 'plain_text', content: '受限操作确认' }, template: pending ? 'yellow' : 'grey' },
     body: { elements: [
       { tag: 'markdown', content: `${privateRequest ? '请确认' : `<at id=${r.ownerId}></at> 请确认`}是否允许执行以下操作。` },
-      { tag: 'div', text: { tag: 'plain_text', content: `来源：${r.groupName ?? "辅助会话"} · 提问者：${r.message.senderName || '群成员'}\n拟执行：${r.action}\n原因：${r.reason}` } },
+      { tag: 'div', text: { tag: 'plain_text', content: `来源：${r.groupName ?? "共享会话"} · 提问者：${r.message.senderName || '群成员'}\n拟执行：${r.action}\n原因：${r.reason}` } },
       { tag: 'div', text: { tag: 'plain_text', content: status, text_size: 'notation' } },
       { tag: 'column_set', flex_mode: 'none', columns: ['approve', 'deny'].map((decision, i) => ({
         tag: 'column', width: 'weighted', weight: 1, elements: [{ tag: 'button',

@@ -61,7 +61,7 @@ export async function stopScopedCodexSubmissions(threadId: string, scope: string
             !['cancelled', 'rejected', 'completed'].includes(other.status)).length === 1);
       if (!record) continue;
       await writer.deleteQueuedTurn(threadId, queued.id);
-      await store.mark(record.id, { status: 'cancelled', error: '辅助群退出，已撤销本群排队输入' });
+      await store.mark(record.id, { status: 'cancelled', error: '共享群退出，已撤销本群排队输入' });
     }
   }
   const snapshot = await writer.readThread(threadId);

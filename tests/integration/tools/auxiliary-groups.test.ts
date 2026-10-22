@@ -498,7 +498,7 @@ describe('private FF groups', () => {
     const restored = new AuxiliaryGroups(h.deps); await restored.load();
     await restored.joined({ ...joined, chatId: row.chatId });
     expect(h.cards).toHaveLength(count);
-    await expect(restored.createPrivateGroup(row.chatId, 'ou_member')).rejects.toThrow('已关联的辅助群');
+    await expect(restored.createPrivateGroup(row.chatId, 'ou_member')).rejects.toThrow('已关联的共享群');
     expect(h.create).toHaveBeenCalledOnce();
     expect(restored.get(row.chatId)?.status).toBe('active');
   });
