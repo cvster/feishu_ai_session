@@ -2,6 +2,7 @@ import type { LarkChannel } from '@larksuite/channel';
 import type { Controls } from '../commands';
 import type { SessionArchiveNotification, SessionCatalog } from '../session/catalog';
 import { log } from '../core/logger';
+import { archivedGroupToken } from './archived-group-actions';
 
 /** The catalog persists the archive and notification together, before IM I/O. */
 export function startSessionArchiveNotifications(options: {
@@ -37,11 +38,14 @@ export function startSessionArchiveNotifications(options: {
           if (stopped) break;
           if (!eligible(notice)) { catalog.completeArchiveNotification(notice.id); await catalog.flush(); continue; }
           const ownerId = controls.botOwnerId;
+          const token = archivedGroupToken(controls, catalog, notice.scopeId);
+          const card = { schema: '2.0', config: { summary: { content: '会话已归档。' } }, body: { elements: [
+            { tag: 'markdown', content: `${ownerId ? `<at id=${ownerId}></at> ` : ''}会话已归档。` },
+            ...(token ? [{ tag: 'button', text: { tag: 'plain_text', content: '解散群' }, type: 'danger',
+              behaviors: [{ type: 'callback', value: { cmd: 'archive-group.confirm', arg: token } }] }] : []),
+          ] } };
           const response = await channel.rawClient.im.v1.message.create({ params: { receive_id_type: 'chat_id' },
-            data: { receive_id: notice.scopeId, msg_type: ownerId ? 'post' : 'text',
-              content: ownerId ? JSON.stringify({ zh_cn: { title: '', content: [[
-                { tag: 'at', user_id: ownerId }, { tag: 'text', text: ' 会话已归档。' },
-              ]] } }) : JSON.stringify({ text: '会话已归档。' }), uuid: notice.id } });
+            data: { receive_id: notice.scopeId, msg_type: 'interactive', content: JSON.stringify(card), uuid: notice.id } });
           if (response.code || !response.data?.message_id) throw new Error(`归档通知发送未确认：${response.code ?? 'missing-message-id'}`);
           catalog.completeArchiveNotification(notice.id); await catalog.flush();
         } catch (error) {

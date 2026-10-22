@@ -347,3 +347,16 @@ it.each([false, true])('continues an approved FF request through the durable que
   expect(h.submit).toHaveBeenCalledTimes(privateEntry ? 2 : 3);
   (h.channel as any).getChatMode = originalMode;
 });
+
+it('acknowledges archived-group dissolution immediately and forwards only its two dedicated callback commands', async () => {
+  const h = await harness(); h.catalog.archiveScope('oc_archived', 'native');
+  const dispatch = vi.spyOn(cardDispatcher, 'handleCardAction').mockResolvedValue(undefined);
+  for (const cmd of ['refresh', 'finish.archive-dissolve', 'config', 'agent_callback']) expect(h.cardAction(cmd, 'oc_archived')).toEqual({});
+  await new Promise<void>(done => setImmediate(done)); expect(dispatch).not.toHaveBeenCalled();
+  expect(h.cardAction('archive-group.confirm', 'oc_archived')).toEqual({});
+  expect(dispatch).not.toHaveBeenCalled();
+  await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+  expect(h.cardAction('archive-group.dissolve', 'oc_archived')).toEqual({});
+  await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+  expect(h.submit).not.toHaveBeenCalled();
+});

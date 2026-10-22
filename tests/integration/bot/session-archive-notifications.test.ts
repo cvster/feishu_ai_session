@@ -64,9 +64,11 @@ it('persists an archive before notifying its current personal group, then stays 
   const first = h.start(); await first.flush();
   expect(h.create).toHaveBeenCalledOnce();
   expect(h.create.mock.calls[0]![0]).toMatchObject({ params: { receive_id_type: 'chat_id' },
-    data: { receive_id: 'oc_personal', msg_type: 'post' } });
+    data: { receive_id: 'oc_personal', msg_type: 'interactive' } });
   const content = JSON.parse((h.create.mock.calls[0]![0] as any).data.content);
-  expect(content.zh_cn.content).toEqual([[{ tag: 'at', user_id: 'ou_owner' }, { tag: 'text', text: ' 会话已归档。' }]]);
+  expect(content.body.elements[0]).toEqual({ tag: 'markdown', content: '<at id=ou_owner></at> 会话已归档。' });
+  expect(content.body.elements[1]).toMatchObject({ tag: 'button', type: 'danger', text: { content: '解散群' },
+    behaviors: [{ type: 'callback', value: { cmd: 'archive-group.confirm', arg: expect.stringMatching(/^[a-f0-9]{64}$/) } }] });
   h.archive(); await first.flush(); expect(h.create).toHaveBeenCalledOnce();
   await first.stop(); await h.reload(); h.archive(); await h.start().flush(); expect(h.create).toHaveBeenCalledOnce();
   expect(h.catalog.pendingArchiveNotifications()).toEqual([]);
@@ -77,8 +79,10 @@ it('still sends the archive notice when the owner identity is unavailable', asyn
   h.add('oc_personal'); h.archive(); await h.start().flush();
   expect(h.create).toHaveBeenCalledOnce();
   expect(h.create.mock.calls[0]![0]).toMatchObject({ data: {
-    msg_type: 'text', content: JSON.stringify({ text: '会话已归档。' }),
+    msg_type: 'interactive',
   } });
+  const card = JSON.parse((h.create.mock.calls[0]![0] as any).data.content);
+  expect(card.body.elements[0].content).toBe('会话已归档。'); expect(card.body.elements[1].text.content).toBe('解散群');
   expect(h.catalog.pendingArchiveNotifications()).toEqual([]);
 });
 
@@ -96,8 +100,8 @@ it('recovers a pending notification after restart and retries an uncertain recei
   expect(h.create).toHaveBeenCalledTimes(2); expect(seen.size).toBe(1); expect(h.channel.sent).toHaveLength(1);
   expect((h.create.mock.calls[0]![0] as any).data.uuid).toBe((h.create.mock.calls[1]![0] as any).data.uuid);
   expect((h.create.mock.calls[0]![0] as any).data.content).toBe((h.create.mock.calls[1]![0] as any).data.content);
-  expect(JSON.parse((h.create.mock.calls[1]![0] as any).data.content).zh_cn.content[0][0])
-    .toEqual({ tag: 'at', user_id: 'ou_owner' });
+  expect(JSON.parse((h.create.mock.calls[1]![0] as any).data.content).body.elements[0].content)
+    .toBe('<at id=ou_owner></at> 会话已归档。');
   expect(h.catalog.pendingArchiveNotifications()).toEqual([]);
 });
 

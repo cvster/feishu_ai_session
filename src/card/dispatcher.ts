@@ -16,6 +16,7 @@ import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
 import { lookupMessageThreadId } from '../bot/thread-id';
+import { handleArchivedGroupAction, isArchivedGroupAction } from '../bot/archived-group-actions';
 
 /** Marker key on a button's value object that flags the cardAction as
  * a callback that should be forwarded back to the agent instead
@@ -81,6 +82,19 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     });
     return;
   }
+
+  if (isArchivedGroupAction(payload)) {
+    if (mode !== 'group' || scope !== chatId || !deps.sessionCatalog) return;
+    await handleArchivedGroupAction({ channel: deps.channel, controls: deps.controls, catalog: deps.sessionCatalog,
+      sessions: deps.sessions, workspaces: deps.workspaces, chatId, operatorId, value: payload,
+      cancelPending: async scope => {
+        deps.pending.cancel(scope);
+        for (const runtime of deps.controls.workerRuntimes?.values() ?? []) await runtime.inbox.rejectScope(scope);
+        await deps.controls.workerInbox?.rejectScope(scope);
+      } });
+    return;
+  }
+  if (deps.sessionCatalog?.isScopeArchived(scope)) return;
 
   if (deps.controls.auxiliary?.isAuxiliary(scope)) {
     const action = typeof payload.cmd === 'string' ? payload.cmd : '';

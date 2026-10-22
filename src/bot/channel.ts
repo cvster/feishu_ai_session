@@ -105,6 +105,7 @@ import { isWorkerScopeArchived } from '../tools/context';
 import { startAaSessionGroupSync } from './aa-session-groups';
 import { createGroupCleanup } from './group-cleanup';
 import { startSessionArchiveNotifications } from './session-archive-notifications';
+import { isArchivedGroupAction } from './archived-group-actions';
 import { startNativeTurnSync } from './native-turn-sync';
 import { DurableAgentAdapter } from '../worker/adapter';
 import { startWorkerReplies } from '../worker/replies';
@@ -526,7 +527,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
     cardAction: (evt) => {
       if (disconnecting) return { toast: { type: 'warning', content: '桥接正在重连，请稍后再试。' } };
-      if (sessionCatalog?.isScopeArchived(evt.chatId)) return {};
+      if (sessionCatalog?.isScopeArchived(evt.chatId) && !isArchivedGroupAction(evt.action.value)) return {};
       // Feishu requires a callback response within 3s. Acknowledge receipt
       // before any REST/worker I/O; results still use the existing card and
       // message paths, with all authorization checks in the dispatchers.
@@ -535,7 +536,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       setImmediate(() => {
         if (disconnecting) return;
         void withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
-          if (sessionCatalog?.isScopeArchived(evt.chatId)) return;
+          if (sessionCatalog?.isScopeArchived(evt.chatId) && !isArchivedGroupAction(evt.action.value)) return;
           try { if (await controls.auxiliaryApprovals?.action(evt)) return; }
           catch (error) { await channel.send(evt.operator.openId, { text: `权限确认处理未完成：${auxiliaryLinkError(error)}。请查看原请求状态；不会自动重复执行。` }); return; }
           try { if (await controls.auxiliary?.action(evt)) return; }
