@@ -251,3 +251,18 @@ it('clamps and persists mouse and keyboard sidebar resizing, restores cancellati
   expect(restored.node('app').style['--sidebar-width']).toBe('410px');
   h.browserWindow.innerWidth = 500; down(); move(1000); expect(h.node('app').style['--sidebar-width']).toBe('325px');
 });
+
+it('updates thought and tool count summaries through SSE as plain non-expandable text', async () => {
+  const h = harness(); await h.ready();
+  const view = h.conversation(0, 'public answer', 1);
+  const snapshot = { ...view, turns: [{ ...view.turns[0]!, progress: ['🧠 思考中', '🧰 2 个工具调用（进行中）'] }] };
+  h.requests[0]!.resolve(snapshot); await h.settle();
+  const summary = () => h.node('messages').querySelector('.progress')!;
+  expect(summary().text).toBe('🧠 思考中🧰 2 个工具调用（进行中）');
+  expect(summary().children.every(e => e.tag === 'span' && !e.onclick)).toBe(true);
+  expect(summary().querySelectorAll('button')).toHaveLength(0); expect(summary().querySelectorAll('details')).toHaveLength(0);
+  snapshot.turns[0]!.progress = ['🧠 思考完成', '🧰 2 个工具调用（已完成）'];
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: snapshot });
+  expect(summary().text).toBe('🧠 思考完成🧰 2 个工具调用（已完成）');
+  expect(h.requests).toHaveLength(1);
+});

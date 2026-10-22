@@ -40,7 +40,7 @@ lark-channel-bridge web disable --profile <profile>
                          └── 飞书消息、群名同步
 ```
 
-- `apps/bridge-web/page.ts`：无构建依赖的原生 DOM 页面，随 CLI 打包，不执行工具命令。答案以安全文本和代码块展示，不执行消息里的 HTML；不展示思考或工具详情。
+- `apps/bridge-web/page.ts`：无构建依赖的原生 DOM 页面，随 CLI 打包，不执行工具命令。答案以安全文本和代码块展示，不执行消息里的 HTML；保留思考状态和工具调用数量、状态的纯文字摘要，不展示思考或工具详情，也不提供展开入口。
 - `src/web/server.ts`：127.0.0.1 本机免登录、其他地址 cookie 登录、Host/Origin 检查、JSON 请求限制、登录限流和 SSE。多个浏览器共享按会话的观察结果，慢连接会断开并重新读取快照。
 - `src/web/service.ts`：统一 `list/read/send/rename/control/favorite`，依据绑定、账户和 worker capabilities 授权。会话身份包含 profile、应用、群、工具、sourceId 和 nativeId，页面持有其摘要。归档/共享/辅助/话题群被排除，已失效群沿用现有群清理流程。读取失败不会被当成归档。
 - `src/bot/intake-queue.ts`：飞书和 Web 共用持久化收件箱、去重和 PendingQueue。执行、会话锁、回复卡片、完成时艾特所有者沿用原桥接路径。网页文本中的 `/exit` 等仅作为模型输入。

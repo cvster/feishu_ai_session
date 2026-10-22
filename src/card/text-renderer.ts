@@ -1,6 +1,6 @@
-import type { Block, RunState, ToolEntry } from './run-state';
-import { toolHeaderText } from './tool-render';
+import type { RunState } from './run-state';
 import { renderColoredRunStatus } from './run-status-render';
+import { runProgress } from './run-progress';
 
 /**
  * Render `RunState` as plain markdown text — used in `messageReply: 'text'`
@@ -8,17 +8,15 @@ import { renderColoredRunStatus } from './run-status-render';
  *
  * Differences vs `renderCard`:
  *   - No collapsible panels, no buttons (markdown messages have neither)
- *   - Tool calls collapse to a single short line each (no body)
- *   - No reasoning / thinking output (no place to fold it; would be noise)
+ *   - Same phase/count summaries, without reasoning or tool details
  *   - Footer is appended inline at the bottom while running
  */
 export function renderText(state: RunState): string {
   const parts: string[] = [];
 
-  for (const block of state.blocks) {
-    const piece = renderBlock(block);
-    if (piece) parts.push(piece);
-  }
+  for (const block of state.blocks) if (block.kind === 'text' && block.content.trim()) parts.push(block.content.trim());
+  const progress = runProgress(state);
+  parts.push(...progress);
 
   if (state.terminal === 'interrupted') {
     parts.push('_⏹ 已被中断_');
@@ -32,28 +30,11 @@ export function renderText(state: RunState): string {
   const status = renderColoredRunStatus(state);
   if (status) {
     parts.push(status);
-  } else if (state.terminal === 'running' && state.footer) {
+  } else if (state.terminal === 'running' && state.footer && !(state.footer === 'thinking' || state.footer === 'tool_running' && state.blocks.some(block => block.kind === 'tool'))) {
     parts.push(footerLine(state.footer));
   }
 
   return parts.join('\n\n');
-}
-
-function renderBlock(block: Block): string {
-  if (block.kind === 'text') {
-    return block.content.trim();
-  }
-  return toolLine(block.tool);
-}
-
-/**
- * One-line summary for a tool call:
- *   `> ⏳ **Bash** — git status`
- *   `> ✅ **Read** — ~/code/foo.ts`
- * Reuses `toolHeaderText` so the format matches the card mode header.
- */
-function toolLine(tool: ToolEntry): string {
-  return `> ${toolHeaderText(tool)}`;
 }
 
 function footerLine(status: 'thinking' | 'tool_running' | 'streaming' | 'waiting_input'): string {

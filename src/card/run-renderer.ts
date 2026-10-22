@@ -2,6 +2,7 @@ import type { FooterStatus, RunState } from './run-state';
 import { renderColoredRunStatus } from './run-status-render';
 import type { RunControlIcons } from './run-control-icons';
 import type { RunButtonAction } from './run-button-images';
+import { runProgress } from './run-progress';
 
 export interface RunCardRenderOptions extends RunControlIcons {
   signCallback?: (action: string) => string;
@@ -16,6 +17,8 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   const textBlocks = state.blocks.filter(block => block.kind === 'text');
   const elements: object[] = options.auxiliary ? auxiliaryContent(textBlocks) :
     textBlocks.filter(block => block.content.trim()).map(block => markdown(block.content));
+  const progress = runProgress(state);
+  elements.push(...progress.map(noteMd));
 
   if (state.terminal === 'interrupted') {
     elements.push(noteMd('_⏹ 已被中断_'));
@@ -24,7 +27,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     elements.push(noteMd(`_⏱ ${mins} 分钟无响应,已自动终止_`));
   } else if (state.terminal === 'error' && state.errorMsg) {
     elements.push(noteMd(`⚠️ agent 失败：${state.errorMsg}`));
-  } else if (state.terminal === 'done' && elements.length === 0) {
+  } else if (state.terminal === 'done' && !textBlocks.some(block => block.content.trim())) {
     elements.push(noteMd('_（未返回内容）_'));
   }
 
@@ -32,7 +35,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   if (state.terminal === 'running') {
     const status = renderColoredRunStatus(state);
     if (status) elements.push(noteMd(status));
-    else if (state.footer) elements.push(footerStatus(state.footer));
+    else if (state.footer && !(state.footer === 'thinking' || state.footer === 'tool_running' && state.blocks.some(block => block.kind === 'tool'))) elements.push(footerStatus(state.footer));
     elements.push(controlButtonRow(options));
   } else {
     const status = renderColoredRunStatus(state);

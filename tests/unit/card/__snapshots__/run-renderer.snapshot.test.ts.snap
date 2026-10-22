@@ -5,7 +5,7 @@ exports[`run card renderer snapshots > omits consecutive tools while preserving 
   "body": {
     "elements": [
       {
-        "content": "🧰 正在调用工具",
+        "content": "🧰 3 个工具调用（进行中）",
         "tag": "markdown",
         "text_size": "notation",
       },
@@ -342,6 +342,11 @@ exports[`run card renderer snapshots > omits consecutive tools while preserving 
 {
   "body": {
     "elements": [
+      {
+        "content": "🧰 3 个工具调用（已完成）",
+        "tag": "markdown",
+        "text_size": "notation",
+      },
       {
         "content": "_（未返回内容）_",
         "tag": "markdown",
@@ -681,7 +686,7 @@ exports[`run card renderer snapshots > renders active and completed thinking 1`]
   "body": {
     "elements": [
       {
-        "content": "🧠 正在思考",
+        "content": "🧠 思考中",
         "tag": "markdown",
         "text_size": "notation",
       },
@@ -1021,6 +1026,11 @@ exports[`run card renderer snapshots > renders active and completed thinking 2`]
       {
         "content": "final answer",
         "tag": "markdown",
+      },
+      {
+        "content": "🧠 思考完成",
+        "tag": "markdown",
+        "text_size": "notation",
       },
       {
         "columns": [
@@ -2716,7 +2726,7 @@ exports[`run card renderer snapshots > renders initial running state 1`] = `
   "body": {
     "elements": [
       {
-        "content": "🧠 正在思考",
+        "content": "🧠 思考中",
         "tag": "markdown",
         "text_size": "notation",
       },
@@ -3052,9 +3062,11 @@ exports[`run card renderer snapshots > renders initial running state 1`] = `
 exports[`run card renderer snapshots > renders markdown text mode without card-only controls 1`] = `
 "Answer
 
-> ✅ **Bash** — pwd
-
 Done
+
+🧠 思考完成
+
+🧰 1 个工具调用（已完成）
 
 _✍️ 正在输出…_"
 `;
@@ -3062,9 +3074,11 @@ _✍️ 正在输出…_"
 exports[`run card renderer snapshots > renders markdown text mode without card-only controls 2`] = `
 "Answer
 
-> ✅ **Bash** — pwd
-
 Done
+
+🧠 思考完成
+
+🧰 1 个工具调用（已完成）
 
 _⏹ 已被中断_"
 `;
@@ -3072,9 +3086,11 @@ _⏹ 已被中断_"
 exports[`run card renderer snapshots > renders markdown text mode without card-only controls 3`] = `
 "Answer
 
-> ✅ **Bash** — pwd
-
 Done
+
+🧠 思考完成
+
+🧰 1 个工具调用（已完成）
 
 _⏱ 10 分钟无响应,已自动终止_"
 `;
@@ -3086,7 +3102,7 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
   "body": {
     "elements": [
       {
-        "content": "🧰 正在调用工具",
+        "content": "🧰 1 个工具调用（进行中）",
         "tag": "markdown",
         "text_size": "notation",
       },
@@ -3423,6 +3439,11 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
 {
   "body": {
     "elements": [
+      {
+        "content": "🧰 1 个工具调用（已完成）",
+        "tag": "markdown",
+        "text_size": "notation",
+      },
       {
         "content": "_（未返回内容）_",
         "tag": "markdown",
@@ -3761,6 +3782,11 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
 {
   "body": {
     "elements": [
+      {
+        "content": "🧰 1 个工具调用（已完成）",
+        "tag": "markdown",
+        "text_size": "notation",
+      },
       {
         "content": "_（未返回内容）_",
         "tag": "markdown",

@@ -10,13 +10,14 @@ import type { ToolSession } from '../tools/types';
 import { initialState, reduce, type RunState } from '../card/run-state';
 import { writeFileAtomic } from '../platform/atomic-write';
 import type { WebControlResult } from './controls';
+import { runProgress } from '../card/run-progress';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
   id: string; scope: string; toolId: string; tool: string; project: string; cwd: string; name: string;
   updatedAtMs: number; favorite: boolean; online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
 }
-export interface WebTurn { id: string; input: string; answer: string; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
+export interface WebTurn { id: string; input: string; answer: string; progress?: string[]; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
 export interface WebConversation { session: WebSession; turns: WebTurn[]; notice?: string }
 interface Receipt { fingerprint: string; sessionId: string; owner: string; createdAt: number; messageId?: string; enqueued?: boolean }
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
@@ -244,11 +245,13 @@ export class PersonalSessionService {
         const nativeTurn = native?.turns.find(t => t.bridgeJobId === job.id || t.id === view!.turnId);
         if (nativeTurn) linkedTurns.add(nativeTurn.id);
         turns.push({ id: 'job:' + job.id, input: inputs.map(r => r.message.content).join('\n\n'), answer: answer(nativeTurn?.state ?? view.state), status,
+          progress: runProgress({ ...(nativeTurn?.state ?? view.state), terminal: ['running', 'accepted'].includes(job.status) ? 'running' : 'done' }),
           createdAtMs: job.createdAt, origin: 'bridge' });
       }
       const historyBoundary = Math.min(...matchedJobTimes);
       for (const turn of native?.turns ?? []) if (!linkedTurns.has(turn.id) && (!turn.bridge || turn.createdAtMs < historyBoundary)) turns.push({
         id: 'native:' + turn.id, input: turn.bridge ? '' : turn.input, answer: answer(turn.state), status: turn.state.footer === 'waiting_input' ? 'waiting_input' : turn.state.terminal,
+        progress: runProgress(turn.state),
         createdAtMs: turn.createdAtMs, origin: turn.bridge ? 'bridge' : 'native',
       });
       turns.sort((a, z) => a.createdAtMs - z.createdAtMs || a.id.localeCompare(z.id));

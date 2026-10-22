@@ -217,6 +217,27 @@ it('reports native update time and recent bridge input without catalog scan time
   expect((await restarted.list())[0]?.updatedAtMs).toBe(inputTime);
 });
 
+it('returns phase/count summaries for native and bridge turns without private details, including a late native snapshot', async () => {
+  const h = await harness();
+  const id = (await h.service.list())[0]!.id;
+  let state = reduce(initialState, { type: 'thinking', delta: 'private-thought' });
+  state = reduce(state, { type: 'tool_use', id: 'private-tool-id', name: 'PrivateTool', input: { command: 'private-command' } });
+  h.conversation.turns[0]!.state = state;
+  const native = await h.service.read(id);
+  expect(native.turns[0]?.progress).toEqual(['🧠 思考完成', '🧰 1 个工具调用（进行中）']);
+  for (const detail of ['private-thought', 'PrivateTool', 'private-command', 'private-tool-id']) expect(JSON.stringify(native)).not.toContain(detail);
+  await h.service.send(id, 'progress-summary-web-01', 'public input');
+  await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+  const job = (await h.client.list())[0]!;
+  const bridgeTurn = { ...h.conversation.turns[0]!, id: 'bridge-native', bridge: true, bridgeJobId: job.id, createdAtMs: job.createdAt };
+  h.conversation.turns.push(bridgeTurn);
+  expect((await h.service.read(id)).turns.find(t => t.id === 'job:' + job.id)?.progress).toEqual(['🧠 思考完成', '🧰 1 个工具调用（进行中）']);
+  h.finish(); await vi.waitFor(async () => expect((await h.client.list())[0]?.status).toBe('completed'));
+  const finished = await h.service.read(id);
+  expect(finished.turns.find(t => t.id === 'job:' + job.id)?.progress).toEqual(['🧠 思考完成', '🧰 1 个工具调用（已完成）']);
+  for (const detail of ['private-thought', 'PrivateTool', 'private-command', 'private-tool-id']) expect(JSON.stringify(finished)).not.toContain(detail);
+});
+
 it.each([{ code: 232017, data: { name: '错误返回名', chat_mode: 'group' } }, { code: 0, data: { name: '未确认群模式' } }])('keeps the confirmed title and disables writes on an invalid group response: %j', async response => {
   const h = await harness(); await h.names.stop();
   const id = (await h.service.list())[0]!.id;
