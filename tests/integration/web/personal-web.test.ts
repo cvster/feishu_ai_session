@@ -181,12 +181,40 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('uses live group n
   h.group('AA-实际群名');
   await h.names.stop();
   const service = h.makeService(); await service.load();
-  expect((await service.list())[0]?.name).toBe('AA-实际群名');
+  expect((await service.list())[0]).toMatchObject({ name: 'AA-实际群名', updatedAtMs: h.native.updatedAtMs });
   // A transient Feishu failure retains the last confirmed group title.
   vi.mocked(h.channel.rawClient.im.v1.chat.get).mockRejectedValueOnce(new Error('temporary lookup failure'));
   await expect(service.send((await service.list())[0]!.id, 'group-read-failure-01', 'test')).rejects.toMatchObject({ status: 503 });
   expect((await service.list())[0]).toMatchObject({ name: 'AA-实际群名', online: false });
   expect(h.enqueue).not.toHaveBeenCalled();
+});
+
+it('serves the exact group avatar PNGs for every tool and rejects unknown assets', async () => {
+  const h = await harness();
+  for (const tool of ['codex', 'claude', 'zcode', 'kilo', 'dsh']) {
+    const response = await h.request('/assets/session-avatars/' + tool + '.png');
+    expect(response.status).toBe(200); expect(response.headers.get('content-type')).toBe('image/png');
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(await readFile(new URL('../../../assets/session-avatars/' + tool + '.png', import.meta.url)));
+  }
+  expect((await h.request('/assets/session-avatars/unknown.png')).status).toBe(404);
+  expect((await h.request('/assets/session-avatars/constructor.png')).status).toBe(404);
+});
+
+it('reports native update time and recent bridge input without catalog scan time reordering old sessions', async () => {
+  const h = await harness(); await h.names.stop();
+  expect((await h.service.list())[0]?.updatedAtMs).toBe(2);
+  const original = h.catalog.entries()[0]!;
+  h.catalog.upsertActive({ ...original, now: Date.now() + 1000 });
+  expect((await h.service.list())[0]?.updatedAtMs).toBe(2);
+  h.native.updatedAtMs = 42;
+  const refreshed = h.makeService(); await refreshed.load();
+  expect((await refreshed.list())[0]?.updatedAtMs).toBe(42);
+  const inputTime = Date.now() + 2000;
+  await h.inbox.receive('oc_group', { messageId: 'om_pending_recent', chatId: 'oc_group', chatType: 'group', senderId: 'ou_owner', createTime: inputTime,
+    content: 'pending', resources: [], mentions: [], mentionAll: false, mentionedBot: true, rawContentType: 'text' });
+  expect((await refreshed.list())[0]?.updatedAtMs).toBe(inputTime);
+  const restarted = h.makeService(); await restarted.load();
+  expect((await restarted.list())[0]?.updatedAtMs).toBe(inputTime);
 });
 
 it.each([{ code: 232017, data: { name: '错误返回名', chat_mode: 'group' } }, { code: 0, data: { name: '未确认群模式' } }])('keeps the confirmed title and disables writes on an invalid group response: %j', async response => {

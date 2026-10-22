@@ -18,6 +18,11 @@ class Element {
   open = false;
   isConnected = true;
   style: Record<string, string> = {};
+  checked = false;
+  pointer?: number;
+  setPointerCapture(id: number) { this.pointer = id; }
+  hasPointerCapture(id: number) { return this.pointer === id; }
+  releasePointerCapture() { this.pointer = undefined; }
   dataset: Record<string, string> = {};
   attributes = new Map<string, string>();
   offsetWidth = 176;
@@ -42,13 +47,14 @@ class Element {
   get text(): string { return this.textContent + this.children.map(child => child.text).join(''); }
 }
 
-function harness() {
+function harness(preferences?: unknown, count = 2) {
   const ids = [...bridgeWebPage.matchAll(/id="([^"]+)"/g)].map(match => match[1]!);
   const elements = new Map(ids.map(id => [id, new Element('div', id)]));
   const node = (id: string) => elements.get(id)!;
+  node('app').style.setProperty = ((key: string, value: string) => { node('app').style[key] = value; }) as any;
   node('session-menu').hidden = true; node('session-menu').append(node('session-rename'), node('session-archive'), node('session-copy'));
   for (const action of ['stop', 'refresh']) { const button = new Element('button'); button.setAttribute('data-control', action); node('session-controls').append(button); }
-  const rows = ['a', 'b'].map((id, index) => ({ id: id.repeat(64), toolId: index ? 'another' : 'generic', tool: index ? 'Other' : 'Tool', favorite: false,
+  const rows = Array.from({ length: count }, (_, i) => String.fromCharCode(97 + i)).map((id, index) => ({ id: id.repeat(64), toolId: index ? 'another' : 'generic', tool: index ? 'Other' : 'Tool', favorite: false, updatedAtMs: index + 1,
     project: 'project', cwd: '/project', scope: 'oc_' + id, name: '会话' + index, online: true, canSend: true, canRename: true }));
   const conversation = (index: number, answer = '回答', count = 12) => ({ session: rows[index], turns: Array.from({ length: count }, (_, i) => ({
     id: String(i), input: '问题' + i, answer, status: 'completed', origin: 'native', createdAtMs: 1,
@@ -64,23 +70,25 @@ function harness() {
     emit(name: string, data: unknown) { this.listeners.get(name)?.({ data: JSON.stringify(data) }); }
   }
   const response = (value: unknown) => ({ ok: true, json: async () => value });
+  const storage = new Map(preferences === undefined ? [] : [['bridge-web-preferences', JSON.stringify(preferences)]]);
+  const browserWindow = { innerWidth: 1280, innerHeight: 900, addEventListener() {} };
   runInNewContext(bridgeWebPage.match(/<script>([\s\S]*?)<\/script>/)![1]!, {
-    document: { getElementById: node, createElement: (tag: string) => new Element(tag), body: new Element('body'), addEventListener() {} },
-    window: { innerWidth: 1280, innerHeight: 900, addEventListener() {} },
+    document: { getElementById: node, createElement: (tag: string) => new Element(tag), createElementNS: (_ns: string, tag: string) => new Element(tag), body: new Element('body'), addEventListener() {} },
+    window: browserWindow,
     fetch: async (path: string, options?: { body?: string }) => {
       if (path === '/api/access') return response({ loginRequired: false });
       if (path === '/api/sessions') return response(rows);
       // Deliberately allow a response after abort to check the selection guard.
       return new Promise(resolve => requests.push({ id: path.split('/').at(-1)!, path, data: options?.body ? JSON.parse(options.body) : undefined, resolve: value => resolve(response(value)) }));
     },
-    EventSource: Stream, AbortController, localStorage: { getItem: () => null },
+    EventSource: Stream, AbortController, localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
   });
   const ready = () => vi.waitFor(() => expect(requests).toHaveLength(1));
   const choose = (index: number) => { void node('tree').querySelectorAll('button').find(button => button.textContent === rows[index]!.name)!.onclick!(); };
   const menu = (index: number) => node('tree').querySelectorAll('button').find(button => button.getAttribute('aria-label') === rows[index]!.name + '的会话选项')!.onclick!({ stopPropagation() {} });
   const settle = () => new Promise<void>(resolve => setTimeout(resolve, 0));
   const snapshot = (index: number, answer?: string, count?: number) => Stream.all.at(-1)!.emit('snapshot', { sessions: rows, conversation: conversation(index, answer, count) });
-  return { node, rows, requests, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all };
+  return { node, rows, requests, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all, storage, browserWindow };
 }
 
 it('reuses cached content without another history request and restores each session scroll position', async () => {
@@ -176,7 +184,7 @@ it('renders tool icons and favorites across tools under one project, without loa
   const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
   const root = h.node('tree'), favorite = (name: string) => root.querySelectorAll('.session-favorite').find(b => b.getAttribute('aria-label') === name + '的收藏')!;
   expect(root.children[0]!.querySelector('summary')!.text).toBe('收藏0');
-  expect(root.querySelectorAll('.tool-icon').map(e => e.getAttribute('aria-label'))).toEqual(['Tool', 'Other']);
+  expect(root.querySelectorAll('.tool-icon').map(e => e.getAttribute('aria-label'))).toEqual(['Other', 'Tool', 'Tool', 'Other']);
   favorite(h.rows[1]!.name).onclick!({ stopPropagation() {} });
   expect(h.requests[1]).toMatchObject({ path: '/api/sessions/' + h.rows[1]!.id + '/favorite', data: { favorite: true } });
   expect(favorite(h.rows[1]!.name).disabled).toBe(true);
@@ -186,9 +194,60 @@ it('renders tool icons and favorites across tools under one project, without loa
   expect(saved.querySelector('summary')!.text).toBe('收藏2');
   expect(saved.querySelectorAll('details')).toHaveLength(1);
   expect(saved.querySelectorAll('.session')).toHaveLength(2);
-  expect(root.querySelectorAll('.session-favorite').every(b => b.getAttribute('aria-pressed') === 'true' && b.textContent === '★')).toBe(true);
+  expect(root.querySelectorAll('.session-favorite').every(b => b.getAttribute('aria-pressed') === 'true' && b.className.includes('favorited') && b.querySelector('svg'))).toBe(true);
   expect(h.node('title').textContent).toBe(h.rows[0]!.name); expect(h.requests).toHaveLength(3);
   favorite(h.rows[1]!.name).onclick!({ stopPropagation() {} }); h.requests[3]!.resolve({ favorite: false }); await h.settle();
   expect(root.children[0]!.querySelectorAll('.session')).toHaveLength(1);
   expect(favorite(h.rows[1]!.name).getAttribute('aria-pressed')).toBe('false');
+});
+
+it('limits recent updates before search, groups projects, and follows SSE timestamps without reading history', async () => {
+  const h = harness(undefined, 12); await h.ready();
+  const recent = () => h.node('tree').children[1]!;
+  expect(recent().querySelector('summary')!.text).toBe('最近更新9');
+  expect(recent().querySelectorAll('.session').map(e => e.text)).toEqual(Array.from({ length: 9 }, (_, i) => '会话' + (11 - i)));
+  h.rows[0]!.updatedAtMs = 20;
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows });
+  expect(recent().querySelectorAll('.session')[0]!.text).toBe('会话0');
+  h.node('search').value = '会话1'; (h.node('search') as any).oninput();
+  expect(recent().querySelectorAll('.session').map(e => e.text)).toEqual(['会话11', '会话10']);
+  expect(h.requests).toHaveLength(1);
+});
+
+it('persists recent visibility and count, validates settings, and cancels unsaved changes', async () => {
+  const h = harness(undefined, 12); await h.ready();
+  h.node('settings').onclick!();
+  expect(h.node('show-recent').checked).toBe(true); expect(h.node('recent-count').value).toBe('9');
+  h.node('recent-count').value = '0'; await h.node('settings-form').onsubmit!({ preventDefault() {} });
+  expect(h.node('settings-dialog').open).toBe(true); expect(h.storage.size).toBe(0);
+  h.node('recent-count').value = '3'; await h.node('settings-form').onsubmit!({ preventDefault() {} });
+  expect(h.node('tree').children[1]!.querySelector('summary')!.text).toBe('最近更新3');
+  expect(h.node('settings-dialog').open).toBe(false);
+  h.node('settings').onclick!(); h.node('show-recent').checked = false; (h.node('show-recent') as any).onchange();
+  expect(h.node('recent-count').disabled).toBe(true);
+  await h.node('settings-form').onsubmit!({ preventDefault() {} });
+  expect(h.node('tree').children.some(e => e.querySelector('summary')!.text.startsWith('最近更新'))).toBe(false);
+  const saved = JSON.parse(h.storage.get('bridge-web-preferences')!);
+  const restored = harness(saved); await restored.ready();
+  restored.node('settings').onclick!(); expect(restored.node('show-recent').checked).toBe(false); expect(restored.node('recent-count').value).toBe('3');
+  restored.node('show-recent').checked = true; restored.node('cancel-settings').onclick!();
+  expect(restored.node('tree').children.some(e => e.querySelector('summary')!.text.startsWith('最近更新'))).toBe(false);
+  expect(h.requests).toHaveLength(1);
+});
+
+it('clamps and persists mouse and keyboard sidebar resizing, restores cancellation, and ignores mobile dragging', async () => {
+  const h = harness(); await h.ready(); const handle = h.node('sidebar-resizer') as any;
+  const down = (clientX = 325) => handle.onpointerdown({ button: 0, clientX, pointerId: 1, preventDefault() {} });
+  const move = (clientX: number) => handle.onpointermove({ clientX, pointerId: 1 });
+  expect(h.node('app').style['--sidebar-width']).toBe('325px');
+  down(); move(410); expect(h.node('app').style['--sidebar-width']).toBe('410px');
+  handle.onpointerup({ pointerId: 1 });
+  expect(JSON.parse(h.storage.get('bridge-web-preferences')!).sidebarWidth).toBe(410);
+  down(410); move(900); expect(handle.getAttribute('aria-valuenow')).toBe('520'); handle.onpointercancel({ pointerId: 1 });
+  expect(h.node('app').style['--sidebar-width']).toBe('410px');
+  handle.onkeydown({ key: 'Home', preventDefault() {} }); expect(h.node('app').style['--sidebar-width']).toBe('240px');
+  handle.ondblclick(); expect(h.node('app').style['--sidebar-width']).toBe('325px');
+  const restored = harness({ ...JSON.parse(h.storage.get('bridge-web-preferences')!), sidebarWidth: 410 }); await restored.ready();
+  expect(restored.node('app').style['--sidebar-width']).toBe('410px');
+  h.browserWindow.innerWidth = 500; down(); move(1000); expect(h.node('app').style['--sidebar-width']).toBe('325px');
 });

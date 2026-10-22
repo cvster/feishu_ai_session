@@ -3,6 +3,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { loadWebConfig, trustedWebPeer, webListenHosts, webSecretHash, type WebConfig } from './config';
 import { PersonalSessionService, WebError } from './service';
 import { bridgeWebPage } from '../../apps/bridge-web/page';
+import { GROUP_AVATAR_IMAGES } from '../bot/group-avatar-images';
 
 async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
   if (!req.headers['content-type']?.startsWith('application/json')) throw new WebError(415, '仅接受 JSON');
@@ -46,6 +47,13 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     if (req.method === 'POST' && req.headers.origin !== origin) throw new WebError(403, '请求来源不匹配');
     const url = new URL(req.url ?? '/', origin);
     if (url.pathname === '/' && req.method === 'GET') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(bridgeWebPage); return; }
+    const avatar = /^\/assets\/session-avatars\/([a-z0-9-]+)\.png$/.exec(url.pathname);
+    if (avatar && req.method === 'GET') {
+      const image = Object.hasOwn(GROUP_AVATAR_IMAGES, avatar[1]!) ? GROUP_AVATAR_IMAGES[avatar[1]! as keyof typeof GROUP_AVATAR_IMAGES] : undefined;
+      if (!image) throw new WebError(404, '工具头像不存在');
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=3600' });
+      res.end(Buffer.from(image, 'base64')); return;
+    }
     const local = localRequest(req);
     if (url.pathname === '/api/access' && req.method === 'GET') { respond(res, 200, { loginRequired: !local }); return; }
     if (url.pathname === '/api/login' && req.method === 'POST') {

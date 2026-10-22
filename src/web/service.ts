@@ -14,7 +14,7 @@ import type { WebControlResult } from './controls';
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
   id: string; scope: string; toolId: string; tool: string; project: string; cwd: string; name: string;
-  favorite: boolean; online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
+  updatedAtMs: number; favorite: boolean; online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
 }
 export interface WebTurn { id: string; input: string; answer: string; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
 export interface WebConversation { session: WebSession; turns: WebTurn[]; notice?: string }
@@ -108,7 +108,13 @@ export class PersonalSessionService {
       const group = this.groups.get(scope);
       // A confirmed name sync may be newer than our 15-second group snapshot.
       const name = group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
+      // Use native activity rather than the catalog's periodically refreshed timestamp.
+      // Pending bridge input should also appear immediately, before the worker lists it.
+      const activity = [row?.updatedAtMs ?? catalog?.boundAt ?? catalog?.updatedAt ?? 0,
+        ...(this.deps.controls.workerRuntimes?.get(b.toolId)?.inbox.receipts(scope) ?? []).map(r => Number(r.message.createTime)).filter(t => t >= (catalog?.boundAt ?? 0))];
+      const updatedAtMs = Math.max(0, ...activity.filter(t => Number.isFinite(t) && t >= 0));
       return [{ id: this.identity(scope, b), scope, toolId: b.toolId, tool: meta?.label ?? b.toolId,
+        updatedAtMs,
         favorite: this.favorites[hash(JSON.stringify([owner, this.identity(scope, b)]))] === owner, cwd, project: cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd, name: name ?? row?.name ?? b.nativeId!, online,
         canSend: online && meta?.capabilities?.jobs.submit === true,
         canRename: online && meta?.capabilities?.sessions.rename === true && meta?.capabilities?.nativeSessionNames === true,
