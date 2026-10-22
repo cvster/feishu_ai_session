@@ -25,6 +25,9 @@ import { startWorkerReplies } from '../../../src/worker/replies';
 import { startNativeTurnSync } from '../../../src/bot/native-turn-sync';
 import { configureGroupNotifications } from '../../../src/bot/group-notifications';
 import { startWorkerNameSync } from '../../../src/bot/tool-name-sync';
+import { recordRunSessionEvent } from '../../../src/bot/run-flow';
+import { capabilityForTool } from '../../../src/agent/capability';
+import type { RunPolicyAllow } from '../../../src/policy/run-policy';
 
 async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'kilo', host = '127.0.0.1') {
   const native = { nativeId: 'native', name: 'AA-web', cwd: '/project', createdAtMs: 1, updatedAtMs: 2, archived: false };
@@ -91,8 +94,44 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   const login = async () => { const response = await request('/api/login', { secret }); expect(response.status).toBe(200); cookie = response.headers.get('set-cookie')?.split(';')[0] ?? ''; };
   const replies = await startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath: join(h.dir, 'replies.json'), intervalMs: 60_000 }); cleanups.push(() => replies.stop());
   controls.workerRuntimes!.get(tool)!.replies = replies;
-  return { ...h, bindings, catalog, controls, inbox, service, makeService, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
+  return { ...h, bindings, catalog, controls, sessions, inbox, service, makeService, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
 }
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('replays %s history once and keeps one reply writer when a task refreshes the binding', async tool => {
+  const h = await harness(tool), original = h.catalog.entries()[0]!;
+  h.catalog.upsertActive({ ...original, now: Date.now(), recentTurnReplayCount: 3 });
+  const boundAt = h.catalog.entries()[0]!.boundAt;
+  const startMirror = () => startNativeTurnSync({ toolId: tool, displayName: 'Generic worker', channel: h.channel, controls: h.controls,
+    catalog: h.catalog, sourceId: h.client.sourceId, statePath: join(h.dir, 'native-mirror.json'), intervalMs: 60_000,
+    reader: { read: sid => h.client.conversation(sid), close: async () => {} } });
+  let mirror = await startMirror();
+  try {
+    expect(h.catalog.entries()[0]!.recentTurnReplayCount).toBeUndefined();
+    const historicalSends = h.create.mock.calls.length;
+    const historicalCard = JSON.stringify(vi.mocked(h.channel.createCard).mock.calls);
+    expect(historicalCard).toContain('原生回答');
+    const id = (await h.service.list())[0]!.id;
+    await h.service.send(id, 'single-reply-request-01', '本轮只回复一次');
+    await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+    h.conversation.turns.push({ id: 'worker-current', input: '本轮只回复一次', bridge: true, createdAtMs: Date.now() + 1,
+      state: { ...initialState, terminal: 'running', blocks: [{ kind: 'text', content: 'worker answer', streaming: true }] } });
+    recordRunSessionEvent({ scopeId: 'oc_group', botAppId: 'cli_test', sessions: h.sessions, sessionCatalog: h.catalog,
+      capability: capabilityForTool(tool, h.controls.profileConfig), policy: { cwdRealpath: h.native.cwd, policyFingerprint: 'fp' } as RunPolicyAllow,
+      event: { type: 'system', ...(tool === 'codex' ? { threadId: 'native' } : { sessionId: 'native' }) } });
+    await h.replies.runNow(); await mirror.runNow();
+    expect(h.catalog.entries()[0]!.boundAt).toBe(boundAt);
+    expect(h.catalog.entries()[0]!.recentTurnReplayCount).toBeUndefined();
+    // Only the Web input adds a create; the answer belongs to worker reply().
+    expect(h.create).toHaveBeenCalledTimes(historicalSends + 1);
+    expect(vi.mocked(h.channel.rawClient.im.v1.message.reply).mock.calls.filter(([r]) => r?.data.msg_type === 'interactive')).toHaveLength(1);
+    h.finish(); await vi.waitFor(async () => expect((await h.client.list())[0]?.status).toBe('completed'));
+    h.conversation.turns.at(-1)!.state.terminal = 'done';
+    await h.replies.runNow(); await mirror.runNow();
+    await mirror.stop(); mirror = await startMirror(); await mirror.runNow();
+    expect(h.create).toHaveBeenCalledTimes(historicalSends + 1);
+    expect(vi.mocked(h.channel.rawClient.im.v1.message.reply).mock.calls.filter(([r]) => r?.data.msg_type === 'interactive')).toHaveLength(1);
+  } finally { await mirror.stop(); }
+});
 
 it.each(['codex', 'zcode', 'kilo'] as const)('syncs Web/group/native messages through the same durable %s worker, with retries and SSE reconnect', async tool => {
   const h = await harness(tool); await h.login();

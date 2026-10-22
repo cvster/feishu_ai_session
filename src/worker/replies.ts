@@ -92,7 +92,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       const sessionId = (init.sessionId ?? init.threadId)!;
       deps.controls.toolBindings!.set(target.scope, { ...binding, nativeId: sessionId, nativeCreated: true });
       deps.sessions.set(target.scope, sessionId, job.options.cwd ?? '');
-      deps.catalog.upsertActive({ scopeId: target.scope, agentId: binding.toolId, cwdRealpath: job.options.cwd!,
+      deps.catalog.upsertActive({ preserveBinding: true, scopeId: target.scope, agentId: binding.toolId, cwdRealpath: job.options.cwd!,
         policyFingerprint: target.policyFingerprint, ...nativeSessionFields(binding.toolId, sessionId), sourceId: target.sourceId, botAppId: target.botAppId });
       await Promise.all([deps.controls.toolBindings!.flush(), deps.sessions.flush(), deps.catalog.flush()]);
     }

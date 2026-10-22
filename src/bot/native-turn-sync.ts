@@ -181,17 +181,29 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
           const initial = !previous || previous.boundAtMs !== boundAtMs;
           const binding = initial ? state.bindings[key] = { baselineAtMs: now(), boundAtMs, turns: {} } : previous;
           if (initial) log.info(phase, 'baseline-created', { scope, sessionId: id, turns: snapshot.turns.length });
-          const replay = new Set(initial && entry.recentTurnReplayCount ? snapshot.turns.slice(-entry.recentTurnReplayCount).map(turn => turn.id) : []);
+          const replay = new Set(initial && entry.recentTurnReplayCount ? snapshot.turns
+            .filter(turn => turn.createdAtMs <= boundAtMs && turn.state.terminal !== 'running')
+            .slice(-entry.recentTurnReplayCount).map(turn => turn.id) : []);
+          // Persist the complete replay plan before sending or consuming the
+          // marker. A failed send/restart resumes these deliveries, not a new
+          // history replay that could also pick up the worker's current turn.
+          let changed = initial;
           for (const turn of snapshot.turns) {
             if (!Number.isFinite(turn.createdAtMs)) continue;
             let delivery = binding.turns[turn.id];
             if (!delivery) {
+              changed = true;
               delivery = binding.turns[turn.id] = { createdAtMs: turn.createdAtMs, sequence: 0,
                 replay: replay.has(turn.id), skipped: !replay.has(turn.id) && (turn.bridge || (turn.createdAtMs <= binding.baselineAtMs && (initial || turn.state.terminal !== 'running'))) };
               // A first snapshot establishes a baseline, including currently
               // running turns: never expose work that predates the binding.
-              await save();
             }
+          }
+          if (changed) await save();
+          if (entry.recentTurnReplayCount && deps.catalog.clearRecentTurnReplay(scope, id, toolId, deps.sourceId)) await deps.catalog.flush();
+          for (const turn of snapshot.turns) {
+            const delivery = binding.turns[turn.id];
+            if (!delivery) continue;
             if (refresh && (refresh.scope !== scope || delivery.messageId !== refresh.messageId && !delivery.parts?.some(part => part.messageId === refresh.messageId))) continue;
             if (await publish(scope, id, turn, delivery, !!refresh)) refreshed ||= !!refresh;
           }

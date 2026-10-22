@@ -23,7 +23,7 @@ export interface SessionCatalogEntry extends SessionCatalogIdentity {
   /** Feishu app that last established this chat binding. Legacy entries omit it. */
   sourceId?: string;
   botAppId?: string;
-  /** Number of recent completed Codex turns to replay when this chat is first attached. */
+  /** Number of recent completed native turns to replay when this chat is first attached. */
   recentTurnReplayCount?: number;
   status: SessionCatalogStatus;
   /** Last binding establishment time; archival must not reorder current bindings. */
@@ -35,6 +35,8 @@ export interface SessionCatalogEntry extends SessionCatalogIdentity {
 }
 
 export interface UpsertSessionCatalogInput extends SessionCatalogIdentity {
+  /** System events refresh an existing binding without establishing it again. */
+  preserveBinding?: boolean;
   /** Only an explicit user-selected resume may reopen an archived group. */
   rebindArchivedScope?: boolean;
   now?: number;
@@ -253,21 +255,27 @@ export class SessionCatalog {
     }
     const key = sessionCatalogKey(input);
     const existing = this.data.get(key);
+    const current = input.preserveBinding ? this.latestEntries().find(row => row.scopeId === input.scopeId) : undefined;
+    const retained = current?.status === 'active' && current.agentId === input.agentId &&
+      current.cwdRealpath === input.cwdRealpath && (current.threadId ?? current.sessionId) === (input.threadId ?? input.sessionId) &&
+      (!input.sourceId || !current.sourceId || current.sourceId === input.sourceId) &&
+      (!input.botAppId || !current.botAppId || current.botAppId === input.botAppId) ? current : undefined;
+    const metadata = retained ?? existing;
     const recentTurnReplayCount = input.recentTurnReplayCount === null
       ? undefined
-      : normalizeReplayCount(input.recentTurnReplayCount ?? existing?.recentTurnReplayCount);
+      : normalizeReplayCount(input.recentTurnReplayCount ?? metadata?.recentTurnReplayCount);
     const entry: SessionCatalogEntry = {
       key,
       fingerprintVersion: CURRENT_FINGERPRINT_VERSION,
-      ...((input.sourceId ?? existing?.sourceId) ? { sourceId: input.sourceId ?? existing?.sourceId } : {}),
-      ...(input.botAppId ? { botAppId: input.botAppId } : {}),
+      ...((input.sourceId ?? metadata?.sourceId) ? { sourceId: input.sourceId ?? metadata?.sourceId } : {}),
+      ...((input.botAppId ?? retained?.botAppId) ? { botAppId: input.botAppId ?? retained?.botAppId } : {}),
       ...(recentTurnReplayCount !== undefined ? { recentTurnReplayCount } : {}),
       scopeId: input.scopeId,
       agentId: input.agentId,
       cwdRealpath: input.cwdRealpath,
       policyFingerprint: input.policyFingerprint,
       status: 'active',
-      boundAt: input.now ?? Date.now(),
+      boundAt: retained ? retained.boundAt ?? retained.updatedAt : input.now ?? Date.now(),
       updatedAt: input.now ?? Date.now(),
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       ...(input.threadId ? { threadId: input.threadId } : {}),
@@ -395,13 +403,15 @@ export class SessionCatalog {
   }
 
   /** Consume the one-shot history replay marker after the new group is first observed. */
-  clearRecentTurnReplay(scopeId: string, threadId: string): number {
+  clearRecentTurnReplay(scopeId: string, nativeId: string, agentId: CatalogAgentId = 'codex', sourceId?: string): number {
     let cleared = 0;
     for (const [key, entry] of this.data.entries()) {
       if (
         entry.status !== 'active' ||
         entry.scopeId !== scopeId ||
-        entry.threadId !== threadId ||
+        entry.agentId !== agentId ||
+        (entry.threadId ?? entry.sessionId) !== nativeId ||
+        (sourceId !== undefined && entry.sourceId !== undefined && entry.sourceId !== sourceId) ||
         entry.recentTurnReplayCount === undefined
       ) continue;
       const { recentTurnReplayCount: _ignored, ...next } = entry;

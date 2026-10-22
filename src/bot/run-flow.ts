@@ -247,6 +247,7 @@ export function recordRunSessionEvent(input: RecordRunSessionEventInput): void {
     if (input.sessionCatalog?.isScopeArchived(input.scopeId)) return;
     const cwdRealpath = input.event.cwd ?? input.policy.cwdRealpath;
     input.sessionCatalog?.upsertActive({
+      preserveBinding: true,
       scopeId: input.scopeId,
       agentId: input.capability.agentId,
       cwdRealpath,
@@ -262,6 +263,7 @@ export function recordRunSessionEvent(input: RecordRunSessionEventInput): void {
     if (input.sessionCatalog?.isScopeArchived(input.scopeId) ||
         input.sessionCatalog?.isThreadArchived(input.event.threadId)) return;
     input.sessionCatalog?.upsertActive({
+      preserveBinding: true,
       scopeId: input.scopeId,
       agentId: input.capability.agentId,
       cwdRealpath: input.policy.cwdRealpath,

@@ -64,6 +64,23 @@ it('never duplicates Feishu-origin input or answers, even when their text matche
   h.snapshots.ses_native!.turns.push({ ...turn('msg_bridge'), bridge: true }, turn()); await sync.runNow();
   expect(h.create).toHaveBeenCalledTimes(2);
 });
+it('persists the whole one-shot replay plan before a failed send and excludes a current worker turn after restart', async () => {
+  const h = await fixture(), entry = h.catalog.entries()[0]!;
+  h.catalog.upsertActive({ ...entry, now: 1000, recentTurnReplayCount: 3 });
+  h.snapshots.ses_native!.turns = [turn('old-one', 100), turn('old-two', 200),
+    { ...turn('worker-current', 1100, true), bridge: true }];
+  h.create.mockRejectedValueOnce(Error('connection lost'));
+  const first = await h.start();
+  expect(h.catalog.entries()[0]!.recentTurnReplayCount).toBeUndefined();
+  const ledger = JSON.parse(await readFile(h.statePath, 'utf8'));
+  expect(Object.values(ledger.bindings).map((b: any) => Object.keys(b.turns))).toEqual([['old-one', 'old-two', 'worker-current']]);
+  await first.stop(); h.advance(2000);
+  h.snapshots.ses_native!.turns.at(-1)!.state.terminal = 'done';
+  const second = await h.start(); await second.runNow();
+  // One failed input send, then two historical input/card pairs; no worker card.
+  expect(h.create).toHaveBeenCalledTimes(5); expect(h.channel.createCard).toHaveBeenCalledTimes(2);
+  expect(h.create.mock.calls[0]![0].data.uuid).toBe(h.create.mock.calls[1]![0].data.uuid);
+});
 it('routes VS Code and Desktop native sessions only to their respective bound personal groups', async () => {
   const h = await fixture(); h.add('oc_desktop', 'ses_desktop'); h.snapshots.ses_desktop = { ...h.snapshots.ses_native!, id: 'ses_desktop', turns: [] };
   const sync = await h.start(); h.advance(3000);

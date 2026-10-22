@@ -194,6 +194,24 @@ describe('agent-aware session catalog', () => {
     await catalog.flush();
   });
 
+  it('keeps the binding epoch and consumed replay marker across system updates, policy changes and restart', async () => {
+    const file = await path(), catalog = new SessionCatalog(file);
+    const identity = { scopeId: 'oc_group', agentId: 'kilo' as const, cwdRealpath: '/repo', policyFingerprint: 'fp',
+      sessionId: 'native', sourceId: 'source', botAppId: 'cli_test' };
+    catalog.upsertActive({ ...identity, now: 1000, recentTurnReplayCount: 3 });
+    expect(catalog.clearRecentTurnReplay('oc_group', 'native', 'kilo', 'source')).toBe(1);
+    expect(catalog.upsertActive({ ...identity, preserveBinding: true, now: 2000 })).toMatchObject({ boundAt: 1000, updatedAt: 2000 });
+    const next = catalog.upsertActive({ ...identity, policyFingerprint: 'fp-next', preserveBinding: true, now: 3000 });
+    expect(next.boundAt).toBe(1000); expect(next.recentTurnReplayCount).toBeUndefined();
+    await catalog.flush();
+    const loaded = new SessionCatalog(file); await loaded.load();
+    expect(loaded.activeFor(next)).toMatchObject({ boundAt: 1000, sourceId: 'source', botAppId: 'cli_test' });
+    expect(loaded.upsertActive({ ...identity, policyFingerprint: 'fp-next', now: 4000 }).boundAt).toBe(4000);
+    expect(loaded.upsertActive({ ...identity, sessionId: 'other', preserveBinding: true, now: 5000 }).boundAt).toBe(5000);
+    expect(loaded.upsertActive({ ...identity, sessionId: 'other', sourceId: 'other-source', preserveBinding: true, now: 6000 }).boundAt).toBe(6000);
+    await loaded.flush();
+  });
+
   it('rejects mismatched Claude/Codex identity fields and does not auto-resume damaged entries', async () => {
     const catalog = new SessionCatalog(await path());
 
