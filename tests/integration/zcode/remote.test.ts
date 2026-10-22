@@ -116,6 +116,17 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
   return { client, calls, wire, file, dir, httpCalls, credentialFile, relay:harness.relay, emit: (value: any) => emit(value), disconnect: () => connection?.terminate() };
 }
 describe('ZCode desktop remote attachment', () => {
+  it('submits an official remote input through V4 with durable native provenance', async () => {
+    const f = await fixture();
+    await f.client.sendNativeText('sess_original', 'native input', { providerId: 'account:native', modelId: 'native-model' });
+    const sent = f.calls.filter(c => c.method === 'sendConversationCommandV4');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.args[0]).toMatchObject({ workspacePath: f.dir, sessionId: 'sess_original', envelope: {
+      sessionId: 'sess_original', type: 'sendText', payload: { text: 'native input', inputOrigin: 'mobile',
+        requestedDelivery: 'startNow', modelSelection: { providerId: 'account:native', modelId: 'native-model' } },
+    } });
+    expect(f.calls.some(c => ['sendPrompt', 'createSession'].includes(c.method))).toBe(false);
+  });
   it('ignores replayed faults from an old terminal, but fails on its own workspace bridge fault', async () => {
     const stale=await fixture({staleDegraded:true});
     await expect(stale.client.request('workspace/updateProviderRegistry',{})).resolves.toEqual({});

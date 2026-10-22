@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { isZcodeDesktopInput, projectZcodeConversation } from '../../../src/agent/zcode/conversation';
+import { isZcodeNativeInput, projectZcodeConversation } from '../../../src/agent/zcode/conversation';
 
 const session = { sessionId: 'sess_native', sessionKind: 'interactive', title: 'AA-ZCode', workspace: { workspacePath: '/project' } };
 const user = (id = 'u1', created = 100) => ({ info: { messageId: id, sessionId: 'sess_native', role: 'user', time: { created },
@@ -27,19 +27,29 @@ it('ignores synthetic/model-only messages and parts, including answers to hidden
   expect(result.turns).toHaveLength(1); expect(JSON.stringify(result)).not.toContain('secret');
   expect(JSON.stringify(result)).not.toContain('hidden-answer');
 });
-it('requires native desktop admission and excludes bridge commands even if marked desktop', () => {
+it('requires native desktop or official remote admission and excludes bridge commands', () => {
   const info: any = user().info;
-  expect(isZcodeDesktopInput(info)).toBe(true);
-  info.metadata.inputIntent.sourceCommandId = 'bridge-worker-run'; expect(isZcodeDesktopInput(info)).toBe(false);
-  info.metadata.inputIntent.sourceCommandId = 'native'; info.metadata.inputIntent.inputOrigin = 'mobile'; expect(isZcodeDesktopInput(info)).toBe(false);
-  delete info.metadata; expect(isZcodeDesktopInput(info)).toBe(false);
+  expect(isZcodeNativeInput(info)).toBe(true);
+  info.metadata.inputIntent.sourceCommandId = 'bridge-worker-run'; expect(isZcodeNativeInput(info)).toBe(false);
+  info.metadata.inputIntent.sourceCommandId = 'native'; info.metadata.inputIntent.inputOrigin = 'mobile'; expect(isZcodeNativeInput(info)).toBe(true);
+  info.metadata.inputIntent.sourceCommandId = 'bridge-worker-run'; expect(isZcodeNativeInput(info)).toBe(false);
+  delete info.metadata; expect(isZcodeNativeInput(info)).toBe(false);
   const u = user(); u.parts[0]!.text = JSON.stringify(user().info.metadata);
   delete (u.info as any).metadata; expect(project([u]).turns[0]?.bridge).toBe(true);
+});
+it('projects official remote input as native while rejecting hidden or mismatched command records', () => {
+  const u = user(); u.info.metadata.inputIntent.inputOrigin = 'mobile';
+  expect(project([u, answer()]).turns[0]).toMatchObject({ bridge: false, state: { terminal: 'done' } });
+  const info: any = u.info;
+  info.metadata.conversationInputIntent = { ...info.metadata.inputIntent, sourceCommandId: 'another-command' };
+  expect(isZcodeNativeInput(info)).toBe(false);
+  delete info.metadata.conversationInputIntent;
+  info.synthetic = true; expect(isZcodeNativeInput(info)).toBe(false);
 });
 it('fails closed when two native intent records disagree', () => {
   const info: any = user().info;
   info.metadata.conversationInputIntent = { ...info.metadata.inputIntent, inputOrigin: 'mobile' };
-  expect(isZcodeDesktopInput(info)).toBe(false);
+  expect(isZcodeNativeInput(info)).toBe(false);
 });
 it('keeps incomplete/tool-step native output running despite the detached CLI idle status', () => {
   const incomplete = answer(); delete (incomplete.info as any).finish; delete (incomplete.info.time as any).completed;

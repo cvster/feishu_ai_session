@@ -404,6 +404,8 @@ pnpm build
 
 `pnpm test` 包含 unit、integration 和 process-level adapter 测试。CI 在 macOS、Ubuntu、Windows 上执行 `pnpm install --frozen-lockfile`、`pnpm test`、`pnpm typecheck` 和 `pnpm build`。
 
+真实 Codex、ZCode、Kilo 与飞书的双向消息及改名验证使用可选的 `pnpm test:live:bridge`，启用条件和项目路径参数见 [测试说明](docs/TESTING.md)。
+
 ## 可选：遥测（Telemetry）
 
 默认情况下 bridge **不上报任何数据**：没有指标、没有日志离开你的机器，也不引入任何遥测依赖。下面这个钩子在你主动开启前完全是空操作。

@@ -42,6 +42,7 @@
     "test:web": "pnpm build:core && node tools/prepare-web-core.mjs && node tools/run-web-tests.mjs",
     "test:unit": "vitest run tests/unit --passWithNoTests",
     "test:integration": "vitest run tests/integration --passWithNoTests",
+    "test:live:bridge": "vitest run tests/integration/worker/bridge.live.test.ts",
     "test:process": "vitest run tests/process --passWithNoTests",
     "ci:local": "git diff --check && pnpm test && pnpm typecheck && pnpm build",
     "ci:platform": "pnpm test && pnpm typecheck && pnpm build",

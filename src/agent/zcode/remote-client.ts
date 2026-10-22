@@ -1,4 +1,4 @@
-import { isZcodeDesktopInput } from './conversation';
+import { isZcodeNativeInput } from './conversation';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { createHmac, randomUUID } from 'node:crypto';
@@ -191,6 +191,18 @@ export class ZcodeRemoteClient {
     return response;
   }
   onNotification(listener: (method: string, params: any) => void) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  /** Submit the official remote UI's native V4 input command with durable origin.
+   * Legacy sendPrompt omits inputOrigin and cannot exercise native mirroring.
+   * This is an explicit native input seam; bridge jobs keep using session/send.
+   */
+  async sendNativeText(sessionId: string, text: string, model: { providerId: string; modelId: string; options?: object }): Promise<void> {
+    await this.ready;
+    const result = await this.call('sendConversationCommandV4', [{ ...this.target!, sessionId, envelope: {
+      commandId: randomUUID(), clientId: this.clientId, sessionId, issuedAt: Date.now(), type: 'sendText',
+      payload: { text, inputOrigin: 'mobile', requestedDelivery: 'startNow', modelSelection: model },
+    } }]);
+    if (!['accepted', 'duplicate'].includes(result?.status)) throw new Error('ZCode 桌面未确认原生输入，未自动重发');
+  }
   async request<T = any>(method: string, params: any): Promise<T> {
     await this.ready;
     const target = { ...this.target!, ...(params.sessionId ? { sessionId: params.sessionId } : {}) };
@@ -267,7 +279,7 @@ export class ZcodeRemoteClient {
         const before = await this.call('readSession', [target]);
         if (before.session?.sessionId !== params.sessionId || before.session?.archivedAt)
           throw new Error('ZCode 原生会话身份不匹配或已归档，未停止');
-        const user = [...(before.messages ?? [])].reverse().find((row: any) => row.info?.role === 'user' && isZcodeDesktopInput(row.info));
+        const user = [...(before.messages ?? [])].reverse().find((row: any) => row.info?.role === 'user' && isZcodeNativeInput(row.info));
         const activeTurn = before.runtime?.activeTurnId;
         if (!activeTurn) { result = { stopped: false }; break; }
         if (!user || user.info.messageId !== params.turnId)

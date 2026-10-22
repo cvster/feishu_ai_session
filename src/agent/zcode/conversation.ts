@@ -10,13 +10,14 @@ const visiblePart = (part: any): boolean => !part.synthetic && !part.ignored &&
   !['hidden', 'model-only', 'debug'].includes(part.visibility ?? part.metadata?.visibility);
 
 /** Native structured admission metadata, never text matching or prompt JSON.
- * Missing/old provenance is deliberately not broadcast. Legacy session/send can
- * record a desktop intent when a model is selected; exclude our input command ID.
+ * Desktop and official remote inputs carry desktop/mobile origins. Missing/old
+ * provenance is deliberately not broadcast; exclude our input command ID.
  */
-export function isZcodeDesktopInput(info: any): boolean {
+export function isZcodeNativeInput(info: any): boolean {
   const intents = [info?.metadata?.inputIntent, info?.metadata?.conversationInputIntent].filter(Boolean);
   return visible(info) && intents.length > 0 && intents.every(intent =>
-    intent.inputOrigin === 'desktop' && typeof intent.sourceCommandId === 'string' &&
+    ['desktop', 'mobile'].includes(intent.inputOrigin) && intent.inputOrigin === intents[0].inputOrigin &&
+    intent.sourceCommandId === intents[0].sourceCommandId && typeof intent.sourceCommandId === 'string' &&
     !!intent.sourceCommandId && !intent.sourceCommandId.startsWith('bridge-'));
 }
 
@@ -66,7 +67,7 @@ export function projectZcodeConversation(snapshot: any): NativeConversationSnaps
     else if (last?.finish && !['tool-calls', 'unknown'].includes(last.finish)) state = reduce(state, { type: 'done',
       terminationReason: ['cancelled', 'aborted'].includes(last.finish) ? 'interrupted' : 'normal' });
     else if (index < users.length - 1) state = reduce(state, { type: 'done', terminationReason: 'interrupted' });
-    return { id, createdAtMs, bridge: !isZcodeDesktopInput(user.info),
+    return { id, createdAtMs, bridge: !isZcodeNativeInput(user.info),
       input: user.parts.filter((part: any) => part.type === 'text' && typeof part.text === 'string' && visiblePart(part)).map((part: any) => part.text).join('\n'), state };
   });
   return { id: session.sessionId, name: session.title, cwd: session.workspace.workspacePath, archived: !!session.archivedAt, turns };
