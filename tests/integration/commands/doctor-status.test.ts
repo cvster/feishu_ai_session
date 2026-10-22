@@ -51,8 +51,8 @@ describe('/status and /doctor diagnostics', () => {
     expect(status).toContain('owner API');
     expect(status).toContain('profile');
     expect(status).toContain('claude');
-    expect(status).toContain('permission');
-    expect(status).toContain('plan');
+    expect(status).toContain('access');
+    expect(status).toContain('read-only');
     expect(status).not.toContain('bypassPermissions');
   });
 
@@ -84,7 +84,7 @@ describe('/status and /doctor diagnostics', () => {
     expect(output).toContain('profile');
     expect(output).toContain('claude');
     expect(output).toContain('workspace check');
-    expect(output).toContain('policy check: ok permission=plan');
+    expect(output).toContain('policy check: ok access=plan');
     expect(output).not.toContain('permission=bypassPermissions');
     expect(output).toContain('agent echo check');
     expect(output).toContain('OK');

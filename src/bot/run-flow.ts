@@ -25,6 +25,7 @@ import type { RunDelivery } from '../worker/protocol';
 
 export interface StartRunFlowInput {
   scopeId: string;
+  nativeBinding?: { nativeId: string; sourceId: string };
   scope: ScopeContext;
   prompt: string;
   attachments: AgentAttachment[];
@@ -122,8 +123,6 @@ export async function prepareRunFlow(input: StartRunFlowInput): Promise<Prepared
     capability: input.capability,
     profileConfig: input.profileConfig,
     now: input.now,
-    codexHome: input.profileConfig.codex?.codexHome,
-    inheritCodexHome: input.profileConfig.codex?.inheritCodexHome,
   });
   if (!policy.ok) {
     return {
@@ -146,10 +145,19 @@ export async function prepareRunFlow(input: StartRunFlowInput): Promise<Prepared
     if (catalogEntry && toolDefinition(catalogEntry.agentId).nativeField === 'sessionId') {
       sessionId = catalogEntry.sessionId;
       resumeFrom = sessionId;
-    } else if (catalogEntry?.agentId === 'codex') {
+    } else if (catalogEntry && toolDefinition(catalogEntry.agentId).nativeField === 'threadId') {
       threadId = catalogEntry.threadId;
       resumeFrom = threadId;
     }
+  }
+  if (input.nativeBinding) {
+    const rows = input.sessionCatalog?.entries().filter(row => row.scopeId === input.scopeId && row.agentId === input.capability.agentId &&
+      row.status === 'active' && (row.threadId ?? row.sessionId) === input.nativeBinding!.nativeId &&
+      (!row.sourceId || row.sourceId === input.nativeBinding!.sourceId)) ?? [];
+    if (rows.length && !rows.some(row => row.cwdRealpath === workspace.cwdRealpath)) return { ok: false, rejectReason: { code: 'archive-check-unavailable', userVisible: '原会话工作目录已变化，请重新核对绑定。' }, workspace };
+    resumeFrom = input.nativeBinding.nativeId;
+    if (toolDefinition(input.capability.agentId).nativeField === 'threadId') threadId = resumeFrom;
+    else sessionId = resumeFrom;
   }
   if (!resumeFrom && toolDefinition(input.capability.agentId).nativeField === 'sessionId') {
     resumeFrom = input.sessions.resumeFor(input.scopeId, workspace.cwdRealpath);
@@ -193,13 +201,10 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
         input.profileConfig.preferences.model,
       ),
       reasoningEffort: resolveReasoningEffort(input.profileConfig.preferences.reasoningEffort),
-      images:
-        input.capability.agentId === 'codex'
-          ? policy.attachments
-              .filter((attachment) => attachment.kind === 'image' && attachment.decision === 'accepted')
-              .map((attachment) => attachment.path)
-              .filter((path): path is string => Boolean(path))
-          : undefined,
+      images: policy.attachments
+        .filter((attachment) => attachment.kind === 'image' && attachment.decision === 'accepted')
+        .map((attachment) => attachment.path)
+        .filter((path): path is string => Boolean(path)),
       stopGraceMs: input.stopGraceMs,
       requestKey: input.requestKey,
       delivery: input.delivery ? { ...input.delivery, policyFingerprint: policy.policyFingerprint } : undefined,
@@ -252,13 +257,13 @@ export function recordRunSessionEvent(input: RecordRunSessionEventInput): void {
     input.sessions.set(input.scopeId, input.event.sessionId, cwdRealpath);
     return;
   }
-  if (input.capability.agentId === 'codex' && input.event.threadId) {
+  if (toolDefinition(input.capability.agentId).nativeField === 'threadId' && input.event.threadId) {
     // A late system event from a stopped/archived run must not reopen its group.
     if (input.sessionCatalog?.isScopeArchived(input.scopeId) ||
         input.sessionCatalog?.isThreadArchived(input.event.threadId)) return;
     input.sessionCatalog?.upsertActive({
       scopeId: input.scopeId,
-      agentId: 'codex',
+      agentId: input.capability.agentId,
       cwdRealpath: input.policy.cwdRealpath,
       policyFingerprint: input.policy.policyFingerprint,
       threadId: input.event.threadId,

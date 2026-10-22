@@ -42,7 +42,7 @@ const timer = setInterval(() => {
   const source = resolve('src'), observerEntry = join(dir, 'observer.ts');
   const options = { runId: 'bridge-run', requestKey: 'one-feishu-message', prompt: 'real test request', cwd: workspace,
     initialSessionId: '50d06950-8fa4-4a6c-a132-77158c27c9ee' };
-  const stateDir = join(dir, 'profiles', 'worker-test', 'execution-worker');
+  const stateDir = join(dir, 'profiles', 'worker-test', 'workers', 'claude');
   await writeFile(observerEntry, `
 import { WorkerClient } from ${JSON.stringify(join(source, 'worker/client.ts'))};
 import { DurableClaudeAdapter } from ${JSON.stringify(join(source, 'worker/adapter.ts'))};
@@ -63,7 +63,7 @@ for await (const event of run.events) console.log(JSON.stringify(event));
     return { child, output: () => output, errors: () => errors };
   };
   try {
-    const worker = launch(join(buildDir, 'worker.js'), ['worker', 'run', '--profile', 'worker-test', '--config', configPath]);
+    const worker = launch(join(buildDir, 'worker.js'), ['worker', 'run', '--tool', 'claude', '--profile', 'worker-test', '--config', configPath]);
     const client = new WorkerClient(stateDir, claudeHome, 'cli_worker_test');
     await vi.waitFor(async () => { if (worker.child.exitCode !== null) throw Error(worker.errors()); await client.health(); }, { timeout: 5000 });
     const bridge = launch(join(buildDir, 'observer.js'), []);

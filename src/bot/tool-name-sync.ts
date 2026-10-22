@@ -58,15 +58,13 @@ export async function startToolNameSync(options: {
   return { tick, async stop() { stopped = true; clearInterval(timer); await running; } };
 }
 
-/** Kilo and Codex names are observed by their existing native turn readers. */
+/** Metadata support is advertised by each worker. */
 export async function startWorkerNameSync(options: {
   channel: LarkChannel; controls: Controls; catalog: SessionCatalog; profileDir: string; intervalMs?: number;
 }) {
   const handles: Awaited<ReturnType<typeof startToolNameSync>>[] = [];
   for (const tool of options.controls.toolRegistry?.all() ?? []) {
-    if (!['claude', 'dsh', 'zcode'].includes(tool.id) || !tool.sessions || !(tool.agent instanceof DurableAgentAdapter)) continue;
-    // CLI-mode ZCode labels are local aliases, not native desktop titles.
-    if (tool.id === 'zcode' && !options.controls.profileConfig.zcode?.remoteControlFile) continue;
+    if (!tool.sessions || !(tool.agent instanceof DurableAgentAdapter)) continue;
     const agent = tool.agent;
     try {
       handles.push(await startToolNameSync({ ...options, tool,
@@ -74,8 +72,7 @@ export async function startWorkerNameSync(options: {
         ready: async () => {
           await agent.prepareRun();
           const health = await agent.client.health();
-          if (health.capabilities) return health.capabilities.sessions.list && health.capabilities.sessions.rename;
-          return tool.id === 'zcode' && health.zcodeSessionNames === true;
+          return health.capabilities?.nativeSessionNames === true && health.capabilities.sessions.list && health.capabilities.sessions.rename;
         } }));
     } catch (error) { log.warn('session', 'name-sync-disabled', { toolId: tool.id, error: String(error) }); }
   }

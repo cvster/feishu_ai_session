@@ -2,29 +2,27 @@
 
 The standard runtime sends both first and follow-up messages through the
 official `codex queue` entry point. The Desktop/shared writer owns execution;
-bridge children only submit or read. First messages create idle history with
+the Codex worker submits or reads. First messages create idle history with
 public `thread/start`, materialize it using `thread/name/set`, validate it with
 `thread/read`, then close that creator before queueing. No bridge-owned
 `turn/start` is used. The standalone CLI's compatible `legacy` history mode is
 used for this idle preparation; `threadSource` remains `lark-channel-bridge`.
 The group name replaces the temporary title through existing name sync.
 
-## Feishu stop only interrupts the current response
+## Uniform worker boundary
 
-In the acceptance-only Codex runtime, `/stop` and the card's stop button use
-the public shared writer's `turn/interrupt` and wait for its acknowledgement.
-They preserve both the durable unsent intake and all accepted queued input.
-After already-received intake settles (bounded to 30 seconds), the bridge reads
-`thread/queue/list` and explicitly starts the queue head via `thread/queue/start`.
-Normal completion lets the writer dispatch the remaining queue in order.
-If the queue is empty at stop time, a subsequently accepted RPC input checks
-the shared writer: an idle thread whose latest turn was interrupted is woken
-with `thread/queue/start`. Active and normally completed threads are left alone.
-A wake-up failure does not invalidate confirmed acceptance or resend input.
-An idle thread is left alone. There is no `thread/resume`, queue deletion, or
-write retry. A continuation failure is reported separately from an interrupt
-failure; preserved messages can be continued from Desktop. Windows without a
-public shared endpoint shows the unsupported-stop warning and changes no input.
+The bridge discovers the Codex worker through `workers/*/endpoint.json` and uses
+common job, conversation, model, title, archive and question APIs. Native queue
+submission and public shared-reader handling now belong to the worker. Codex
+installation and account options live in `workers/codex/config.json`; deploying
+only other tools needs no Codex installation. See [migration](WORKER_MIGRATION.md).
+
+`/stop` targets the current worker job, or the exact mirrored native turn through
+the common turn-stop endpoint. Stale native cards never stop a later task.
+Unsubmitted bridge intake remains queued; archive closes and rejects that route's
+input. Native job cancellation semantics still belong to the Codex queue adapter.
+Bridge restart detaches observers; worker restart recovery is not guaranteed and
+unfinished ambiguous worker receipts are marked unknown without automatic replay.
 
 ## Legacy run adapters
 
@@ -39,7 +37,7 @@ submission client while its acknowledgement is in flight. `ActiveRuns`
 marks it detached, not interrupted; stream/executor cleanup must not issue a
 fallback stop or publish a false terminal state. System metadata is drained
 and the session catalog is flushed before exit. The existing snapshot
-synchronizer recovers live output on startup without resubmitting input.
+synchronizer recovers live output on startup through the worker journal without resubmitting input.
 
 This preserves tasks already accepted by Codex, not unsubmitted in-memory
 message batches. It does not survive stopping Desktop/the writer, rebooting

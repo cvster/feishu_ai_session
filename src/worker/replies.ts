@@ -13,6 +13,7 @@ import { getMessageReplyMode, getShowToolCalls } from '../config/schema';
 import { log } from '../core/logger';
 import { DurableAgentAdapter } from './adapter';
 import { isJobActive, type WorkerJob } from './protocol';
+import { nativeSessionFields } from '../tools/definitions';
 
 interface ReplyDelivery {
   mode: 'card' | 'markdown' | 'text';
@@ -69,7 +70,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     }
     if (target.botAppId !== deps.controls.profileConfig.accounts.app.id || target.sourceId !== deps.adapter.client.sourceId) return;
     const binding = deps.controls.toolBindings?.get(target.scope);
-    const originalNative = job.options.sessionId ?? job.options.initialSessionId;
+    const originalNative = job.options.threadId ?? job.options.sessionId ?? job.options.initialSessionId;
     if (!binding || binding.toolId !== deps.adapter.id || binding.sourceId !== target.sourceId ||
       (originalNative && binding.nativeId && originalNative !== binding.nativeId) || deps.catalog.isScopeArchived(target.scope)) {
       if (deliveries[job.id] && !deliveries[job.id]!.skipped) { deliveries[job.id]!.skipped = true; await save(); }
@@ -80,16 +81,16 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       recovered.set(job.id, { handle: deps.activeRuns.register(target.scope, run), scope: target.scope });
     }
     const previousDelivery = deliveries[job.id];
-    const repairZcodeControls = deps.adapter.id === 'zcode' && previousDelivery?.mode === 'card' && previousDelivery.controlsVersion !== 1;
-    if (previousDelivery?.skipped || (previousDelivery?.finished && !repairZcodeControls)) return;
+    const repairControls = previousDelivery?.mode === 'card' && previousDelivery.controlsVersion !== 1;
+    if (previousDelivery?.skipped || (previousDelivery?.finished && !repairControls)) return;
     const snapshot = await deps.adapter.client.snapshot(job.id);
-    const init = snapshot.events.find(row => row.event.type === 'system' && row.event.sessionId)?.event;
-    if (init?.type === 'system' && init.sessionId && (binding.nativeId !== init.sessionId || !binding.nativeCreated)) {
-      const sessionId = init.sessionId;
+    const init = snapshot.events.find(row => row.event.type === 'system' && (row.event.sessionId || row.event.threadId))?.event;
+    if (init?.type === 'system' && (init.sessionId || init.threadId) && (binding.nativeId !== (init.sessionId ?? init.threadId) || !binding.nativeCreated)) {
+      const sessionId = (init.sessionId ?? init.threadId)!;
       deps.controls.toolBindings!.set(target.scope, { ...binding, nativeId: sessionId, nativeCreated: true });
       deps.sessions.set(target.scope, sessionId, job.options.cwd ?? '');
       deps.catalog.upsertActive({ scopeId: target.scope, agentId: binding.toolId, cwdRealpath: job.options.cwd!,
-        policyFingerprint: target.policyFingerprint, sessionId, sourceId: target.sourceId, botAppId: target.botAppId });
+        policyFingerprint: target.policyFingerprint, ...nativeSessionFields(binding.toolId, sessionId), sourceId: target.sourceId, botAppId: target.botAppId });
       await Promise.all([deps.controls.toolBindings!.flush(), deps.sessions.flush(), deps.catalog.flush()]);
     }
     let state = startRunRuntime(initialState, job.createdAt);

@@ -28,7 +28,7 @@ it.each(['claude', 'kilo', 'zcode', 'dsh'] as const)('uses the same model/sessio
   Object.assign(h.raw, { listModels, stopNativeTurn });
   const caps = await h.client.capabilities();
   expect(caps).toEqual({ apiVersion: 2, jobs: { submit: true, read: true, stop: true, eventCursor: true },
-    models: true, sessions: { list: true, history: true, rename: true, archive: true, fork: true }, nativeTurnStop: true });
+    models: true, sessions: { list: true, history: true, rename: true, archive: true, fork: true }, nativeTurnStop: true, conversation: false, questions: false, nativeSessionNames: true });
   const e = await endpoint(h.stateDir);
   expect(await (await fetch(`${e.url}/capabilities`, { headers: e.headers })).json()).toEqual(caps);
   expect(await h.adapter.listModels({ cwd: h.dir })).toEqual([{ value: 'native:model', label: 'Native' }]);
@@ -80,10 +80,23 @@ it('blocks mutations of a newly discovered active native session but permits his
   await expect(h.client.renameSession('native', 'changed')).rejects.toMatchObject({ status: 429, code: 'busy', retryable: true });
   await expect(h.client.archiveSession('native')).rejects.toMatchObject({ status: 429 });
   await expect(h.client.forkSession('native')).rejects.toMatchObject({ status: 429 });
+  await expect(h.client.submit({ requestKey: 'another-group', options: { ...h.options, sessionId: 'native', delivery: { ...h.options.delivery!, scope: 'oc_other' } } })).rejects.toMatchObject({ status: 409, retryable: true });
   expect(await h.client.sessionHistory('native')).toMatchObject({ nativeId: 'native' });
   await h.client.renameSession('other', 'changed');
   expect(sessions.rename).toHaveBeenCalledOnce(); expect(h.stop).not.toHaveBeenCalled();
   await h.client.stop(job.id); h.finish();
+});
+
+it('keeps a native blocking question outside the job event stream from triggering idle cancellation', async () => {
+  const sessions = service(), waiting = vi.fn(() => true); sessions.waitingForInput = waiting;
+  const h = await fixture('claude', sessions);
+  const job = await h.client.submit({ requestKey: 'native-question', options: { ...h.options, initialSessionId: undefined, idleTimeoutMs: 50 } });
+  await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+  await new Promise(resolve => setTimeout(resolve, 160));
+  expect(waiting).toHaveBeenCalledWith('native'); expect(h.stop).not.toHaveBeenCalled();
+  waiting.mockReturnValue(false);
+  await vi.waitFor(() => expect(h.stop).toHaveBeenCalledOnce());
+  expect((await h.client.snapshot(job.id)).job.status).not.toBe('completed'); h.finish();
 });
 
 it('keeps paired execution connections intact while allowing independent history reads', async () => {
@@ -114,18 +127,13 @@ it('does not fall back or repeat a mutation after its acknowledgement is lost', 
   } finally { fetchMock.mockRestore(); }
 });
 
-it('keeps paired-transport validation before unified models and session writes', async () => {
+it('uses worker-owned configuration regardless of bridge-local provider settings', async () => {
   const sessions = service(), h = await fixture('zcode', sessions);
   Object.assign(h.raw, { listModels: vi.fn(async () => []) });
-  const adapter = new DurableAgentAdapter(h.client, new ZcodeAdapter({ remoteControlFile: '/private/pair.link' }));
-  await expect(adapter.listModels({ cwd: h.dir })).rejects.toThrow('桌面配对模式与配置不一致');
-  const legacy = { historyPath: async () => undefined, rename: async () => {}, archive: async () => {} };
-  const proxy = new WorkerSessionClient(h.client, async () => [], legacy, join(h.dir, 'cache'), () => adapter.prepareRun());
-  await expect(proxy.rename('native', 'new')).rejects.toThrow('桌面配对模式与配置不一致');
-  await expect(proxy.archive('native')).rejects.toThrow('桌面配对模式与配置不一致');
-  expect(h.raw.listModels).not.toHaveBeenCalled(); expect(sessions.rename).not.toHaveBeenCalled(); expect(sessions.archive).not.toHaveBeenCalled();
+  const adapter = new DurableAgentAdapter(h.client);
+  await expect(adapter.listModels({ cwd: h.dir })).resolves.toEqual([]);
+  await h.client.renameSession('native', 'new'); expect(sessions.rename).toHaveBeenCalledOnce();
 });
-
 it('exports bounded native history without accepting file paths or partial JSONL tails', async () => {
   const h = await fixture();
   const path = join(h.dir, 'records.jsonl'); await writeFile(path, '{"type":"user"}\n{"partial"');
@@ -153,20 +161,12 @@ it('uses worker session APIs and caches validated records for existing consumers
   await expect(client.historyPath(session.nativeId)).rejects.toThrow('incompatible');
 });
 
-it('chooses old-worker compatibility before writes and retains catalog-only archival', async () => {
-  const h = await fixture('zcode');
-  vi.spyOn(h.client, 'health').mockResolvedValue({ zcodeSessionNames: true });
-  const legacy = { nativeArchive: false, historyPath: vi.fn(async () => undefined),
-    rename: vi.fn(async () => {}), archive: vi.fn(async () => {}) };
-  const list = vi.fn(async () => [session]);
-  const proxy = new WorkerSessionClient(h.client, list, legacy, join(h.dir, 'cache'));
-  expect(await proxy.listSessions()).toEqual([session]);
-  await proxy.rename('native', 'new'); await proxy.archive('native');
-  expect(legacy.rename).toHaveBeenCalledOnce(); expect(legacy.archive).toHaveBeenCalledOnce();
-  const request = vi.spyOn(globalThis, 'fetch');
-  try {
-    await expect(h.client.renameSession('native', 'new', h.dir)).rejects.toBeInstanceOf(WorkerRequestError);
-    expect(request.mock.calls.filter(([path]) => String(path).endsWith('/session-name'))).toHaveLength(1);
-    expect(request.mock.calls.some(([path]) => String(path).endsWith('/rename'))).toBe(false);
-  } finally { request.mockRestore(); }
+it('rejects old workers before writes and retains catalog-only archival without native mutations', async () => {
+  const h = await fixture('zcode'); vi.spyOn(h.client, 'health').mockResolvedValue({ zcodeSessionNames: true });
+  const legacy = { nativeArchive: false, historyPath: vi.fn(async () => undefined), rename: vi.fn(async () => {}), archive: vi.fn(async () => {}) };
+  const proxy = new WorkerSessionClient(h.client, async () => [session], legacy, join(h.dir, 'cache'));
+  await expect(proxy.listSessions()).rejects.toMatchObject({ code: 'unsupported-operation' });
+  await expect(proxy.rename('native', 'new')).rejects.toMatchObject({ code: 'unsupported-operation' });
+  await proxy.archive('native'); expect(legacy.archive).not.toHaveBeenCalled(); expect(legacy.rename).not.toHaveBeenCalled();
+  await expect(h.client.renameSession('native', 'new', h.dir)).rejects.toBeInstanceOf(WorkerRequestError);
 });

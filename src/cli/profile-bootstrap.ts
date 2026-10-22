@@ -1,5 +1,4 @@
 import { mkdir, realpath } from 'node:fs/promises';
-import { join } from 'node:path';
 import { AgentPreflightError } from '../agent/preflight';
 import { createDefaultProfileConfig, type AgentKind, type ProfileConfig } from '../config/profile-schema';
 import type { AppConfig } from '../config/schema';
@@ -26,25 +25,17 @@ export async function createBootstrapProfileConfig(
     : input.defaultWorkspace
       ? await ensureManagedDefaultWorkspace(input.defaultWorkspace)
       : undefined;
-  const codex =
-    input.agentKind === 'codex'
-      ? await createBootstrapCodexConfig(input.codexBinaryPath)
-      : undefined;
   const profile = createDefaultProfileConfig({
     agentKind: input.agentKind,
     accounts: input.accounts,
     preferences: input.preferences,
     secrets: input.secrets,
-    ...(codex ? { codex } : {}),
   });
   if (workspace) {
     profile.workspaces = {
       ...profile.workspaces,
       default: workspace,
     };
-  }
-  if (input.profileDir && profile.codex?.inheritCodexHome === false) {
-    await mkdir(join(input.profileDir, 'codex-home'), { recursive: true });
   }
   return profile;
 }

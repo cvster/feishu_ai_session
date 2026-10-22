@@ -2,17 +2,17 @@ import type { CodexInputRequest, CodexInputAnswers } from '../session/codex-user
 
 export type InputCardStatus = 'waiting' | 'checking' | 'unavailable' | 'submitting' | 'submitted' | 'resolved' | 'disconnected' | 'unconfirmed';
 
-export function codexInputCard(request: CodexInputRequest, token: string, status: InputCardStatus): object {
+export function codexInputCard(request: CodexInputRequest, token: string, status: InputCardStatus, label = 'Codex', callback = '__codex_input'): object {
   const secret = request.questions.some((q) => q.isSecret);
   const enabled = status === 'waiting' && !secret;
-  const notice = status === 'submitted' ? request.kind === 'async' ? '✅ 回答已补充给当前任务' : '✅ 回答已发送；若多端同时回答，以 Codex 首次接收的答案为准'
+  const notice = status === 'submitted' ? request.kind === 'async' ? '✅ 回答已补充给当前任务' : '✅ 回答已发送；若多端同时回答，以工具首次接收的答案为准'
     : status === 'submitting' ? '⏳ 正在提交回答，请勿重复点击'
-    : status === 'unconfirmed' ? '回答发送状态尚未确认，请在 Codex 桌面查看，暂勿重复提交。'
-    : status === 'checking' ? '⏳ 正在检测公开共享 app-server，确认连接后才能在飞书提交；也可在 Codex 桌面回答。'
-    : status === 'unavailable' ? '⚠️ 未检测到承载当前任务的可用公开共享 app-server，飞书暂不能回传答案。请在 Codex 桌面回答；连接恢复后会自动启用选项。'
+    : status === 'unconfirmed' ? '回答发送状态尚未确认，请在工具界面查看，暂勿重复提交。'
+    : status === 'checking' ? '⏳ 正在检测工具连接，确认连接后才能在飞书提交；也可在工具界面回答。'
+    : status === 'unavailable' ? '⚠️ 未检测到承载当前任务的可用工具连接，飞书暂不能回传答案。请在工具界面回答；连接恢复后会自动启用选项。'
     : status === 'resolved' ? '✅ 已在其他端回答，或问题已结束'
-    : status === 'disconnected' ? '连接已断开，等待重连；也可以在 Codex 桌面回答。'
-    : secret ? '🔒 包含敏感输入，请在 Codex 桌面回答，不要在群内填写。'
+    : status === 'disconnected' ? '连接已断开，等待重连；也可以在工具界面回答。'
+    : secret ? '🔒 包含敏感输入，请在工具界面回答，不要在群内填写。'
     : request.isBlocking ? '⏳ 等待选择 · 提交后继续当前任务'
     : '💬 请选择 · 任务仍在继续，提交后补充给当前任务';
   const elements: object[] = [{ tag: 'markdown', content: notice }];
@@ -49,7 +49,7 @@ export function codexInputCard(request: CodexInputRequest, token: string, status
   if (enabled) {
     inputs.push({ tag: 'button', name: 'codex_input_submit', type: 'primary',
       text: { tag: 'plain_text', content: '提交回答' }, form_action_type: 'submit',
-      behaviors: [{ type: 'callback', value: { __codex_input: token } }] });
+      behaviors: [{ type: 'callback', value: { [callback]: token } }] });
     elements.push({ tag: 'form', name: 'codex_input_form', elements: inputs });
   } else elements.push(...inputs);
   return { schema: '2.0', config: { summary: { content: notice } }, body: { elements } };
@@ -57,7 +57,7 @@ export function codexInputCard(request: CodexInputRequest, token: string, status
 
 /** Never trust option labels or question IDs supplied by a card callback. */
 export function codexAnswersFromForm(request: CodexInputRequest, form: Record<string, unknown>): CodexInputAnswers {
-  if (request.questions.some((q) => q.isSecret)) throw new Error('敏感问题请在 Codex 桌面回答');
+  if (request.questions.some((q) => q.isSecret)) throw new Error('敏感问题请在工具界面回答');
   const answers: CodexInputAnswers = Object.create(null) as CodexInputAnswers;
   request.questions.forEach((q, index) => {
     if (request.kind === 'async' && request.answeredQuestionIds?.includes(q.id)) return;

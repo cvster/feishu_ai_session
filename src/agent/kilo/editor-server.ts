@@ -1,11 +1,9 @@
 import { readFile, readdir, readlink, realpath } from 'node:fs/promises';
 import { request } from 'node:http';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 
-export type KiloPreferredClient = 'vscode' | 'desktop';
-
-export interface KiloEditorServer { url: string; authorization: string; pid: number; client?: 'vscode' | 'desktop'; sessionMetadata?: Record<string, unknown> }
+export interface KiloEditorServer { url: string; authorization: string; pid: number; client?: 'vscode' }
 
 function contains(root: string, cwd: string): boolean {
   const path = relative(root, cwd);
@@ -23,17 +21,6 @@ function extensionExecutable(path: string): boolean {
   }
   return false;
 }
-function desktopExecutable(path: string, parent: string): boolean {
-  if (!['/usr/lib/kilo-desktop/kilo-desktop', '/opt/kilo-desktop/kilo-desktop'].includes(parent)) return false;
-  return /^[^/]+\/bin\/kilo$/.test(relative(join(dirname(parent), 'resources/kilo'), path));
-}
-function desktopMetadata(info: any): Record<string, unknown> | undefined {
-  const metadata = info?.metadata?.['kilo-desktop'];
-  if (!metadata || typeof metadata !== 'object' || typeof metadata.workspaceId !== 'string' || !metadata.workspaceId) return;
-  return { 'kilo-desktop': { workspaceId: metadata.workspaceId,
-    ...(Array.isArray(metadata.workspaceFolders) ? { workspaceFolders: metadata.workspaceFolders } : {}),
-    ...(typeof metadata.worktreeBranch === 'string' ? { worktreeBranch: metadata.worktreeBranch } : {}) } };
-}
 async function readServer(server: KiloEditorServer, path: string): Promise<any> {
   return new Promise((accept, reject) => {
     const req = request(`${server.url}${path}`, { agent: false, headers: { Authorization: server.authorization } }, res => {
@@ -50,10 +37,9 @@ async function readServer(server: KiloEditorServer, path: string): Promise<any> 
 }
 
 /** Same-user local UI servers. Installed upgrades do not change an existing window's executable.
- * Desktop sessions carry native kilo-desktop workspace metadata; use it before workspace ranking.
  */
 export async function findKiloEditorServer(binary: string, cwd?: string, dataHome?: string,
-  test: { procRoot?: string; uid?: number; platform?: string } = {}, sessionId?: string, preferredClient: KiloPreferredClient = 'vscode'): Promise<KiloEditorServer | undefined> {
+  test: { procRoot?: string; uid?: number; platform?: string } = {}, sessionId?: string, _preferredClient?: string): Promise<KiloEditorServer | undefined> {
   if ((test.platform ?? process.platform) !== 'linux') return;
   const proc = test.procRoot ?? '/proc', uid = test.uid ?? process.getuid?.();
   if (uid === undefined) return;
@@ -77,12 +63,10 @@ export async function findKiloEditorServer(binary: string, cwd?: string, dataHom
       if (!parent || env.KILO_PARENT_PID !== parent) continue;
       const args = (await readFile(join(root, 'cmdline'), 'utf8')).split('\0');
       if (!args.includes('serve')) continue;
-      let client: 'vscode' | 'desktop';
+      let client: 'vscode';
       if (env.KILO_CLIENT === 'vscode' && (path === executable || extensionExecutable(path))) client = 'vscode';
-      else if (env.KILO_PLATFORM === 'desktop' && env.KILO_APP_NAME === 'kilo-desktop' && desktopExecutable(path, await readlink(join(proc, parent, 'exe')))) client = 'desktop';
       else continue;
       const workspace = await realpath(join(root, 'cwd'));
-      // Desktop's cwd is its runtime directory; HTTP directory scopes actual project sessions.
       if (client === 'vscode' && directory && !contains(workspace, directory)) continue;
       const sockets = new Set<string>();
       for (const fd of await readdir(join(root, 'fd'))) {
@@ -101,41 +85,23 @@ export async function findKiloEditorServer(binary: string, cwd?: string, dataHom
     } catch { /* Exited, inaccessible, or not an eligible UI process. */ }
   }
   if (!candidates.length) return;
-  const desktops = candidates.filter(c => c.client === 'desktop');
-  let metadata: Record<string, unknown> | undefined;
   if (sessionId) {
     if (!/^ses[A-Za-z0-9_-]+$/.test(sessionId)) throw new Error('Kilo 会话 ID 无效');
-    // This is a read of the shared, already-validated database, not an execution choice.
-    const reader = desktops.length === 1 ? desktops[0]! : candidates[0]!;
-    const info = await readServer(reader, `/session/${sessionId}`);
+    const info = await readServer(candidates[0]!, `/session/${sessionId}`);
     if (info?.id !== sessionId || typeof info.directory !== 'string') throw new Error('Kilo 会话来源无法确认，未提交消息。');
+    if (info.metadata?.['kilo-desktop']) throw new Error('不再支持 Kilo App 会话，请使用 VS Code 插件会话。');
     const nativeDirectory = await realpath(info.directory);
     if (directory && directory !== nativeDirectory) throw new Error('Kilo 会话工作目录不匹配，未提交消息。');
-    directory = nativeDirectory; metadata = desktopMetadata(info);
+    directory = nativeDirectory;
   }
-  let selected = metadata ? desktops : directory ? candidates.filter(c => c.client === 'vscode' && contains(c.root, directory!)) : [];
-  if (selected.length && !metadata) {
+  let selected = directory ? candidates.filter(c => contains(c.root, directory!)) : candidates;
+  if (selected.length) {
     const longest = Math.max(...selected.map(c => c.root.length));
     selected = selected.filter(c => c.root.length === longest);
   }
-  // Preference breaks ties between client types for new sessions only.
-  // Existing sessions retain their native origin; a lone client is always usable.
-  if (!sessionId && preferredClient === 'desktop' && desktops.length) selected = desktops;
-  if (!selected.length) selected = desktops;
   if (!selected.length) return;
   if (selected.length !== 1) throw new Error('同一项目有多个 Kilo 编辑器后端，无法确定实时同步目标；请关闭重复窗口后重试。');
   const server = selected[0]!;
   if ((await readServer(server, '/global/health'))?.healthy !== true) throw new Error('Kilo 界面后端健康检查失败，未切换后端或提交消息。');
-  if (server.client === 'desktop' && !metadata && directory && !sessionId) {
-    const rows = await readServer(server, `/session?directory=${encodeURIComponent(directory)}&limit=100`);
-    if (!Array.isArray(rows)) throw new Error('Kilo 桌面工作区会话列表格式不兼容');
-    const contexts = new Map<string, Record<string, unknown>>();
-    for (const row of rows) if (typeof row.directory === 'string' && resolve(row.directory) === resolve(directory)) {
-      const context = desktopMetadata(row);
-      if (context) contexts.set((context['kilo-desktop'] as { workspaceId: string }).workspaceId, context);
-    }
-    if (contexts.size > 1) throw new Error('此项目对应多个 Kilo 桌面工作区，请关联已有桌面会话以确定来源。');
-    metadata = contexts.values().next().value;
-  }
-  return { url: server.url, authorization: server.authorization, pid: server.pid, client: server.client, ...(metadata ? { sessionMetadata: metadata } : {}) };
+  return { url: server.url, authorization: server.authorization, pid: server.pid, client: 'vscode' };
 }

@@ -2,11 +2,11 @@ import { mkdir, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveAppPaths } from '../../config/app-paths';
-import { loadRootConfig, readActiveProfile, saveRootConfig, withConfigFileLock } from '../../config/profile-store';
+import { loadRootConfig, readActiveProfile, withConfigFileLock } from '../../config/profile-store';
 import { writeFileAtomic } from '../../platform/atomic-write';
 import { parseZcodePairing, ZcodeRemoteClient } from '../../agent/zcode/remote-client';
-import { zcodeCommand } from '../../agent/zcode/client';
 import { zcodeDesktopCredentialFile } from '../../agent/zcode/remote-auth';
+import { loadWorkerConfig, readWorkerConfig } from '../../worker/config';
 
 /** Read from stdin, never a CLI argument (process lists / shell history). No link echo. */
 export async function runZcodePair(options: { profile?: string; config?: string; workspace?: string }) {
@@ -20,23 +20,25 @@ export async function runZcodePair(options: { profile?: string; config?: string;
   const rootDir = options.config ? dirname(resolve(options.config)) : undefined;
   const profile = options.profile ?? await readActiveProfile(rootDir) ?? 'codex';
   const paths = resolveAppPaths({ rootDir, profile });
+  const configFile = options.config ?? paths.configFile;
   await mkdir(paths.profileDir, { recursive: true, mode: 0o700 });
   const file = join(paths.profileDir, `zcode-remote-${randomUUID()}.link`);
   await writeFileAtomic(file, link.trim() + '\n', { mode: 0o600 });
   let saved = false;
   try {
     if (options.workspace) {
-      const current = await loadRootConfig(paths.configFile);
-      const client = new ZcodeRemoteClient(file, resolve(options.workspace), undefined, zcodeDesktopCredentialFile(current?.profiles[profile]?.zcode?.modelConfigPath));
+      const current = await loadRootConfig(configFile), workerConfig = await readWorkerConfig(paths.profileDir, 'zcode');
+      const modelConfigPath = workerConfig ? workerConfig.options.modelConfigPath : current?.profiles[profile]?.zcode?.modelConfigPath;
+      const client = new ZcodeRemoteClient(file, resolve(options.workspace), undefined, zcodeDesktopCredentialFile(typeof modelConfigPath === 'string' ? modelConfigPath : undefined));
       try { await client.request('workspace/updateProviderRegistry', {}); }
       finally { await client.close(); }
     }
-    await withConfigFileLock(paths.configFile, async () => {
-      const root = await loadRootConfig(paths.configFile), selected = root?.profiles[profile];
+    await withConfigFileLock(configFile, async () => {
+      const root = await loadRootConfig(configFile), selected = root?.profiles[profile];
       if (!root || !selected) throw new Error(`profile not found: ${profile}`);
-      const command = zcodeCommand();
-      selected.zcode = { ...(selected.zcode ?? { binaryPath: command.binary, args: command.args }), remoteControlFile: file };
-      await saveRootConfig(root, paths.configFile); saved = true;
+      const workerConfig = await loadWorkerConfig(paths.profileDir, 'zcode', selected);
+      workerConfig.options.remoteControlFile = file;
+      await writeFileAtomic(join(paths.profileDir, 'workers', 'zcode', 'config.json'), JSON.stringify(workerConfig, null, 2), { mode: 0o600 }); saved = true;
     });
     console.log(`ZCode 桌面远控配置已保存（凭据权限 600）${options.workspace ? '，连接和工作区验证通过' : '，尚未连接验证'}。需要单独升级/重启 ZCode worker 和重启桥接后生效；本命令不会重启服务。`);
   } finally { if (!saved) await unlink(file).catch(() => {}); }

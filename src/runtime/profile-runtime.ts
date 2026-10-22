@@ -1,11 +1,11 @@
+import { migrateWorkerConfiguration } from '../worker/migration';
 import { toolDefinition } from '../tools/definitions';
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import * as p from '@clack/prompts';
 import { runRegistrationWizard } from '../bot/wizard';
-import { detectInstalledAgents, type DetectedAgent } from '../cli/agent-detection';
+import { type DetectedAgent } from '../cli/agent-detection';
 import {
-  createBootstrapCodexConfig,
   createBootstrapProfileConfig,
   resolveBootstrapWorkspace,
 } from '../cli/profile-bootstrap';
@@ -87,12 +87,7 @@ const ENV_SECRET_TEMPLATE_RE = /^\$\{[A-Z][A-Z0-9_]{0,127}\}$/;
 export function createRuntimeProfileConfig(
   input: CreateDefaultProfileConfigInput,
 ): ProfileConfig {
-  return createDefaultProfileConfig({
-    ...input,
-    ...(input.agentKind === 'codex'
-      ? { codex: input.codex ?? { binaryPath: process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' } }
-      : {}),
-  });
+  return createDefaultProfileConfig(input);
 }
 
 export async function resolveProfileRuntime(
@@ -107,21 +102,7 @@ export async function resolveProfileRuntime(
   const explicitProfile = opts.profile;
   const activeProfile = explicitProfile ?? (await readActiveProfile(rootDir));
   let profile = activeProfile ?? requestedAgent;
-  if (!profile && opts.allowBootstrap) {
-    const detected = await detectInstalledAgents();
-    if (detected.length === 0) {
-      throw new Error('no supported local agent found; install a supported agent (claude, codex, zcode, kilo, dsh) first');
-    }
-    if (detected.length > 1) {
-      const selected = await selectDetectedAgent(detected, opts.selectAgent);
-      if (!selected) {
-        throw new Error(formatAmbiguousAgentSelectionError(detected));
-      }
-      profile = selected;
-    } else {
-      profile = detected[0]?.kind;
-    }
-  }
+  if (!profile && opts.allowBootstrap) profile = 'default';
   if (!profile && !opts.allowBootstrap) {
     throw new Error('active profile is required');
   }
@@ -139,7 +120,7 @@ export async function resolveProfileRuntime(
     workspace: opts.workspace,
     ...(migrationAgent ? { agentKind: migrationAgent } : {}),
     ...(needsMigration && migrationAgent === 'codex'
-      ? { codex: await createBootstrapCodexConfig(undefined) }
+      ? { codex: { binaryPath: 'codex' } }
       : {}),
   }, opts.handleActiveBridgeMigrationConflict);
 
@@ -164,6 +145,8 @@ export async function resolveProfileRuntime(
       throw new Error(`profile not found: ${profile}`);
     }
     assertRequestedAgentMatchesExistingProfile(profile, profileConfig, requestedAgent);
+    const migratedProfile = await migrateWorkerConfiguration(appPaths.profileDir, profileConfig);
+    if (migratedProfile !== profileConfig) { rootConfig.profiles[profile] = migratedProfile; profileConfig = migratedProfile; await saveRootConfig(rootConfig, configPath); }
     const runtimeUpgrade = upgradeLegacyRuntimeDefaults(rootConfig, profile);
     if (runtimeUpgrade.changed) {
       rootConfig = runtimeUpgrade.rootConfig;
@@ -293,22 +276,9 @@ function upgradeLegacyRuntimeDefaults(
   const nextPermissions = shouldUpgradeClaudeDefaultPermissions
     ? { defaultAccess: 'full' as const, maxAccess: 'full' as const }
     : profileConfig.permissions;
-  const legacyCodexDefaults = profileConfig.permissionSource !== 'permissions';
-  const legacyIsolatedCodexHome =
-    legacyCodexDefaults &&
-    profileConfig.agentKind === 'codex' &&
-    Boolean(profileConfig.codex) &&
-    !profileConfig.codex?.codexHome &&
-    profileConfig.codex?.inheritCodexHome === false;
-  const legacyIgnoredUserConfig =
-    legacyCodexDefaults &&
-    profileConfig.agentKind === 'codex' &&
-    Boolean(profileConfig.codex) &&
-    !profileConfig.codex?.codexHome &&
-    profileConfig.codex?.ignoreUserConfig === true;
   const permissionsChanged = legacySandboxPolicy || shouldUpgradeClaudeDefaultPermissions;
   const permissionDefaultsMarkerChanged = !permissionDefaultsMigrated;
-  const codexChanged = legacyIsolatedCodexHome || legacyIgnoredUserConfig;
+  const codexChanged = false;
   if (!permissionsChanged && !codexChanged && !permissionDefaultsMarkerChanged) {
     return { rootConfig, changed: false, permissions: false, codex: false };
   }
@@ -320,15 +290,6 @@ function upgradeLegacyRuntimeDefaults(
           permissions: nextPermissions,
           permissionSource: 'permissions' as const,
           sandbox: permissionsToLegacySandbox(nextPermissions),
-        }
-      : {}),
-    ...(profileConfig.codex
-      ? {
-          codex: {
-            ...profileConfig.codex,
-            ...(legacyIsolatedCodexHome ? { inheritCodexHome: true } : {}),
-            ...(legacyIgnoredUserConfig ? { ignoreUserConfig: false } : {}),
-          },
         }
       : {}),
   };
@@ -566,58 +527,6 @@ export async function materializeEnvSecretForService(
   return true;
 }
 
-function formatAmbiguousAgentSelectionError(
-  detected: Array<{ kind: AgentKind; binaryPath: string }>,
-): string {
-  const lines = detected.map((agent) => `  - ${agent.kind}: ${agent.binaryPath}`);
-  return [
-    '检测到多个本地 agent，请使用 --agent <claude|codex|zcode|kilo|dsh> 指定要初始化哪一个。',
-    '已检测到：',
-    ...lines,
-  ].join('\n');
-}
-
-async function selectDetectedAgent(
-  detected: DetectedAgent[],
-  selector: ResolveProfileRuntimeOptions['selectAgent'],
-): Promise<AgentKind | undefined> {
-  const selected = selector
-    ? await selector(detected)
-    : await promptForDetectedAgentSelection(detected);
-  if (!selected) return undefined;
-  return detected.some((agent) => agent.kind === selected) ? selected : undefined;
-}
-
-async function promptForDetectedAgentSelection(detected: DetectedAgent[]): Promise<AgentKind | undefined> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
-  p.intro('选择本地 agent');
-  const selected = await p.select<AgentKind>({
-    message: '检测到多个本地 agent，本次要初始化哪一个？',
-    options: detected.map((agent) => ({
-      value: agent.kind,
-      label: displayAgentKind(agent.kind),
-      hint: agent.binaryPath,
-    })),
-    initialValue: detected[0]?.kind,
-  });
-  if (p.isCancel(selected)) {
-    p.cancel('已取消 agent 选择。');
-    throw new UserCancelledError('已取消启动。');
-  }
-  p.outro(`已选择 ${displayAgentKind(selected)}`);
-  return selected;
-}
-
-class UserCancelledError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'UserCancelledError';
-  }
-}
-
-function displayAgentKind(kind: AgentKind): string {
-  return toolDefinition(kind).label;
-}
 
 async function maybeMigrateRootPlaintextSecret(
   rootConfig: RootConfig,

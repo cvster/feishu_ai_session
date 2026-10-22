@@ -9,15 +9,20 @@
 - `apps/feishu-bridge`: adapter workspace. For compatibility with installed services,
   its implementation and build entry still live in root `src`, `tests`, `bin`, `dist`.
   Feishu events, cards, group operations, profiles and service lifecycle stay here.
+- `src/worker`: independent tool execution services. The Feishu bridge discovers
+  `workers/*/endpoint.json` and uses the common HTTP API and capabilities. Native
+  CLI paths, account directories and provider transports stay inside each worker.
 - `apps/web-app`: independently deployed web adapter, including UI, authentication,
   files, nginx and upstream overlay scripts. It does not import Feishu code.
 
 The shared runtime is code reuse, not a new central daemon. Local and PC services
 keep independent processes, credentials, configs and start/stop operations. Each
-adapter attaches to a public shared Codex endpoint when available; otherwise it
-uses a read-only observer. New threads are persisted first, then all web messages
-and existing Feishu-thread messages enter the official native queue. No competing
-embedded `thread/resume` fallback is used for queue delivery.
+web adapter and the Codex worker attach to a public shared Codex endpoint when
+available; otherwise observation is read-only. The Feishu bridge calls its worker,
+which owns native queue submission and observation. New threads are persisted
+first, then web and Feishu messages enter the official native queue. No competing
+embedded `thread/resume` fallback is used for queue delivery. See
+[the worker API](WORKER_API.md) and [migration guide](WORKER_MIGRATION.md).
 
 Closing an observer does not interrupt a writer or delete queued input. An observer
 timeout means observation failed, not that the task ended. Explicit Stop/Archive
@@ -48,7 +53,7 @@ The Feishu npm package does not include the GPL web adapter.
 This code change does not move or update either running deployment. Deployment is a
 separate operation: back up artifacts and service configs, verify dependencies and OS/service health,
 then update only the intended service. Do not inspect task lists as a routine
-bridge restart gate, and leave the independent Claude worker running. Never restart a shared Codex writer daemon
+bridge restart gate, and leave all independent tool workers running. Never restart a shared Codex writer daemon
 as part of an adapter update. Do not copy credentials or runtime databases into Git.
 
 ## Compatibility retained

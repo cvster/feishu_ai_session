@@ -85,28 +85,14 @@ describe('Codex startup compatibility with legacy binary metadata', () => {
     expect(mocks.withProfileAndAppLocks).toHaveBeenCalledTimes(1);
   });
 
-  it('prepares the first Codex run from config even when legacy metadata points elsewhere', async () => {
-    const h = await createLegacyCodexConfig({
-      codexMetadata: staleLegacyMetadata(),
-    });
-    const root = await loadRootConfig(h.configPath);
-    const profile = root?.profiles.codex;
-    expect(profile).toBeDefined();
-
-    const agent = createRuntimeAgent(profile!, {
-      profile: 'codex',
-      rootDir: h.root,
-      profileDir: join(h.root, 'profiles', 'codex'),
-      configPath: h.configPath,
-    });
-
-    await expect(
-      agent.prepareRun?.({
-        runId: 'run-1',
-        prompt: 'hello',
-        cwd: h.workspace,
-      }),
-    ).resolves.toBeUndefined();
+  it('imports legacy binary metadata into worker config without using it in the bridge', async () => {
+    const h = await createLegacyCodexConfig({ codexMetadata: staleLegacyMetadata() });
+    const { resolveProfileRuntime } = await import('../../../src/runtime/profile-runtime');
+    const { loadWorkerConfig } = await import('../../../src/worker/config');
+    const runtime = await resolveProfileRuntime({ config: h.configPath, profile: 'codex', allowBootstrap: false });
+    const config = await loadWorkerConfig(runtime.appPaths.profileDir, 'codex', runtime.profileConfig);
+    expect(config.options.binaryPath).toBeTruthy(); expect(runtime.profileConfig.codex).toBeUndefined();
+    expect('binary' in createRuntimeAgent(runtime.profileConfig, runtime.appPaths)).toBe(false);
   });
 });
 

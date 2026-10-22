@@ -414,6 +414,7 @@ export function newChatCreationCard(
   model = 'gpt-5.6-sol',
   reasoningEffort: string = 'high',
   tools = [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
+  defaultTool = tools[0]?.id,
 ): object {
   return {
     schema: '2.0',
@@ -443,7 +444,7 @@ export function newChatCreationCard(
             {
               tag: 'select_static', name: 'agent_kind',
               label: { tag: 'plain_text', content: '执行工具（创建后固定）' },
-              initial_option: 'codex',
+              initial_option: tools.some(tool => tool.id === defaultTool) ? defaultTool : tools[0]?.id,
               options: tools.map(tool => ({ text: { tag: 'plain_text', content: tool.label }, value: tool.id })),
             },
             {

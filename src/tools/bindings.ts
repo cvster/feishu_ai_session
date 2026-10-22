@@ -51,7 +51,7 @@ export class ToolBindingStore {
   private saving: Promise<void> = Promise.resolve();
   private catalog?: SessionCatalog;
   private appId?: string;
-  private sourceFor?: (id: AgentKind) => string;
+  private sourceFor?: (id: AgentKind) => string | undefined;
   private bindingChains = new Map<string, Promise<unknown>>();
   constructor(private readonly path: string) {}
   async load(): Promise<void> {
@@ -138,7 +138,7 @@ export class ToolBindingStore {
   }
 
   /** Upgrade legacy duplicates before any intake/reply observer starts. */
-  enforcePersonalUniqueness(catalog: SessionCatalog, appId: string, sourceFor: (id: AgentKind) => string): void {
+  enforcePersonalUniqueness(catalog: SessionCatalog, appId: string, sourceFor: (id: AgentKind) => string | undefined): void {
     this.catalog = catalog; this.appId = appId; this.sourceFor = sourceFor;
     const latest = new Map<string, ReturnType<SessionCatalog['entries']>[number]>();
     for (const row of catalog.entries()) {
@@ -149,6 +149,7 @@ export class ToolBindingStore {
     }
     for (const [scope, row] of latest) {
       const current = this.get(scope), sourceId = row.sourceId ?? current?.sourceId ?? sourceFor(row.agentId);
+      if (!sourceId) continue;
       if (current && (current.toolId !== row.agentId || current.sourceId !== sourceId)) continue;
       // A previous resume may have persisted the catalog before updating the tool ledger.
       const nativeId = current?.nativeCreated === false ? current.nativeId : row.threadId ?? row.sessionId;
@@ -174,14 +175,18 @@ export class ToolBindingStore {
       const current = this.get(input.scopeId);
       if (!isPersonalWorkgroup(input.scopeId, current)) return false;
       if (input.botAppId && input.botAppId !== appId) return false;
-      const binding = { ...current, toolId: input.agentId, sourceId: input.sourceId ?? current?.sourceId ?? sourceFor(input.agentId),
+      const sourceId = input.sourceId ?? current?.sourceId ?? sourceFor(input.agentId);
+      if (!sourceId) return false;
+      const binding = { ...current, toolId: input.agentId, sourceId,
         nativeId: input.threadId ?? input.sessionId };
       if (current && (current.toolId !== binding.toolId || current.sourceId !== binding.sourceId)) throw new Error('会话创建后不能切换执行工具');
       this.assertPersonalBinding(input.scopeId, binding);
       return true;
     }, entry => {
       const current = this.get(entry.scopeId);
-      this.set(entry.scopeId, { ...current, toolId: entry.agentId, sourceId: entry.sourceId ?? current?.sourceId ?? sourceFor(entry.agentId),
+      const sourceId = entry.sourceId ?? current?.sourceId ?? sourceFor(entry.agentId);
+      if (!sourceId) return;
+      this.set(entry.scopeId, { ...current, toolId: entry.agentId, sourceId,
         nativeId: entry.threadId ?? entry.sessionId, nativeCreated: true });
     });
   }
@@ -238,7 +243,7 @@ export class ToolBindingStore {
   isArchived(toolId: AgentKind, sourceId: string, nativeId: string): boolean {
     return this.archived.has(sessionRefKey(toolId, sourceId, nativeId));
   }
-  migrate(catalog: SessionCatalog, sourceFor: (id: AgentKind) => string): void {
+  migrate(catalog: SessionCatalog, sourceFor: (id: AgentKind) => string | undefined): void {
     const latest = new Map<string, ReturnType<SessionCatalog['entries']>[number]>();
     for (const row of catalog.entries()) {
       if (row.status !== 'active' || catalog.isScopeArchived(row.scopeId) || (row.botAppId && this.appId && row.botAppId !== this.appId)) continue;
@@ -246,9 +251,10 @@ export class ToolBindingStore {
       if (previous && previous.agentId !== row.agentId) throw new Error(`工具身份冲突：${row.scopeId}`);
       if (!previous || (row.boundAt ?? row.updatedAt) >= (previous.boundAt ?? previous.updatedAt)) latest.set(row.scopeId, row);
     }
-    for (const row of latest.values()) if (!this.get(row.scopeId)) this.set(row.scopeId, {
-      toolId: row.agentId, sourceId: row.sourceId ?? sourceFor(row.agentId), nativeId: row.threadId ?? row.sessionId,
-    });
+    for (const row of latest.values()) if (!this.get(row.scopeId)) {
+      const sourceId = row.sourceId ?? sourceFor(row.agentId); if (!sourceId) continue;
+      this.set(row.scopeId, { toolId: row.agentId, sourceId, nativeId: row.threadId ?? row.sessionId });
+    }
   }
   private persist(): void {
     // Snapshot before queuing: do not accidentally persist later mutations under an older operation.

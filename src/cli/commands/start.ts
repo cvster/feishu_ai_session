@@ -1,17 +1,11 @@
-import { DshAdapter } from '../../agent/dsh/adapter';
-import { KiloAdapter } from '../../agent/kilo/adapter';
-import { ZcodeAdapter } from '../../agent/zcode/adapter';
+import { loadWorkerRegistry, workerTool } from '../../worker/discovery';
+import { DurableAgentAdapter } from '../../worker/adapter';
+import { WorkerClient } from '../../worker/client';
+import { join } from 'node:path';
 import dns from 'node:dns';
 import os from 'node:os';
 import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
-import { ClaudeAdapter } from '../../agent/claude/adapter';
-import { CodexAdapter } from '../../agent/codex/adapter';
-import {
-  AgentPreflightError,
-  formatAgentPreflightDiagnostic,
-  type AgentAvailability,
-} from '../../agent/preflight';
 import type { AgentAdapter } from '../../agent/types';
 import { startChannel, type BridgeChannel } from '../../bot/channel';
 import type { Controls } from '../../commands';
@@ -123,13 +117,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
     hostname: os.hostname(),
   });
 
-  let agent = createRuntimeAgent(profileConfig, { ...appPaths, configPath });
-  const availability = await checkRuntimeAgentAvailability(agent);
-  if (!availability.ok) {
-    console.error(formatAgentPreflightDiagnostic(availability.diagnostic));
-    log.warn('agent', 'preflight-failed', { diagnostic: availability.diagnostic });
-    process.exit(1);
-  }
+  let agent = await resolveRuntimeAgent(profileConfig, appPaths);
 
   for (;;) {
     try {
@@ -242,14 +230,9 @@ export async function runStart(opts: StartOptions): Promise<void> {
                 const next = nextRuntime.cfg;
                 if (!isComplete(next)) throw new Error('config incomplete after change');
                 assertReconnectAgentKindUnchanged(cfg.agentKind, next.agentKind);
-                const nextAgent = createRuntimeAgent(nextRuntime.profileConfig, {
+                const nextAgent = await resolveRuntimeAgent(nextRuntime.profileConfig, {
                   ...nextRuntime.appPaths,
-                  configPath: nextRuntime.configPath,
                 });
-                const nextAvailability = await checkRuntimeAgentAvailability(nextAgent);
-                if (!nextAvailability.ok) {
-                  throw nextAvailability.error;
-                }
                 const appChanged = next.accounts.app.id !== cfg.accounts.app.id;
                 if (appChanged) {
                   nextAppLock = await acquireAppRuntimeLock(
@@ -371,23 +354,6 @@ export async function runStart(opts: StartOptions): Promise<void> {
   }
 }
 
-async function checkRuntimeAgentAvailability(agent: AgentAdapter): Promise<AgentAvailability> {
-  if (agent.checkAvailability) return agent.checkAvailability();
-  const ok = await agent.isAvailable();
-  if (ok) return { ok: true };
-  const diagnostic = {
-    code: 'agent-binary-not-found' as const,
-    agentId: agent.id === 'codex' ? 'codex' as const : 'claude' as const,
-    agentName: agent.displayName,
-    command: agent.id === 'codex' ? 'codex' : 'claude',
-  };
-  return {
-    ok: false,
-    diagnostic,
-    error: new AgentPreflightError(diagnostic),
-  };
-}
-
 export function assertReconnectAgentKindUnchanged(
   current: AgentKind | undefined,
   next: AgentKind | undefined,
@@ -401,6 +367,11 @@ export function assertReconnectAgentKindUnchanged(
   }
 }
 
+async function resolveRuntimeAgent(profile: ProfileConfig, paths: Pick<AppPaths, 'profileDir'>): Promise<AgentAdapter> {
+  const discovered = (await loadWorkerRegistry(paths.profileDir, profile.accounts.app.id)).find(worker => worker.health.toolId === profile.agentKind);
+  return discovered ? workerTool(discovered).agent : createRuntimeAgent(profile, paths);
+}
+
 export function createRuntimeAgent(
   profileConfig: ProfileConfig,
   appPaths: Pick<AppPaths, 'profileDir'> &
@@ -408,41 +379,8 @@ export function createRuntimeAgent(
       configPath?: string;
     },
 ): AgentAdapter {
-  const larkChannelConfigPath = appPaths.configPath ?? appPaths.configFile;
-  const larkChannel =
-    appPaths.rootDir && appPaths.profile
-      ? {
-          profile: appPaths.profile,
-          rootDir: appPaths.rootDir,
-          ...(larkChannelConfigPath ? { configPath: larkChannelConfigPath } : {}),
-          ...(appPaths.larkCliConfigDir ? { larkCliConfigDir: appPaths.larkCliConfigDir } : {}),
-          ...(appPaths.larkCliSourceConfigFile
-            ? { larkCliSourceConfigFile: appPaths.larkCliSourceConfigFile }
-            : {}),
-        }
-      : undefined;
-  if (profileConfig.agentKind === 'codex') {
-    const codex = profileConfig.codex;
-    if (!codex?.binaryPath) {
-      throw new Error('codex profile requires codex.binaryPath');
-    }
-    return new CodexAdapter({
-      binary: codex.binaryPath,
-      profileStateDir: appPaths.profileDir,
-      ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
-      inheritCodexHome: codex.inheritCodexHome === true,
-      ignoreUserConfig: codex.ignoreUserConfig === true,
-      ignoreRules: codex.ignoreRules !== false,
-      sandbox: profileConfig.sandbox.defaultMode,
-      larkChannel,
-      useAppServerForFreshThreads: true,
-      useQueueForExistingThreads: true,
-    });
-  }
-  if (profileConfig.agentKind === 'dsh') return new DshAdapter({ binary: profileConfig.dsh?.binaryPath, args: profileConfig.dsh?.args, homeDir: profileConfig.dsh?.homeDir, larkChannel });
-  if (profileConfig.agentKind === 'kilo') return new KiloAdapter({ binary: profileConfig.kilo?.binaryPath, args: profileConfig.kilo?.args, dataHome: profileConfig.kilo?.dataHome, editorSync: profileConfig.kilo?.editorSync, preferredClient: profileConfig.kilo?.preferredClient, larkChannel });
-  if (profileConfig.agentKind === 'zcode') return new ZcodeAdapter({ binary: profileConfig.zcode?.binaryPath, args: profileConfig.zcode?.args, dataDir: profileConfig.zcode?.dataDir, modelConfigPath: profileConfig.zcode?.modelConfigPath, remoteControlFile: profileConfig.zcode?.remoteControlFile, larkChannel });
-  return new ClaudeAdapter({ larkChannel, binary: process.env.LARK_CHANNEL_CLAUDE_BIN });
+  return new DurableAgentAdapter(new WorkerClient(join(appPaths.profileDir, 'workers', profileConfig.agentKind),
+    '', profileConfig.accounts.app.id, profileConfig.agentKind));
 }
 
 /**

@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseEnv } from 'node:util';
 import { atLeast, checkTool, collectChecks, type Probe, SUPPORTED, versionOf } from '../../../src/setup/checks';
 import { loadRuntimeEnv } from '../../../src/config/runtime-env';
+import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
+import { createRootConfig } from '../../../src/config/profile-store';
 
 const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true }))); });
@@ -20,6 +22,21 @@ const healthyProbe: Probe = async (command, args) => {
   return { ok: true, output: '10.33.0' };
 };
 describe('installation checks', () => {
+  it('uses canonical worker binaries without changing root or worker configuration during diagnostics', async () => {
+    const root = await temp(), config = join(root, 'config.json');
+    const profile = createDefaultProfileConfig({ agentKind: 'codex', accounts: { app: { id: 'cli_test', secret: 'fixture', tenant: 'feishu' } }, codex: { binaryPath: '/obsolete/codex' } });
+    const rootText = JSON.stringify(createRootConfig('test', profile)); await writeFile(config, rootText);
+    const directory = join(root, 'profiles', 'test', 'workers', 'codex'); await mkdir(directory, { recursive: true });
+    const canonicalBinary = join(root, 'codex'); await writeFile(canonicalBinary, 'fixture', { mode: 0o700 });
+    const workerFile = join(directory, 'config.json'), workerText = JSON.stringify({ version: 1, toolId: 'codex', options: { binaryPath: canonicalBinary } });
+    await writeFile(workerFile, workerText);
+    const run = vi.fn(healthyProbe);
+    await collectChecks({ config, profile: 'test', agents: 'codex' }, run);
+    expect(run).toHaveBeenCalledWith(canonicalBinary, ['queue', '--help']);
+    expect(run.mock.calls.some(([binary]) => binary === '/obsolete/codex')).toBe(false);
+    expect(await readFile(config, 'utf8')).toBe(rootText);
+    expect(await readFile(workerFile, 'utf8')).toBe(workerText);
+  });
   it('uses numeric version comparisons and handles CLI version banners', () => {
     expect(versionOf('codex-cli 0.159.2')).toBe('0.159.2');
     expect(versionOf('2.1.261 (Claude Code)')).toBe('2.1.261');

@@ -38,7 +38,7 @@ async function fixture(toolId: 'claude' | 'dsh' | 'zcode' = 'zcode') {
   const profile=createDefaultProfileConfig({agentKind:'codex',codex:{binaryPath:'codex',inheritCodexHome:true},accounts:{app:{id:'bot',secret:'test',tenant:'feishu'}}});
   const controls={profileConfig:profile,toolBindings:bindings} as unknown as Controls;
   const worker=new WorkerClient(dir,'local','bot',toolId);
-  const capabilities: WorkerCapabilities={apiVersion:2,jobs:{submit:true,read:true,stop:true,eventCursor:true},models:true,
+  const capabilities: WorkerCapabilities={apiVersion:2,jobs:{submit:true,read:true,stop:true,eventCursor:true},models:true,nativeSessionNames:true,
     sessions:{list:true,history:true,rename:true,archive:false,fork:false},nativeTurnStop:false};
   const health=vi.spyOn(worker,'health').mockResolvedValue({capabilities,zcodeRegistryResume:true,zcodeSessionNames:true});
   const agent=new DurableAgentAdapter(worker,{id:toolId,displayName:toolId,isAvailable:async()=>true,run:()=>{throw Error('Name synchronization must never submit a task');}});
@@ -101,16 +101,16 @@ it.each(['claude','dsh','zcode'] as const)('waits for %s worker capabilities and
   await sync.tick();expect(h.rename).toHaveBeenCalledOnce();
 });
 it('keeps CLI ZCode aliases out of automatic native name synchronization',async()=>{
-  const h=await fixture();h.controls.profileConfig.zcode!.remoteControlFile=undefined;
-  await h.startRegistered();expect(h.list).not.toHaveBeenCalled();expect(h.health).not.toHaveBeenCalled();
+  const h=await fixture();h.health.mockResolvedValue({capabilities:{...h.capabilities,nativeSessionNames:false}});
+  await h.startRegistered();expect(h.list).not.toHaveBeenCalled();expect(h.rename).not.toHaveBeenCalled();
 });
 it.each(['claude','dsh'] as const)('does not enable %s name writes through an older worker',async toolId=>{
   const h=await fixture(toolId);h.health.mockResolvedValue({});await h.startRegistered();
   expect(h.list).not.toHaveBeenCalled();expect(h.rename).not.toHaveBeenCalled();
 });
-it('retains paired ZCode naming compatibility with v1 workers',async()=>{
+it('requires common capabilities even for older paired ZCode workers',async()=>{
   const h=await fixture();h.health.mockResolvedValue({zcodeRegistryResume:true,zcodeSessionNames:true});await h.startRegistered();
-  expect(h.rename).toHaveBeenCalledOnce();
+  expect(h.rename).not.toHaveBeenCalled();
 });
 it.each(['claude','dsh','zcode'] as const)('prevents multiple personal groups from fighting over a %s title',async toolId=>{
   const h=await fixture(toolId);await h.legacyAdd('oc_duplicate','session_native');

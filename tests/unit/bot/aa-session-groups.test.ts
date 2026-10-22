@@ -1,3 +1,4 @@
+import { ToolRegistry } from '../../../src/tools/types';
 import { describe, expect, it, vi } from 'vitest';
 import type { LarkChannel } from '@larksuite/channel';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
@@ -12,18 +13,10 @@ import {
 } from '../../../src/bot/aa-session-groups.js';
 
 describe('AA session automatic groups', () => {
-  it('never recreates a group for a previously archived AA thread', async () => {
-    const create = vi.fn();
-    const profileConfig = createDefaultProfileConfig({ agentKind: 'codex',
-      accounts: { app: { id: 'app', secret: 'secret', tenant: 'feishu' } }, codex: { binaryPath: 'codex' } });
-    await syncAaSessionGroupsOnce({
-      channel: { listChats: async () => [], rawClient: { im: { v1: { chat: { create } } } } } as unknown as LarkChannel,
-      controls: { profileConfig, botOwnerId: 'ou_owner' } as Controls,
-      sessionCatalog: { entries: () => [], isThreadArchived: (id: string) => id === 'old' } as unknown as SessionCatalog,
-      workspaces: {} as WorkspaceStore, profileStateDir: process.cwd(),
-      historyProvider: async () => [{ threadId: 'old', name: 'AA旧任务', cwd: process.cwd(), preview: '', createdAtMs: 1, updatedAtMs: 2, source: 'exec' }],
-    });
-    expect(create).not.toHaveBeenCalled();
+  it('never recreates a group for a locally archived native session', async () => {
+    const h = createHarness([historyThread('old', 'AA旧任务', 2)]);
+    h.deps.controls.toolBindings = { isArchived: () => true, personalOwner: () => undefined } as any;
+    await syncAaSessionGroupsOnce(h.deps); expect(h.created).toEqual([]);
   });
 
   it('backfills an already bound personal group without creating a duplicate or touching another bot group', async () => {
@@ -37,31 +30,19 @@ describe('AA session automatic groups', () => {
     expect(h.channel.rawClient.im.v1.chat.update).toHaveBeenCalledWith({ path: { chat_id: 'oc_current' }, data: { avatar: 'img_current_tool' } });
   });
 
-  it('checks current archive state at the AA group creation boundary', async () => {
-    const create = vi.fn(); const check = vi.fn(async () => true);
-    const profileConfig = createDefaultProfileConfig({ agentKind: 'codex',
-      accounts: { app: { id: 'app', secret: 'secret', tenant: 'feishu' } }, codex: { binaryPath: 'codex' } });
-    await syncAaSessionGroupsOnce({
-      channel: { listChats: async () => [], rawClient: { im: { v1: { chat: { create } } } } } as unknown as LarkChannel,
-      controls: { profileConfig, botOwnerId: 'ou_owner', codexReplySync: { isThreadArchived: check } } as unknown as Controls,
-      sessionCatalog: { entries: () => [], isThreadArchived: () => false } as unknown as SessionCatalog,
-      workspaces: {} as WorkspaceStore, profileStateDir: process.cwd(),
-      historyProvider: async () => [{ threadId: 'external-archive', name: 'AA旧任务', cwd: process.cwd(), preview: '', createdAtMs: 1, updatedAtMs: 2, source: 'exec' }],
-    });
-    expect(check).toHaveBeenCalledWith('external-archive'); expect(create).not.toHaveBeenCalled();
+  it('checks archived worker sessions before creating a group', async () => {
+    const h = createHarness([historyThread('external-archive', 'AA旧任务', 2)]);
+    h.deps.controls.toolRegistry!.get('codex').listSessions = vi.fn(async () => [{ nativeId: 'external-archive', name: 'AA旧任务', cwd: process.cwd(), createdAtMs: 1, updatedAtMs: 2, archived: true }]);
+    await syncAaSessionGroupsOnce(h.deps);
+    expect(h.created).toEqual([]);
   });
   it('pauses scans during native fork naming and resumes them after an error', async () => {
     const historyProvider = vi.fn(async () => []);
     const profileConfig = createDefaultProfileConfig({ agentKind: 'codex',
       accounts: { app: { id: 'app', secret: 'secret', tenant: 'feishu' } },
       codex: { binaryPath: 'codex' } });
-    const handle = startAaSessionGroupSync({
-      channel: { listChats: async () => [] } as unknown as LarkChannel,
-      controls: { profileConfig, botOwnerId: 'ou_owner' } as Controls,
-      sessionCatalog: { entries: () => [] } as unknown as SessionCatalog,
-      workspaces: {} as WorkspaceStore,
-      profileStateDir: process.cwd(), historyProvider,
-    });
+    const h = createHarness([]); h.deps.historyProvider = historyProvider;
+    const handle = startAaSessionGroupSync(h.deps);
     try {
       await handle.runNow();
       const calls = historyProvider.mock.calls.length;
@@ -195,6 +176,9 @@ describe('AA session automatic groups', () => {
       profileStateDir: process.cwd(),
       historyProvider,
     };
+    controls.toolRegistry = new ToolRegistry();
+    controls.toolRegistry.register({ id: 'codex', label: 'Codex', sourceId: 'legacy', agent: { id: 'codex', displayName: 'Codex', isAvailable: async () => true, run() { throw Error('no inference'); } }, listSessions: async () => (await historyProvider()).map(row => ({ nativeId: row.threadId, name: row.name, cwd: row.cwd, createdAtMs: row.createdAtMs, updatedAtMs: row.updatedAtMs })) });
+    sessionCatalog.archiveNativeSession = vi.fn((_, id) => sessionCatalog.archiveThread(id));
     await syncAaSessionGroupsOnce(deps);
     await syncAaSessionGroupsOnce(deps);
 
@@ -214,6 +198,9 @@ describe('AA session automatic groups', () => {
     const archive = vi.fn();
     h.sessionCatalog.archiveNativeSession = archive;
     h.deps.controls.profileConfig.agentKind = toolId;
+    const previous = h.deps.controls.toolRegistry!.get('codex');
+    h.deps.controls.toolRegistry!.remove('codex');
+    h.deps.controls.toolRegistry!.replace({ ...previous, id: toolId, sourceId: `${toolId}-data` });
     const deps = { ...h.deps, toolId, sourceId: `${toolId}-data` };
     await syncAaSessionGroupsOnce(deps);
     knownChats.push({ id: 'oc_auto_1', name: 'AA-ZCode' });
@@ -278,11 +265,12 @@ describe('AA session automatic groups', () => {
     });
     let closed = false;
     Object.assign(h.sessionCatalog, { isScopeArchived: () => closed });
-    h.deps.controls.codexReplySync = { observeTurn() {}, runNow: async () => {},
-      isThreadArchived: async () => { closed = true; return false; } };
+    const tool = h.deps.controls.toolRegistry!.get('codex'), list = tool.listSessions; let reads = 0;
+    tool.listSessions = async () => { if (++reads > 1) closed = true; return list(); };
     await syncAaSessionGroupsOnce(h.deps);
     expect(h.channel.rawClient.im.v1.chat.update).not.toHaveBeenCalled();
-    expect(h.sessionCatalog.upsertActive).not.toHaveBeenCalled(); expect(h.created).toEqual([]);
+    expect(h.created).toHaveLength(1);
+    expect(h.sessionCatalog.upsertActive).toHaveBeenCalledWith(expect.objectContaining({ scopeId: 'oc_auto_1', threadId: 'new' }));
   });
 
   it('does not let a binding from a chat invisible to the current bot suppress creation', async () => {
@@ -324,7 +312,7 @@ describe('AA session automatic groups', () => {
     await syncAaSessionGroupsOnce(h.deps);
 
     expect(h.created).toHaveLength(1);
-    expect(h.created[0]?.name).toBe('AA-共享群任务-2');
+    expect(h.created[0]?.name).toBe('AA-共享群任务（Codex）');
   });
 
   it('keeps a visible legacy binding without a bot app id for compatibility', async () => {
@@ -464,7 +452,7 @@ function createHarness(
     setCwd: vi.fn(),
     flush: vi.fn(async () => undefined),
   } as unknown as WorkspaceStore;
-  return {
+  const h = {
     created,
     channel,
     sessionCatalog,
@@ -477,4 +465,9 @@ function createHarness(
       historyProvider: vi.fn(async () => history),
     },
   };
+  controls.toolRegistry = new ToolRegistry();
+  controls.toolRegistry.register({ id: 'codex', sourceId: 'legacy', label: 'Codex', agent: { id: 'codex', displayName: 'Codex', isAvailable: async () => true, run() { throw Error('no inference'); } },
+    listSessions: async () => (await h.deps.historyProvider()).map(row => ({ nativeId: row.threadId, name: row.name, cwd: row.cwd, createdAtMs: row.createdAtMs, updatedAtMs: row.updatedAtMs })) });
+  sessionCatalog.archiveNativeSession = vi.fn((_, id) => sessionCatalog.archiveThread(id));
+  return h;
 }

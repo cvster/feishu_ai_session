@@ -64,7 +64,7 @@ async function harness() {
   const controls = { profile: 'codex', profileConfig: profile, cfg: { accounts: profile.accounts, preferences: profile.preferences },
     botOwnerId: 'ou_owner', ownerRefreshState: 'ok', configPath: join(dir, 'config.json'), defaultToolId: 'codex',
     toolRegistry: registry, toolBindings: bindings, executorForTool: (id: AgentKind) => executors.get(id),
-    codexSubmissions: {}, knownChats: [], refreshOwner: async () => {}, restart: async () => {}, exit: async () => {},
+    knownChats: [], refreshOwner: async () => {}, restart: async () => {}, exit: async () => {},
   } as unknown as Controls;
   function context(scope = 'dm', chatType: 'p2p' | 'group' = 'p2p'): CommandContext {
     return { channel, scope, chatMode: chatType === 'p2p' ? 'p2p' : 'group',
@@ -173,7 +173,7 @@ describe('personal multi-tool workflows', () => {
   it('archives a pending Claude reservation before its first init event and stops a recovered worker task', async () => {
     const h = await harness(); h.registry.get('claude').reserveSessionId = () => 'same-uuid';
     const stopScope = vi.fn(async () => true);
-    h.controls.claudeReplySync = { runNow: async () => {}, stopScope };
+    h.controls.workerRuntimes = new Map([['claude', { inbox: {} as any, replies: { runNow: async () => {}, stopScope } }]]);
     const creation = h.context(); creation.formValue = { group_name: 'AA-pending', cwd: h.dir, agent_kind: 'claude' };
     await runCommandHandler('new', 'chat form', creation);
     const group = h.groups[0]!.id;

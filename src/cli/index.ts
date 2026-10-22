@@ -107,12 +107,12 @@ for (const action of ['configure', 'list', 'enable', 'disable', 'alias', 'grant'
 }
 worker.command('run').description('Run a worker in the foreground under an independent supervisor')
   .option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
-  .option('--tool <kind>', 'worker tool (claude, zcode, kilo or dsh; default claude)')
+  .option('--tool <kind>', 'worker tool (codex, claude, zcode, kilo or dsh; defaults to profile tool)')
   .action(runWorker);
 for (const action of ['start', 'stop', 'status'] as const) {
   worker.command(action).description(action === 'stop' ? 'Stop the worker and its active tasks of the selected tool' : `${action} the independent worker (does not restart the bridge)`)
     .option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
-    .option('--tool <kind>', 'worker tool (claude, zcode, kilo or dsh; default claude)')
+    .option('--tool <kind>', 'worker tool (codex, claude, zcode, kilo or dsh; defaults to profile tool)')
     .action(options => workerService(action, options));
 }
 

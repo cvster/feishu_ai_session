@@ -37,13 +37,7 @@ describe('first-run profile bootstrap', () => {
     const workspaceRealpath = await realpath(workspace);
     expect(profile.agentKind).toBe('codex');
     expect(profile.workspaces).toEqual({ default: workspaceRealpath });
-    expect(profile.codex).toMatchObject({
-      binaryPath: codex,
-      inheritCodexHome: true,
-    });
-    expect(profile.codex?.realpath).toBeUndefined();
-    expect(profile.codex?.version).toBeUndefined();
-    expect(profile.codex?.sha256).toBeUndefined();
+    expect(profile.codex).toBeUndefined();
     expect(profile.sandbox).toMatchObject({
       defaultMode: 'danger-full-access',
       maxMode: 'danger-full-access',
@@ -69,25 +63,8 @@ describe('first-run profile bootstrap', () => {
     expect(profile.workspaces.default).toBe(defaultWorkspaceRealpath);
   });
 
-  it('reports missing Codex bootstrap binaries as agent preflight diagnostics', async () => {
-    const root = await makeRoot();
-    const missing = join(root, 'missing-codex');
-
-    await expect(
-      createBootstrapProfileConfig({
-        agentKind: 'codex',
-        accounts: { app: { id: 'cli_codex', secret: '${APP_SECRET}', tenant: 'feishu' } },
-        codexBinaryPath: missing,
-      }),
-    ).rejects.toMatchObject({
-      diagnostic: {
-        code: 'agent-binary-not-found',
-        agentId: 'codex',
-        agentName: 'Codex CLI',
-        command: missing,
-        binaryPath: missing,
-      },
-    });
+  it('starts a bridge profile without installing Codex', async () => {
+    expect((await createBootstrapProfileConfig({ agentKind: 'codex', accounts: { app: { id: 'app', secret: 's', tenant: 'feishu' } }, codexBinaryPath: '/missing' })).codex).toBeUndefined();
   });
 
   it('fails closed when a requested bootstrap workspace is not a directory', async () => {

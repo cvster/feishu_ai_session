@@ -118,6 +118,17 @@ export class CodexAdapter implements AgentAdapter {
     });
   }
 
+  async stopNativeTurn(threadId: string, turnId: string, cwd: string): Promise<boolean> {
+    const reader = new CodexThreadReader({ binary: this.binary, profileStateDir: this.profileStateDir, codexHome: this.codexHome,
+      inheritCodexHome: this.inheritCodexHome, sharedServer: true, passive: true, remote: this.appServerRemote });
+    try {
+      const snapshot = await reader.readThread(threadId), turn = snapshot.turns.at(-1);
+      if (snapshot.id !== threadId || turn?.id !== turnId || turn.status !== 'inProgress' || snapshot.status?.type !== 'active') return false;
+      // Native directory ownership is checked before the common worker API invokes this method.
+      await reader.interruptTurn(threadId, turnId); return true;
+    } finally { await reader.stop(); }
+  }
+
   async archiveThread(threadId: string): Promise<void> {
     await archiveCodexThread({
       binary: this.binary,

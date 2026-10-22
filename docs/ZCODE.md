@@ -16,11 +16,13 @@ node bin/lark-channel-bridge.mjs setup --profile my-bot
 
 先安装并配置 [官方 ZCode](https://github.com/zai-org/ZCode)。独立执行验证基线为 Linux、ZCode Agent CLI **0.16.5 / 0.17.0**；桌面配对已在 ZCode **3.16.2 / Agent CLI 0.17.0** 验证。安装脚本的 `--install-clis` 仍只安装 Codex/Claude，ZCode 需单独准备。
 
-`/usr/bin/zcode` 可能是桌面启动器，不能作为 Agent CLI。桥接在常见安装路径找到桌面附带的 `resources/glm/zcode.cjs` 后，使用 Node 运行它；也可以在 profile 中显式配置：
+`/usr/bin/zcode` 可能是桌面启动器，不能作为 Agent CLI。worker 在常见安装路径找到桌面附带的 `resources/glm/zcode.cjs` 后，使用 Node 运行它；也可以在 `profiles/<profile>/workers/zcode/config.json` 显式配置：
 
 ```json
 {
-  "zcode": {
+  "version": 1,
+  "toolId": "zcode",
+  "options": {
     "binaryPath": "/absolute/path/to/node",
     "args": ["/opt/ZCode/resources/glm/zcode.cjs"]
   }
@@ -29,9 +31,9 @@ node bin/lark-channel-bridge.mjs setup --profile my-bot
 
 桥接会按原生 CLI 的真实路径识别随包供应商配置（包括桌面安装的 `resources/config/provider/zcode-builtin.json`），不复制其中内容。已显式设置 `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` 时保留该设置；桌面升级后若会话发现失败，先确认该路径仍有效。
 
-以上字段合入现有 profile，保留其他配置。已有 Codex/Claude profile 无须修改 `agentKind`；它只决定默认工具。新 profile 可使用 `profile create --agent zcode`。
+以上字段写入 ZCode worker 配置，保留其他 `options`。旧 profile 的 `zcode` 字段仅在首次迁移时导入，后续编辑 worker 配置。已有 Codex/Claude profile 无须修改 `agentKind`；它只决定默认工具。新 profile 可使用 `profile create --agent zcode`。
 
-模型列表和账号配置动态读取，默认读取桌面当前的 `~/.zcode/v2` 配置目录（兼容新旧格式）；无需把供应商和密钥复制到独立 CLI。可通过 `zcode.modelConfigPath` 显式指定配置来源。完整来源优先级、刷新和失效处理见 [动态模型列表](MODELS.md)。独立 CLI 的 `~/.zcode/cli/config.json` 仍受支持，权限设为 `600`，示意：
+模型列表和账号配置动态读取，默认读取桌面当前的 `~/.zcode/v2` 配置目录（兼容新旧格式）；无需把供应商和密钥复制到独立 CLI。可通过 worker 的 `options.modelConfigPath` 显式指定配置来源。完整来源优先级、刷新和失效处理见 [动态模型列表](MODELS.md)。独立 CLI 的 `~/.zcode/cli/config.json` 仍受支持，权限设为 `600`，示意：
 
 ```json
 {
@@ -48,7 +50,7 @@ node bin/lark-channel-bridge.mjs setup --profile my-bot
 
 provider 的类型、URL、模型参数应沿用实际账号配置；不要把凭据提交到仓库。桥接在本机读取当前配置，模型列表仅提取标识、显示名和推理档位；执行时将选定供应商的凭据经私有 stdin 传给其拥有的 ZCode 进程，不写入提示词、卡片、worker 收据或桥接日志。它不会改写桌面或 CLI 的默认模型设置。
 
-若使用 `zcode.dataDir` 或 `ZCODE_STORAGE_DIR`，`config.json` 放在该目录下；bridge 与 worker 必须使用相同目录及账号。不要在已经绑定的群上直接更换数据源。
+若使用 worker 的 `options.dataDir` 或 `ZCODE_STORAGE_DIR`，原生 `config.json` 放在该目录下；bridge 从 worker 读取数据源身份。不要在已经绑定的群上直接更换数据源。
 
 ## 启动与使用
 
@@ -63,11 +65,11 @@ node bin/lark-channel-bridge.mjs run --profile my-bot
 
 Linux ZCode worker 服务名为 `lark-channel-worker.zcode.my-bot.service`。非 Linux 可用 `worker run --profile my-bot --tool zcode` 配合独立进程托管。Claude worker 的旧命令与服务名保持兼容；同时使用两种工具时分别启动两种 worker。以上命令是手动启动步骤，普通桥接部署不要停止或重启 worker。
 
-涉及 ZCode 执行适配器的修复需要**单独升级 ZCode worker**；只重启桥接不会更新已加载的 worker 代码。健康接口的 `zcodeRegistryResume` 标记用于阻止将新请求交给仍会覆盖原会话供应商的旧 worker，不影响已经接收的任务。
+涉及 ZCode 执行适配器的修复需要**单独升级 ZCode worker**；只重启桥接不会更新已加载的 worker 代码。桥接通过健康接口的统一 manifest 和 capabilities 确认兼容性，旧 worker 需单独升级。
 
-本机曾因旧 `provider_config.json` 残留而读到了 `new-provider`；桌面实际使用 `config.json` 中的 `tars`/`TarsC`。部署这次修复时，应将 profile 的 `zcode.modelConfigPath` 改为当前桌面目录（本机 `/home/pc/.zcode/v2`）或实际使用的文件，保留其他 profile 字段及独立会话数据目录。不要将供应商名称当作原生 ID 重新创建供应商。
+本机曾因旧 `provider_config.json` 残留而读到了 `new-provider`；桌面实际使用 `config.json` 中的 `tars`/`TarsC`。部署这次修复时，应将 worker 的 `options.modelConfigPath` 改为当前桌面目录（本机 `/home/pc/.zcode/v2`）或实际使用的文件，保留其他 worker 字段及独立会话数据目录。不要将供应商名称当作原生 ID 重新创建供应商。
 
-私聊机器人发送“新建会话”，选择 **ZCode** 和项目目录。也可从已有会话面板创建工作群；正式名称以 `AA` 开头的 ZCode 会话可自动建群。原生 ID 兼容 `sess_...` 和新版桌面的 `session_...`，不要求 UUID。列表读取 `zcode.dataDir` 对应的原生历史；默认安装下桌面与桥接可共用 `~/.zcode/cli/db/db.sqlite`，但它们的 Agent 进程和内存事件流不同，共用数据库不代表已打开的桌面界面会实时刷新。
+私聊机器人发送“新建会话”，选择 **ZCode** 和项目目录。也可从已有会话面板创建工作群；正式名称以 `AA` 开头的 ZCode 会话可自动建群。原生 ID 兼容 `sess_...` 和新版桌面的 `session_...`，不要求 UUID。列表读取 `options.dataDir` 对应的原生历史；默认安装下桌面与桥接可共用 `~/.zcode/cli/db/db.sqlite`，但它们的 Agent 进程和内存事件流不同，共用数据库不代表已打开的桌面界面会实时刷新。
 
 ## 桌面实时同步：原生远控配对
 
@@ -82,7 +84,7 @@ node bin/lark-channel-bridge.mjs zcode pair --profile my-bot \
   --workspace /absolute/project/path < /absolute/private/zcode.link
 ```
 
-命令保存独立的 `600` 连接文件，profile 中只保存 `zcode.remoteControlFile` 路径，不回显链接。新版账号登录态从 `zcode.modelConfigPath` 旁的 `credentials.json` 读取，默认 `~/.zcode/v2/credentials.json`；按原生 `enc:v1:` 格式解密，保持原文件不变。登录 JWT 只用于官方 HTTPS 授权接口，不进入链接、配置、提示词或日志，短期 terminal token 只在内存使用。只读验证仍会建立一个远控终端，可能替换已连接的手机远控；不要同时使用桥接和手机争用同一个配对入口。重新导入时写入新的凭据文件，已经加载旧配置的 worker 不受导入动作直接影响。命令不重启服务；配置后需单独升级 / 重启 ZCode worker，并重启桥接。旧 worker 或执行模式不匹配时拒绝派发。
+命令保存独立的 `600` 连接文件，`workers/zcode/config.json` 的 `options.remoteControlFile` 只保存连接文件路径，不回显链接。新版账号登录态从 `options.modelConfigPath` 旁的 `credentials.json` 读取，默认 `~/.zcode/v2/credentials.json`；按原生 `enc:v1:` 格式解密，保持原文件不变。登录 JWT 只用于官方 HTTPS 授权接口，不进入链接、配置、提示词或日志，短期 terminal token 只在内存使用。只读验证仍会建立一个远控终端，可能替换已连接的手机远控；不要同时使用桥接和手机争用同一个配对入口。重新导入时写入新的凭据文件，已经加载旧配置的 worker 不受导入动作直接影响。命令不重启服务；配置后需单独升级 / 重启 ZCode worker，并重启桥接。旧 worker 或执行模式不匹配时拒绝派发。
 
 首次安装且尚未启动服务时，完成配对后执行：
 
@@ -105,7 +107,7 @@ node bin/lark-channel-bridge.mjs status --profile my-bot
 
 非 Linux 环境由自己的进程管理器按相同顺序重启 `worker run --profile my-bot --tool zcode` 和桥接。首次验收在 ZCode 桌面打开相同的本地项目，再从对应飞书工作群发送简单问题，检查同一会话的输入、回复与停止操作；桌面直接发起的新消息按下方“桌面消息回推个人工作群”同步。
 
-支持两种官方链接：旧版含 `hash/t`，使用原生 HMAC challenge；3.16.2 链接只含设备标识，使用账号授权 V2。V2 在每次连接前读取桌面现有登录态，先通过官方接口确认该设备属于当前账号且在线，再申请短期 `terminal` token，连接官方 `/api/v1/remote/ws2`；不注册 / 删除设备，不申请 `device` token。JWT 只发送给固定官方授权接口，短期 token 仅用于原生 WebSocket 握手，不写入链接文件、profile、提示词或日志。账号与凭据目录默认使用 `~/.zcode/v2`，也可沿用 `zcode.modelConfigPath` 所指目录；自定义原生凭据加密密钥仍需通过 `ZCODE_CREDENTIAL_SECRET` 提供。桌面登录失效时由用户在桌面重新登录，桥接不修改或导出桌面凭据。
+支持两种官方链接：旧版含 `hash/t`，使用原生 HMAC challenge；3.16.2 链接只含设备标识，使用账号授权 V2。V2 在每次连接前读取桌面现有登录态，先通过官方接口确认该设备属于当前账号且在线，再申请短期 `terminal` token，连接官方 `/api/v1/remote/ws2`；不注册 / 删除设备，不申请 `device` token。JWT 只发送给固定官方授权接口，短期 token 仅用于原生 WebSocket 握手，不写入链接文件、profile、提示词或日志。账号与凭据目录默认使用 `~/.zcode/v2`，也可沿用 `options.modelConfigPath` 所指目录；自定义原生凭据加密密钥仍需通过 `ZCODE_CREDENTIAL_SECRET` 提供。桌面登录失效时由用户在桌面重新登录，桥接不修改或导出桌面凭据。
 
 配对模式每个 ZCode worker 同时只执行一个任务，不同群共用该入口。同一凭据文件还有跨进程连接锁；不要为多个 profile 分别导入同一个配对入口，它们仍可能争用同一远控终端。项目必须在该桌面窗口中存在唯一匹配的本地工作区；不按第一个工作区兜底，也不会把本地绑定路由到同路径的 SSH 工作区。
 
@@ -117,7 +119,7 @@ node bin/lark-channel-bridge.mjs status --profile my-bot
 
 会话列表、历史快照、桥接别名以及原生复制仍使用已有本机数据源；配对不会自动搬迁历史、更改已有 `sourceId` 或把桌面其他机器的历史导入本机。桌面新轮次的回推独立读取本机原生记录，不通过配对终端订阅，规则见下文。
 
-暂不使用远控时，移除 profile 的 `zcode.remoteControlFile` 并单独重启 ZCode worker / 桥接，即恢复独立执行。要撤销已复制链接的远控授权，在 ZCode 桌面刷新 / 撤销远控入口；只删除桥接配置不代表已撤销桌面的链接凭据。
+暂不使用远控时，移除 worker 配置的 `options.remoteControlFile` 并单独重启 ZCode worker / 桥接，即恢复独立执行。要撤销已复制链接的远控授权，在 ZCode 桌面刷新 / 撤销远控入口；只删除桥接配置不代表已撤销桌面的链接凭据。
 
 协议来源：[官方远控架构](https://github.com/zai-org/ZCode/blob/main/docs/web-remote-control/web-remote-control-architecture.md)、[relay 协议与工作区入口](https://github.com/zai-org/ZCode/blob/main/packages/shared/src/web-remote-control.ts)、[Channel RPC 格式](https://github.com/zai-org/ZCode/blob/main/packages/rpc/src/serialization.ts)。实现没有打补丁或注入桌面进程。
 
@@ -125,9 +127,9 @@ node bin/lark-channel-bridge.mjs status --profile my-bot
 
 ## 桌面消息回推个人工作群
 
-绑定个人工作群后，桥接每约 2 秒通过本机 ZCode Agent CLI 读取原生消息记录，将桌面新提问和回答同步到该群；回答持续更新同一张卡片。只观察已有会话，不向模型再次提交问题、不修改模型配置，也不连接或占用远控配对终端。飞书发起的任务仍由 worker 回复。消息回推无需新权限或额外配置，更新并重启桥接即可。桌面任务的群内停止按钮还需要既有远控配对，并单独升级 ZCode worker（健康接口 `zcodeNativeStop: true`）；升级方式沿用上方步骤，不重启其他工具 worker。
+绑定个人工作群后，桥接每约 2 秒通过 worker 的统一 conversation 接口读取原生消息记录，将桌面新提问和回答同步到该群；回答持续更新同一张卡片。只观察已有会话，不向模型再次提交问题、不修改模型配置，也不连接或占用远控配对终端。飞书发起的任务仍由 worker 回复。消息回推无需新权限；迁移时须单独升级 ZCode worker，再更新桥接。桌面任务的群内停止按钮还需要既有远控配对和 worker 的 `capabilities.nativeTurnStop: true`；升级方式沿用上方步骤，不重启其他工具 worker。
 
-首次启用或重新绑定建立历史基线，不补发已有消息，包括当时已开始的轮次；后续重启沿用 `profiles/<profile>/zcode-turn-sync.json` 的去重和卡片更新序号。不要删除该文件来排障。
+首次启用或重新绑定建立历史基线，不补发已有消息，包括当时已开始的轮次；后续重启沿用 `profiles/<profile>/zcode-native-turn-sync.json`（自动导入旧 `zcode-turn-sync.json`） 的去重和卡片更新序号。不要删除该文件来排障。
 
 仅向绑定的活跃个人工作群回推。开放群、私聊群、旧 FF 工作群、话题及归档群不接收桌面内容广播。根据原生输入准入元数据确认桌面来源，飞书来源或来源不明的旧格式不转发；不按问题文本猜测来源，也不会转发内部隐藏提醒。已配对的桌面任务回推卡片提供停止按钮：通过 ZCode worker 确认当前输入、轮次和原生执行身份后发出停止，不向独立 CLI 下发停止，不自动重试。点击旧卡片不会停止后续任务。worker 正在处理其他飞书任务时提示稍后重试，不抢占其远控连接。未配对时仍需在桌面停止；飞书发起任务的停止按钮保持原行为。模型原生交互仍在桌面处理。
 
@@ -137,7 +139,7 @@ node bin/lark-channel-bridge.mjs status --profile my-bot
 
 绑定的活跃个人工作群每约 10 秒同步一次名称：修改飞书群名会更新 ZCode 原生会话名，修改桌面会话名会更新飞书群名。首次启用以群名为准，修复旧版仅保存桥接标签造成的标题不一致；双方同时改名时群名优先。共享群、旧 FF 工作群、AI助手私聊群、话题和归档群不参与此名称同步。ZCode 正在执行时暂缓原生改名，结束后重试，不为改名替换正在使用的远控连接。
 
-该能力需要同时更新桥接并单独升级 ZCode worker，健康接口提供 `zcodeSessionNames` 标记。独立 CLI 模式仍保留桥接本地标签，不支持桌面标题双向同步。
+该能力需要同时更新桥接并单独升级 ZCode worker，健康接口提供 `capabilities.nativeSessionNames` 标记。独立 CLI 模式仍保留桥接本地标签，不支持桌面标题双向同步。
 
 ## 能力与边界
 
@@ -153,7 +155,7 @@ Codex、Claude、ZCode 均使用各自专用头像；手动创建、AA 自动建
 
 ## 新工具如何接入
 
-工具能力集中在 `src/tools/definitions.ts`，统一标识为 `toolId + sourceId + nativeId`。持久化目录、收件箱和回复账本按工具隔离；Codex 保留原生队列，Claude/ZCode 复用独立 worker。会话历史、改名和归档由 `ToolSessionOperations` 隔离原生格式，飞书消息、共享群、私聊群和 A2A 不解析第三方历史文件。
+工具能力集中在 `src/tools/definitions.ts`，统一标识为 `toolId + sourceId + nativeId`。持久化目录、收件箱和回复账本按工具隔离；所有工具通过统一 worker 接口；Codex worker 内保留原生队列。会话历史、改名和归档由 `ToolSessionOperations` 隔离原生格式，飞书消息、共享群、私聊群和 A2A 不解析第三方历史文件。
 
 新增工具时注册能力、提供 adapter 与会话操作，并接入 registry；补充原生协议、停止、重连、来源隔离与 A2A 测试。未知工具拒绝加载，不按 Claude 或 Codex 兜底执行。
 

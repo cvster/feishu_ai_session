@@ -4,7 +4,7 @@
 
 ## 1. 选择工具和系统
 
-Codex、Claude **至少安装一个，也可以同时存在**。一个 profile 的 `agentKind` 是默认工具；安装两个时，同一机器人创建个人工作群可分别选择 Codex 或 Claude，群创建后工具固定。`--agents both` 会检查两者；只选一个，不要求另一个存在。
+安装实际使用的工具即可：Codex、Claude、Kilo、ZCode 或 DSH。只用 Kilo 无需安装 Codex。一个 profile 的 `agentKind` 是默认工具；安装两个时，同一机器人创建个人工作群可分别选择 Codex 或 Claude，群创建后工具固定。`--agents both` 会检查两者；只选一个，不要求另一个存在。
 
 | 依赖 | 本项目基线/验证版本 | 用途 |
 |---|---|---|
@@ -14,12 +14,12 @@ Codex、Claude **至少安装一个，也可以同时存在**。一个 profile �
 | Codex CLI | >=0.159.2，并通过能力检查 | Codex 用户选择；检查 queue 参数和公开 app-server |
 | Claude Code | >=2.1.261，并通过能力检查 | Claude 用户选择；检查 stream-json、权限、会话名等参数 |
 | 飞书 CLI | >=1.0.97 | 文件发送、profile 应用身份和后续 CLI 操作 |
-| Claude worker | 本仓库自带，需独立启动 | 只使用 Codex 时不需要 |
+| 工具 worker | 本仓库自带，按工具独立启动 | 所有工具包含 Codex 都通过 worker 接入 |
 | Codex writer | 与 CLI 兼容的常驻公开 app-server/桌面执行端 | 只使用 Claude 时不需要；历史读取进程不承担执行 |
 
 CLI 版本号是本项目的支持基线，不是声称这些功能在上游首次出现的版本。高于基线仍要通过命令能力、认证及运行检查。账号额度、模型可用性不能靠版本或离线检查证明；首次真实任务再验收。
 
-Linux 用户级 systemd 是完整自动后台部署的主要支持环境。macOS/Windows 的桥接后台服务已有支持，但 Claude worker 需用 `worker run` 配合自己的进程托管。Linux 容器/WSL 未启用 systemd 时也使用前台模式。
+Linux 用户级 systemd 是完整自动后台部署的主要支持环境。macOS/Windows 的桥接后台服务已有支持，但工具 worker 需用 `worker run` 配合自己的进程托管。Linux 容器/WSL 未启用 systemd 时也使用前台模式。
 
 官方安装/认证参考：[Codex CLI](https://learn.chatgpt.com/docs/cli/reference)、[Codex 认证](https://learn.chatgpt.com/docs/auth)、[Claude 安装](https://code.claude.com/docs/en/setup)、[Claude CLI](https://code.claude.com/docs/en/cli-reference)、[飞书 CLI](https://github.com/larksuite/cli)。
 
@@ -100,11 +100,11 @@ bash install.sh --agents both --install-clis --configure \
 
 该过程仍需人工扫码/输入凭据，不能替代飞书审批与发布。
 
-### Kilo 客户端优先级
+### Kilo 接入
 
-Kilo 需先自行安装并登录 [VS Code 插件或 Kilo App](KILO.md)。在 `~/.lark-channel/config.json` 的 `profiles.<profile>.kilo` 中合入 `"preferredClient": "vscode"`（默认，当前使用插件优先）；改为 `"desktop"` 则优先在 Kilo App 中创建会话，保留已有 `binaryPath` 等配置。完整示例见 [Kilo 配置](KILO.md#本机准备)。
-
-仅新建会话遇到多个可用 Kilo 后端时使用此优先级；只有一个时直接使用。已有会话继续使用原客户端，同类窗口仍需唯一匹配。选择 App 时，先在 App 为该项目创建过会话，以便识别桌面工作区。修改后需更新并重启 Kilo worker 及桥接，不必重启 Kilo 界面。
+Kilo 支持 VS Code 插件和独立 CLI。Kilo App/Desktop 已移除，旧 `preferredClient`
+设置不再使用；旧 App 会话保留历史但不会列出或续聊。原生配置位于
+`profiles/<profile>/workers/kilo/config.json`。完整说明见 [Kilo](KILO.md)。
 
 ## 5. 统一前台和后台环境
 
@@ -145,7 +145,7 @@ codex app-server daemon version
 
 按以下顺序排查和处理：
 
-1. **确认真正使用的 CLI。** 终端执行下面的只读检查，同时核对 profile 的 `codex.binaryPath`、后台服务 PATH 和运行 OS 用户。Windows 用 `where.exe codex`，不要只看当前终端能运行哪个版本。
+1. **确认真正使用的 CLI。** 终端执行下面的只读检查，同时核对 `workers/codex/config.json` 的 `options.binaryPath`、worker 服务 PATH 和运行 OS 用户。Windows 用 `where.exe codex`，不要只看当前终端能运行哪个版本。
 
    ```bash
    command -v codex
@@ -156,7 +156,7 @@ codex app-server daemon version
 
    `queue --help` 应提供 `--remote`；不认识命令或参数时，先更新 CLI 至本文支持基线并重新做能力检查。`daemon version` 中的 `cliVersion`、`appServerVersion`、`socketPath` 可辅助判断版本与连接来源；这份输出本身不能证明桌面使用同一实例。
 
-2. **统一安装来源与账号目录。** 将 profile 的 `codex.binaryPath` 指向已验证兼容的 CLI 的绝对路径；桌面与桥接使用相同账号和预期的 `CODEX_HOME`。升级 CLI 后检查后台仍引用的旧路径。不同版本号不一定有问题，最终以协议能力和实际连接为准。
+2. **统一安装来源与账号目录。** 将 Codex worker 的 `options.binaryPath` 指向已验证兼容的 CLI 的绝对路径；桌面与 worker 使用相同账号和预期的 `CODEX_HOME`。升级 CLI 后检查后台仍引用的旧路径。不同版本号不一定有问题，最终以协议能力和实际连接为准。
 
 3. **连接桌面实际使用的公开共享 writer。** 按所装桌面版本支持的方式启用共享连接，在桥接的 `runtime.env` 中指定该公开端点，例如：
 
@@ -243,7 +243,7 @@ Linux 若需退出登录后继续运行，由管理员为部署账户开启 syst
 
 升级前备份构建产物和服务配置；构建成功后只重启目标桥接。不要用旧备份覆盖新的会话、收据和队列账本；不要随代码复制他人的认证、profile 状态或 `.env`。Web 服务另行部署。
 
-新增工具时，更新桥接并为新工具启动自己的 worker；已有 Claude/ZCode worker 与 Codex writer 不随桥接重启，已接收任务继续运行。桥接重连期间回复同步可能短暂停顿，恢复后读取原收据；不要重发任务或重建执行队列。
+新增工具时，更新桥接并为新工具启动自己的 worker；已有 worker 与 Codex writer 不随桥接重启，已接收任务继续运行。桥接重连期间回复同步可能短暂停顿，恢复后读取原收据；不要重发任务或重建执行队列。
 
 运行中的 worker 保持已加载的代码。只更新磁盘产物不会使其自动支持新执行能力；涉及原生参数或执行协议变化时，单独安排对应 worker 升级，重启该 worker 会中断其任务。新桥接通过健康接口的能力字段识别原生推理档位支持：旧 Claude worker 可继续处理其已支持的档位；新档位或旧 ZCode worker 不支持的档位会明确拒绝，不能静默改用其他档位。此检查不会重启任何服务。
 
@@ -266,3 +266,5 @@ Linux 若需退出登录后继续运行，由管理员为部署账户开启 syst
 | 工具登录状态通过但推理失败 | 核对模型权限、账号额度、提供方配置和模型服务网络 |
 
 检查源码/测试仅证明本地兼容；真实账号授权、特定模型、企业网络和每个平台的后台保活需实际验收。
+
+所有工具需独立 worker，例如 `worker start --profile my-bot --tool codex` 或 `--tool kilo`。桥接自动扫描 `workers/*/endpoint.json`，无需工具专用桥接配置。旧部署升级请先阅读 [完整迁移步骤](WORKER_MIGRATION.md)。

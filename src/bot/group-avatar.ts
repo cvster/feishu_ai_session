@@ -9,7 +9,7 @@ const uploads = new WeakMap<LarkChannel, Map<AgentKind, Promise<string>>>();
 export async function sessionGroupAvatar(channel: LarkChannel, toolId: AgentKind): Promise<string | undefined> {
   if (!(toolId in GROUP_AVATAR_IMAGES)) return undefined;
   const image = GROUP_AVATAR_IMAGES[toolId as keyof typeof GROUP_AVATAR_IMAGES];
-  if (!channel.rawClient.im?.v1?.image?.create) return undefined;
+  if (!image || !channel.rawClient.im?.v1?.image?.create) return undefined;
   let cache = uploads.get(channel);
   if (!cache) { cache = new Map(); uploads.set(channel, cache); }
   let pending = cache.get(toolId);

@@ -21,7 +21,10 @@ export function workerCapabilities(api: Pick<WorkerToolApi, 'agent' | 'sessions'
       rename: !!api.sessions?.rename || typeof api.agent.renameSession === 'function',
       archive: !!api.sessions?.archive, fork: !!api.sessions?.fork },
     nativeTurnStop: typeof api.agent.stopNativeTurn === 'function' &&
-      (!('desktopRemoteEnabled' in api.agent) || api.agent.desktopRemoteEnabled === true) };
+      (!('desktopRemoteEnabled' in api.agent) || api.agent.desktopRemoteEnabled === true),
+    conversation: typeof api.sessions?.conversation === 'function',
+    questions: typeof api.sessions?.questions === 'function' && typeof api.sessions?.answer === 'function',
+    nativeSessionNames: api.sessions?.nativeNames ?? !!api.sessions?.rename };
 }
 function required(value: unknown, field: string, max: number): string {
   if (typeof value !== 'string' || !value.trim() || value.length > max || /[\u0000-\u001f]/.test(value))
@@ -66,19 +69,37 @@ export async function handleWorkerToolRequest(req: IncomingMessage, res: ServerR
     const sessions = await api.exclusive(() => api.sessions!.list());
     reply(res, sessions); return true;
   }
-  const match = /^\/sessions\/([^/]+)\/(history|rename|archive|fork|turn-stop)$/.exec(url.pathname);
+  const match = /^\/sessions\/([^/]+)\/(history|conversation|questions|answer|rename|archive|fork|turn-stop)$/.exec(url.pathname);
   const legacyRename = url.pathname === '/session-name';
   const legacyStop = url.pathname === '/native-turn-stop';
   if (!match && !legacyRename && !legacyStop) return false;
   const action = legacyRename ? 'rename' : legacyStop ? 'turn-stop' : match![2]!;
-  if (req.method !== (action === 'history' ? 'GET' : 'POST'))
+  if (req.method !== (['history', 'conversation', 'questions'].includes(action) ? 'GET' : 'POST'))
     throw new WorkerApiError(405, 'Method not allowed', 'invalid-request');
   let nativeId: string;
   try { nativeId = match ? required(decodeURIComponent(match[1]!), 'session ID', 256) : ''; }
   catch { throw new WorkerApiError(400, 'Invalid session ID', 'invalid-request'); }
-  const value = action === 'history' ? {} : await readWorkerBody(req, 16384);
+  const value = ['history', 'conversation', 'questions'].includes(action) ? {} : await readWorkerBody(req, action === 'answer' ? 128 * 1024 : 16384);
   if (!match) nativeId = required(value.id, 'session ID', 256);
   const capabilities = workerCapabilities(api);
+  if (action === 'conversation') {
+    if (!api.sessions?.conversation) unsupported();
+    reply(res, await api.exclusive(() => api.sessions!.conversation!(nativeId))); return true;
+  }
+  if (action === 'questions') {
+    if (!api.sessions?.questions) unsupported();
+    reply(res, await api.sessions!.questions!(nativeId)); return true;
+  }
+  if (action === 'answer') {
+    if (!api.sessions?.answer) unsupported();
+    const questionId = required(value.questionId, 'question ID', 2048), answers = value.answers;
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers) || !Object.keys(answers).length || Object.keys(answers).length > 50 ||
+      Object.values(answers).some(v => !v || typeof v !== 'object' || !Array.isArray((v as { answers: unknown }).answers) ||
+        (v as { answers: unknown[] }).answers.length !== 1 ||
+        (v as { answers: unknown[] }).answers.some(a => typeof a !== 'string' || !a.trim() || a.length > 10000 || /\u0000/.test(a))))
+      throw new WorkerApiError(400, 'Invalid answers', 'invalid-request');
+    reply(res, { accepted: await api.sessions!.answer!(nativeId, questionId, answers as import('../session/codex-user-input').CodexInputAnswers) }); return true;
+  }
   if (action === 'history') {
     if (!capabilities.sessions.history) unsupported();
     const history = await api.exclusive(() => api.sessions!.history(nativeId));
@@ -90,6 +111,10 @@ export async function handleWorkerToolRequest(req: IncomingMessage, res: ServerR
     const turnId = required(value.turnId, 'turn ID', 256), cwd = required(value.cwd, 'workspace', 4096);
     const stopped = await api.exclusive(async () => {
       api.assertIdle(api.connectionExclusive ? undefined : nativeId);
+      if (api.sessions?.conversation) {
+        const snapshot = await api.sessions.conversation(nativeId);
+        if (snapshot.archived || snapshot.cwd !== cwd || snapshot.turns.at(-1)?.id !== turnId) return false;
+      }
       return api.agent.stopNativeTurn!(nativeId, turnId, cwd);
     });
     reply(res, { stopped }); return true;

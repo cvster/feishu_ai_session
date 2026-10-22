@@ -4,7 +4,7 @@ import { access } from 'node:fs/promises';
 import type { CommandContext } from './index';
 import type { CopiedSessionSource } from '../tools/bindings';
 import { nativeSessionId, type ToolId } from '../tools/definitions';
-import { sessionOperations } from '../tools/session-operations';
+import { sessionOperations } from '../tools/session-api';
 import { sessionCopyCard } from '../card/templates';
 import { sendManagedCard } from '../card/managed';
 
@@ -24,7 +24,7 @@ const choices = new Map<string, CopyChoice>();
 
 export async function currentCopySource(ctx: CommandContext): Promise<CopiedSessionSource> {
   const toolId = ctx.controls.profileConfig.agentKind;
-  const tool = ctx.controls.toolRegistry?.get(toolId);
+  const tool = ctx.controls.toolRegistry?.find(toolId);
   const binding = ctx.controls.toolBindings?.get(ctx.scope);
   const appId = ctx.controls.profileConfig.accounts.app.id;
   const row = ctx.sessionCatalog?.entries().filter(e => e.status === 'active' && e.scopeId === ctx.scope &&
@@ -46,7 +46,7 @@ export async function showSessionCopyMenu(ctx: CommandContext): Promise<void> {
   const issue = (target: ToolId) => {
     const token = randomUUID();
     choices.set(token, { actor: ctx.msg.senderId, scope: ctx.scope, appId: ctx.controls.profileConfig.accounts.app.id,
-      source: { ...source, copyId: randomUUID() }, target, targetSource: ctx.controls.toolRegistry?.get(target).sourceId, expires: Date.now() + 15 * 60_000 });
+      source: { ...source, copyId: randomUUID() }, target, targetSource: ctx.controls.toolRegistry?.find(target)?.sourceId, expires: Date.now() + 15 * 60_000 });
     return token;
   };
   const tools = ctx.controls.toolRegistry?.all() ?? [];
@@ -63,7 +63,7 @@ export async function sessionCopyChoice(ctx: CommandContext, token: string): Pro
       choice.appId !== ctx.controls.profileConfig.accounts.app.id) throw new Error('复制会话操作已过期，请重新打开。');
   const source = await currentCopySource(ctx);
   if (source.toolId !== choice.source.toolId || source.sourceId !== choice.source.sourceId || source.nativeId !== choice.source.nativeId || source.cwd !== choice.source.cwd ||
-      choice.targetSource !== ctx.controls.toolRegistry?.get(choice.target).sourceId) throw new Error('会话或工具来源已变化，请重新打开复制会话。');
+      choice.targetSource !== ctx.controls.toolRegistry?.find(choice.target)?.sourceId) throw new Error('会话或工具来源已变化，请重新打开复制会话。');
   return choice;
 }
 
@@ -72,7 +72,7 @@ export async function readCopiedSession(ctx: CommandContext, copyId: string): Pr
   const source = binding?.copiedFrom;
   if (!ctx.fromCardAction || !source || source.copyId !== copyId || ctx.sessionCatalog?.isScopeArchived(ctx.scope))
     throw new Error('读取入口已失效，请使用新群中的读取按钮。');
-  const tool = ctx.controls.toolRegistry?.get(source.toolId);
+  const tool = ctx.controls.toolRegistry?.find(source.toolId);
   if (!tool || tool.sourceId !== source.sourceId) throw new Error('来源工具配置已变化，无法读取原会话。');
   const historyPath = await sessionOperations(tool).historyPath(source.nativeId);
   if (!historyPath) throw new Error('原会话记录暂不可读，请稍后重试。');

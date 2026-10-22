@@ -6,28 +6,28 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { WorkerClient, WorkerRequestError } from './client';
 import type { WorkerCapabilities } from './protocol';
 
-/** Choose the v1 fallback before the operation; never replay a failed mutation. */
+/** Compatibility wrapper using only the common worker API. */
 export class WorkerSessionClient implements ToolSessionOperations {
   readonly historyMode;
   readonly nativeArchive;
   readonly fork?: ToolSessionOperations['fork'];
-  constructor(private client: WorkerClient, private legacyList: () => Promise<ToolSession[]>,
-    private legacy: ToolSessionOperations, private cacheDir: string, private validateMutation?: () => Promise<void>) {
+  constructor(private client: WorkerClient, _legacyList: () => Promise<ToolSession[]>,
+    legacy: ToolSessionOperations, private cacheDir: string, private validateMutation?: () => Promise<void>) {
     this.historyMode = legacy.historyMode;
     this.nativeArchive = legacy.nativeArchive;
     if (legacy.fork) this.fork = id => this.forkSession(id);
   }
   private async useWorker(operation: keyof WorkerCapabilities['sessions']): Promise<boolean> {
     const capabilities = await this.client.capabilities();
-    if (!capabilities) return false;
+    if (!capabilities) throw new WorkerRequestError(501, 'Worker API incompatible', false, 'unsupported-operation');
     if (!capabilities.sessions[operation]) throw new WorkerRequestError(501, `Worker does not support session ${operation}`, false, 'unsupported-operation');
     return true;
   }
   async listSessions(): Promise<ToolSession[]> {
-    return await this.useWorker('list') ? this.client.listSessions() : this.legacyList();
+    await this.useWorker('list'); return this.client.listSessions();
   }
   async historyPath(id: string): Promise<string | undefined> {
-    if (!await this.useWorker('history')) return this.legacy.historyPath(id);
+    await this.useWorker('history');
     let history;
     try { history = await this.client.sessionHistory(id); }
     catch (error) { if (error instanceof WorkerRequestError && error.status === 404) return; throw error; }
@@ -39,18 +39,16 @@ export class WorkerSessionClient implements ToolSessionOperations {
     await writeFileAtomic(path, history.content, { mode: 0o600 }); return path;
   }
   async rename(id: string, name: string): Promise<void> {
-    if (await this.useWorker('rename')) { await this.validateMutation?.(); await this.client.renameSession(id, name); }
-    else await this.legacy.rename(id, name);
+    await this.useWorker('rename'); await this.validateMutation?.(); await this.client.renameSession(id, name);
   }
   async archive(id: string): Promise<void> {
     // Preserve catalog-only archival: the worker must not claim it archived
     // native data, and the bridge still owns its local archive ledger.
-    if (this.nativeArchive === false) { await this.legacy.archive(id); return; }
-    if (await this.useWorker('archive')) { await this.validateMutation?.(); await this.client.archiveSession(id); }
-    else await this.legacy.archive(id);
+    if (this.nativeArchive === false) return;
+    await this.useWorker('archive'); await this.validateMutation?.(); await this.client.archiveSession(id);
   }
   private async forkSession(id: string) {
-    if (!await this.useWorker('fork')) return this.legacy.fork!(id);
+    await this.useWorker('fork');
     await this.validateMutation?.(); return this.client.forkSession(id);
   }
 }

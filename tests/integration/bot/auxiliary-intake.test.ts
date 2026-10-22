@@ -1,3 +1,5 @@
+import { startWorkerServer } from '../../../src/worker/server';
+import { WorkerClient } from '../../../src/worker/client';
 import { join } from 'node:path';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -62,11 +64,19 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
   const controls = { profile: 'codex', profileConfig: profile, cfg: profile, configPath: join(tmp.profile, 'config.json'),
     botOwnerId: 'ou_owner', ownerRefreshState: 'ok', refreshOwner: async () => {}, restart: async () => {}, exit: async () => {},
   } as unknown as Controls;
+  const submit = vi.fn(async (_opts: any) => {});
   const agent = new FakeAgentAdapter({ id: 'codex' });
-  const submit = vi.fn(async (opts: any, beforeSend: any) => {
-    await beforeSend({ threadId: originalId, knownTurnIds: [], transport: 'rpc' });
-    return { status: 'accepted' as const, submissionId: opts.runId, threadId: originalId, transport: 'rpc' as const };
-  }); Object.assign(agent, { submit });
+  agent.run = opts => ({ runId: opts.runId, stop: async () => {}, waitForExit: async () => true, events: { async *[Symbol.asyncIterator]() {
+    await submit(opts);
+    yield { type: 'system' as const, threadId: originalId, turnId: opts.runId, cwd: opts.cwd };
+    yield { type: 'done' as const, threadId: originalId, terminationReason: 'normal' as const };
+  } } });
+  const stateDir = join(tmp.profile, 'workers', 'any-directory');
+  const worker = await startWorkerServer({ stateDir, agent, sourceId: home, botAppId: 'cli_test', manifest: { label: 'Codex', nativeField: 'threadId', sessionKind: 'codex-thread', historyFormat: 'jsonl', nativeHistory: false },
+    sessions: { list: async () => [{ nativeId: originalId, name: 'AA-original', cwd: tmp.workspace, createdAtMs: 1, updatedAtMs: 2 }], history: async id => ({ nativeId: id, content: 'source', format: 'jsonl' }) } });
+  cleanups.push(() => worker.close());
+  const client = new WorkerClient(stateDir, home, 'cli_test', 'codex');
+  const records = async () => (await client.list()).map(job => ({ scope: job.options.delivery!.scope, replyTo: job.options.delivery!.replyTo, status: job.status }));
   const catalog = new SessionCatalog(join(tmp.profile, 'catalog.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   const bridge = await startChannel({ cfg: profile, controls, agent, sessions: new SessionStore(join(tmp.profile, 'sessions.json')),
@@ -81,7 +91,7 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
   const cardAction = (cmd: string, chatId = 'oc_callback') => handlers.cardAction!({
     messageId: `om_${cmd}`, chatId, operator: { openId: 'ou_owner' }, action: { tag: 'button', value: { cmd } },
   });
-  return { controls, channel, submit, message, cardAction, download, history, memberGet, createGroup, catalog, workspaces, cwd: tmp.workspace, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
+  return { controls, channel, submit, records, message, cardAction, download, history, memberGet, createGroup, catalog, workspaces, cwd: tmp.workspace, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
 }
 it.each(['stop', 'config', 'refresh', 'fork', 'finish'])('acknowledges %s before slow card processing and completes it once', async cmd => {
   const h = await harness();
@@ -159,7 +169,7 @@ it('routes a copied-session read through normal intake and the durable Codex sub
   expect(h.submit.mock.calls[0]![0].prompt).toContain("/来源会话' 的内容");
   expect(h.submit.mock.calls[0]![0].prompt).toContain(h.history);
   expect(h.submit.mock.calls[0]![0].threadId).not.toBe(originalId);
-  expect(h.controls.codexSubmissions?.records().find(r => r.scope === 'oc_copy')?.messages[0]?.messageId).toBe('om_provenance');
+  expect((await h.records()).find(r => r.scope === 'oc_copy')?.replyTo).toBe('om_provenance');
   await runCommandHandler('fork', 'read copy-test', ctx);
   await new Promise(r => setTimeout(r, 100)); expect(h.submit).toHaveBeenCalledOnce();
 });
@@ -167,7 +177,7 @@ it('ignores non-mentions, @all and bot senders even when global mention requirem
   const h = await harness(); await h.message({ mentionedBot: false }); await h.message({ mentionedBot: false, mentionAll: true });
   await h.message({ raw: { sender: { sender_type: 'app' } } });
   await h.message({ senderId: 'ou_bot' });
-  expect(h.controls.codexSubmissions?.records()).toHaveLength(0); expect(h.submit).not.toHaveBeenCalled(); expect(h.download).not.toHaveBeenCalled();
+  expect((await h.records())).toHaveLength(0); expect(h.submit).not.toHaveBeenCalled(); expect(h.download).not.toHaveBeenCalled();
 });
 it('silently ignores later messages, commands and attachments after the group is archived', async () => {
   const h = await harness(); h.catalog.archiveScope('oc_aux', 'archived');
@@ -179,12 +189,12 @@ it('silently ignores later messages, commands and attachments after the group is
   expect(h.channel.sent).toHaveLength(sent);
   expect(h.submit).not.toHaveBeenCalled();
   expect(h.download).not.toHaveBeenCalled();
-  expect(h.controls.codexSubmissions?.records()).toHaveLength(0);
+  expect((await h.records())).toHaveLength(0);
 });
 it('keeps pending group requests out of model and attachment handling', async () => {
   const h = await harness('pending'); await h.message({ resources: [{ type: 'file', fileKey: 'file' }] as any });
   expect(h.submit).not.toHaveBeenCalled(); expect(h.download).not.toHaveBeenCalled();
-  expect(h.controls.codexSubmissions?.records()).toHaveLength(0);
+  expect((await h.records())).toHaveLength(0);
 });
 it('wraps every real mention and reuses the original session across topics by resuming the original', async () => {
   const h = await harness(); await h.message({ content: '第一个问题', threadId: 'topic-a' });
@@ -197,7 +207,7 @@ it('wraps every real mention and reuses the original session across topics by re
   expect(opts.map(o => JSON.parse(o.prompt).context.chat_id)).toEqual(['oc_aux', 'oc_aux']);
   expect(opts.every(o => !('source' in JSON.parse(o.prompt)))).toBe(true);
   expect(opts[0].prompt).toContain('第一个问题'); expect(opts[1].prompt).toContain('第二个问题');
-  expect(h.controls.codexSubmissions?.records().every(r => r.scope === 'oc_aux')).toBe(true);
+  expect((await h.records()).every(r => r.scope === 'oc_aux')).toBe(true);
 });
 
 it('passes trusted owner identity into the prompt and restores restrictions for later coworker messages', async () => {
@@ -230,7 +240,7 @@ it('queues simultaneous group requests against one shared original conversation'
   const h = await harness('active', true);
   const implementation = h.submit.getMockImplementation()!;
   let release!: () => void; const waiting = new Promise<void>(resolve => { release = resolve; });
-  h.submit.mockImplementationOnce(async (opts, beforeSend) => { await waiting; return implementation(opts, beforeSend); });
+  h.submit.mockImplementationOnce(async (opts) => { await waiting; return implementation(opts); });
   await Promise.all([h.message({ chatId: 'oc_aux', content: 'A 群的问题' }), h.message({ chatId: 'oc_aux_2', content: 'B 群的问题' })]);
   try {
     await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
@@ -242,7 +252,7 @@ it('queues simultaneous group requests against one shared original conversation'
   expect(h.submit.mock.calls.every(([opts]) => opts.threadId === originalId)).toBe(true);
   expect(JSON.parse(h.submit.mock.calls[0]?.[0].prompt).context.chat_id).toBe('oc_aux');
   expect(JSON.parse(h.submit.mock.calls[1]?.[0].prompt).context.chat_id).toBe('oc_aux_2');
-  expect(h.controls.codexSubmissions?.records().map(r => r.scope).sort()).toEqual(['oc_aux', 'oc_aux_2']);
+  expect((await h.records()).map(r => r.scope).sort()).toEqual(['oc_aux', 'oc_aux_2']);
   expect(h.controls.toolBindings?.get('oc_aux')?.nativeId).toBe(h.controls.toolBindings?.get('oc_aux_2')?.nativeId);
 });
 
@@ -257,7 +267,7 @@ it('creates a private group only for an actual human @bot 私聊 without invokin
   expect(h.createGroup).toHaveBeenCalledOnce();
   expect(h.createGroup.mock.calls[0]![0]).toMatchObject({ data: { name: '私聊-C系列-Agent对话', user_id_list: ['ou_owner', 'ou_colleague'] } });
   expect(h.submit).not.toHaveBeenCalled(); expect(h.download).not.toHaveBeenCalled();
-  expect(h.controls.codexSubmissions?.records()).toHaveLength(0);
+  expect((await h.records())).toHaveLength(0);
   await h.message({ content: '私聊' }); expect(h.createGroup).toHaveBeenCalledOnce();
   await h.message({ chatId: 'oc_privategroup', content: '私聊', threadId: undefined });
   expect(h.createGroup).toHaveBeenCalledOnce(); expect(h.submit).not.toHaveBeenCalled();
@@ -272,7 +282,7 @@ it('routes private group questions to the original while keeping replies and per
   expect(prompt.rules.permissions).toContain('不修改项目源码');
   expect(prompt.rules.delivery).toContain('不沿用历史群ID');
   expect(h.controls.toolBindings?.get('oc_privategroup')?.sharedScope).toBe(h.controls.toolBindings?.get('oc_aux')?.sharedScope);
-  expect(h.controls.codexSubmissions!.records()[0]?.scope).toBe('oc_privategroup');
+  expect((await h.records())[0]?.scope).toBe('oc_privategroup');
   await h.message({ content: '在原群继续' });
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
   expect(h.submit.mock.calls[1]![0].threadId).toBe(originalId);
@@ -285,7 +295,7 @@ it('returns a migration notice for retired bot-DM requests without entering the 
     await h.message({ senderId, chatId: 'oc_dm', chatType: 'p2p', content: JSON.stringify({ protocol: 'ff-dm-v1', question: 'do something' }) });
   }
   expect(h.submit).not.toHaveBeenCalled(); expect(h.createGroup).not.toHaveBeenCalled();
-  expect(h.controls.codexSubmissions?.records()).toHaveLength(0);
+  expect((await h.records())).toHaveLength(0);
   expect(JSON.stringify(h.channel.sent)).toContain('旧私聊接口已停用');
 });
 
@@ -296,7 +306,7 @@ it.each([false, true])('continues an approved FF request through the durable que
   const original = { chatId: targetChat, content: '请修改本机项目源码' };
   await h.message(original);
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
-  const initial = h.controls.codexSubmissions!.records()[0]!;
+  const initial = (await h.records())[0]!;
   const approvalText = JSON.stringify({ type: 'ff_permission_request', action: '修改本机项目源码 src/main.ts', reason: '修改本机项目源码受限' });
   await h.controls.auxiliaryApprovals!.review(initial.scope, 'turn-needs-approval', initial.replyTo,
     { blocks: [{ kind: 'text', content: approvalText, streaming: false }], terminal: 'done', reasoning: { content: '', active: false }, footer: null });

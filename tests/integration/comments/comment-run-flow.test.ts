@@ -479,8 +479,6 @@ async function seedCodexCatalog(
     capability,
     profileConfig: h.profileConfig,
     now: Date.now(),
-    codexHome: h.profileConfig.codex?.codexHome,
-    inheritCodexHome: h.profileConfig.codex?.inheritCodexHome,
   });
   if (!policy.ok) throw new Error('failed to seed policy');
   h.sessionCatalog.upsertActive({

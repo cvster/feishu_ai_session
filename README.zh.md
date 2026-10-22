@@ -23,9 +23,9 @@ Codex、Claude 和 ZCode 的模型列表动态读取工具当前配置或接口�
 - **Codex 统一回复同步**：飞书发送端只提交消息；桌面 App 和飞书发起的轮次都由同一个 app-server 快照同步器回复。每个群中的同一会话、同一轮次只对应一张持久化卡片，每 2 秒检查变化；刷新和重启继续更新原卡片。桌面输入会回显到群里，飞书输入不重复回显；首次启用不回放旧历史（建群时配置的最近三轮补同步除外）。旧版双路径留下的卡片不会自动撤回。
 - **排队与消息合并**：短时间连续发送的消息会合并处理；任务运行中收到的普通消息会排队到下一轮，`/new`、`/cd`、`/ws use`、`/stop` 这类命令可以中断当前任务。
 - **Codex 选项卡**：`requestUserInput` 问题显示为飞书表单，支持多问题、选项和自定义回答；提交直接回答原请求，不创建新轮次。阻塞式问题显示“等待选择”并暂停空闲超时，非阻塞问题继续运行；桌面回答或轮次结束后关闭表单，重连复用原卡片。敏感输入仅在桌面处理。桌面/已有会话的请求需要可连接的共享 app-server（可用 `CODEX_QUEUE_REMOTE` 指定）；独立桌面服务无法只靠历史轮询提取待选项，不会通过竞争性 resume 绕过此限制。标准运行模式的新建/已有任务都由桌面或共享服务执行；显式 stdio 兼容模式才使用原连接回答。
-- **Codex 异步问询**：从现有 `thread/read` 快照中的助手消息 `questions` 生成飞书选项卡，复用每 2 秒同步，不另开桌面内部 IPC。答案使用公开 `turn/steer` 和原任务 ID 回传，不排队开启下一轮。桌面回答后同步关闭对应问题，部分回答保留剩余问题；重启复用原卡片，发送回执不确定时禁止自动重发。标准运行模式的新建/已有任务都使用官方队列交给外部 writer；已有桌面任务每 10 秒动态检测同一公开共享 app-server（可用 `CODEX_QUEUE_REMOTE` 指定）是否承载当前任务，可用时启用提交，断开时显示警告并关闭控件，恢复后更新原卡片。提交前再次确认；不抢占会话，也不只凭端点存在判定可用。两端使用相同逻辑。答案文本格式与 App 保持兼容，集中在 `src/session/codex-async-input.ts`，原生问询逻辑不变。
+- **Codex 异步问询**：从现有 `thread/read` 快照中的助手消息 `questions` 生成飞书选项卡，复用每 2 秒同步，不另开桌面内部 IPC。答案使用公开 `turn/steer` 和原任务 ID 回传，不排队开启下一轮。桌面回答后同步关闭对应问题，部分回答保留剩余问题；重启复用原卡片，发送回执不确定时禁止自动重发。标准运行模式的新建/已有任务都使用官方队列交给外部 writer；Codex worker 检测同一公开共享 app-server（可用 `CODEX_QUEUE_REMOTE` 指定）是否承载当前任务，可用时启用提交，断开时显示警告并关闭控件，恢复后更新原卡片。提交前再次确认；不抢占会话，也不只凭端点存在判定可用。两端使用相同逻辑。答案文本格式与 App 保持兼容，集中在 `src/session/codex-async-input.ts`，原生问询逻辑不变。
 - **Codex 重启保活**：桥接服务退出、重启或重连只停止观察，不中断已提交的任务，也不删除 Codex 队列；启动后由快照同步恢复输出。首次消息先创建并持久化空会话，再由官方队列执行，不依赖桥接子进程保活。“停止/归档”仍是主动取消；桌面/共享 writer 退出及主机重启不在保活范围内。详见 `docs/CODEX_TASK_LIFECYCLE.md`。
-- **群名与会话名双向同步**：支持 Codex、Kilo、Claude Code、DeepSeek Harness 和桌面配对模式的 ZCode。普通群首次绑定以群名为准；之后群名变化同步到会话，在工具中改会话名也同步回群名。同步记录持久化并识别自身写入的延迟回显；群名每 10 秒检查，Codex/Kilo 复用原生快照轮询，Claude/DSH/ZCode 每 10 秒通过 worker 查询名称。若两端同时改名，以群名为准。只处理当前机器人明确绑定的个人普通群，排除归档、旧 FF 工作群、共享群和话题独立会话；名称接口失败时保留原同步记录并重试。worker 能力和模式限制见 [Worker API](docs/WORKER_API.md#group-and-native-session-names)。
+- **群名与会话名双向同步**：支持 Codex、Kilo、Claude Code、DeepSeek Harness 和桌面配对模式的 ZCode。普通群首次绑定以群名为准；之后群名变化同步到会话，在工具中改会话名也同步回群名。同步记录持久化并识别自身写入的延迟回显；群名每 10 秒检查，Codex/Kilo 复用原生快照轮询，Claude/DSH/ZCode 每 10 秒通过 worker 查询名称。若两端同时改名，以群名为准。只处理当前机器人明确绑定的个人普通群，排除归档、旧 FF 工作群、共享群和话题独立会话；名称接口失败时保留原同步记录并重试。所有工具通过 worker list/rename 同步；能力和模式限制见 [Worker API](docs/WORKER_API.md#group-and-native-session-names)。
 - **多工作空间**：用 `/cd` 切换当前项目，用 `/ws` 保存和复用常用项目目录。
 - **失效群关联清理**：启动时及每分钟分批检查关联群；确认已解散后清理执行、目录和准入关联，保留历史记录与原生会话，并阻止自动重建同一 AA 群。权限或网络错误时保留关联并重试，详见 [生命周期说明](docs/CODEX_TASK_LIFECYCLE.md#dissolved-groups-lose-their-live-bridge-routes)。
 - **图片 / 文件**：直接发给 bot，bridge 下载到本地后交给本机 agent 处理。
@@ -142,22 +142,30 @@ Claude 的归档保存在桥接账本中，不删除原生 transcript；已归�
 
 私聊通知失败、卡片过期或桥接重启后，可私聊发送 `/aux`，或在私聊控制台点击「会话共享」重新选择。更换关联时，先退出，再重新邀请机器人。状态保存在 profile 的 `auxiliary-groups.json` 与工具绑定账本中。旧版独立 FF 入口迁移后使用对应原会话；保留旧 FF 历史、现有群和 API 别名，不自动合并旧 FF 内容。关联时通过支持现有 `im:chat:read` 权限的群信息接口确认机器人在群内，无需为旧成员检查接口追加权限。
 
-### Claude 独立执行服务与桥接重启
+### 统一 worker 与桥接重启
 
-群内 Claude 任务由独立 worker 执行，飞书桥接只提交请求和同步回复。配置好 profile 后，在 Linux 上先启动 worker：
+所有工具都通过独立 worker 提交任务、查询模型、会话与支持的功能。桥接自动扫描
+`profiles/<profile>/workers/*/endpoint.json`，不按文件夹名猜测工具。Codex worker
+内部继续使用原生队列/shared writer；问答能力仅由支持的 worker 开启。
 
 ```bash
-lark-channel-bridge worker start --profile my-bot
-lark-channel-bridge worker status --profile my-bot
+lark-channel-bridge worker start --profile my-bot --tool codex
+lark-channel-bridge worker start --profile my-bot --tool kilo
+lark-channel-bridge worker status --profile my-bot --tool kilo
 ```
 
-worker 是独立的 `lark-channel-worker.<profile>.service`。`worker start` 不重启已运行的 worker；日常 `lark-channel-bridge restart --profile <profile>` 只重启桥接。未启动或来源不匹配时，Claude 请求明确失败，不降级为桥接子进程执行。其他 supervisor 可用 `worker run --profile <profile>` 单独管理；本阶段完整恢复验证以 Linux 为准。
+只用 Kilo 时不需要安装 Codex。Kilo 保留 VS Code 插件和 CLI，Kilo App/Desktop 已移除。
+根配置保留机器人及通用策略；原生设置在 `workers/<tool>/config.json`，旧设置首次
+导入后不再覆盖。目录名可以任意，接口返回的工具、来源和能力用于发现与校验。
 
-任务接收记录和输出保存在 profile 的 `execution-worker/jobs`，接收持久化后才启动 Claude。相同请求 ID 不重复执行；空闲超时由 worker 处理，桥接断开不触发超时取消。桥接会保存 debounce 前的输入到 `claude-inbox.json`，重启后核对 worker 收据，再恢复尚未提交的消息。停止命令取消的待处理消息不会重新入队。桥接重启后能继续更新同一卡片或富文本消息，纯文本模式仍只发送最终结果；worker 模式暂不另发 CoT 过程气泡。
+收据和输出在 `workers/<tool>/jobs`，消息在 debounce 前写入 `<tool>-inbox.json`。
+相同请求不重复执行，桥接重启从收据恢复原卡片及序号。停止当前回复保留后续未提交
+输入；归档和显式退出会关闭对应入口。首发使用稳定飞书 uuid，超过 55 分钟的不明
+投递暂停自动重发。worker 或主机重启不保证任务继续，未知收据不自动重跑。
 
-`worker-replies.json` 保存回复 ID、卡片序号和发送进度。首发使用稳定的飞书 `uuid` 去重；发送确认丢失后在一小时去重窗口内核对并重试，超过 55 分钟则暂停自动重发，保留输出等待人工核对，避免重复消息。[飞书 SDK 对 uuid 的说明](https://larksuite.github.io/oapi-sdk-java/com/lark/oapi/service/im/v1/model/CreateMessageReqBody.Builder.html)
-
-此机制保障**桥接重启**，不保障 worker 自身重启、退出或主机重启时当前 Claude 进程继续运行。`worker stop` 会停止其任务；worker 重启后已持久化的完整结果仍可补发，未确认完成的任务标记为状态不确定，不自动重跑，也不回滚已产生的操作。worker 启动时读取账户目录和并发上限；升级或调整 worker 应与日常桥接部署分开处理。当前保活和回复恢复覆盖 IM 工作群，不承诺评论入口的回复恢复或外部 Claude 终端直播。
+普通桥接重启只脱离观察，不重启 worker、原生界面或 Codex writer。配置或执行适配器
+升级需要单独维护相应 worker。详见 [Worker API](docs/WORKER_API.md)、
+[完整迁移](docs/WORKER_MIGRATION.md) 和 [Codex 生命周期](docs/CODEX_TASK_LIFECYCLE.md)。
 
 ### 多 profile：分别运行多个机器人
 
@@ -297,7 +305,8 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 | `~/.lark-channel/active-profile` | 最近选择的 profile |
 | `~/.lark-channel/profiles/<profile>/sessions.json` | 会话状态 |
 | `~/.lark-channel/profiles/<profile>/sessions.json.catalog.json` | agent-aware 会话索引 |
-| `~/.lark-channel/profiles/<profile>/codex-turn-sync.json` | Codex 统一回复的轮次游标、卡片 ID 和更新序号（v2 自动迁移旧状态） |
+| `~/.lark-channel/profiles/<profile>/<tool>-native-turn-sync.json` | 原生消息轮次游标、卡片 ID 和更新序号，自动导入旧状态 |
+| `~/.lark-channel/profiles/<profile>/workers/<tool>/` | worker 原生配置、端点和任务收据 |
 | `~/.lark-channel/profiles/<profile>/workspaces.json` | 当前和命名工作空间绑定 |
 | `~/.lark-channel/profiles/<profile>/secrets.enc` | profile 本地加密 secret |
 | `~/.lark-channel/profiles/<profile>/lark-cli/` | 当前 profile 的 lark-cli 目录 |

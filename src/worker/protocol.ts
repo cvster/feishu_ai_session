@@ -1,5 +1,7 @@
 import type { AgentBotIdentity, AgentEvent, AgentRunOptions } from '../agent/types';
 import type { ToolSession } from '../tools/types';
+import type { NativeConversationSnapshot } from '../agent/native-conversation';
+import type { CodexInputAnswers, CodexInputRequest } from '../session/codex-user-input';
 
 /** Transport capabilities, independent of provider-specific compatibility flags. */
 export interface WorkerCapabilities {
@@ -8,13 +10,25 @@ export interface WorkerCapabilities {
   models: boolean;
   sessions: { list: boolean; history: boolean; rename: boolean; archive: boolean; fork: boolean };
   nativeTurnStop: boolean;
+  conversation?: boolean;
+  questions?: boolean;
+  nativeSessionNames?: boolean;
 }
+export interface WorkerManifest {
+  label: string;
+  nativeField: 'sessionId' | 'threadId';
+  sessionKind: string;
+  historyFormat: 'json' | 'jsonl';
+  nativeHistory: boolean;
+}
+export interface WorkerQuestion { id: string; request: CodexInputRequest; available: boolean; origin?: 'native' | 'worker' | 'unknown'; delivery?: RunDelivery }
 export interface WorkerHealth {
   version: 1;
   toolId: string;
   sourceId: string;
   botAppId: string;
   capabilities?: WorkerCapabilities;
+  manifest?: WorkerManifest;
   nativeReasoningEfforts?: boolean;
   zcodeRegistryResume?: boolean;
   zcodeSessionNames?: boolean;
@@ -22,7 +36,6 @@ export interface WorkerHealth {
   zcodeDesktopRemote?: boolean;
   zcodeDesktopRemoteConfigId?: string;
   kiloEditorSync?: boolean;
-  kiloDesktopSync?: boolean;
   kiloNativeInputOrigin?: boolean;
 }
 /** History is an export of native records, not the worker job journal. */
@@ -37,6 +50,14 @@ export interface WorkerSessionService {
   rename?(nativeId: string, name: string, cwd?: string): Promise<void>;
   archive?(nativeId: string): Promise<void>;
   fork?(nativeId: string): Promise<{ nativeId: string; name: string; cwd: string }>;
+  conversation?(nativeId: string): Promise<NativeConversationSnapshot>;
+  questions?(nativeId: string): Promise<WorkerQuestion[]>;
+  answer?(nativeId: string, questionId: string, answers: CodexInputAnswers): Promise<boolean>;
+  close?(): Promise<void>;
+  nativeNames?: boolean;
+  receiveInput?(prompt: import('../session/codex-user-input').CodexInputPrompt): void;
+  /** Synchronous observation of a native blocking prompt; never submits input. */
+  waitingForInput?(nativeId: string): boolean;
 }
 export type WorkerErrorCode = 'invalid-request' | 'unauthorized' | 'not-found' | 'unsupported-operation' | 'busy' | 'conflict' | 'unavailable' | 'internal-error';
 

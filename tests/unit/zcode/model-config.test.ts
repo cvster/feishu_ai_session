@@ -22,8 +22,9 @@ it('projects the selected local model without placing account secrets in model i
   await writeFile(join(dataDir, 'config.json'), 'invalid-secret-data');
   await expect(loadZcodeRuntimeModel({ dataDir })).rejects.toThrow('ZCode 模型配置无法读取');
 });
-it('keeps opaque native IDs and rejects unknown providers instead of falling back', () => {
+it('keeps opaque native IDs and generic metadata for additional workers', () => {
   expect(nativeSessionFields('zcode', 'sess_opaque')).toEqual({ sessionId: 'sess_opaque' });
   expect(capabilityForTool('zcode')).toMatchObject({ agentId: 'zcode', sessionKind: 'zcode-session' });
-  expect(() => toolDefinition('unknown' as never)).toThrow('未注册');
+  expect(toolDefinition('unknown')).toMatchObject({ label: 'unknown', backend: 'worker' });
+  expect(() => toolDefinition('../invalid')).toThrow('未注册');
 });

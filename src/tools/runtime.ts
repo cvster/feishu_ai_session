@@ -1,93 +1,17 @@
-import { DshAdapter } from '../agent/dsh/adapter';
-import { dshStorageDir } from '../agent/dsh/client';
-import { DshSessionProvider } from './dsh-sessions';
-import { KiloAdapter } from '../agent/kilo/adapter';
-import { kiloStorageDir } from '../agent/kilo/client';
-import { KiloSessionProvider } from './kilo-sessions';
-import { zcodeStorageDir } from '../agent/zcode/client';
-import { ZcodeAdapter } from '../agent/zcode/adapter';
-import { ZcodeSessionProvider } from './zcode-sessions';
-import { nativeSessionOperations } from './session-operations';
-import { DurableAgentAdapter, DurableClaudeAdapter } from '../worker/adapter';
-import { workerStateDirName } from './definitions';
-import { randomUUID } from 'node:crypto';
-import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
 import type { ProfileConfig, AgentKind } from '../config/profile-schema';
 import type { AppPaths } from '../config/app-paths';
 import type { AgentAdapter } from '../agent/types';
-import { ClaudeAdapter } from '../agent/claude/adapter';
-import { CodexAdapter } from '../agent/codex/adapter';
-import { listCodexThreadHistory } from '../session/codex-history';
 import { ToolRegistry } from './types';
-import { ClaudeSessionProvider } from './claude-sessions';
-import { WorkerClient } from '../worker/client';
-import { WorkerSessionClient } from '../worker/session-client';
+import { loadWorkerRegistry, workerTool } from '../worker/discovery';
 
-export function createToolRegistry(profile: ProfileConfig, paths: AppPaths, primary: AgentAdapter): ToolRegistry {
+/** The bridge learns tool identities exclusively from worker endpoints. */
+export async function createToolRegistry(profile: ProfileConfig, paths: AppPaths, _primary?: AgentAdapter): Promise<ToolRegistry> {
   const registry = new ToolRegistry();
-  const larkChannel = { profile: paths.profile, rootDir: paths.rootDir, configPath: paths.configFile,
-    larkCliConfigDir: paths.larkCliConfigDir, larkCliSourceConfigFile: paths.larkCliSourceConfigFile };
-  const codex = profile.codex ?? { binaryPath: process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex', inheritCodexHome: true };
-  const codexAgent = primary.id === 'codex' ? primary : new CodexAdapter({
-    binary: codex.binaryPath, profileStateDir: paths.profileDir, codexHome: codex.codexHome,
-    inheritCodexHome: codex.inheritCodexHome, ignoreUserConfig: codex.ignoreUserConfig,
-    ignoreRules: codex.ignoreRules, sandbox: profile.sandbox.defaultMode, larkChannel,
-  });
-  registry.register({ id: 'codex', label: 'Codex', sourceId: resolve(codex.codexHome ?? process.env.CODEX_HOME ?? (codex.inheritCodexHome !== false ? join(homedir(), '.codex') : join(paths.profileDir, 'codex-home'))),
-    agent: codexAgent, listSessions: async () => (await listCodexThreadHistory({ binary: codex.binaryPath,
-      limit: 10_000, profileStateDir: paths.profileDir, codexHome: codex.codexHome, inheritCodexHome: codex.inheritCodexHome, timeoutMs: 60_000,
-    })).map(row => ({ nativeId: row.threadId, name: row.name, cwd: row.cwd,
-      createdAtMs: row.createdAtMs, updatedAtMs: row.updatedAtMs })) });
-  const claudeHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
-  const claudeHistory = new ClaudeSessionProvider(claudeHome);
-  registry.register({ id: 'claude', label: 'Claude Code', sourceId: resolve(claudeHome),
-    reserveSessionId: randomUUID,
-    agent: new DurableClaudeAdapter(new WorkerClient(join(paths.profileDir, 'execution-worker'), resolve(claudeHome), profile.accounts.app.id),
-      primary.id === 'claude' ? primary : new ClaudeAdapter({ binary: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude', larkChannel })),
-    listSessions: () => claudeHistory.listSessions() });
-  const zcodeConfig = profile.zcode;
-  const zcodeHome = zcodeStorageDir(zcodeConfig);
-  const zcodeOptions = { binary: zcodeConfig?.binaryPath, args: zcodeConfig?.args, dataDir: zcodeConfig?.dataDir, modelConfigPath: zcodeConfig?.modelConfigPath, remoteControlFile: zcodeConfig?.remoteControlFile, larkChannel };
-  const zcodeWorker = new WorkerClient(join(paths.profileDir, workerStateDirName('zcode')), zcodeHome, profile.accounts.app.id, 'zcode');
-  const zcodeAgent = new DurableAgentAdapter(zcodeWorker, primary.id === 'zcode' ? primary : new ZcodeAdapter(zcodeOptions));
-  const zcodeSessions = new ZcodeSessionProvider(zcodeOptions, join(paths.profileDir, 'zcode-sessions'), async (id, name, cwd) => {
-    await zcodeAgent.prepareRun();
-    if (!(await zcodeWorker.health()).zcodeSessionNames) throw new Error('ZCode worker 尚未升级到原生会话命名版本');
-    await zcodeWorker.renameSession(id, name, cwd);
-  });
-  registry.register({ id: 'zcode', label: 'ZCode', sourceId: zcodeHome,
-    agent: zcodeAgent, sessions: zcodeSessions, listSessions: () => zcodeSessions.listSessions() });
-  const kiloOptions = { binary: profile.kilo?.binaryPath, args: profile.kilo?.args, dataHome: profile.kilo?.dataHome, editorSync: profile.kilo?.editorSync, preferredClient: profile.kilo?.preferredClient, larkChannel };
-  const kiloHome = kiloStorageDir(kiloOptions);
-  const kiloSessions = new KiloSessionProvider(kiloOptions, join(paths.profileDir, 'kilo-sessions'));
-  registry.register({ id: 'kilo', label: 'Kilo', sourceId: kiloHome,
-    agent: new DurableAgentAdapter(new WorkerClient(join(paths.profileDir, workerStateDirName('kilo')), kiloHome, profile.accounts.app.id, 'kilo'),
-      primary.id === 'kilo' ? primary : new KiloAdapter(kiloOptions)), sessions: kiloSessions, listSessions: () => kiloSessions.listSessions() });
-  const dshOptions = { binary: profile.dsh?.binaryPath, args: profile.dsh?.args, homeDir: profile.dsh?.homeDir, larkChannel };
-  const dshHome = dshStorageDir(dshOptions);
-  const dshSessions = new DshSessionProvider(dshOptions, join(paths.profileDir, 'dsh-sessions'));
-  registry.register({ id: 'dsh', label: 'DeepSeek Harness', sourceId: dshHome,
-    reserveSessionId: () => `session-${randomUUID()}`,
-    agent: new DurableAgentAdapter(new WorkerClient(join(paths.profileDir, workerStateDirName('dsh')), dshHome, profile.accounts.app.id, 'dsh'),
-      primary.id === 'dsh' ? primary : new DshAdapter(dshOptions)), sessions: dshSessions, listSessions: () => dshSessions.listSessions() });
-  for (const tool of registry.all()) {
-    tool.sessions ??= nativeSessionOperations(tool);
-    if (tool.agent instanceof DurableAgentAdapter) {
-      const agent = tool.agent;
-      const sessions = new WorkerSessionClient(tool.agent.client, tool.listSessions, tool.sessions,
-        join(paths.profileDir, 'worker-history', tool.id), () => agent.prepareRun());
-      tool.sessions = sessions;
-      tool.listSessions = () => sessions.listSessions();
-    }
-  }
+  for (const worker of await loadWorkerRegistry(paths.profileDir, profile.accounts.app.id)) registry.register(workerTool(worker));
   return registry;
 }
-
 export function toolProfile(profile: ProfileConfig, toolId: AgentKind): ProfileConfig {
-  return { ...profile, agentKind: toolId,
-    ...(toolId !== 'codex' ? { codex: undefined } : {}),
-    preferences: { ...profile.preferences,
-      model: toolId === profile.agentKind ? profile.preferences.model : undefined,
-      reasoningEffort: toolId === profile.agentKind ? profile.preferences.reasoningEffort : undefined } };
+  return { ...profile, agentKind: toolId, preferences: { ...profile.preferences,
+    model: toolId === profile.agentKind ? profile.preferences.model : undefined,
+    reasoningEffort: toolId === profile.agentKind ? profile.preferences.reasoningEffort : undefined } };
 }

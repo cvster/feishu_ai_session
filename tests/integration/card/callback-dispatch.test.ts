@@ -10,7 +10,6 @@ import type { Controls } from '../../../src/commands/index.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
-import { CodexSubmissionStore } from '../../../src/session/codex-submissions.js';
 import { FakeAgentAdapter, type FakeAgentRun } from '../../helpers/fake-agent.js';
 import { createFakeChannel, type FakeChannel } from '../../helpers/fake-channel.js';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
@@ -22,10 +21,8 @@ describe('signed card callback dispatch', () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
-  it.each(['stop', 'panel.stop'])('preserves unsent Codex intake after a %s card action', async cmd => {
+  it.each(['stop', 'panel.stop'])('preserves unsent worker intake after a %s card action', async cmd => {
     const h = await createHarness();
-    const store = new CodexSubmissionStore(`${h.tmp.profile}/submissions.json`); await store.load();
-    h.controls.codexSubmissions = store;
     h.pending.push('oc_group', { messageId: 'next', content: 'keep next' } as any);
     await h.dispatch({ cmd });
     expect(h.pending.cancel('oc_group').map(m => m.messageId)).toEqual(['next']);
@@ -40,10 +37,10 @@ describe('signed card callback dispatch', () => {
     expect(JSON.stringify(h.channel.sent)).toContain('未停止其他任务');
   });
 
-  it('routes Codex form answers to the live request without queueing or launching a run', async () => {
+  it('routes legacy form answers through the common worker handler to the live request without queueing or launching a run', async () => {
     const h = await createHarness();
     const handleAction = vi.fn(async () => {});
-    h.controls.codexUserInput = { handleAction } as unknown as NonNullable<Controls['codexUserInput']>;
+    h.controls.workerQuestions = { handleAction };
     await h.dispatch({ __codex_input: 'opaque-token' }, { q_0: '1' });
     expect(handleAction).toHaveBeenCalledWith('oc_group', 'om_card', 'opaque-token', { q_0: '1' });
     expect(h.pending.cancel('oc_group')).toHaveLength(0);
@@ -54,7 +51,7 @@ describe('signed card callback dispatch', () => {
     const h = await createHarness();
     h.controls.profileConfig.access.allowedChats = [];
     const handleAction = vi.fn(async () => {});
-    h.controls.codexUserInput = { handleAction } as unknown as NonNullable<Controls['codexUserInput']>;
+    h.controls.workerQuestions = { handleAction };
     await h.dispatch({ __codex_input: 'opaque-token' }, { q_0: '1' });
     expect(handleAction).not.toHaveBeenCalled();
     expect(h.pending.cancel('oc_group')).toHaveLength(0);

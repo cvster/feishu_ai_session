@@ -129,8 +129,8 @@ export class KiloAdapter implements AgentAdapter {
         const permission = kiloPermissions(opts.accessMode ?? opts.sandbox);
         if (stopping) { push({ type: 'done', terminationReason: 'interrupted' }); return; }
         if (!info) {
-          const metadata = await client.sessionCreationMetadata();
-          info = await client.request('POST', '/session', { title: opts.sessionName ?? '飞书会话', permission, ...(metadata ? { metadata } : {}) }, opts.cwd);
+
+          info = await client.request('POST', '/session', { title: opts.sessionName ?? '飞书会话', permission,  }, opts.cwd);
         }
         sessionId = kiloSessionId(info.id);
         if (opts.sessionId && sessionId !== opts.sessionId) throw new Error('Kilo 返回了不匹配的会话');

@@ -1,3 +1,4 @@
+import { ToolRegistry } from '../../../src/tools/types';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CardActionEvent, NormalizedMessage } from '@larksuite/channel';
@@ -95,7 +96,7 @@ describe('agent-aware resume commands', () => {
     const rendered = JSON.stringify(card);
     expect(rendered).toContain('current prompt');
     expect(rendered).toContain('target prompt');
-    expect(rendered).toContain('sess-tar');
+    expect(rendered).not.toContain('sess-target');
 
     const nonces = resumeArgsFromCard(card);
     expect(nonces).toHaveLength(2);
@@ -114,7 +115,7 @@ describe('agent-aware resume commands', () => {
     h.catalog.upsertActive({ ...h.identity, threadId: 'thread-current', now: 1000 });
 
     await expect(h.run('/resume')).resolves.toBe(true);
-    const nonce = resumeNonce(lastMarkdown(h.channel));
+    const nonce = resumeArgsFromCard(lastContent(h.channel))[0]!;
 
     await expect(h.run(`/resume use ${nonce}`)).resolves.toBe(true);
 
@@ -126,7 +127,7 @@ describe('agent-aware resume commands', () => {
     const h = await createHarness('codex');
     h.catalog.upsertActive({ ...h.identity, threadId: 'thread-current', now: 1000 });
     await expect(h.run('/resume')).resolves.toBe(true);
-    const nonce = resumeNonce(lastMarkdown(h.channel));
+    const nonce = resumeArgsFromCard(lastContent(h.channel))[0]!;
     const originalSend = h.channel.send.bind(h.channel);
     let attempts = 0;
     h.channel.send = async (...args) => {
@@ -151,9 +152,8 @@ describe('agent-aware resume commands', () => {
 
     await expect(h.run('/resume')).resolves.toBe(true);
 
-    expect(lastMarkdown(h.channel)).toContain('当前 Codex thread 可恢复');
-    expect(lastMarkdown(h.channel)).toMatch(/\/resume use [a-f0-9-]+/);
-    expect(lastMarkdown(h.channel)).not.toContain('thread-current');
+    expect(JSON.stringify(lastContent(h.channel))).toContain('已是当前会话');
+    expect(resumeArgsFromCard(lastContent(h.channel))).toHaveLength(1);
   });
 
   it('does not accept raw Codex thread ids as resume candidates', async () => {
@@ -163,7 +163,7 @@ describe('agent-aware resume commands', () => {
     await expect(h.run('/resume use thread-current')).resolves.toBe(true);
 
     expect(h.sessions.getRaw('chat-1')).toBeUndefined();
-    expect(lastMarkdown(h.channel)).toContain('请先用 `/resume`');
+    expect(JSON.stringify(lastContent(h.channel))).toContain('当前');
   });
 
   it('does not fall back to legacy SessionStore when Codex catalog identity is missing', async () => {
@@ -172,7 +172,7 @@ describe('agent-aware resume commands', () => {
     await expect(h.run('/resume use thread-current', { withCatalogIdentity: false })).resolves.toBe(true);
 
     expect(h.sessions.getRaw('chat-1')).toBeUndefined();
-    expect(lastMarkdown(h.channel)).toContain('当前上下文没有可恢复的 Codex thread');
+    expect(lastMarkdown(h.channel)).toContain('不可恢复这个会话');
   });
 
   it('does not list Claude local history for Codex when no current thread is recorded', async () => {
@@ -308,7 +308,15 @@ async function createHarness(
     configPath: join(tmp.profile, 'config.json'),
     cfg: profileConfig,
     processId: 'proc-1',
+    toolRegistry: new ToolRegistry(),
   } satisfies Controls;
+  controls.toolRegistry.register({ id: agentKind, sourceId: 'source', label: agentKind, agent, listSessions: async () => {
+    const rows = agentKind === 'codex' ? codexHistory.map(row => ({ nativeId: row.threadId, name: row.preview, cwd: tmp.workspace, createdAtMs: row.createdAtMs, updatedAtMs: row.updatedAtMs })) : claudeHistory.map(row => ({ nativeId: row.sessionId, name: row.preview, cwd: tmp.workspace, createdAtMs: row.mtime, updatedAtMs: row.mtime }));
+    const current = catalog.activeFor(identity);
+    const nativeId = current?.threadId;
+    if (nativeId && !rows.some(row => row.nativeId === nativeId)) rows.push({ nativeId, name: nativeId, cwd: tmp.workspace, createdAtMs: 0, updatedAtMs: current.updatedAt });
+    return rows;
+  } });
   if (options.bindWorkspace !== false) {
     workspaces.setCwd('chat-1', tmp.workspace);
   }
@@ -412,8 +420,6 @@ async function commandIdentity(
     capability,
     profileConfig,
     now: Date.now(),
-    codexHome: profileConfig.codex?.codexHome,
-    inheritCodexHome: profileConfig.codex?.inheritCodexHome,
   });
   if (!policy.ok) throw new Error(policy.rejectReason.userVisible);
   return {

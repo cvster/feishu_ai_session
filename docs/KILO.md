@@ -1,98 +1,71 @@
 # Kilo 接入
 
-同一个飞书机器人可同时使用 Codex、Claude Code、ZCode 和 Kilo。Kilo 使用独立 worker，复用个人工作群、AA 自动建群、共享群、私聊群、停止/复制会话按钮和 A2A 接口，不需要新增飞书权限。
+Kilo 支持 VS Code 插件和独立 CLI，通过统一 worker 接入飞书。Kilo App/Desktop
+已移除：不会发现 App 后端，也不会列出或续聊带 `kilo-desktop` 标记的旧 App 会话；
+原生历史保留。可以只部署 Kilo，无需安装 Codex 或其他工具。
 
 ## 本机准备
 
-已验证 Kilo **7.8.8 / 7.8.12** 的原生 HTTP/SSE 协议，并分别通过 VS Code 7.8.12 和桌面 App 0.1.12（内置 CLI 7.8.8）完成真实问答及界面事件流验证。桥接优先使用 profile 的 `kilo.binaryPath`，其次是 `LARK_CHANNEL_KILO_BIN`；未指定时在常见 VS Code、VS Code Server 和 Insiders 扩展目录中查找 `kilocode.kilo-code-*` 的 `bin/kilo`，最后使用 PATH 中的 `kilo`。无需为已安装的 VS Code 扩展重复安装 CLI。
-
-默认沿用 Kilo 自己的配置、认证和原生会话库。供应商凭据不会复制进桥接配置、提示词或飞书卡片。若显式配置运行时，将下面的 `kilo` 字段合入现有 profile，保留其他设置：
+先安装并登录官方 VS Code 扩展或 CLI。执行设置位于
+`profiles/<profile>/workers/kilo/config.json`：
 
 ```json
 {
-  "kilo": {
-    "binaryPath": "/absolute/path/to/kilo",
-    "preferredClient": "vscode"
-  }
+  "version": 1,
+  "toolId": "kilo",
+  "options": { "binaryPath": "kilo", "editorSync": true }
 }
 ```
 
-可选 `args` 用于包装启动命令。可选 `dataHome` 对应原生 `XDG_DATA_HOME`，数据源目录为 `<dataHome>/kilo`，默认是 `$XDG_DATA_HOME/kilo` 或 `~/.local/share/kilo`。桥接和 worker 必须使用同一数据源。不要在已有群上直接切换数据源。
+可配置 `dataHome`、`args` 等执行选项。来源目录默认是 `$XDG_DATA_HOME/kilo` 或
+`~/.local/share/kilo`。不要直接更换已有群的数据源。旧根 `profiles.<profile>.kilo`
+设置首次导入此文件，旧 `preferredClient` 丢弃，之后以 worker 配置为准。
 
-Linux 默认启用 `editorSync`：连接同一 OS 用户、同一数据库的原生界面后端。已有原生会话带有 `kilo-desktop` 工作区标记时连接桌面 App；其他已有会话优先连接项目目录最匹配的 VS Code 后端。已安装扩展升级到新版本时，仍能识别尚未重载的旧版窗口。认证从该进程的本机环境读取，仅在内存中使用，不写配置或日志。桌面 App 后端从自己的运行目录启动，桥接仍以会话的实际项目目录提交请求。
-
-飞书产生的消息和回答进入所选界面后端的 `/global/event`，已打开的同一原生会话可以实时显示。桥接不会强制切换当前标签。VS Code 和桌面 App 即使共用历史库，也有各自独立的事件流：桌面会话发给桌面后端，编辑器会话发给编辑器后端，不同时向两个后端重复提交。另一个界面打开同一会话时可能需要重新打开才能读取新历史；编辑器或桌面 App 自行发起的新提问和回答会在约 2 秒内同步到该原生会话绑定的个人工作群，回答沿用卡片更新、折叠和停止/刷新/复制会话控件。
-
-从飞书新建会话（包括在新工具中创建会话）时，`kilo.preferredClient` 指定客户端优先级：`vscode`（默认，VS Code 插件）或 `desktop`（Kilo App）。仅有多个可用后端时按客户端类型优先选择；只有一个时直接使用，不要求所配置的客户端必须运行。VS Code 内仍按项目目录最精确匹配，同等候选不自动猜测。该设置不迁移已有会话或原生 fork 的来源，也不改变 CLI 可执行文件的选择。
-
-选中桌面 App 时，从该项目已有原生会话推断唯一的桌面工作区，并保留工作区标记。请先在桌面 App 为项目创建一个会话；多个桌面工作区对应同一目录时，请关联具体已有会话。复制桌面会话保留其工作区标记，改名和归档也按实际项目目录发布事件。
-
-没有匹配的界面后端时，仍启动桥接自己的后端；不支持 `/proc` 的系统、自定义启动 `args`、其他数据库不会自动连接。多个同等匹配的界面进程会拒绝提交，请关闭重复窗口；已选后端健康检查失败或连接断开后不改用其他后端重发。设置 `kilo.editorSync: false` 可始终使用独立后端。
-
-安装脚本的 CLI 自动安装仍仅支持 Codex/Claude；Kilo 请先通过官方扩展或官方 CLI 完成准备。
+Linux 默认启用 `editorSync`，连接同一 OS 用户、同一数据库且项目目录最匹配的
+VS Code 后端。多个同等候选会拒绝提交，已选后端断开后不会换后端重发。认证只在
+内存使用；不会写入配置或日志。没有匹配窗口、不支持 `/proc`、使用自定义启动参数
+时使用独立 CLI 后端。`editorSync: false` 始终使用独立后端。
 
 ## 启动和使用
 
-从源码构建后，先检查并启动 Kilo worker，再启动桥接：
-
 ```bash
-node bin/lark-channel-bridge.mjs doctor --profile my-bot --agents kilo
-node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool kilo
-node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool kilo
-node bin/lark-channel-bridge.mjs run --profile my-bot
+lark-channel-bridge worker start --profile my-bot --tool kilo
+lark-channel-bridge worker status --profile my-bot --tool kilo
+lark-channel-bridge run --profile my-bot
 ```
 
-Linux 服务名为 `lark-channel-worker.kilo.my-bot.service`。其他系统可使用 `worker run --profile my-bot --tool kilo` 并自行托管进程。新增 Kilo 只需启动其 worker 和更新桥接；不要为此重启已有 Claude/ZCode worker 或 Codex writer。修改 Kilo 执行适配器后，需要单独升级 Kilo worker。
+Linux 服务名为 `lark-channel-worker.kilo.my-bot.service`。其他系统使用
+`worker run --profile my-bot --tool kilo` 自行托管。桥接自动发现该 worker；安装其他
+工具时无需修改桥接的工具配置。升级执行适配器需单独更新 Kilo worker。
 
-编辑器实时同步修复也需要升级 Kilo worker。新 worker 健康接口提供 `kiloEditorSync`、`kiloDesktopSync` 和 `kiloNativeInputOrigin` 标记；桥接不会向缺少任一标记的旧 worker 提交新的 Kilo 请求，避免部署后仍使用旧的独立后端路径。
+私聊机器人「新建会话」选择 Kilo，填写工作群名及项目目录。正式标题以 AA 开头的
+原生会话可自动建群。个人群与原生会话一对一绑定；会话共享及 AI助手入口继续续聊
+所选原会话，各群只接收自己的请求回复。工具/来源不会自动切换。
 
-私聊机器人选择「新建会话」→ **Kilo** → 填写工作群名和项目目录，即可在群中继续。已有正式标题以 `AA` 开头的原生 Kilo 会话可自动建群。原生 ID 为 `ses...`，工作群绑定后不切换工具。群头像使用 Kilo 自身图标。
+## 同步、模型和执行
 
-将机器人拉入共享群后，所有者可选择任意未归档的原始 Kilo 会话，按 AA、其他个人工作群、其余会话排序。开放群、私聊群和 A2A 直接续聊所选原会话，不创建 FF 或读取来源快照。所有者本人权限、同事限制和受限操作确认继续使用现有会话共享规则。开放群、私聊群和 A2A 不另建权限机制。
+- VS Code 中的输入和回答通过 worker 会话快照同步到个人群；飞书任务由 worker
+  收据回复，来源标记防止重复转发。共享群不广播原生界面消息。
+- 首次绑定建立历史基线；桥接重启继续更新原卡片。状态在
+  `kilo-native-turn-sync.json`，旧 `kilo-turn-sync.json` 自动导入。
+- 群名与原生标题双向同步，初次及同时修改以群名为准。仅处理唯一绑定的活跃个人群，
+  使用 worker list/rename 接口，不调用模型。状态在 `kilo-name-sync.json`。
+- `/config` 动态读取供应商、完整模型 ID 和该模型的原生 variants；已选模型失效时
+  提示重新选择，不切换供应商。普通输入原样提交；附件以本机文件路径提供。
+- 流式文本、思考、工具结果按原生会话及本次用户消息过滤。停止针对本次任务或当前
+  镜像轮次，旧卡片不会停止新轮次。复制会话调用原生 fork，归档保留历史。
+- 原生权限和交互弹窗未转接飞书，不自动同意；受限操作的所有者确认卡继续沿用
+  会话共享业务逻辑。权限约束不是操作系统沙箱。
+- 共享 VS Code 后端的工具、MCP 和 CLI 环境由 VS Code 管理；独立 worker 环境需要
+  `editorSync: false`。连接关闭不终止编辑器。原生界面与飞书并发写同一会话仍需避免。
+- 桥接重启脱离观察，worker 继续任务；worker/主机重启不保证保活，未知收据不重跑。
 
-## 从 Kilo 界面同步到群
+[统一接口](WORKER_API.md) · [迁移步骤](WORKER_MIGRATION.md) ·
+[官方扩展架构](https://kilo.ai/docs/contributing/architecture/vscode-extension) ·
+[CLI 架构](https://kilo.ai/docs/contributing/architecture/cli-runtime)
 
-- 原生会话绑定个人工作群后，桥接每 2 秒读取该会话的原生消息快照，将界面发起的新提问和回答同步到对应群；不会向模型重复提交问题。VS Code 和桌面会话分别按其原生会话 ID 路由。
-- 首次开启、首次绑定或重新绑定会话时，当前历史作为基线，不补发旧消息。重启桥接后保留去重账本并继续更新原卡片。
-- 飞书发起的输入在原生文本片段 metadata 中带显式来源标记，回答仍由 worker 回复，不再次由界面同步流程转发。标记不依赖提示词，也不改变用户消息正文。
-- 仅同步活跃个人工作群。已归档群、共享群、旧 FF 工作群和 AI助手私聊群均不接收桌面消息的主动广播；这些入口仍按各自请求回复，避免原会话内容串群。
-- 「停止」仅针对该群当前已镜像的原生外部轮次；若会话已开始另一个轮次，则不会误停新任务。桥接重启或退出只断开读取，不停止 Kilo 界面任务。
-- 状态保存在 profile 的 `kilo-turn-sync.json`；不要删除此文件来排障，以免丢失已发送卡片的去重和更新序号。未识别到旧版 worker 的来源标记能力时暂停反向同步，先单独升级 Kilo worker。
-
-## 群名与会话名同步
-
-- Kilo 的个人工作群名与原生会话标题双向同步，支持 VS Code 插件和桌面 App。群名变化约 10 秒内写入原生标题；原生标题变化随会话轮询同步回群。
-- 首次启用以当前飞书群名为准，因此启用前已手动修改的群名也会写入 Kilo。两边同时改名时同样以群名为准；重启会保留同步基线，避免标题来回覆盖。
-- 仅处理当前应用、同一数据源下唯一绑定的活跃个人工作群。共享群、旧 FF 工作群、归档会话及多群争用同一会话标题的情况跳过自动改名。
-- 改名通过原生会话元数据接口执行，不调用模型，不发送聊天消息，不改变会话 ID、项目目录或已有消息绑定。原生界面后端运行时，标题更新事件也发送到对应界面后端。
-- 状态保存在 profile 的 `kilo-name-sync.json`。本功能只需更新桥接服务，无需为改名同步单独重启 Kilo worker、VS Code 或桌面 App；飞书沿用现有群读取和群更新权限。
-
-## 模型和推理档位
-
-`/config` 的「刷新模型」直接读取 Kilo 当前可用供应商及其模型。值保留完整的 `供应商ID/模型ID`，模型名内的斜杠不会被截断。推理档位来自该模型自己的原生 `variants`，不从其他供应商或同名模型推断；没有元数据时只提供「跟随工具默认」。
-
-新增、删除供应商、模型和档位后，刷新即可看到变化。默认模型读取原生配置和最近选择；已有会话优先沿用其原生供应商、模型和档位。已选模型或档位失效时提示重新选择，不自动换供应商。桥接不修改 Kilo 的全局默认设置。
-
-## 执行和会话边界
-
-- 只连接同用户匹配的界面进程拥有的 `127.0.0.1` 监听端口，不通过网络对外开放 Kilo 管理接口。桥接自己的后端使用随机认证密码；共享的界面后端仅连接，不接管生命周期。关闭连接只取消本客户端的事件订阅，绝不会终止编辑器或桌面 App 进程。
-- 共享后端的工具、MCP 和 CLI 进程环境由 VS Code 或桌面 App 管理，不会重新注入桥接独立子进程的环境变量（包括飞书 CLI 配置目录）。需要保持独立 worker 的专用 CLI 环境时，设置 `editorSync: false`；该模式不提供插件实时刷新。两种模式均按本次请求设置 Kilo 原生会话权限，会话共享提示词与所有者确认流程保持既有行为。
-- 普通消息原样传递；引用和附件作为必要上下文。附件当前仅以本机文件路径提供，不宣称支持原生多模态图片输入。开放群每次使用简短 JSON 权限与投递提示。
-- 支持流式文本、思考和工具结果。事件按原生会话和本次用户消息 ID 过滤，重复事件不重复追加。请求结果不明或连接断开时不自动重发。
-- 「停止」只中断本次 Kilo 会话；「复制会话」使用原生 fork，复制历史并创建独立工作群，不回退项目文件。来源历史读取不执行任务。改名和归档调用原生元数据接口，归档保留历史，不删除会话。
-- 原生权限规则按本次 profile 访问模式设置：只读禁止编辑和命令执行；工作区模式允许读取及工作区编辑，命令等操作保留原生确认；完全访问沿用原生允许模式。这些不是操作系统沙箱。会话共享的业务限制仍为提示词软约束。
-- 原生权限弹窗和交互问答尚未转接到飞书；遇到后停止并明确提示，不自动同意。会话共享的所有者确认卡与这类原生交互是不同机制。
-- worker 持有执行，桥接重启只脱离观察；重连从持久化收据更新结果。worker 或主机重启不保证任务继续，状态不明的请求不自动重跑。
-- 默认共享原生历史不代表支持界面与飞书同时写同一会话。请先结束 VS Code 或桌面 App 中该会话的运行，再从飞书续聊；桥接内部锁不能阻止界面并发写入。
-
-## 验证
-
-常规测试包含协议模拟、动态模型、来源读取、停止、异常去重、权限、AA 工作群、会话共享、独立 worker 和 A2A。真实问答验证为可选测试，会创建并最终归档临时原生会话，使用 Kilo 已有账号：
+可选真实验证会创建并归档临时会话，使用本机已有账号：
 
 ```bash
 KILO_LIVE_SMOKE=1 pnpm exec vitest run tests/integration/kilo/live.test.ts
-# 原生未设置全局默认时，也可显式选择其实际模型：
-KILO_LIVE_SMOKE=1 KILO_LIVE_MODEL='provider/model' pnpm exec vitest run tests/integration/kilo/live.test.ts
 ```
-
-接口以本机运行时生成的 OpenAPI 为准。会话跨项目发现使用原生全局会话接口；上游协议变化时应重新验证。参考：[官方 VS Code 架构](https://kilo.ai/docs/contributing/architecture/vscode-extension)、[CLI 运行时架构](https://kilo.ai/docs/contributing/architecture/cli-runtime)。

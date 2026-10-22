@@ -306,7 +306,7 @@ describe('Claude slash command visible behavior', () => {
 
     await expect(h.run('/reconnect')).resolves.toBe(true);
 
-    expect(lastMarkdown(h.channel)).toBe('⏳ 正在停止当前运行并重连…');
+    expect(lastMarkdown(h.channel)).toBe('⏳ 正在重连，已提交的任务继续运行…');
     expect(h.controls.restart).toHaveBeenCalledTimes(1);
   });
 });

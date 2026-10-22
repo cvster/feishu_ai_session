@@ -1,3 +1,4 @@
+import { loadWorkerConfig } from '../../../src/worker/config';
 import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -237,7 +238,7 @@ describe('profile runtime resolver', () => {
     expect(saved.profiles.claude?.workspaces?.default).toBe(managed);
   });
 
-  it('reports detected local agents when first-run agent selection is ambiguous', async () => {
+  it('requires app credentials rather than installed tools for noninteractive bootstrap', async () => {
     const root = await tmpRoot();
     const bin = join(root, 'bin');
     const claude = await writeExecutable(bin, 'claude');
@@ -264,12 +265,9 @@ describe('profile runtime resolver', () => {
 
       expect(error).toBeDefined();
       const message = error?.message ?? '';
-      expect(message).toContain('检测到多个本地 agent');
-      expect(message).toContain('claude');
-      expect(message).toContain(claude);
-      expect(message).toContain('codex');
-      expect(message).toContain(codex);
-      expect(message).toContain('--agent <claude|codex|zcode|kilo|dsh>');
+      expect(message).toContain('当前没有配置');
+      expect(message).toContain('--app-id');
+      expect(message).not.toContain('检测到多个');
     } finally {
       process.env.PATH = oldPath;
       if (oldClaude === undefined) {
@@ -302,16 +300,13 @@ describe('profile runtime resolver', () => {
         resolveProfileRuntime({
           config: join(root, 'config.json'),
           allowBootstrap: true,
-          selectAgent: (detected) => {
-            expect(detected.map((agent) => agent.kind)).toEqual(['claude', 'codex']);
-            return 'codex';
-          },
+          agent: 'codex',
         }),
       );
 
       expect(runtime.profile).toBe('codex');
       expect(runtime.profileConfig.agentKind).toBe('codex');
-      expect(runtime.profileConfig.codex?.binaryPath).toBe(codex);
+      expect(runtime.profileConfig.codex).toBeUndefined();
     } finally {
       process.env.PATH = oldPath;
       if (oldClaude === undefined) {
@@ -473,9 +468,9 @@ describe('profile runtime resolver', () => {
 
       expect(runtime.profile).toBe('codex');
       expect(runtime.profileConfig.agentKind).toBe('codex');
-      expect(runtime.profileConfig.codex?.binaryPath).toBe(codex);
+      expect(runtime.profileConfig.codex).toBeUndefined();
       expect(saved.profiles.codex?.agentKind).toBe('codex');
-      expect(saved.profiles.codex?.codex?.binaryPath).toBe(codex);
+      expect((await loadWorkerConfig(runtime.appPaths.profileDir, 'codex', runtime.profileConfig)).options.binaryPath).toBe('codex');
     } finally {
       process.env.PATH = oldPath;
       if (oldHome === undefined) {
@@ -513,17 +508,8 @@ describe('profile runtime resolver', () => {
       });
 
       expect(runtime.profileConfig.agentKind).toBe('codex');
-      expect(runtime.profileConfig.codex).toMatchObject({
-        binaryPath: codex,
-      });
-      expect(runtime.profileConfig.codex?.realpath).toBeUndefined();
-      expect(runtime.profileConfig.codex?.version).toBeUndefined();
-      expect(runtime.profileConfig.codex?.sha256).toBeUndefined();
-      await expect(readFile(join(root, 'profiles', 'codex', 'sessions.json'), 'utf8')).resolves
-        .toContain('thread-1');
-      await expect(readFile(join(root, 'sessions.json'), 'utf8')).rejects.toMatchObject({
-        code: 'ENOENT',
-      });
+      expect(runtime.profileConfig.codex).toBeUndefined();
+      expect((await loadWorkerConfig(runtime.appPaths.profileDir, 'codex', runtime.profileConfig)).options.binaryPath).toBe('codex');
     } finally {
       process.env.PATH = oldPath;
     }
@@ -576,7 +562,7 @@ describe('profile runtime resolver', () => {
     expect(runtime.appPaths.profileDir).toBe(join(root, 'profiles', 'codex-dev'));
   });
 
-  it('canonicalizes legacy Codex sandbox while fixing old Codex runtime defaults', async () => {
+  it('canonicalizes legacy sandbox without changing native worker isolation defaults', async () => {
     const root = await tmpRoot();
     const legacyCodex = createDefaultProfileConfig({
       agentKind: 'codex',
@@ -614,16 +600,16 @@ describe('profile runtime resolver', () => {
       defaultMode: 'read-only',
       maxMode: 'read-only',
     });
-    expect(runtime.profileConfig.codex?.inheritCodexHome).toBe(true);
-    expect(runtime.profileConfig.codex?.ignoreUserConfig).toBe(false);
+    expect((await loadWorkerConfig(runtime.appPaths.profileDir, 'codex', runtime.profileConfig)).options.inheritCodexHome).toBe(false);
+    expect((await loadWorkerConfig(runtime.appPaths.profileDir, 'codex', runtime.profileConfig)).options.ignoreUserConfig).toBe(false);
     expect(saved.profiles['codex-dev']?.permissions).toEqual({
       defaultAccess: 'read-only',
       maxAccess: 'read-only',
     });
     expect(saved.profiles['codex-dev']).not.toHaveProperty('sandbox');
     expect(saved.profiles['codex-dev']).not.toHaveProperty('permissionSource');
-    expect(saved.profiles['codex-dev']?.codex?.inheritCodexHome).toBe(true);
-    expect(saved.profiles['codex-dev']?.codex?.ignoreUserConfig).toBe(false);
+    expect(saved.profiles['codex-dev']?.codex).toBeUndefined();
+    expect(runtime.profileConfig.codex).toBeUndefined();
   });
 
   it('upgrades legacy Claude workspace sandbox default to full access', async () => {
@@ -913,10 +899,10 @@ describe('profile runtime resolver', () => {
       defaultMode: 'danger-full-access',
       maxMode: 'danger-full-access',
     });
-    expect(runtime.profileConfig.codex?.inheritCodexHome).toBe(true);
-    expect(runtime.profileConfig.codex?.ignoreUserConfig).toBe(false);
-    expect(saved.profiles['codex-dev']?.codex?.inheritCodexHome).toBe(true);
-    expect(saved.profiles['codex-dev']?.codex?.ignoreUserConfig).toBe(false);
+    expect((await loadWorkerConfig(runtime.appPaths.profileDir, 'codex', runtime.profileConfig)).options.inheritCodexHome).toBe(false);
+    expect((await loadWorkerConfig(runtime.appPaths.profileDir, 'codex', runtime.profileConfig)).options.ignoreUserConfig).toBe(true);
+    expect(saved.profiles['codex-dev']?.codex).toBeUndefined();
+    expect(runtime.profileConfig.codex).toBeUndefined();
   });
 
   it('keeps explicit canonical Codex home and user-config isolation settings', async () => {
@@ -943,10 +929,10 @@ describe('profile runtime resolver', () => {
       profiles: Record<string, { codex?: { inheritCodexHome?: boolean; ignoreUserConfig?: boolean } }>;
     };
 
-    expect(runtime.profileConfig.codex?.inheritCodexHome).toBe(false);
-    expect(runtime.profileConfig.codex?.ignoreUserConfig).toBe(true);
-    expect(saved.profiles['codex-dev']?.codex?.inheritCodexHome).toBe(false);
-    expect(saved.profiles['codex-dev']?.codex?.ignoreUserConfig).toBe(true);
+    expect((await loadWorkerConfig(runtime.appPaths.profileDir, 'codex', runtime.profileConfig)).options.inheritCodexHome).toBe(false);
+    expect((await loadWorkerConfig(runtime.appPaths.profileDir, 'codex', runtime.profileConfig)).options.ignoreUserConfig).toBe(true);
+    expect(saved.profiles['codex-dev']?.codex).toBeUndefined();
+    expect(runtime.profileConfig.codex).toBeUndefined();
   });
 
   it('creates a managed default workspace for profiles without a default', async () => {
@@ -1093,7 +1079,7 @@ describe('profile runtime resolver', () => {
     const runtime = await resolveProfileRuntime({ config: join(root, 'config.json') });
 
     expect(runtime.profileConfig.workspaces.default).toBe('/repo/project');
-    expect(runtime.profileConfig.codex).not.toHaveProperty('flags');
+    expect((await loadWorkerConfig(runtime.appPaths.profileDir, 'codex', runtime.profileConfig)).options).not.toHaveProperty('flags');
   });
 
   it('materializes env-backed secrets into encrypted profile storage for service mode', async () => {

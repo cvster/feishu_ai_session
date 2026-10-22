@@ -92,7 +92,7 @@ export interface ProfileConfig {
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
   dsh?: { binaryPath: string; args?: string[]; homeDir?: string };
-  kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean; preferredClient?: 'vscode' | 'desktop' };
+  kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean };
   zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string; remoteControlFile?: string };
   attachments: AttachmentConfig;
   comments: CommentConfig;
@@ -121,7 +121,7 @@ export interface CreateDefaultProfileConfigInput {
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
   dsh?: { binaryPath: string; args?: string[]; homeDir?: string };
-  kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean; preferredClient?: 'vscode' | 'desktop' };
+  kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean };
   zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string; remoteControlFile?: string };
   secrets?: SecretsConfig;
 }
@@ -172,14 +172,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     throw new Error('agentKind must be a registered tool (claude, codex, zcode, kilo, dsh)');
   }
   const accounts = normalizeAccounts(raw.accounts);
-  if (raw.agentKind === 'codex' && !raw.codex) {
-    throw new Error('codex profile requires codex configuration');
-  }
-
   const preferences = normalizePreferences(raw.preferences);
-  if (raw.agentKind === 'codex') {
-    if (!preferences.model || preferences.model === '5.6 sol') preferences.model = 'gpt-5.6-sol';
-  }
   const access = normalizeAccess(
     raw.access ?? raw.preferences?.access,
     raw.preferences?.requireMentionInGroup,
@@ -377,7 +370,7 @@ function normalizeKilo(input: { binaryPath?: unknown; args?: unknown; dataHome?:
       (input.preferredClient !== undefined && input.preferredClient !== 'vscode' && input.preferredClient !== 'desktop')) throw new Error('Invalid kilo configuration');
   return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.dataHome ? { dataHome: input.dataHome as string } : {}),
     ...(input.editorSync !== undefined ? { editorSync: input.editorSync as boolean } : {}),
-    ...(input.preferredClient !== undefined ? { preferredClient: input.preferredClient as 'vscode' | 'desktop' } : {}) };
+ };
 }
 
 function normalizeDsh(input: { binaryPath?: unknown; args?: unknown; homeDir?: unknown }): NonNullable<ProfileConfig['dsh']> {

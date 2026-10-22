@@ -40,8 +40,8 @@ ZCode 能力读取使用临时目录和独立的短生命周期 Agent CLI，仅�
 
 按以下顺序解析，每次读取当前文件，不使用一次性复制的供应商名单：
 
-1. profile 的 `zcode.modelConfigPath`（绝对文件路径或桌面配置目录）；或 Agent CLI 参数 `--settings` 指定的配置文件。
-2. 指定 `zcode.dataDir` / `ZCODE_STORAGE_DIR` 时，使用该目录下的 `config.json`，保持独立 CLI 数据源隔离。
+1. `workers/zcode/config.json` 的 `options.modelConfigPath`（绝对文件路径或桌面配置目录）；或 Agent CLI 参数 `--settings` 指定的配置文件。
+2. 指定 worker 的 `options.dataDir` / `ZCODE_STORAGE_DIR` 时，使用该目录下的 `config.json`，保持独立 CLI 数据源隔离。
 3. 默认桌面模式读取 `~/.zcode/v2`：兼容 `provider_config.json` 的供应商规则和 `config.json` 的供应商字典。两者并存时使用最近修改的一份，适应桌面升级/降级留下旧文件的情况。可显式指定正在使用的配置文件固定来源，也可指定桌面目录自动选择。
 4. 无桌面配置时使用 `~/.zcode/cli/config.json`。
 

@@ -5,7 +5,7 @@ import { initialState, reduce } from '../card/run-state';
 import type { Controls } from '../commands';
 import type { AuxiliaryApproval } from '../bot/auxiliary-approvals';
 import { prepareRunFlow, recordRunSessionEvent, startRunFlow } from '../bot/run-flow';
-import { controlsForTool } from '../tools/context';
+import { isWorkerScopeArchived, controlsForTool } from '../tools/context';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
@@ -33,11 +33,11 @@ export function createA2ARunner(deps: { controls: Controls; sessions: SessionSto
       if (approval && !grant) throw new Error('本次确认已失效');
       const prompt = await auxiliary.wrapPrompt(task.scope, text, [task.actorId], grant ? { id: grant.id, action: grant.action, ownerId: grant.ownerId } : undefined);
       const flowInput: Parameters<typeof startRunFlow>[0] = {
-        scopeId: task.scope, scope: { source: 'a2a', chatId: task.scope, actorId: task.actorId }, prompt, attachments: [],
+        scopeId: task.scope, ...(binding.nativeId ? { nativeBinding: { nativeId: binding.nativeId, sourceId: binding.sourceId } } : {}), scope: { source: 'a2a', chatId: task.scope, actorId: task.actorId }, prompt, attachments: [],
         access: { ok: true, reason: 'allowed-chat' }, capability, profileConfig: controls.profileConfig,
         sessions, sessionCatalog, workspaces, executor: root.executorForTool!(binding.toolId),
         checkSessionArchived: async () => !await context.valid() || !auxiliary.isActive(task.scope) ||
-          !!(binding.toolId === 'codex' && binding.nativeId && await root.codexReplySync?.isThreadArchived?.(binding.nativeId)),
+          await isWorkerScopeArchived(root, task.scope),
         now: Date.now(), requestKey: JSON.stringify(['a2a', root.profile, task.id, approval?.id ?? 'initial']),
         observability: { profile: root.profile, agent: binding.toolId, source: 'a2a', stage: 'submit' },
       };

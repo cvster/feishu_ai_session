@@ -44,4 +44,8 @@ export class ToolRegistry {
     return tool;
   }
   all(): AgentTool[] { return [...this.tools.values()]; }
+  find(id: AgentKind): AgentTool | undefined { return this.tools.get(id); }
+  replace(tool: AgentTool): void { this.tools.set(tool.id, tool); }
+  remove(id: AgentKind): void { this.tools.delete(id); }
+  has(id: AgentKind): boolean { return this.tools.has(id); }
 }

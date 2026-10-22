@@ -38,7 +38,7 @@ describe('Codex input cards', () => {
   });
   it('does not collect secret answers in a group', () => {
     const secret = { ...request, questions: request.questions.map((q) => ({ ...q, isSecret: true })) };
-    expect(JSON.stringify(codexInputCard(secret, 'token', 'waiting'))).toContain('请在 Codex 桌面回答');
+    expect(JSON.stringify(codexInputCard(secret, 'token', 'waiting'))).toContain('请在工具界面回答');
     expect(JSON.stringify(codexInputCard(secret, 'token', 'waiting'))).not.toContain('__codex_input');
     expect(() => codexAnswersFromForm(secret, {})).toThrow('敏感');
   });

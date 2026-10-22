@@ -79,6 +79,8 @@ it('defines an independent systemd unit with no bridge lifetime dependency', () 
   expect(unit).toContain('worker run --profile "p"');
   expect(unit).not.toMatch(/PartOf=|BindsTo=|bot\.p/);
   expect(unit).toContain('KillMode=control-group'); expect(unit).toContain('Restart=on-failure');
+  const explicit = buildWorkerUnit({ node: '/node', entry: '/bridge/entry.mjs', profile: 'codex-default', config: '/state/config.json', envPath: '/bin', toolId: 'claude' });
+  expect(explicit).toContain('--tool claude');
 });
 
 it('keeps ZCode service selection and custom storage independent of Claude', () => {
@@ -90,26 +92,14 @@ it('keeps ZCode service selection and custom storage independent of Claude', () 
   expect(unit).not.toMatch(/CLAUDE_CONFIG_DIR|LARK_CHANNEL_CLAUDE_BIN|PartOf=|BindsTo=/);
 });
 
-it('checks worker capability without restarting it or silently coercing future effort levels', async () => {
-  const h = await fixture();
-  expect(await h.client.health()).toMatchObject({ nativeReasoningEfforts: true });
+it.each(['claude', 'zcode', 'kilo'] as const)('requires the common job API for %s and passes future effort values through unchanged', async toolId => {
+  const h = await fixture(toolId), capabilities = (await h.client.health()).capabilities;
   const health = vi.spyOn(h.client, 'health').mockResolvedValue({});
-  await expect(h.adapter.prepareRun({ ...h.options, reasoningEffort: 'xhigh' })).resolves.toBeUndefined();
-  await expect(h.adapter.prepareRun({ ...h.options, reasoningEffort: 'native-new' })).rejects.toThrow('worker 版本');
+  await expect(h.adapter.prepareRun(h.options)).rejects.toThrow('执行服务不可用');
+  health.mockResolvedValue({ capabilities });
+  await expect(h.adapter.prepareRun({ ...h.options, reasoningEffort: 'future-effort' })).resolves.toBeUndefined();
   expect(h.calls).toHaveLength(0); expect(h.stop).not.toHaveBeenCalled();
-  health.mockResolvedValue({ nativeReasoningEfforts: true });
-  await expect(h.adapter.prepareRun({ ...h.options, reasoningEffort: 'native-new' })).resolves.toBeUndefined();
 });
-
-it('requires the ZCode registry/resume fix before dispatching work to an old worker', async () => {
-  const h = await fixture('zcode');
-  const health = vi.spyOn(h.client, 'health').mockResolvedValue({ nativeReasoningEfforts: true });
-  await expect(h.adapter.prepareRun(h.options)).rejects.toThrow('保留原会话供应商');
-  expect(h.calls).toHaveLength(0); expect(h.stop).not.toHaveBeenCalled();
-  health.mockResolvedValue({ nativeReasoningEfforts: true, zcodeRegistryResume: true });
-  await expect(h.adapter.prepareRun(h.options)).resolves.toBeUndefined();
-});
-
 it('registers Kilo as an independent worker without reusing an existing tool service', () => {
   const unit = buildWorkerUnit({ node: '/node', entry: '/bridge/entry.mjs', profile: 'p', config: '/state/config.json', envPath: '/bin',
     toolId: 'kilo', kiloBinary: '/native/kilo', kiloDataHome: '/native/data-home' });
@@ -117,20 +107,6 @@ it('registers Kilo as an independent worker without reusing an existing tool ser
   expect(unit).toContain('LARK_CHANNEL_KILO_BIN=/native/kilo');
   expect(unit).toContain('XDG_DATA_HOME=/native/data-home');
   expect(unit).not.toContain('ZCODE_STORAGE_DIR');
-});
-
-it('requires the Kilo editor and desktop sync capabilities before dispatching to an old worker', async () => {
-  const h = await fixture('kilo');
-  expect(await h.client.health()).toMatchObject({ kiloEditorSync: true, kiloDesktopSync: true, kiloNativeInputOrigin: true });
-  const health = vi.spyOn(h.client, 'health').mockResolvedValue({ nativeReasoningEfforts: true });
-  await expect(h.adapter.prepareRun(h.options)).rejects.toThrow('桌面 App 实时同步');
-  expect(h.calls).toHaveLength(0); expect(h.stop).not.toHaveBeenCalled();
-  health.mockResolvedValue({ nativeReasoningEfforts: true, kiloEditorSync: true });
-  await expect(h.adapter.prepareRun(h.options)).rejects.toThrow('桌面 App 实时同步');
-  health.mockResolvedValue({ nativeReasoningEfforts: true, kiloEditorSync: true, kiloDesktopSync: true });
-  await expect(h.adapter.prepareRun(h.options)).rejects.toThrow('消息来源标记');
-  health.mockResolvedValue({ nativeReasoningEfforts: true, kiloEditorSync: true, kiloDesktopSync: true, kiloNativeInputOrigin: true });
-  await expect(h.adapter.prepareRun(h.options)).resolves.toBeUndefined();
 });
 
 it('starts DSH through its own service and preserves its native home and binary', () => {

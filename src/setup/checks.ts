@@ -12,6 +12,7 @@ import { resolveCodexBinary } from '../platform/codex-binary';
 import { resolveSharedCodexEndpoint } from '../../packages/codex-core/src/queue';
 import { CodexThreadReader } from '../session/codex-thread-reader';
 import { WorkerClient } from '../worker/client';
+import { readWorkerConfig } from '../worker/config';
 import { resolveAppPaths } from '../config/app-paths';
 import { loadRootConfig, readActiveProfile, runtimeProfileConfig } from '../config/profile-store';
 import { loadRuntimeEnv } from '../config/runtime-env';
@@ -65,7 +66,15 @@ export async function collectChecks(options: DoctorOptions, run: Probe = probe):
   const profile = options.profile ?? await readActiveProfile(rootDir);
   if (profile) await loadRuntimeEnv(profile, rootDir);
   const paths = resolveAppPaths({ rootDir, profile: profile ?? 'codex' });
-  const root = await loadRootConfig(paths.configFile), selected = profile ? root?.profiles[profile] : undefined;
+  const root = await loadRootConfig(paths.configFile);
+  let selected = profile ? root?.profiles[profile] : undefined;
+  let configuredCodexRemote: string | undefined;
+  if (selected) for (const toolId of ['codex', 'kilo', 'zcode', 'dsh'] as const) {
+    const config = await readWorkerConfig(paths.profileDir, toolId);
+    if (config) selected = { ...selected, [toolId]: config.options };
+    if (toolId === 'codex' && typeof config?.options.appServerRemote === 'string') configuredCodexRemote = config.options.appServerRemote;
+  }
+  const claudeConfig = selected ? await readWorkerConfig(paths.profileDir, 'claude') : undefined;
   const phaseStatus = options.runtime ? 'fail' : 'warn';
   rows.push({ id: 'node', status: atLeast(process.versions.node, SUPPORTED.node) ? 'pass' : 'fail', detail: `Node ${process.versions.node}；要求 >= ${SUPPORTED.node}，推荐 24` });
   for (const command of ['git', 'npm', 'pnpm']) {
@@ -87,7 +96,7 @@ export async function collectChecks(options: DoctorOptions, run: Probe = probe):
   const lark = await run('lark-cli', ['--version']), larkVersion = versionOf(lark.output);
   rows.push({ id: 'lark-cli', status: lark.ok && larkVersion && atLeast(larkVersion, SUPPORTED.lark) ? 'pass' : 'fail', detail: `飞书 CLI ${larkVersion ?? '缺失'}；基线 >= ${SUPPORTED.lark}`, fix: `npm install -g @larksuite/cli@${SUPPORTED.lark}` });
   const codexBinary = resolveCodexBinary(selected?.codex?.binaryPath ?? process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex');
-  const claudeBinary = process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude';
+  const claudeBinary = typeof claudeConfig?.options.binaryPath === 'string' ? claudeConfig.options.binaryPath : process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude';
   const available = { codex: await run(codexBinary, ['--version']), claude: await run(claudeBinary, ['--version']) };
   const kinds: ToolId[] = requested === 'both' ? ['codex', 'claude'] : requested !== 'auto' ? [requested as ToolId] :
     selected ? [selected.agentKind] : (['codex', 'claude'] as const).filter(kind => available[kind].ok);
@@ -130,6 +139,7 @@ export async function collectChecks(options: DoctorOptions, run: Probe = probe):
       }
       continue;
     }
+    if (kind !== 'codex' && kind !== 'claude') { rows.push({ id: `${kind}.worker`, status: 'warn', detail: '外部 worker，通过 endpoint.json 自动发现' }); continue; }
     const binary = kind === 'codex' ? codexBinary : claudeBinary;
     rows.push(...await checkTool(kind, binary, run));
     const auth = await run(binary, kind === 'codex' ? ['login', 'status'] : ['auth', 'status', '--json']);
@@ -139,7 +149,7 @@ export async function collectChecks(options: DoctorOptions, run: Probe = probe):
     if (!options.runtime) continue;
     if (kind === 'codex') {
       const home = selected?.codex?.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), '.codex');
-      const remote = await resolveSharedCodexEndpoint({ codexHome: home, remote: process.env.CODEX_QUEUE_REMOTE });
+      const remote = await resolveSharedCodexEndpoint({ codexHome: home, remote: configuredCodexRemote ?? process.env.CODEX_QUEUE_REMOTE });
       if (!remote) rows.push({ id: 'codex.writer', status: 'fail', detail: '没有发现公开共享 Codex writer', fix: '启动兼容的 Codex app-server daemon 或桌面共享端点；详见 docs/INSTALL.md，不要把历史读取进程当执行服务' });
       else {
         const reader = new CodexThreadReader({ binary, profileStateDir: paths.profileDir, codexHome: home, inheritCodexHome: true, sharedServer: true, passive: true, remote, timeoutMs: 5000 });
@@ -148,8 +158,8 @@ export async function collectChecks(options: DoctorOptions, run: Probe = probe):
         finally { await reader.stop(); }
       }
     } else if (selected) {
-      const sourceId = resolve(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'));
-      try { await new WorkerClient(join(paths.profileDir, 'execution-worker'), sourceId, selected.accounts.app.id).health(); rows.push({ id: 'claude.worker', status: 'pass', detail: '独立 worker 健康，应用及账号目录匹配' }); }
+      const sourceId = resolve(typeof claudeConfig?.options.configDir === 'string' ? claudeConfig.options.configDir : process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'));
+      try { await new WorkerClient(join(paths.profileDir, 'workers', 'claude'), sourceId, selected.accounts.app.id).health(); rows.push({ id: 'claude.worker', status: 'pass', detail: '独立 worker 健康，应用及账号目录匹配' }); }
       catch { rows.push({ id: 'claude.worker', status: 'fail', detail: '独立 worker 未运行或身份/目录不匹配', fix: `执行 worker start --profile ${profile}（Linux）；其他平台用 worker run 配合进程托管` }); }
     }
   }

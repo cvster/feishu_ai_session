@@ -1,3 +1,5 @@
+import { ToolRegistry } from '../../../src/tools/types';
+import { FakeAgentAdapter } from '../../helpers/fake-agent';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -100,6 +102,8 @@ it('keeps dissolution and auto-group suppression across GC/restart without archi
   expect(loaded.isThreadArchived('shared')).toBe(false);
   expect(() => loaded.upsertActive({ scopeId: 'oc_dead', agentId: 'codex', threadId: 'new',
     cwdRealpath: h.dir, policyFingerprint: 'new', rebindArchivedScope: true })).toThrow('已解散');
+  h.controls.toolRegistry = new ToolRegistry();
+  h.controls.toolRegistry.register({ id: 'codex', sourceId: 'legacy', label: 'Codex', agent: new FakeAgentAdapter({ id: 'codex' }), listSessions: async () => [{ nativeId: 'shared', name: 'AA-old', cwd: h.dir, createdAtMs: 1, updatedAtMs: 2 }] });
   await syncAaSessionGroupsOnce({ channel: h.channel, controls: h.controls, sessionCatalog: loaded,
     workspaces: h.workspaces, profileStateDir: h.dir, historyProvider: async () => [{
       threadId: 'shared', name: 'AA-old', cwd: h.dir, preview: '', source: 'exec', createdAtMs: 1, updatedAtMs: 2,

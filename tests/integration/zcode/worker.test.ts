@@ -14,10 +14,8 @@ import type { LarkChannel } from '@larksuite/channel';
 import { ZcodeAdapter } from '../../../src/agent/zcode/adapter';
 import { DurableAgentAdapter } from '../../../src/worker/adapter';
 
-it('rejects a paired bridge against a worker still using independent execution', async () => {
-  const h = await fixture('zcode');
-  const adapter = new DurableAgentAdapter(h.client, new ZcodeAdapter({ remoteControlFile: '/private/pair.link' }));
-  await expect(adapter.prepareRun(h.options)).rejects.toThrow('桌面配对模式与配置不一致');
+it('delegates transport configuration to the worker', async () => {
+  const h = await fixture('zcode'); await expect(h.adapter.prepareRun(h.options)).resolves.toBeUndefined();
   expect(h.calls).toHaveLength(0);
 });
 it('serializes paired model discovery against active runs without replacing their connection',async()=>{
@@ -44,12 +42,6 @@ it('serializes native renames against active jobs and requires the local bearer 
   await expect(h.client.renameSession('session_native','changed',h.dir)).rejects.toThrow('正在执行');
   expect(renameSession).toHaveBeenCalledTimes(1);
   await h.client.stop(job.id);h.finish();
-});
-it('blocks named creation on a paired worker without native naming support', async () => {
-  const h=await fixture('zcode');
-  Object.assign(h.raw,{desktopRemoteEnabled:true});
-  await expect(h.adapter.prepareRun({...h.options,sessionName:'AA-copy'})).rejects.toThrow('原生会话命名版本');
-  expect(h.calls).toHaveLength(0);
 });
 it.each(['zcode', 'kilo'] as const)('keeps %s running across bridge detach and recovers exactly one result in its own group', async toolId => {
   const h = await fixture(toolId);
@@ -86,7 +78,7 @@ it.each(['zcode', 'kilo'] as const)('keeps %s running across bridge detach and r
     await writeFile(path, JSON.stringify(ledger));
     const updates = update.mock.calls.length;
     publisher = await startWorkerReplies(deps); await publisher.runNow(); await publisher.runNow();
-    expect(update.mock.calls.length).toBe(updates + (toolId === 'zcode' ? 1 : 0));
+    expect(update.mock.calls.length).toBe(updates + 1);
     expect(channel.sent).toHaveLength(1); expect(h.calls).toHaveLength(1);
   } finally { await publisher.stop(); await Promise.all([bindings.flush(), catalog.flush(), sessions.flush()]); }
 });

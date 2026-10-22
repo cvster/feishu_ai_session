@@ -301,7 +301,7 @@ describe('Bridge command contracts', () => {
       threadId: 'external-archive', name: '旧卡片', cwd, preview: '', source: 'appServer', createdAtMs: 1, updatedAtMs: 2,
     }] });
     const token = extractActionToken(JSON.stringify(lastContent(h.channel)), 'panel.session-group');
-    h.controls.codexReplySync = { observeTurn() {}, runNow: async () => {}, isThreadArchived: async () => true };
+    const tool = h.controls.toolRegistry!.get('codex'); const list = tool.listSessions; tool.listSessions = async () => (await list()).map(row => ({ ...row, archived: true }));
     await h.run(`/panel session-group ${token}`);
     expect(h.channel.createdChats).toEqual([]);
     expect(lastMarkdown(h.channel)).toContain('会话已归档');
@@ -564,7 +564,7 @@ describe('Bridge command contracts', () => {
 
   it.each([false, true])('sends one concise archive notification when finishing a bound personal group with a %s routed identity', async routed => {
     const h = await createHarness(), bindings = await personalTools(h);
-    if (!routed) h.controls.toolRegistry = undefined;
+    if (!routed) h.controls.toolRegistry!.get('codex').sessions = { nativeArchive: true, historyPath: async () => undefined, rename: async () => {}, archive: id => h.agent.archiveThread!(id) };
     const identity: SessionCatalogIdentity = { scopeId: 'oc_group', agentId: 'codex', cwdRealpath: h.tmp.workspace, policyFingerprint: 'finish' };
     h.sessionCatalog.upsertActive({ ...identity, threadId: 'native-one', sourceId: 'home', botAppId: 'app-id' });
     const notifications = startSessionArchiveNotifications({ channel: h.channel as unknown as CommandContext['channel'],
@@ -762,13 +762,13 @@ describe('Bridge command contracts', () => {
 
     expect(h.agent.runOptions).toHaveLength(0);
     const status = JSON.stringify(lastContent(h.channel));
-    expect(status).toContain('Fake Agent');
+    expect(status).toContain('Claude Code');
     expect(status).toContain('工作目录');
     expect(status).toContain('**session**');
     expect(status).toContain('(无)');
     expect(status).not.toContain('**conversation**');
-    expect(status).toContain('permission');
-    expect(status).toContain('plan');
+    expect(status).toContain('access');
+    expect(status).toContain('read-only');
     expect(status).not.toContain('bypassPermissions');
     expect(status).not.toContain('workspace-write/workspace-write');
     expect(status).toContain('owner');
@@ -782,7 +782,7 @@ describe('Bridge command contracts', () => {
 
     const status = JSON.stringify(lastContent(h.channel));
     expect(status).toContain('当前状态');
-    expect(status).toContain('Fake Agent');
+    expect(status).toContain('Claude Code');
   });
 
   it('refreshes a live clicked reply with no duplicate card', async () => {
@@ -808,11 +808,7 @@ describe('Bridge command contracts', () => {
   it('updates pre-restart bridge cards in place, retaining typed refresh behavior', async () => {
     const h = await createHarness();
     prepareForkSource(h);
-    const read = vi.spyOn(CodexThreadReader.prototype, 'readThread').mockResolvedValue({
-      id: 'thread-source', turns: [{ id: 'turn-refresh', status: 'completed', items: [
-        { type: 'agentMessage', text: 'fresh answer' },
-      ] }],
-    });
+    h.controls.refreshMirroredRunCard = async (scope, messageId) => { await h.channel.updateCard(messageId, { answer: 'fresh answer' }); return true; };
     try {
       await h.run('/refresh', { chatMode: 'group', fromCardAction: true, messageId: 'om_old_reply' });
       expect(h.channel.sent).toHaveLength(0);
@@ -820,24 +816,20 @@ describe('Bridge command contracts', () => {
         method: 'im.v1.message.patch', params: { messageId: 'om_old_reply' },
       });
       expect(JSON.stringify(h.channel.rawClient.requests.at(-1))).toContain('fresh answer');
-      await h.run('/refresh', { chatMode: 'group' });
-      expect(h.channel.sent).toHaveLength(1);
-    } finally { read.mockRestore(); }
+    } finally { h.controls.refreshMirroredRunCard = undefined; }
   });
 
   it('never falls back to a duplicate card after refresh delivery failure', async () => {
     const h = await createHarness();
     prepareForkSource(h);
-    const read = vi.spyOn(CodexThreadReader.prototype, 'readThread').mockResolvedValue({
-      id: 'thread-source', turns: [{ id: 'turn-refresh', status: 'completed', items: [] }],
-    });
+    h.controls.refreshMirroredRunCard = async (scope, messageId) => { await h.channel.updateCard(messageId, {}); return true; };
     vi.spyOn(h.channel, 'updateCard').mockRejectedValue(new Error('timeout'));
     try {
       await h.run('/refresh', { chatMode: 'group', fromCardAction: true, messageId: 'om_old_reply' });
       expect(h.channel.sent).toHaveLength(1);
       expect(lastMarkdown(h.channel)).toContain('原卡片已保留');
       expect(h.channel.sent.some((message) => 'card' in (message.content as object))).toBe(false);
-    } finally { read.mockRestore(); }
+    } finally { h.controls.refreshMirroredRunCard = undefined; }
   });
 
   it('shows workspace paths in group-visible /status replies', async () => {
@@ -860,42 +852,13 @@ describe('Bridge command contracts', () => {
     expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
   });
 
-  it.each([false, true])('stops only the current turn and preserves later submissions (continuation failure: %s)', async failStart => {
-    const h = await createHarness(); prepareForkSource(h);
-    const store = new CodexSubmissionStore(join(h.tmp.profile, 'submissions.json')); await store.load();
-    await store.receive('chat-1', { ...message('next input', { chatId: 'chat-1', senderId: 'ou-admin' }), messageId: 'next-input' }, 'source-thread');
-    await store.mark('next-input', { status: 'accepted', threadId: 'source-thread', queueId: 'next-queue' });
-    h.controls.codexSubmissions = store;
-    const runNow = vi.fn(async () => {});
-    h.controls.codexReplySync = { observeTurn() {}, runNow };
-    const status = vi.spyOn(CodexThreadReader.prototype, 'readThreadStatus').mockResolvedValue({ type: 'idle' })
-      .mockResolvedValueOnce({ type: 'active' });
-    const read = vi.spyOn(CodexThreadReader.prototype, 'readThread').mockResolvedValue({ id: 'source-thread',
-      turns: [{ id: 'live', status: 'inProgress', items: [] }] });
-    const interrupt = vi.spyOn(CodexThreadReader.prototype, 'interruptTurn').mockResolvedValue();
-    const list = vi.spyOn(CodexThreadReader.prototype, 'listQueuedSubmissions').mockResolvedValue([{ id: 'next-queue', input: [] }]);
-    const start = vi.spyOn(CodexThreadReader.prototype, 'startQueuedTurn');
-    if (failStart) start.mockRejectedValue(new Error('connection lost'));
-    else start.mockResolvedValue('next-turn');
-    const stop = vi.spyOn(CodexThreadReader.prototype, 'stop').mockResolvedValue();
-    const remote = process.env.CODEX_QUEUE_REMOTE;
-    process.env.CODEX_QUEUE_REMOTE = 'ws://127.0.0.1:1';
-    try {
-      await expect(h.run('/panel stop', { chatMode: 'group', fromCardAction: true })).resolves.toBe(true);
-      expect(interrupt).toHaveBeenCalledWith('source-thread', 'live');
-      expect(start).toHaveBeenCalledTimes(1);
-      expect(start).toHaveBeenCalledWith('source-thread', 'next-queue');
-      expect(store.records()[0]?.status).toBe('accepted');
-      expect(runNow).toHaveBeenCalledTimes(1);
-      if (failStart) {
-        expect(JSON.stringify(h.channel.sent)).toContain('当前响应已停止，但后续队列继续执行未确认');
-        expect(JSON.stringify(h.channel.sent)).not.toContain('停止请求未确认');
-      }
-    } finally {
-      for (const spy of [status, read, interrupt, list, start, stop]) spy.mockRestore();
-      if (remote === undefined) delete process.env.CODEX_QUEUE_REMOTE;
-      else process.env.CODEX_QUEUE_REMOTE = remote;
-    }
+  it('stops the current worker job while preserving pending intake', async () => {
+    const h = await createHarness(), pending = new PendingQueue(60_000, () => {});
+    pending.push('chat-1', message('next', { chatId: 'chat-1', senderId: 'ou-admin' }));
+    const stopScope = vi.fn(async () => true);
+    h.controls.workerRuntimes = new Map([['claude', { replies: { stopScope } } as any]]);
+    try { await h.run('/stop', { chatMode: 'group', pending }); expect(stopScope).toHaveBeenCalledWith('chat-1'); expect(pending.snapshot()).toHaveLength(1); }
+    finally { pending.cancelAll(); }
   });
 
   it('does not let a stale native card interrupt a later active worker task', async () => {
@@ -916,29 +879,11 @@ describe('Bridge command contracts', () => {
     expect(interrupt).not.toHaveBeenCalled(); expect(lastMarkdown(h.channel)).toContain('未停止其他任务');
   });
 
-  it.each(['win32', 'linux'] as const)('explains unavailable stop control appropriately on %s and preserves unsent input', async (platform) => {
-    const h = await createHarness();
-    prepareForkSource(h);
-    h.controls.profileConfig.codex!.codexHome = join(h.tmp.root, 'no-shared-server');
-    const store = new CodexSubmissionStore(join(h.tmp.profile, 'submissions.json'));
-    await store.load();
-    await store.receive('chat-1', message('pending input', { chatId: 'chat-1', senderId: 'ou-admin' }), 'source-thread');
-    h.controls.codexSubmissions = store;
-    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
-    const remote = process.env.CODEX_QUEUE_REMOTE;
-    try {
-      Object.defineProperty(process, 'platform', { ...descriptor, value: platform });
-      delete process.env.CODEX_QUEUE_REMOTE;
-      await expect(h.run('/stop', { chatMode: 'group', fromCardAction: true })).resolves.toBe(true);
-      expect(lastMarkdown(h.channel)).toContain(platform === 'win32'
-        ? 'windows不支持桥接停止会话，请在 Codex 桌面停止任务。'
-        : '没有可用的公开共享连接，请在 Codex 桌面停止任务。');
-      expect(store.records().map(record => record.status)).toEqual(['pending']);
-    } finally {
-      Object.defineProperty(process, 'platform', descriptor);
-      if (remote === undefined) delete process.env.CODEX_QUEUE_REMOTE;
-      else process.env.CODEX_QUEUE_REMOTE = remote;
-    }
+  it('leaves unsent input intact when no worker stop target exists', async () => {
+    const h = await createHarness(), pending = new PendingQueue(60_000, () => {});
+    pending.push('chat-1', message('next', { chatId: 'chat-1', senderId: 'ou-admin' }));
+    try { await h.run('/stop', { chatMode: 'group', pending }); expect(pending.snapshot()).toHaveLength(1); }
+    finally { pending.cancelAll(); }
   });
 
   it('does not expose access allowlists through the Lark /config form', async () => {
@@ -1013,6 +958,7 @@ async function createHarness(): Promise<Harness> {
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const sessionCatalog = new SessionCatalog(join(tmp.profile, 'sessions.catalog.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
+  const toolBindings = new ToolBindingStore(join(tmp.profile, 'tool-bindings.json')); await toolBindings.load();
   const activeRuns = new ActiveRuns();
   const agent = createFakeAgent();
   const workspaceRealpath = await realpath(tmp.workspace);
@@ -1031,11 +977,16 @@ async function createHarness(): Promise<Harness> {
     configPath,
     cfg: profileConfig,
     processId: 'proc-1',
+    toolRegistry: new ToolRegistry(), toolBindings,
   } satisfies Controls;
+  controls.toolRegistry.register({ id: 'claude', label: 'Claude Code', sourceId: 'claude-home', agent: { id: 'claude', displayName: 'Claude Code', isAvailable: () => agent.isAvailable(), run: options => agent.run(options) }, listSessions: async () => [], sessions: { historyPath: async () => undefined, rename: async () => {}, archive: async () => {} } });
+  controls.toolRegistry.register({ id: 'codex', label: 'Codex', sourceId: 'home', agent: { id: 'codex', displayName: 'Codex', isAvailable: () => agent.isAvailable(), run: options => agent.run(options), forkThread: id => (agent as unknown as { forkThread(id: string): Promise<{ threadId: string; name: string; cwd: string }> }).forkThread(id) },
+    listSessions: async () => [], sessions: { nativeArchive: true, historyPath: async () => undefined, rename: async () => {}, archive: id => agent.archiveThread!(id) } });
 
   workspaces.setCwd('chat-1', workspaceRealpath);
 
   const run = (content: string, overrides: RunOverrides = {}): Promise<boolean> => {
+    if (overrides.codexHistoryProvider) controls.toolRegistry.get('codex').listSessions = async () => (await overrides.codexHistoryProvider!({ binary: 'unused', profileStateDir: tmp.profile, limit: 100 })).map(row => ({ nativeId: row.threadId, name: row.name ?? row.preview, cwd: row.cwd, createdAtMs: row.createdAtMs, updatedAtMs: row.updatedAtMs, archived: sessionCatalog.isThreadArchived(row.threadId) || toolBindings.isArchived('codex', 'home', row.threadId) }));
     const chatId = overrides.chatId ?? 'chat-1';
     const scope = overrides.scope ?? chatId;
     return tryHandleCommand({
@@ -1064,7 +1015,7 @@ async function createHarness(): Promise<Harness> {
   };
 
   cleanups.push(async () => {
-    await Promise.all([sessions.flush(), sessionCatalog.flush(), workspaces.flush()]);
+    await Promise.all([sessions.flush(), sessionCatalog.flush(), workspaces.flush(), toolBindings.flush()]);
     await tmp.cleanup();
   });
 
@@ -1077,7 +1028,8 @@ async function personalTools(h: Harness): Promise<ToolBindingStore> {
   await bindings.load(); bindings.enforcePersonalUniqueness(h.sessionCatalog, 'app-id', () => 'home');
   const registry = new ToolRegistry();
   registry.register({ id: 'codex', label: 'Codex', sourceId: 'home', agent: h.agent,
-    listSessions: async () => [{ nativeId: 'native-one', name: 'AA-one', cwd: h.tmp.workspace, createdAtMs: 1, updatedAtMs: 2 }] });
+    listSessions: async () => [{ nativeId: 'native-one', name: 'AA-one', cwd: h.tmp.workspace, createdAtMs: 1, updatedAtMs: 2, archived: bindings.isArchived('codex', 'home', 'native-one') }],
+    sessions: { nativeArchive: true, historyPath: async () => undefined, rename: async () => {}, archive: id => h.agent.archiveThread!(id) } });
   h.controls.toolBindings = bindings; h.controls.toolRegistry = registry;
   return bindings;
 }

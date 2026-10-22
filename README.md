@@ -6,7 +6,7 @@
 
 **本项目开发者：Lennox Gao。** 使用过程中有问题、建议或需求，欢迎联系 Lennox Gao。
 
-本仓库包含个人工作群、AA 会话自动建群、开放群直接关联原会话、折叠回复和独立 Claude/ZCode/Kilo worker 等定制功能。使用本仓库版本请按下文从源码构建；公开 npm 包不保证包含这些改动。
+本仓库包含个人工作群、AA 会话自动建群、开放群直接关联原会话、折叠回复和各工具统一 worker 等定制功能。使用本仓库版本请按下文从源码构建；公开 npm 包不保证包含这些改动。
 
 - [完整安装配置指引](docs/INSTALL.md)：一键安装、二选一/双工具、版本检查、登录、writer/worker、后台环境及验收。
 - [动态模型列表](docs/MODELS.md)：Codex、Claude、ZCode、Kilo 原生模型发现，供应商区分、刷新及删除后的处理。
@@ -28,7 +28,7 @@
 - 新建工作群、关联共享群时，自动为飞书 CLI 所有者开启消息免打扰；不会更改其他成员的通知设置。主 CLI 需以应用所有者登录并授权 `im:chat.user_setting:write`，不影响 Agent 专用 CLI 的身份限制。
 - 把AI助手加入目标群后，由所有者在私聊选择已有会话，启用会话共享（优先选择 AA 会话）。共享群只响应真实 `@机器人` 的消息；同事可提问，回答仅回到提问群。
 - 共享群默认简短回复，不提及来源会话和内部读取过程。长正文、代码和工具记录默认折叠；结束后的状态与按钮也放入折叠区。
-- Codex 通过原生队列提交、统一同步桌面与飞书回复；Claude/ZCode/Kilo 由各自独立 worker 执行。桥接重启后可继续同步已有结果。
+- Codex、Claude、ZCode、Kilo 和 DSH 都通过独立 worker 执行；Codex worker 内继续使用原生队列。桥接重启后可继续同步已有结果。
 - ZCode 桌面新消息每约 2 秒回推绑定的个人工作群，首次启用不补发历史；开放群和私聊群不接收桌面广播。见 [ZCode 接入说明](docs/ZCODE.md#桌面消息回推个人工作群)。
 
 ## 环境要求
@@ -44,7 +44,7 @@
 
 Codex 的发送、队列与选项交互依赖兼容的原生接口；桌面已有任务的问询需要可访问的公开共享 app-server，可按环境配置 `CODEX_QUEUE_REMOTE`。只安装 CLI 并不保证桌面私有连接上的交互可用。详见 [Codex 任务生命周期](docs/CODEX_TASK_LIFECYCLE.md)。
 
-Claude/ZCode/Kilo 独立 worker 的系统服务和重启恢复目前以 Linux 为主要验证环境。不要把桥接重启保活理解为 worker、Codex writer 或主机重启也能保活。
+各工具独立 worker 的系统服务和重启恢复目前以 Linux 为主要验证环境。不要把桥接重启保活理解为 worker、Codex writer 或主机重启也能保活。
 
 ## 安装与首次启动
 
@@ -68,7 +68,7 @@ node bin/lark-channel-bridge.mjs doctor --agents codex
 node bin/lark-channel-bridge.mjs doctor --profile my-bot --agents codex --runtime --network
 ```
 
-Codex、Claude 和 ZCode 至少配置一个，也可以同时存在。ZCode 单独安装与配置，见 [接入指引](docs/ZCODE.md)。支持基线为 Codex 0.159.2、Claude 2.1.261、飞书 CLI 1.0.97；仍须通过功能检查。后台和前台可共用 `profiles/<profile>/runtime.env`，示例见 [环境模板](config/runtime.env.example)，Linux/macOS 必须 `chmod 600`。所选工具决定检查项，不因另一工具缺失报错。
+可部署任意所需工具及其 worker，也可以同时存在多个工具。桥接创建配置无需先安装 Codex。ZCode 单独安装与配置，见 [接入指引](docs/ZCODE.md)。支持基线为 Codex 0.159.2、Claude 2.1.261、飞书 CLI 1.0.97；仍须通过功能检查。后台和前台可共用 `profiles/<profile>/runtime.env`，示例见 [环境模板](config/runtime.env.example)，Linux/macOS 必须 `chmod 600`。所选工具决定检查项，不因另一工具缺失报错。
 
 ### 手动安装：下载和构建
 
@@ -113,11 +113,11 @@ node bin/lark-channel-bridge.mjs profile create my-bot \
 
 ### 3. 启动 worker 与桥接
 
-需要在工作群中使用 Claude 时，先启动该 profile 的 worker。ZCode 使用独立的 `worker start --profile my-bot --tool zcode`，详见 [接入指引](docs/ZCODE.md)。只使用 Codex 可跳过 worker 两条命令。
+每个使用的工具都需启动 worker。桥接自动扫描 `profiles/<profile>/workers/*/endpoint.json`，从健康接口读取工具和能力；只用 Kilo 时无需安装 Codex。配置放在对应 worker 的 `config.json`。详见 [统一接口](docs/WORKER_API.md) 和 [迁移步骤](docs/WORKER_MIGRATION.md)。
 
 ```bash
-node bin/lark-channel-bridge.mjs worker start --profile my-bot
-node bin/lark-channel-bridge.mjs worker status --profile my-bot
+node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool codex
+node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool codex
 
 node bin/lark-channel-bridge.mjs run --profile my-bot
 ```
@@ -284,7 +284,7 @@ pnpm build
 node bin/lark-channel-bridge.mjs restart --profile my-bot
 node bin/lark-channel-bridge.mjs status --profile my-bot
 # 若启用了 Claude，仅核对 worker，不重启它
-node bin/lark-channel-bridge.mjs worker status --profile my-bot
+node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool codex
 ```
 
 部署前检查版本、依赖与构建；部署后检查服务健康和 WebSocket 连接。无需把读取任务列表或等待全部任务结束作为日常桥接重启的前置条件。
@@ -314,8 +314,9 @@ node bin/lark-channel-bridge.mjs worker status --profile my-bot
 | `profiles/<profile>/tool-bindings.json`    | 工具与原会话入口绑定             |
 | `profiles/<profile>/auxiliary-groups.json` | 共享群关联和生命周期              |
 | `profiles/<profile>/ff-approvals.json` | 受限操作确认、原请求上下文与恢复状态 |
-| `profiles/<profile>/codex-turn-sync.json`  | Codex 回复卡片、游标与更新序号      |
-| `profiles/<profile>/execution-worker/`     | Claude worker 收据与输出日志   |
+| `profiles/<profile>/<tool>-native-turn-sync.json` | 原生消息回复卡片、游标与更新序号；自动导入旧状态 |
+| `profiles/<profile>/<tool>-worker-replies.json` | worker 任务投递收据；Claude 沿用 `worker-replies.json` |
+| `profiles/<profile>/workers/<tool>/`     | 各工具 worker 配置、端点、收据与日志   |
 | `profiles/<profile>/logs/`                 | 桥接日志与 `daemon/` 服务日志    |
 
 常见问题：

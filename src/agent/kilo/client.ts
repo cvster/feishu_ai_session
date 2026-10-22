@@ -7,9 +7,9 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { spawnProcess, mergeProcessEnv } from '../../platform/spawn';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
-import { findKiloEditorServer, type KiloEditorServer, type KiloPreferredClient } from './editor-server';
+import { findKiloEditorServer, type KiloEditorServer } from './editor-server';
 
-export interface KiloOptions { binary?: string; args?: readonly string[]; dataHome?: string; editorSync?: boolean; preferredClient?: KiloPreferredClient; larkChannel?: LarkChannelEnvContext }
+export interface KiloOptions { binary?: string; args?: readonly string[]; dataHome?: string; editorSync?: boolean; larkChannel?: LarkChannelEnvContext }
 export function kiloStorageDir(options: KiloOptions = {}): string {
   return resolve(join(options.dataHome ?? process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'kilo'));
 }
@@ -49,8 +49,9 @@ export class KiloClient {
   private async connect(options: KiloOptions, cwd?: string, sessionId?: string): Promise<string> {
     const command = kiloCommand(options);
     const editor = options.editorSync !== false && !command.args.length
-      ? await findKiloEditorServer(command.binary, cwd, options.dataHome, {}, sessionId, options.preferredClient) : undefined;
+      ? await findKiloEditorServer(command.binary, cwd, options.dataHome, {}, sessionId) : undefined;
     if (this.closed) throw new Error('Kilo 连接已关闭');
+    if (editor && editor.client !== 'vscode') throw new Error('不再支持 Kilo App 后端，请使用 VS Code 扩展或 CLI');
     if (editor) { this.attached = editor; this.authorization = editor.authorization; return editor.url; }
     this.child = spawnProcess(command.binary, [...command.args, 'serve', '--hostname', '127.0.0.1', '--port', '0'], {
       cwd, env: mergeProcessEnv(process.env, { ...buildLarkChannelEnv(options.larkChannel),
@@ -74,11 +75,6 @@ export class KiloClient {
     this.child.once('close', () => { lines.close(); this.exit(); });
     return ready;
   }
-  async sessionCreationMetadata(): Promise<Record<string, unknown> | undefined> {
-    await this.ready;
-    if (this.attached?.client === 'desktop' && !this.attached.sessionMetadata) throw new Error('请先在 Kilo 桌面 App 为此项目创建一个会话，再从飞书关联或创建，确保新会话可在桌面工作区显示。');
-    return this.attached?.sessionMetadata;
-  }
   async request<T = any>(method: string, path: string, body?: unknown, cwd?: string): Promise<T> {
     const url = new URL(path, await this.ready);
     if (cwd) url.searchParams.set('directory', cwd);
@@ -94,8 +90,12 @@ export class KiloClient {
         res.once('error', reject);
         res.once('end', () => {
           if (res.statusCode === 204) { resolveRequest(undefined as T); return; }
-          try { resolveRequest(JSON.parse(Buffer.concat(chunks).toString('utf8')) as T); }
-          catch { reject(new Error('Kilo 返回了无效的协议数据')); }
+          try {
+            const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            if (/^\/session\/[^/]+$/.test(path) && value?.metadata?.['kilo-desktop']) throw new Error('Kilo App 会话已不再支持，请使用 VS Code 扩展或 CLI 会话');
+            resolveRequest(value as T);
+          }
+          catch (error) { reject(error instanceof Error ? error : new Error('Kilo 返回了无效的协议数据')); }
         });
       });
       req.setTimeout(30_000, () => req.destroy(new Error(`Kilo ${method} 请求超时；未自动重发`)));

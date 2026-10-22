@@ -1,150 +1,132 @@
 # Unified execution worker API
 
-Claude, Kilo, ZCode and DSH use the same authenticated loopback HTTP server and
-client. Provider selection belongs to worker construction, not request routing.
-Codex remains on its native app-server/queue transport; this change does not add
-a Codex worker or move ownership of Codex turns.
+Codex, Claude, Kilo, ZCode and DSH all use the same authenticated loopback HTTP
+API. The bridge discovers workers and reads their capabilities; native protocols,
+local executable paths, account directories and provider configuration belong to
+workers. Only Codex currently advertises native question/answer support.
 
-## Discovery and capabilities
+## Discovery and identity
 
-Each worker writes `endpoint.json` in its own state directory, containing the
-loopback URL, bearer token and PID. All routes require the bearer token. Before
-calling operations, `WorkerClient` verifies `/health` against the expected
-`toolId`, `sourceId` and `botAppId`.
+The bridge scans immediate real subdirectories of `profiles/<profile>/workers/`
+for `endpoint.json`. Directory names are arbitrary. A worker publishes:
 
-`GET /health` retains `version: 1` and the old compatibility flags, and adds:
+```json
+{ "version": 1, "url": "http://127.0.0.1:12345", "token": "random-bearer-token", "pid": 123 }
+```
+
+Every route requires `Authorization: Bearer <token>`. Discovery authenticates
+`GET /health`, validates the common protocol and bot application, then registers
+the returned `toolId`, `sourceId`, manifest and capabilities. A sanitized tool ID
+may identify an external worker; adding it requires no bridge provider switch or
+provider configuration. `sourceId` identifies the native account/history source.
 
 ```json
 {
+  "version": 1,
+  "toolId": "codex",
+  "sourceId": "/home/user/.codex",
+  "botAppId": "cli_example",
+  "manifest": {
+    "label": "Codex", "nativeField": "threadId", "sessionKind": "codex-thread",
+    "historyFormat": "jsonl", "nativeHistory": false
+  },
   "capabilities": {
     "apiVersion": 2,
     "jobs": { "submit": true, "read": true, "stop": true, "eventCursor": true },
     "models": true,
-    "sessions": { "list": true, "history": true, "rename": true, "archive": false, "fork": false },
-    "nativeTurnStop": false
+    "sessions": { "list": true, "history": true, "rename": true, "archive": true, "fork": true },
+    "nativeTurnStop": true,
+    "conversation": true, "questions": true, "nativeSessionNames": true
   }
 }
 ```
 
-`GET /capabilities` returns the capability object alone. The above values are an
-example; clients must use the worker's actual values. A false capability means
-the common route returns HTTP 501 with `code: "unsupported-operation"`.
+Values above are illustrative; callers use each live worker's advertised values.
+`workers/registry.json` retains validated identities while offline. Missing
+endpoints do not remove native histories or group bindings. Duplicate live tool
+IDs disable that tool. Changed source, directory or native identity metadata is
+rejected rather than rebinding existing groups. The bridge refreshes discovery
+every 10 seconds and when opening the session panel. It can start with no workers.
 
 ## Common routes
 
 | Method | Route | Request / result |
 | --- | --- | --- |
-| GET | `/health` | Identity, compatibility flags, capabilities |
+| GET | `/health` | Identity, manifest, capabilities |
 | GET | `/capabilities` | Capability object |
 | GET | `/models?cwd=...` | `ModelOption[]` |
 | POST | `/jobs` | `WorkerSubmission` → durable `WorkerJob` |
-| GET | `/jobs` | Jobs accepted by this worker; **not** the native session roster |
-| GET | `/jobs/:id?after=N` | Job and normalized `AgentEvent` records after sequence N |
+| GET | `/jobs` | Worker receipts, distinct from the native session roster |
+| GET | `/jobs/:id?after=N` | Job and normalized events after sequence N |
 | POST | `/jobs/:id/stop` | `{}` → `{ "ok": true }` |
-| GET | `/sessions` | Native `ToolSession[]`, using `nativeId`, name, cwd and timestamps |
-| GET | `/sessions/:nativeId/history` | Native history export described below |
-| POST | `/sessions/:nativeId/rename` | `{ "name": "...", "cwd": "..." }` → `{ "ok": true }`; cwd optional for session providers |
-| POST | `/sessions/:nativeId/archive` | `{}` → `{ "ok": true }`, only if native archival is supported |
-| POST | `/sessions/:nativeId/fork` | `{}` → `{ "nativeId": "...", "name": "...", "cwd": "..." }` |
-| POST | `/sessions/:nativeId/turn-stop` | `{ "turnId": "...", "cwd": "..." }` → `{ "stopped": true/false }` |
+| GET | `/sessions` | Native IDs, titles, cwd, timestamps and archive state |
+| GET | `/sessions/:id/history` | `{ "nativeId": "...", "format": "jsonl", "content": "..." }` |
+| GET | `/sessions/:id/conversation` | Normalized snapshot described below |
+| GET | `/sessions/:id/questions` | Available questions with origin and delivery scope |
+| POST | `/sessions/:id/answer` | `{ "questionId": "...", "answers": { "q": { "answers": ["A"] } } }` → `{ "accepted": true/false }` |
+| POST | `/sessions/:id/rename` | `{ "name": "...", "cwd": "..." }` → `{ "ok": true }`; cwd optional for session providers |
+| POST | `/sessions/:id/archive` | `{}` → `{ "ok": true }` |
+| POST | `/sessions/:id/fork` | `{}` → `{ "nativeId": "...", "name": "...", "cwd": "..." }` |
+| POST | `/sessions/:id/turn-stop` | `{ "turnId": "...", "cwd": "..." }` → `{ "stopped": true/false }` |
 
-Encode native session IDs as one URL component. IDs remain opaque at the
-transport boundary; provider adapters validate their own native formats.
-`/session-name` and `/native-turn-stop` remain aliases for installed clients.
+Encode IDs as one URL component. IDs remain opaque to the bridge. Unsupported
+operations return HTTP 501 with `code: "unsupported-operation"`; there is no
+local native fallback. `/session-name` and `/native-turn-stop` remain wire aliases.
+History exports retain native formats, are bounded to 32 MiB, and accept no file
+path. Codex/Claude use JSONL; other built-in workers use JSON snapshots.
 
-History exports have a common envelope:
+Conversation snapshots contain `{id, name?, cwd, archived, turns}`; each turn has
+`{id, createdAtMs, bridge, input, state}`. `state` is the common run-card state.
+Bridge-owned turns are delivered by the job journal, while native external turns
+are mirrored only to the personal owner group. Shared groups receive replies to
+their own requests.
 
-```json
-{ "nativeId": "...", "format": "jsonl", "content": "...native records..." }
-```
-
-`format` is `jsonl` for Claude and `json` for Kilo, ZCode and DSH. Native records
-retain their provider format: this API does not normalize all historic messages
-into a browser transcript. Executing jobs already expose normalized `AgentEvent`
-records through `/jobs/:id`. Exports are limited to 32 MiB and omit a partial
-JSONL tail. Clients cannot supply a file path to read.
+Questions contain `{id, request, available, origin, delivery?}`. The request
+retains `threadId/turnId/itemId` names for wire and card-ledger compatibility.
+`origin: "worker"` requires the original authenticated delivery scope;
+`origin: "native"` targets the personal owner group; unknown origins are not
+published. Answer callbacks revalidate token, message, binding, source, application,
+archive state and current native turn. Secret fields stay in the native UI.
+Workers persist answer claims before RPC; lost acknowledgements are never replayed.
+Answer text is not stored in the answer-claim or question-delivery ledger.
 
 ## Capability differences
 
-| Worker | Native session rename | Native archive | Fork | Native desktop turn stop |
-| --- | --- | --- | --- | --- |
-| Claude | Writes CLI custom-title metadata | Unsupported; bridge catalog owns archival | Unsupported | Unsupported |
-| Kilo | Native API | Native API | Native API | Available; validates cwd, current turn and native input origin |
-| ZCode | Native title in paired mode; local labels in CLI mode | Unsupported; bridge catalog owns archival | Native fork | Available in paired mode |
-| DSH | Native API | Native API | Native API | Unsupported |
+| Worker | Native rename | Native archive | Fork | Conversation mirror | Questions |
+| --- | --- | --- | --- | --- | --- |
+| Codex | Yes | Yes | Yes | Yes | Yes, when the native connection can answer |
+| Claude | CLI title metadata | Catalog only | No | No | No |
+| Kilo | Yes | Yes | Yes | Yes, VS Code/CLI | No |
+| ZCode | Paired title or CLI labels | Catalog only | Yes | Paired mode | No |
+| DSH | Yes | Yes | Yes | No | No |
 
-All workers expose model discovery when their adapter supplies it. Supporting
-the same interface does not imply inventing a native feature absent from a tool.
+Native stop is available for Codex with a usable shared writer, Kilo, and paired
+ZCode. Workers recheck cwd, current turn and archive state before stopping.
 
 ## Group and native session names
 
-Personal whole-group bindings synchronize names in both directions:
+`nativeSessionNames` advertises automatic title synchronization. Personal groups
+have one-to-one native bindings; shared routes do not own the native title. The
+bridge checks group titles every 10 seconds and uses worker list/rename APIs.
+Initial and simultaneous changes prefer the group title. State survives restart;
+failed operations retain the previous baseline. No model is invoked to rename.
 
-| Tool | Automatic name synchronization | Observation |
-| --- | --- | --- |
-| Codex | Yes, in Codex primary profiles | Native thread reader |
-| Kilo | Yes | Native conversation reader |
-| Claude | Yes, with worker session list/rename capabilities | Native metadata polling through worker API |
-| DSH | Yes, with worker session list/rename capabilities | Native metadata polling through worker API |
-| ZCode | Yes, in paired desktop mode | Native metadata polling through worker API |
+## Concurrency and durability
 
-Metadata polling runs every 10 seconds without submitting model input. The
-first observation adopts the live group name; later edits flow from either
-side, with the group winning simultaneous changes. Baselines survive restarts
-in `<tool>-name-sync.json`. Failed reads or renames leave the baseline intact
-for a later retry, including worker `busy` rejections.
+Job acceptance is persisted before execution. Stable request keys, original
+message IDs and event sequences prevent duplicate execution. A bridge restart
+detaches observers and keeps worker jobs alive; reconnect reuses reply IDs and
+CardKit sequences. Uncertain sends retain their receipt and never switch native
+endpoint to replay a mutation. Metadata mutations are serialized against admission
+and rejected when a job owns the target session; paired transports also require
+an idle connection. Blocking native questions pause the worker idle watchdog.
 
-Archived, topic and auxiliary bindings (including legacy FF groups) are excluded, as are other accounts,
-bots and data sources. The metadata pollers and Kilo reader pause name
-synchronization when multiple personal groups own the same native session.
-CLI-mode ZCode
-labels remain local aliases. Claude native archive/fork and Claude/DSH desktop
-turn observation remain unsupported; name synchronization does not add them.
+Worker/host restart does not guarantee task continuation. Unfinished uncertain
+jobs are marked unknown and never automatically rerun. Codex still submits to its
+existing native queue/shared writer inside its worker. This migration does not
+change the separate worker-shutdown lifecycle contract.
 
-Kilo mirror stop requests use the common worker turn-stop route when advertised.
-For installed workers without that capability, compatibility is selected before
-the write and uses the existing native reader. A false stop result or a lost
-acknowledgement never triggers a second stop via another transport. The worker
-rereads the native session and refuses archived, completed, bridge-origin,
-stale-turn or mismatched-directory requests; closing its reader detaches from
-attached editor/desktop services.
-
-Personal bindings are unique within the current bot/profile by `(toolId,
-sourceId, nativeId)`. Both the tool-binding ledger and runtime catalog writes
-enforce this rule; a new conversation retires the group's old live catalog rows
-while retaining history. Manual and automatic group creation share a lease for
-the native session across remote group creation and binding. Missing chat-list
-entries do not release ownership; confirmed group cleanup or explicit closure
-does. Resume conflicts are rejected before interrupting the current run.
-
-Startup reconciles stale catalog/tool-ledger state and legacy duplicates before
-intake starts. It retains the earliest established active personal binding
-(ties use scope ID order), closes other duplicate bridge scopes, and preserves
-groups and native histories. Shared auxiliary routes do not count as personal
-owners. New FF native sessions and FF personal groups remain disabled; existing
-FF groups are compatibility routes to the original session.
-
-## Concurrency, durability and upgrades
-
-Metadata mutations are serialized against task admission and rejected with a
-retryable `busy` error for an active target session, including IDs discovered
-after new-session creation. Paired transports also block model discovery and
-mutations while a job owns the paired connection. Independent native history
-readers remain available during execution.
-
-Job acceptance, request-key deduplication, durable event sequence numbers and
-detachable observers retain their existing behavior. Loss of an acknowledgement
-does not trigger another write, an alternative endpoint or a task cancellation.
-
-Errors retain the existing `{ "error": "...", "retryable": false }` fields and
-add `code`: `invalid-request`, `unauthorized`, `not-found`,
-`unsupported-operation`, `busy`, `conflict`, `unavailable` or `internal-error`.
-
-The bridge uses `WorkerSessionClient` for native session discovery/operations and
-`WorkerClient.models` for model discovery. When `/health` lacks capabilities,
-it selects the existing v1 path **before** an operation. It never falls back
-after an attempted mutation. Catalog-only archival stays in the bridge rather
-than claiming native data was archived.
-
-The bridge and workers can be upgraded independently. Building and pushing this
-change does not update running services; deploy each intended worker separately.
+Errors have `{error, code, retryable}`. Codes are `invalid-request`, `unauthorized`,
+`not-found`, `unsupported-operation`, `busy`, `conflict`, `unavailable`, and
+`internal-error`. Old workers missing the common manifest/capabilities require
+upgrade. See [migration instructions](WORKER_MIGRATION.md).

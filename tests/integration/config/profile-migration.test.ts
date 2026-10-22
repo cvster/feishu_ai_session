@@ -11,7 +11,6 @@ import {
 } from '../../../src/config/migrate-v2';
 import type { RootConfig } from '../../../src/config/profile-schema';
 import { resolveProfileRuntime } from '../../../src/runtime/profile-runtime';
-import { writeVersionExecutable } from '../../helpers/fake-executable';
 
 const roots: string[] = [];
 const childProcesses: ChildProcess[] = [];
@@ -381,36 +380,17 @@ describe('profile v2 migration', () => {
     expect(next.profiles.claude?.workspaces.default).toBeUndefined();
   });
 
-  it('migrates a legacy config to Codex through the migrate command', async () => {
+  it('migrates a legacy config into a Codex worker without requiring an installed CLI', async () => {
     const root = await makeRoot();
-    const codex = await writeVersionExecutable(root, 'codex', 'codex 1.2.3');
-    const oldCodexBin = process.env.LARK_CHANNEL_CODEX_BIN;
-    process.env.LARK_CHANNEL_CODEX_BIN = codex;
     await writeJson(join(root, 'config.json'), legacyConfigFixture());
-
-    try {
-      await runMigrate({
-        config: join(root, 'config.json'),
-        profile: 'codex',
-        agent: 'codex',
-      });
-    } finally {
-      if (oldCodexBin === undefined) {
-        delete process.env.LARK_CHANNEL_CODEX_BIN;
-      } else {
-        process.env.LARK_CHANNEL_CODEX_BIN = oldCodexBin;
-      }
-    }
+    await runMigrate({ config: join(root, 'config.json'), profile: 'codex', agent: 'codex' });
 
     const next = (await readJson(join(root, 'config.json'))) as RootConfig;
     expect(next.activeProfile).toBe('codex');
     expect(next.profiles.codex?.agentKind).toBe('codex');
-    expect(next.profiles.codex?.codex).toMatchObject({
-      binaryPath: codex,
-    });
-    expect(next.profiles.codex?.codex?.realpath).toBeUndefined();
-    expect(next.profiles.codex?.codex?.version).toBeUndefined();
-    expect(next.profiles.codex?.codex?.sha256).toBeUndefined();
+    expect(next.profiles.codex?.codex).toBeUndefined();
+    const workerConfig = await readJson(join(root, 'profiles', 'codex', 'workers', 'codex', 'config.json'));
+    expect(workerConfig).toMatchObject({ version: 1, toolId: 'codex', options: { binaryPath: 'codex' } });
     expect(next.profiles.codex?.permissions).toEqual({
       defaultAccess: 'full',
       maxAccess: 'full',

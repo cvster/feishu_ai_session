@@ -24,9 +24,8 @@ export function controlsForTool(root: Controls, toolId: AgentKind, scope?: strin
       if (key === 'profileConfig') return profile;
       if (key === 'cfg') return { ...target.cfg, agentKind: toolId,
         preferences: { ...target.cfg.preferences, model: profile.preferences.model, reasoningEffort: profile.preferences.reasoningEffort } };
-      if (toolId !== 'codex' && ['codexSubmissions', 'codexReplySync', 'codexUserInput'].includes(String(key))) return undefined;
-      if (key === 'workerInbox') return target.workerRuntimes?.get(toolId)?.inbox ?? (toolId === 'claude' ? target.workerInbox : undefined);
-      if (key === 'workerReplySync' || key === 'claudeReplySync') return target.workerRuntimes?.get(toolId)?.replies ?? (toolId === 'claude' ? target.claudeReplySync : undefined);
+      if (key === 'workerInbox') return target.workerRuntimes?.get(toolId)?.inbox;
+      if (key === 'workerReplySync' || key === 'claudeReplySync') return target.workerRuntimes?.get(toolId)?.replies;
       return Reflect.get(target, key, receiver);
     },
   });
@@ -39,7 +38,7 @@ export function toolForScope(controls: Controls, scope: string): AgentKind {
 }
 
 export async function routeCommandContext(ctx: CommandContext): Promise<CommandContext> {
-  if (!ctx.controls.toolRegistry) return ctx;
+  if (!ctx.controls.toolRegistry || !ctx.controls.toolRegistry.has(toolForScope(ctx.controls, ctx.scope))) return ctx;
   const id = toolForScope(ctx.controls, ctx.scope);
   const tool = ctx.controls.toolRegistry.get(id);
   const binding = ctx.controls.toolBindings?.get(ctx.scope);
@@ -47,6 +46,24 @@ export async function routeCommandContext(ctx: CommandContext): Promise<CommandC
   const controls = controlsForTool(ctx.controls, id, ctx.scope);
   const access = ctx.msg.chatType === 'p2p' ? canUseDm(controls.profileConfig, controls, ctx.msg.senderId) : canUseGroup(controls.profileConfig, controls, ctx.msg.chatId, ctx.msg.senderId);
   return { ...ctx, agent: tool.agent, controls,
-    sessionCatalogIdentity: await commandSessionCatalogIdentity({ msg: ctx.msg, scope: ctx.scope, mode: ctx.chatMode, workspaces: ctx.workspaces, controls, access }),
+    sessionCatalogIdentity: ctx.sessionCatalogIdentity?.agentId === id ? ctx.sessionCatalogIdentity : await commandSessionCatalogIdentity({ msg: ctx.msg, scope: ctx.scope, mode: ctx.chatMode, workspaces: ctx.workspaces, controls, access }),
     runExecutor: ctx.controls.executorForTool?.(id) ?? ctx.runExecutor };
+}
+
+/** Fail closed when a bound worker cannot confirm its native session state. */
+export async function isWorkerScopeArchived(controls: Controls, scope: string): Promise<boolean> {
+  const binding = controls.toolBindings?.get(scope);
+  if (!binding?.nativeId) return false;
+  const tool = controls.toolRegistry?.find(binding.toolId);
+  if (!tool || tool.sourceId !== binding.sourceId) throw new Error('会话 worker 身份不匹配');
+  const { DurableAgentAdapter } = await import('../worker/adapter');
+  if (!(tool.agent instanceof DurableAgentAdapter)) return false;
+  const health = await tool.agent.client.health();
+  if (health.capabilities?.conversation) return (await tool.agent.client.conversation(binding.nativeId)).archived;
+  if (health.capabilities?.sessions.list) {
+    const row = (await tool.listSessions()).find(row => row.nativeId === binding.nativeId);
+    if (!row && binding.nativeCreated !== false) throw new Error('无法确认原会话状态');
+    return row?.archived === true;
+  }
+  throw new Error('worker 不支持会话状态查询');
 }

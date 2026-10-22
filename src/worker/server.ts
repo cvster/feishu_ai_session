@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import * as lockfile from 'proper-lockfile';
 import type { AgentAdapter, AgentRun } from '../agent/types';
 import { JobStore, jobIdFor, submissionFingerprint } from './store';
-import { isJobActive, type WorkerJob, type WorkerSubmission, type WorkerSessionService } from './protocol';
+import { isJobActive, type WorkerJob, type WorkerSubmission, type WorkerSessionService, type WorkerManifest } from './protocol';
 import { handleWorkerToolRequest, workerCapabilities, readWorkerBody, WorkerApiError, type WorkerToolApi } from './tool-api';
 import { writeFileAtomic } from '../platform/atomic-write';
 
@@ -16,6 +16,7 @@ export interface WorkerServerOptions {
   botAppId: string;
   maxConcurrent?: number;
   sessions?: WorkerSessionService;
+  manifest?: WorkerManifest;
 }
 class HttpError extends WorkerApiError {
   constructor(status: number, message: string, retryable = status === 429 || status === 503) {
@@ -50,13 +51,27 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     const task = serial.then(fn); serial = task.catch(() => {}); return task;
   };
   const toolApi: WorkerToolApi = {
-    agent: options.agent, sessions: options.sessions, exclusive,
+    agent: options.agent, sessions: options.sessions ? { ...options.sessions,
+      ...(options.sessions.conversation ? { conversation: async (nativeId: string) => {
+        const snapshot = await options.sessions!.conversation!(nativeId);
+        return { ...snapshot, turns: snapshot.turns.map(turn => ({ ...turn, bridge: turn.bridge || store.list().some(job =>
+          store.snapshot(job.id)?.events.some(row => row.event.type === 'system' && (row.event.threadId ?? row.event.sessionId) === nativeId && row.event.turnId === turn.id)) })) };
+      } } : {}),
+      ...(options.sessions.questions ? { questions: async (nativeId: string) => {
+        const questions = await options.sessions!.questions!(nativeId);
+        return questions.map(question => {
+          const job = store.list().find(job => store.snapshot(job.id)?.events.some(row => row.event.type === 'system' &&
+            (row.event.threadId ?? row.event.sessionId) === nativeId && row.event.turnId === question.request.turnId));
+          return job ? { ...question, origin: 'worker' as const, delivery: job.options.delivery } : question;
+        });
+      } } : {}),
+    } : undefined, exclusive,
     connectionExclusive: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true,
     assertIdle(nativeId) {
       if (closing) throw new HttpError(503, '执行服务正在停止');
       const busy = nativeId === undefined ? tasks.size > 0 : store.list().some(job => {
         if (!isJobActive(job)) return false;
-        if ([job.options.sessionId, job.options.initialSessionId].includes(nativeId)) return true;
+        if ([job.options.threadId, job.options.sessionId, job.options.initialSessionId].includes(nativeId)) return true;
         return store.snapshot(job.id)?.events.some(row => row.event.type === 'system' &&
           (row.event.sessionId === nativeId || row.event.threadId === nativeId));
       });
@@ -66,13 +81,15 @@ export async function startWorkerServer(options: WorkerServerOptions) {
   const persistStatus = async (job: WorkerJob, status: WorkerJob['status'], error?: string) =>
     store.put({ ...job, status, updatedAt: Date.now(), ...(error ? { error } : {}) });
   const execute = async (job: WorkerJob): Promise<void> => {
-    const native = job.options.sessionId ?? job.options.initialSessionId;
+    const native = job.options.threadId ?? job.options.sessionId ?? job.options.initialSessionId;
+    let observedNative = native;
     let run: AgentRun | undefined;
     let terminal = false;
     let status: WorkerJob['status'] = 'failed';
     let lastActivityAt = Date.now();
     let timer: ReturnType<typeof setInterval> | undefined;
     let timeout = false;
+    let waitingForInput = false;
     try {
       if (stopped.has(job.id)) { status = 'interrupted'; return; }
       await options.agent.prepareRun?.(job.options);
@@ -82,6 +99,8 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       run = options.agent.run({ ...job.options, runId: job.id }); runs.set(job.id, run);
       if (job.options.idleTimeoutMs) {
         timer = setInterval(() => {
+          const promptWaiting = !!observedNative && options.sessions?.waitingForInput?.(observedNative);
+          if (waitingForInput || promptWaiting) { lastActivityAt = Date.now(); return; }
           if (Date.now() - lastActivityAt >= job.options.idleTimeoutMs! && !timeout) {
             timeout = true; void run!.stop().catch(() => {});
           }
@@ -89,6 +108,19 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       }
       for await (const event of run.events) {
         lastActivityAt = Date.now();
+        if (event.type === 'system') {
+          observedNative = event.threadId ?? event.sessionId ?? observedNative;
+          if (observedNative) nativeLeases.add(observedNative);
+        }
+        if (event.type === 'user_input') {
+          waitingForInput = event.prompt.request.isBlocking;
+          options.sessions?.receiveInput?.({ ...event.prompt, respond: async answers => {
+            const accepted = await event.prompt.respond(answers);
+            if (accepted) { waitingForInput = false; lastActivityAt = Date.now(); }
+            return accepted;
+          } });
+        }
+        if (event.type === 'user_input_resolved') { waitingForInput = false; lastActivityAt = Date.now(); }
         await store.append(job.id, event.type === 'done' && timeout ? { ...event, terminationReason: 'timeout' } : event);
         if (event.type === 'done' || event.type === 'error') {
           terminal = true;
@@ -112,6 +144,7 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       await persistStatus(job, status);
       runs.delete(job.id); tasks.delete(job.id); stopped.delete(job.id);
       if (native) nativeLeases.delete(native);
+      if (observedNative) nativeLeases.delete(observedNative);
     }
   };
   const submit = async (input: WorkerSubmission): Promise<WorkerJob> => exclusive(async () => {
@@ -127,7 +160,7 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     const delivery = input.options.delivery;
     if (delivery?.messageIds?.length && store.list().some(job => job.options.delivery?.scope === delivery.scope &&
       job.options.delivery?.messageIds?.some(id => delivery.messageIds!.includes(id)))) throw new HttpError(409, '消息已由原任务接收，未重复执行；请重新发送本次新增内容');
-    const native = input.options.sessionId ?? input.options.initialSessionId;
+    const native = input.options.threadId ?? input.options.sessionId ?? input.options.initialSessionId;
     if (tasks.size >= (options.maxConcurrent ?? 2)) throw new HttpError(429, '执行服务已达到并发上限');
     if ((native && nativeLeases.has(native)) || store.list().some(job => isJobActive(job) && input.options.delivery && job.options.delivery?.scope === input.options.delivery.scope)) throw new HttpError(409, '该会话已有任务运行', true);
     const job: WorkerJob = { ...input, options: { ...input.options, runId: id }, version: 1, id, fingerprint, status: 'accepted', createdAt: Date.now(), updatedAt: Date.now() };
@@ -150,7 +183,7 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     // Compute transport exclusivity dynamically for capability changes in adapters.
     toolApi.connectionExclusive = 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true;
     if (await handleWorkerToolRequest(req, res, url, toolApi)) return;
-    if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { version: 1, toolId: options.agent.id, sourceId: options.sourceId, botAppId: options.botAppId, capabilities: workerCapabilities(toolApi), nativeReasoningEfforts: true, ...(options.agent.id === 'zcode' ? { zcodeRegistryResume: true, zcodeNativeStop: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.stopNativeTurn === 'function', zcodeSessionNames: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.renameSession === 'function', zcodeDesktopRemote: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true, zcodeDesktopRemoteConfigId: 'desktopRemoteConfigId' in options.agent ? options.agent.desktopRemoteConfigId : undefined } : {}), ...(options.agent.id === 'kilo' ? { kiloEditorSync: true, kiloDesktopSync: true, kiloNativeInputOrigin: true } : {}) });
+    if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { version: 1, toolId: options.agent.id, sourceId: options.sourceId, botAppId: options.botAppId, manifest: options.manifest ?? { label: options.agent.displayName, nativeField: 'sessionId', sessionKind: 'native-session', historyFormat: 'json', nativeHistory: false }, capabilities: workerCapabilities(toolApi), nativeReasoningEfforts: true, ...(options.agent.id === 'zcode' ? { zcodeRegistryResume: true, zcodeNativeStop: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.stopNativeTurn === 'function', zcodeSessionNames: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true && typeof options.agent.renameSession === 'function', zcodeDesktopRemote: 'desktopRemoteEnabled' in options.agent && options.agent.desktopRemoteEnabled === true, zcodeDesktopRemoteConfigId: 'desktopRemoteConfigId' in options.agent ? options.agent.desktopRemoteConfigId : undefined } : {}), ...(options.agent.id === 'kilo' ? { kiloEditorSync: true, kiloNativeInputOrigin: true } : {}) });
     if (req.method === 'GET' && url.pathname === '/jobs') return reply(res, 200, store.list());
     if (req.method === 'POST' && url.pathname === '/jobs') {
       return reply(res, 200, await submit(await readWorkerBody(req, 2_000_000) as unknown as WorkerSubmission));
@@ -186,6 +219,7 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       await Promise.allSettled([...tasks.values()]); await closed;
       const endpoint = JSON.parse(await readFile(endpointFile, 'utf8'));
       if (endpoint.token === token) await unlink(endpointFile);
+      await options.sessions?.close?.();
       await release();
     },
   };

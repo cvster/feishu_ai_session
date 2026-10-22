@@ -10,106 +10,18 @@ import { createDefaultProfileConfig } from '../../../src/config/profile-schema.j
 import { createRuntimeProfileConfig } from '../../../src/runtime/profile-runtime.js';
 
 describe('start runtime agent factory', () => {
-  it('constructs a primary DSH adapter with its native runtime settings', () => {
-    const dsh = { binaryPath: '/native/dsh', homeDir: '/native/home', args: ['--patch', '/native/profile.yml'] };
-    const agent = createRuntimeAgent(createDefaultProfileConfig({ agentKind: 'dsh', accounts: appAccount(), dsh }), { profileDir: tmpdir() });
-    expect(agent.id).toBe('dsh');
-    expect(agent.displayName).toBe('DeepSeek Harness');
-    expect((agent as unknown as { options: unknown }).options).toMatchObject({ binary: dsh.binaryPath, homeDir: dsh.homeDir, args: dsh.args });
+  it.each(['claude', 'codex', 'kilo', 'zcode', 'dsh', 'custom'])('constructs only a worker transport for %s', toolId => {
+    const agent = createRuntimeAgent(createDefaultProfileConfig({ agentKind: toolId, accounts: appAccount() }), { profileDir: tmpdir() });
+    expect(agent.id).toBe(toolId);
+    expect((agent as import('../../../src/worker/adapter').DurableAgentAdapter).client.stateDir).toBe(join(tmpdir(), 'workers', toolId));
+    expect('binary' in agent).toBe(false);
   });
-  beforeEach(() => {
-    // The host's service override must not change the default-path fixture.
-    vi.stubEnv('LARK_CHANNEL_CODEX_BIN', undefined);
+  it('bootstraps without provider configuration or an installed CLI', () => {
+    vi.stubEnv('LARK_CHANNEL_CODEX_BIN', '/unavailable');
+    const profile = createRuntimeProfileConfig({ agentKind: 'kilo', accounts: appAccount() });
+    expect(profile.codex).toBeUndefined(); expect(profile.kilo).toBeUndefined();
+    vi.unstubAllEnvs();
   });
-
-  afterEach(() => vi.unstubAllEnvs());
-
-  it('keeps Claude as the default runtime agent', () => {
-    const agent = createRuntimeAgent(
-      createDefaultProfileConfig({
-        agentKind: 'claude',
-        accounts: appAccount(),
-      }),
-      { profileDir: tmpdir() },
-    );
-
-    expect(agent.id).toBe('claude');
-    expect(agent.displayName).toBe('Claude Code');
-  });
-
-  it('creates the Kilo runtime without falling back to Claude or Codex', () => {
-    const profile = createDefaultProfileConfig({ agentKind: 'kilo', accounts: appAccount(), kilo: { binaryPath: '/native/kilo', dataHome: '/native/data-home', editorSync: false, preferredClient: 'desktop' } });
-    const agent = createRuntimeAgent(profile, { profileDir: tmpdir() });
-    expect(agent.id).toBe('kilo');
-    expect(agent.displayName).toBe('Kilo');
-    expect((agent as unknown as { options: unknown }).options).toMatchObject({ editorSync: false, preferredClient: 'desktop' });
-  });
-
-  it('creates CodexAdapter from canonical workspace permissions', () => {
-    const profile = createDefaultProfileConfig({
-      agentKind: 'codex',
-      accounts: appAccount(),
-      codex: codexConfig(),
-      permissions: { defaultAccess: 'workspace', maxAccess: 'workspace' },
-    });
-    const agent = createRuntimeAgent(profile, {
-      profileDir: '/tmp/lark-channel-bridge/profiles/codex-e2e',
-    });
-
-    expect(agent.id).toBe('codex');
-    expect(agent.displayName).toBe('Codex CLI');
-    expect(profile.permissions).toEqual({
-      defaultAccess: 'workspace',
-      maxAccess: 'workspace',
-    });
-    expect(profile.sandbox).toMatchObject({
-      defaultMode: 'workspace-write',
-      maxMode: 'workspace-write',
-    });
-  });
-
-  it('creates a Codex runtime agent when an older profile has only a binary path', () => {
-    const agent = createRuntimeAgent(
-      createDefaultProfileConfig({
-        agentKind: 'codex',
-        accounts: appAccount(),
-        codex: { binaryPath: '/usr/local/bin/codex' },
-      }),
-      { profileDir: '/tmp/lark-channel-bridge/profiles/codex-e2e' },
-    );
-
-    expect(agent.id).toBe('codex');
-    expect(agent.displayName).toBe('Codex CLI');
-  });
-
-  it('seeds a default Codex binary when bootstrapping a new Codex profile', () => {
-    const profile = createRuntimeProfileConfig({
-      agentKind: 'codex',
-      accounts: appAccount(),
-    });
-
-    expect(profile.codex?.binaryPath).toBe('codex');
-  });
-
-  it('uses the environment binary override when no binary is configured', () => {
-    vi.stubEnv('LARK_CHANNEL_CODEX_BIN', '/fixture/codex-override');
-    const profile = createRuntimeProfileConfig({
-      agentKind: 'codex', accounts: appAccount(),
-    });
-
-    expect(profile.codex?.binaryPath).toBe('/fixture/codex-override');
-  });
-
-  it('preserves an explicitly configured binary ahead of the environment default', () => {
-    vi.stubEnv('LARK_CHANNEL_CODEX_BIN', '/fixture/codex-override');
-    const profile = createRuntimeProfileConfig({
-      agentKind: 'codex', accounts: appAccount(),
-      codex: { binaryPath: '/fixture/configured-codex' },
-    });
-
-    expect(profile.codex?.binaryPath).toBe('/fixture/configured-codex');
-  });
-
   it('updates the process registry before releasing the old app lock during reconnect', async () => {
     const source = await readFile(join(process.cwd(), 'src/cli/commands/start.ts'), 'utf8');
     const restartStart = source.indexOf('async restart()');

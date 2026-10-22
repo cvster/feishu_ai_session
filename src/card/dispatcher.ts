@@ -93,10 +93,11 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   }
 
   // Native replies use their original RPC; async replies steer the exact turn.
-  if (typeof payload.__codex_input === 'string') {
+  if (typeof payload.__worker_input === 'string' || typeof payload.__codex_input === 'string') {
     try {
-      if (!deps.controls.codexUserInput) throw new Error('交互监听器未启动，请在桌面回答');
-      await deps.controls.codexUserInput.handleAction(scope, deps.evt.messageId, payload.__codex_input, formValue);
+      const handler = deps.controls.workerQuestions;
+      if (!handler) throw new Error('交互监听器未启动，请在工具界面回答');
+      await handler.handleAction(scope, deps.evt.messageId, String(payload.__worker_input ?? payload.__codex_input), formValue);
     } catch (err) {
       const message = err instanceof Error ? err.message : '回答提交失败，请在桌面重试';
       log.warn('codex-input', 'callback-rejected', { scope }); // never log form values
@@ -148,10 +149,6 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     try {
       const scopedCtx = await routeCommandContext(ctx);
       const ok = await runCommandHandler(name ?? '', args, scopedCtx);
-      if (ok && !scopedCtx.controls.codexSubmissions && (cmd === 'stop' || cmd === 'panel.stop')) {
-        const dropped = deps.pending.cancel(scope);
-        if (dropped.length) await scopedCtx.controls.workerInbox?.reject(scope, dropped);
-      }
       if (!ok) log.warn('cardAction', 'unknown', { cmd });
     } catch (err) {
       log.fail('cardAction', err, { cmd });

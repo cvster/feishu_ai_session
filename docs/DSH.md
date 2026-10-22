@@ -14,18 +14,20 @@ dsh web
 
 在 DSH 的模型设置页配置自己的供应商、API 凭据和默认模型。安装本身不包含模型授权或额度；模型目录可见也不表示账号可实际调用。桥接不自动复制其他工具的 API key。
 
-DSH 默认读取 `~/.dsh`，也支持原生 `DSH_HOME`。桥接配置可选：
+DSH 默认读取 `~/.dsh`，也支持原生 `DSH_HOME`。可在 `profiles/<profile>/workers/dsh/config.json` 配置：
 
 ```json
 {
-  "dsh": {
+  "version": 1,
+  "toolId": "dsh",
+  "options": {
     "binaryPath": "/absolute/path/to/dsh",
     "homeDir": "/home/you/.dsh"
   }
 }
 ```
 
-可选 `args` 原样放在 DSH 启动参数之前，可用于原生 `--patch` 配置；供应商和凭据仍由 DSH 管理，不放进桥接仓库。桥接和 worker 必须使用同一个 `homeDir`，不要在已有群上切换数据源。二进制选择顺序为 profile 配置、`LARK_CHANNEL_DSH_BIN`、PATH 中的 `dsh`。
+可选 `args` 原样放在 DSH 启动参数之前，可用于原生 `--patch` 配置；供应商和凭据仍由 DSH 管理，不放进桥接仓库。桥接从 worker 读取数据源身份，不要在已有群上切换数据源。二进制选择顺序为 worker 配置、`LARK_CHANNEL_DSH_BIN`、PATH 中的 `dsh`。旧 profile 的 `dsh` 字段仅在首次迁移时导入。
 
 ## 独立 worker 与使用
 
@@ -37,7 +39,7 @@ node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool dsh
 node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool dsh
 ```
 
-Linux 服务为 `lark-channel-worker.dsh.my-bot.service`，状态目录为 profile 下的 `execution-worker-dsh`。其他系统可用 `worker run --profile my-bot --tool dsh` 自行托管。新增 DSH 只需启动它的 worker、更新桥接；已有 Claude、ZCode、Kilo worker 不需要重启。
+Linux 服务为 `lark-channel-worker.dsh.my-bot.service`，状态目录为 profile 下的 `workers/dsh`。其他系统可用 `worker run --profile my-bot --tool dsh` 自行托管。新增 DSH 只需启动它的 worker、更新桥接；已有 Claude、ZCode、Kilo worker 不需要重启。
 
 私聊机器人选择“新建会话”→ **DeepSeek Harness** → 项目目录。已有 DSH 会话改为 `AA` 开头也可自动建群。使用独立的蓝底 DSH 鲸鱼头像，支持停止和复制会话按钮。工作群、共用原会话的共享群、AI助手私聊群、权限确认与 A2A 复用现有机制，不需新增飞书权限。
 

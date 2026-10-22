@@ -1,3 +1,4 @@
+import { toolDefinition } from '../tools/definitions';
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -209,8 +210,6 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
       capability,
       profileConfig: controls.profileConfig,
       now: Date.now(),
-      codexHome: controls.profileConfig.codex?.codexHome,
-      inheritCodexHome: controls.profileConfig.codex?.inheritCodexHome,
       ...(typeof commentTimeoutMs === 'number' ? { ttlMs: commentTimeoutMs } : {}),
     });
     if (!policy.ok) {
@@ -241,11 +240,11 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
           })
         : undefined;
       const sessionId =
-        canResumeAgentSession && capability.agentId === 'claude'
+        canResumeAgentSession && toolDefinition(capability.agentId).nativeField === 'sessionId'
           ? sessions.resumeFor(docSessionScopeId, cwdRealpath) ??
             sessions.resumeFor(legacyDocSessionScopeId, cwdRealpath)
           : undefined;
-      const threadId = capability.agentId === 'codex' ? catalogEntry?.threadId : undefined;
+      const threadId = toolDefinition(capability.agentId).nativeField === 'threadId' ? catalogEntry?.threadId : undefined;
       log.info('comment', 'session', {
         commentScopeId: runScopeId,
         sessionScopeId: agentSessionScopeId,
@@ -327,7 +326,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
             policy,
             event: e,
           });
-          if (capability.agentId === 'claude' && e.type === 'system' && e.sessionId) {
+          if (toolDefinition(capability.agentId).nativeField === 'sessionId' && e.type === 'system' && e.sessionId) {
             sessions.set(docSessionScopeId, e.sessionId, policy.cwdRealpath);
           }
           switch (e.type) {

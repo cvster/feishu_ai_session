@@ -1,5 +1,4 @@
 import type { AgentAdapter, AgentBotIdentity, AgentEvent, AgentRun, AgentRunOptions } from '../agent/types';
-import { resolveReasoningEffort } from '../agent/models';
 import { RunRejected } from '../runtime/errors';
 import { WorkerClient, WorkerRequestError } from './client';
 import { isJobActive } from './protocol';
@@ -8,44 +7,24 @@ import { jobIdFor } from './store';
 /** Execution belongs to the worker; this object owns only a detachable observer. */
 export class DurableAgentAdapter implements AgentAdapter {
   get id(): string { return this.client.toolId; }
-  get displayName(): string { return this.cli.displayName; }
+  get displayName(): string { return this.cli?.displayName ?? this.id; }
   private identity?: AgentBotIdentity;
-  constructor(readonly client: WorkerClient, private readonly cli: AgentAdapter) {}
+  constructor(readonly client: WorkerClient, private readonly cli?: Pick<AgentAdapter, 'displayName'> & Partial<AgentAdapter>) {}
   setBotIdentity(identity: AgentBotIdentity): void { this.identity = identity; }
-  async isAvailable(): Promise<boolean> {
-    if (!await this.cli.isAvailable()) return false;
-    return this.client.health().then(() => true, () => false);
+  async isAvailable(): Promise<boolean> { return this.client.health().then(() => true, () => false); }
+  async listModels(options?: { cwd?: string }) { await this.prepareRun(); return this.client.models(options?.cwd); }
+  async prepareRun(_options?: AgentRunOptions): Promise<void> {
+    try {
+      const health = await this.client.health();
+      if (!health.capabilities?.jobs.submit || !health.capabilities.jobs.eventCursor)
+        throw new Error('Worker API incompatible');
+    } catch { throw new RunRejected('execution-worker-unavailable', `${this.displayName} 执行服务不可用或版本不兼容，请启动或升级对应 worker。`); }
   }
-  async listModels(options?: { cwd?: string }) {
-    const capabilities = await this.client.capabilities();
-    if (capabilities) { await this.prepareRun(); return this.client.models(options?.cwd); }
-    // Installed v1 workers only expose paired ZCode models. Preserve that
-    // compatibility path until the worker is upgraded independently.
-    if (this.id === 'zcode' && 'desktopRemoteEnabled' in this.cli && this.cli.desktopRemoteEnabled === true) {
-      await this.prepareRun(); return this.client.models(options?.cwd);
-    }
-    if (!this.cli.listModels) throw new Error('工具未提供原生模型列表');
-    return this.cli.listModels(options);
-  }
-  async prepareRun(options?: AgentRunOptions): Promise<void> {
-    let capabilities;
-    try { capabilities = await this.client.health(); }
-    catch { throw new RunRejected('execution-worker-unavailable', `${this.displayName} 执行服务不可用，本次请求未执行。请先启动对应工具的独立 worker 服务。`); }
-    if (this.id === 'zcode' && !capabilities?.zcodeRegistryResume) throw new RunRejected('model-unavailable', 'ZCode worker 尚未升级到保留原会话供应商的版本，本次未执行。请单独升级 ZCode worker。');
-    if (this.id === 'kilo' && (!capabilities?.kiloEditorSync || !capabilities?.kiloDesktopSync || !capabilities?.kiloNativeInputOrigin)) throw new RunRejected('model-unavailable', 'Kilo worker 尚未升级到编辑器和桌面 App 实时同步版本（含消息来源标记），本次未执行。请单独升级 Kilo worker。');
-    if (this.id === 'zcode' && 'desktopRemoteEnabled' in this.cli && (
-      (this.cli.desktopRemoteEnabled === true) !== (capabilities?.zcodeDesktopRemote === true) ||
-      (this.cli.desktopRemoteEnabled === true && 'desktopRemoteConfigId' in this.cli && this.cli.desktopRemoteConfigId !== capabilities?.zcodeDesktopRemoteConfigId)
-    )) throw new RunRejected('execution-worker-unavailable', 'ZCode worker 的桌面配对模式与配置不一致，请单独升级或重启 ZCode worker；本次未执行。');
-    if (this.id === 'zcode' && capabilities?.zcodeDesktopRemote && options?.sessionName && !options.sessionId && !capabilities.zcodeSessionNames)
-      throw new RunRejected('execution-worker-unavailable', 'ZCode worker 尚未升级到原生会话命名版本，请单独升级；本次未创建会话。');
-    const effort = resolveReasoningEffort(options?.reasoningEffort);
-    // Old Claude workers preserve these exact tokens, but coerce unknown levels to high.
-    const legacySafe = this.id === 'claude' && ['low', 'medium', 'high', 'xhigh', 'max'].includes(effort ?? '');
-    if (effort && !legacySafe && !capabilities?.nativeReasoningEfforts) {
-      throw new RunRejected('model-unavailable', '对应 worker 版本尚不支持该原生推理档位。请单独升级该 worker，或选择跟随工具默认。');
-    }
-  }
+  async renameSession(id: string, name: string, cwd: string) { await this.client.renameSession(id, name, cwd); }
+  async setThreadName(id: string, name: string) { await this.client.renameSession(id, name); }
+  async archiveThread(id: string) { await this.client.archiveSession(id); }
+  async forkThread(id: string) { const value = await this.client.forkSession(id); return { ...value, threadId: value.nativeId }; }
+  async stopNativeTurn(id: string, turnId: string, cwd: string) { return this.client.stopNativeTurn(id, turnId, cwd); }
   run(options: AgentRunOptions): AgentRun {
     const requestKey = options.requestKey ?? options.runId;
     const id = jobIdFor(requestKey);

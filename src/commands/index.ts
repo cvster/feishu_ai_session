@@ -6,9 +6,8 @@ import type { ToolRegistry } from '../tools/types';
 import { isPersonalWorkgroup, PersonalBindingConflict, type ToolBindingStore } from '../tools/bindings';
 import type { CopiedSessionSource } from '../tools/bindings';
 import { currentCopySource, readCopiedSession, sessionCopyChoice, showSessionCopyMenu } from './session-copy';
+import { DurableAgentAdapter } from '../worker/adapter';
 import { randomUUID } from 'node:crypto';
-import { CodexQueueContinuationError, stopCodexSubmissions, stopScopedCodexSubmissions, waitForCodexIntake } from '../bot/codex-submission-stop';
-import { resolveSharedCodexEndpoint } from '../../packages/codex-core/src/queue';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute } from 'node:path';
@@ -85,7 +84,6 @@ import { log, reportMetric } from '../core/logger';
 import { renderCard } from '../card/run-renderer';
 import type { RunControlIcons } from '../card/run-control-icons';
 import { refreshLiveRunCard } from '../card/run-refresh';
-import { codexTurnRunState } from '../card/codex-turn-state';
 import {
   finalizeIfRunning,
   initialState,
@@ -94,14 +92,11 @@ import {
   reduce,
   type RunState,
 } from '../card/run-state';
-import { formatRelTime, listRecentSessions, type SessionSummary } from '../session/history';
+import { formatRelTime, type SessionSummary } from '../session/history';
 import {
-  listCodexThreadHistory,
   type CodexThreadHistoryEntry,
   type ListCodexThreadHistoryOptions,
 } from '../session/codex-history';
-import { CodexThreadReader } from '../session/codex-thread-reader';
-import { isProvisionalInterruptedTurn } from '../session/codex-turn-status';
 import type { SessionCatalog, SessionCatalogIdentity } from '../session/catalog';
 import { isAlive, readAndPrune, resolveTarget } from '../runtime/registry';
 import type { SessionStore } from '../session/store';
@@ -118,6 +113,7 @@ import { applyLarkCliIdentityPolicy, hasStructuredLarkCliUserAuth } from '../lar
 
 export interface Controls {
   /** Reuse normal intake, authorization, durable queue and reply delivery for user-requested card messages. */
+  refreshWorkerDiscovery?(): Promise<void>;
   submitMessage?(message: NormalizedMessage): Promise<void>;
   auxiliary?: import('../bot/auxiliary-groups').AuxiliaryGroups;
   auxiliaryApprovals?: import('../bot/auxiliary-approvals').AuxiliaryApprovals;
@@ -128,6 +124,7 @@ export interface Controls {
   workerRuntimes?: Map<ToolId, { inbox: import('../worker/inbox').WorkerInbox; replies?: { runNow(): Promise<void>; stopScope(scope: string): Promise<boolean> } }>;
   workerReplySync?: { runNow(): Promise<void>; stopScope(scope: string): Promise<boolean> };
   claudeReplySync?: { runNow(): Promise<void>; stopScope(scope: string): Promise<boolean> };
+  workerQuestions?: { handleAction(scope: string, messageId: string, token: string, form?: Record<string, unknown>): Promise<void> };
   workerInbox?: import('../worker/inbox').WorkerInbox;
   codexSubmissions?: import('../session/codex-submissions').CodexSubmissionStore;
   codexUserInput?: import('../bot/codex-user-input').CodexInputHandle;
@@ -490,6 +487,7 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
       ),
       ctx.controls.profileConfig.preferences.reasoningEffort ?? DEFAULT_REASONING,
       ctx.controls.toolRegistry?.all().map(tool => ({ id: tool.id, label: tool.label })),
+      ctx.controls.defaultToolId ?? ctx.controls.profileConfig.agentKind,
     );
     await sendManagedCard(ctx.channel, ctx.msg.chatId, card, commandReplyOptions(ctx));
     return;
@@ -525,7 +523,7 @@ function resetNativeReservation(ctx: CommandContext): void {
   const binding = ctx.controls.toolBindings?.get(ctx.scope);
   if (!binding) return;
   if (binding.nativeId) ctx.controls.toolBindings!.archive(binding.toolId, binding.sourceId, binding.nativeId);
-  const tool = ctx.controls.toolRegistry?.get(binding.toolId);
+  const tool = ctx.controls.toolRegistry?.find(binding.toolId);
   ctx.controls.toolBindings!.set(ctx.scope, { ...binding, nativeId: tool?.reserveSessionId?.(), nativeCreated: false });
 }
 
@@ -690,6 +688,7 @@ const PANEL_ACTION_SETTLE_MS = 1000;
 
 async function showExistingSessionsPanel(ctx: CommandContext, page: number): Promise<void> {
   if (ctx.chatMode !== 'p2p') { await reply(ctx, '请在机器人私聊控制台中管理现有会话。'); return; }
+  await ctx.controls.refreshWorkerDiscovery?.();
   let history: (CodexThreadHistoryEntry & { toolId?: ToolId; sourceId?: string })[];
   if (ctx.controls.toolRegistry) {
     history = [];
@@ -702,7 +701,7 @@ async function showExistingSessionsPanel(ctx: CommandContext, page: number): Pro
       } catch (err) { log.warn('panel', 'history-unavailable', { toolId: tool.id, err: errorText(err) }); }
     }
     history.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-  } else history = await listCodexPanelHistory(ctx, 60);
+  } else history = [];
   const start = page * PANEL_PAGE_SIZE;
   const slice = history.slice(start, start + PANEL_PAGE_SIZE);
   const entries: ExistingSessionCardEntry[] = slice.map((thread) => ({
@@ -756,7 +755,7 @@ async function createGroupForPanelSession(
   options: { exactName?: boolean; forked?: boolean; recentTurnReplayCount?: number } = {},
 ): Promise<boolean> {
   const target = panelCandidate(ctx, token, 'session');
-  const tool = target && ctx.controls.toolRegistry?.get(target.toolId ?? 'codex');
+  const tool = target && ctx.controls.toolRegistry?.find(target.toolId ?? ctx.controls.profileConfig.agentKind);
   const create = () => createGroupForPanelSessionUnlocked(ctx, token, options);
   return target && tool && ctx.controls.toolBindings
     ? ctx.controls.toolBindings.withPersonalBinding({ toolId: tool.id, sourceId: tool.sourceId, nativeId: target.threadId }, create)
@@ -773,8 +772,8 @@ async function createGroupForPanelSessionUnlocked(
     await reply(ctx, '此会话操作已过期，请刷新“现有会话”后重试。');
     return false;
   }
-  const toolId = target.toolId ?? 'codex';
-  const tool = ctx.controls.toolRegistry?.get(toolId);
+  const toolId = target.toolId ?? ctx.controls.profileConfig.agentKind;
+  const tool = ctx.controls.toolRegistry?.find(toolId);
   ctx = { ...ctx, agent: tool?.agent ?? ctx.agent, controls: controlsForTool(ctx.controls, toolId) };
   if (target.sourceId && tool?.sourceId !== target.sourceId) throw new Error('会话数据来源已变化');
   if (tool && !await tool.agent.isAvailable()) {
@@ -782,9 +781,7 @@ async function createGroupForPanelSessionUnlocked(
     return false;
   }
   try {
-    if ((toolId === 'codex' && ctx.sessionCatalog?.isThreadArchived(target.threadId)) ||
-        (tool && ctx.controls.toolBindings?.isArchived(toolId, tool.sourceId, target.threadId)) ||
-        await ctx.controls.codexReplySync?.isThreadArchived?.(target.threadId)) {
+    if (tool && (ctx.controls.toolBindings?.isArchived(toolId, tool.sourceId, target.threadId) || (await tool.listSessions()).find(row => row.nativeId === target.threadId)?.archived)) {
       await reply(ctx, '会话已归档，不会为此会话创建群。');
       return false;
     }
@@ -819,9 +816,14 @@ async function createGroupForPanelSessionUnlocked(
     ? target.name
     : uniqueSessionGroupName(target.name || target.preview,
       (await refreshKnownChatsForNaming(ctx)).map((chat) => chat.name));
-  if (toolId === 'codex' && ctx.sessionCatalog?.isThreadArchived(target.threadId)) {
-    await reply(ctx, '会话已归档，不会为此会话创建群。');
-    return false;
+  // Naming may involve a network lookup. Recheck before creating a binding.
+  if (tool) {
+    try {
+      if (ctx.controls.toolBindings?.isArchived(toolId, tool.sourceId, target.threadId) ||
+          (await tool.listSessions()).find(row => row.nativeId === target.threadId)?.archived) {
+        await reply(ctx, '会话已归档，不会为此会话创建群。'); return false;
+      }
+    } catch { await reply(ctx, '暂时无法确认会话归档状态，请稍后重试。'); return false; }
   }
   let created;
   try {
@@ -878,28 +880,16 @@ function managedKnownChats(ctx: CommandContext, chats: KnownChat[]): KnownChat[]
 async function archivePanelSession(ctx: CommandContext, token: string): Promise<void> {
   const target = panelCandidate(ctx, token, 'session');
   if (!target) return reply(ctx, '此会话操作已过期，请刷新“现有会话”后重试。');
-  const toolId = target.toolId ?? 'codex';
-  const tool = ctx.controls.toolRegistry?.get(toolId);
-  if (target.sourceId && tool?.sourceId !== target.sourceId) throw new Error('会话数据来源已变化');
-  if (toolDefinition(toolId).backend === 'worker') {
-    if (!tool || !ctx.controls.toolBindings) return reply(ctx, `${toolDefinition(toolId).label} 会话来源未配置`);
-    ctx.controls.toolBindings.archive(toolId, tool.sourceId, target.threadId);
-    ctx.sessionCatalog?.archiveNativeSession(toolId, target.threadId, tool.sourceId, true);
-    for (const row of ctx.sessionCatalog?.entries() ?? []) if (row.agentId === toolId && row.sessionId === target.threadId && (!row.sourceId || row.sourceId === tool.sourceId)) ctx.sessionCatalog?.archiveScope(row.scopeId, target.threadId);
-    await Promise.all([ctx.controls.toolBindings.flush(), ctx.sessionCatalog?.flush()]);
-    panelCandidates.delete(token); await reply(ctx, `✓ ${toolDefinition(toolId).label} 会话已在桥接中归档，原生历史保留。`); return;
-  }
-  const selectedAgent = tool?.agent ?? ctx.agent;
-  if (!selectedAgent.archiveThread) return reply(ctx, '当前 Codex 适配器不支持归档会话。');
-  try {
-    await selectedAgent.archiveThread(target.threadId);
-    ctx.sessionCatalog?.archiveCodexThread(target.threadId);
-    await ctx.sessionCatalog?.flush();
-    panelCandidates.delete(token);
-    await reply(ctx, `✓ 会话 \`${target.threadId.slice(0, 8)}…\` 已归档，完整记录仍然保留。`);
-  } catch (err) {
-    await reply(ctx, `❌ 会话归档失败：${errorText(err)}`);
-  }
+  const toolId = target.toolId ?? ctx.controls.profileConfig.agentKind;
+  const tool = ctx.controls.toolRegistry?.find(toolId);
+  if (!tool || !ctx.controls.toolBindings || (target.sourceId && target.sourceId !== tool.sourceId)) throw new Error('会话来源已变化');
+  if (tool.sessions?.nativeArchive) await tool.sessions.archive(target.threadId);
+  ctx.controls.toolBindings.archive(toolId, tool.sourceId, target.threadId);
+  ctx.sessionCatalog?.archiveNativeSession(toolId, target.threadId, tool.sourceId, true);
+  for (const row of ctx.sessionCatalog?.entries() ?? []) if (row.agentId === toolId && (row.sessionId ?? row.threadId) === target.threadId && (!row.sourceId || row.sourceId === tool.sourceId)) ctx.sessionCatalog?.archiveScope(row.scopeId, target.threadId);
+  await Promise.all([ctx.controls.toolBindings.flush(), ctx.sessionCatalog?.flush()]);
+  await ctx.controls.sessionArchiveNotifications?.flush();
+  panelCandidates.delete(token); await reply(ctx, `✓ ${tool.label} 会话已归档，历史保留。`);
 }
 
 function usesArchiveNotification(ctx: CommandContext, scope: string, nativeId?: string): boolean {
@@ -914,35 +904,23 @@ function usesArchiveNotification(ctx: CommandContext, scope: string, nativeId?: 
 async function finishPanelGroup(ctx: CommandContext, token: string): Promise<void> {
   const target = panelCandidate(ctx, token, 'group');
   if (!target) return reply(ctx, '此工作群操作已过期，请刷新“工作群”后重试。');
-  const scopes = ctx.activeRuns.scopes().filter(
-    (scope) => scope === target.chatId || scope.startsWith(`${target.chatId}:`),
-  );
+  const scopes = ctx.activeRuns.scopes().filter(scope => scope === target.chatId || scope.startsWith(`${target.chatId}:`));
   await ctx.activeRuns.stopScopes(scopes);
   const binding = ctx.controls.toolBindings?.get(target.chatId);
-  const notified = usesArchiveNotification(ctx, target.chatId, target.threadId ?? binding?.nativeId);
-  const toolId = target.toolId ?? binding?.toolId ?? 'codex';
-  if (toolDefinition(toolId).backend === 'worker' && scopes.length === 0) await controlsForTool(ctx.controls, toolId).workerReplySync?.stopScope(target.chatId);
-  const selectedAgent = ctx.controls.toolRegistry?.get(toolId).agent ?? ctx.agent;
-  if (toolDefinition(toolId).backend === 'worker' && binding) {
-    const nativeId = target.threadId ?? binding.nativeId;
-    if (nativeId) ctx.controls.toolBindings!.archive(toolId, binding.sourceId, nativeId);
-    ctx.sessionCatalog?.archiveScope(target.chatId, nativeId ?? `pending-${toolId}`, true);
-    await ctx.controls.toolBindings!.flush();
+  const nativeId = target.threadId ?? binding?.nativeId;
+  const notified = usesArchiveNotification(ctx, target.chatId, nativeId);
+  const toolId = target.toolId ?? binding?.toolId ?? ctx.controls.profileConfig.agentKind;
+  if (scopes.length === 0) await controlsForTool(ctx.controls, toolId).workerReplySync?.stopScope(target.chatId);
+  const tool = ctx.controls.toolRegistry?.find(toolId);
+  if (nativeId && tool?.sessions?.nativeArchive) {
+    try { await tool.sessions.archive(nativeId); }
+    catch (error) { await reply(ctx, `❌ 会话归档失败，群保持不变：${errorText(error)}`); return; }
   }
-  if (target.threadId && toolId === 'codex' && selectedAgent.archiveThread) {
-    try {
-      await selectedAgent.archiveThread(target.threadId);
-    } catch (err) {
-      await reply(ctx, `❌ Codex 会话归档失败，群保持不变：${errorText(err)}`);
-      return;
-    }
-    ctx.sessionCatalog?.archiveCodexThread(target.threadId);
-  }
-  await archiveGroupInput(ctx, target.chatId, target.threadId ?? binding?.nativeId ?? `pending-${toolId}`);
+  if (binding && nativeId) { ctx.controls.toolBindings!.archive(toolId, binding.sourceId, nativeId); await ctx.controls.toolBindings!.flush(); }
+  await archiveGroupInput(ctx, target.chatId, nativeId ?? `pending-${toolId}`);
   panelCandidates.delete(token);
   const notice = `✓ 已归档工作群「${target.name}」，后续消息不再响应。群和会话历史已保留，如需解散群，请自行在飞书中操作。`;
-  if (notified)
-    await ctx.controls.sessionArchiveNotifications!.flush();
+  if (notified) await ctx.controls.sessionArchiveNotifications!.flush();
   else await ctx.channel.send(target.chatId, { text: notice });
   if (ctx.msg.chatId !== target.chatId) await reply(ctx, notice);
 }
@@ -955,8 +933,11 @@ async function handleNewChat(
   options: { copiedFrom?: CopiedSessionSource; uuid?: string } = {},
 ): Promise<{ chatId: string; name: string } | undefined> {
   const toolId = selectedTool ?? ctx.controls.defaultToolId ?? ctx.controls.profileConfig.agentKind;
-  const tool = ctx.controls.toolRegistry?.get(toolId);
+  const tool = ctx.controls.toolRegistry?.find(toolId);
   const targetAgent = tool?.agent ?? ctx.agent;
+  if (ctx.controls.toolRegistry && !tool) {
+    await reply(ctx, `❌ ${toolDefinition(toolId).label} worker 未发现，请启动后重试。`); return;
+  }
   if (tool && (targetAgent.id !== toolId || !await targetAgent.isAvailable())) {
     await reply(ctx, `❌ ${toolDefinition(toolId).label} 不可用，请检查本机安装和认证${toolDefinition(toolId).backend === 'worker' ? '，以及独立 worker 服务' : ''}。`);
     return;
@@ -1002,7 +983,7 @@ async function handleNewChat(
     ctx.controls.toolBindings.set(created.chatId, previousCopy ?? { toolId, sourceId: tool.sourceId, name: created.name, nativeId: tool.reserveSessionId?.(), nativeCreated: false,
       ...(options.copiedFrom ? { copiedFrom: options.copiedFrom } : {}),
       model: toolId === ctx.controls.profileConfig.agentKind ? ctx.controls.profileConfig.preferences.model ?? 'default' : 'default',
-      reasoningEffort: toolId === 'codex' ? ctx.controls.profileConfig.preferences.reasoningEffort ?? DEFAULT_REASONING : undefined });
+      reasoningEffort: ctx.controls.profileConfig.preferences.reasoningEffort });
     await ctx.controls.toolBindings.flush();
   }
   // Inherit cwd from the originating chat so the new group starts in the
@@ -1236,56 +1217,16 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  if (ctx.controls.profileConfig.agentKind === 'codex') {
-    const identity = ctx.sessionCatalogIdentity;
-    const entry =
-      ctx.sessionCatalog && identity
-        ? ctx.sessionCatalog.activeFor(identity)
-        : undefined;
-    const history = identity ? await listCodexResumeHistory(ctx, cwd, limit) : [];
-    if (history.length > 0 && identity) {
-      const entries = history.map((thread) => {
-        const nonce = issueResumeCandidate(identity, { threadId: thread.threadId });
-        return {
-          sessionId: nonce,
-          preview: thread.name || thread.preview,
-          relTime: formatRelTime(thread.updatedAtMs),
-          detail: `Codex · ${thread.source}`,
-          current: thread.threadId === entry?.threadId,
-        };
-      });
-      const card = resumeCard(cwd, entries);
-      await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-      return;
-    }
-    if (entry?.threadId && identity) {
-      const nonce = issueResumeCandidate(identity, { threadId: entry.threadId });
-      await reply(
-        ctx,
-        `当前 Codex thread 可恢复。\n使用 \`/resume use ${nonce}\` 恢复（10 分钟内有效）。`,
-      );
-      return;
-    }
-    const card = resumeCard(cwd, []);
-    await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-    return;
-  }
-
-  const sessions = await listClaudeResumeHistory(ctx, cwd, limit);
-  const currentSession = ctx.sessions.getRaw(ctx.scope);
+  const toolId = ctx.controls.profileConfig.agentKind;
+  const tool = ctx.controls.toolRegistry?.find(toolId);
   const identity = ctx.sessionCatalogIdentity;
-  const entries = sessions.map((s) => ({
-    sessionId: identity
-      ? issueResumeCandidate(identity, { sessionId: s.sessionId })
-      : s.sessionId,
-    displayId: s.sessionId,
-    preview: s.preview,
-    relTime: formatRelTime(s.mtime),
-    lineCount: s.lineCount,
-    current: s.sessionId === currentSession?.sessionId,
-  }));
-  const card = resumeCard(cwd, entries);
-  await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+  const current = identity && ctx.sessionCatalog?.activeFor(identity);
+  const rows = tool ? (await tool.listSessions()).filter(row => !row.archived && row.cwd === cwd).sort((a, b) => b.updatedAtMs - a.updatedAtMs).slice(0, limit) : [];
+  const entries = rows.map(row => ({ sessionId: identity ? issueResumeCandidate(identity,
+    nativeSessionFields(toolId, row.nativeId) as { sessionId: string } | { threadId: string }) : row.nativeId,
+    preview: row.name ?? row.nativeId, relTime: formatRelTime(row.updatedAtMs), detail: tool?.label,
+    current: row.nativeId === (current?.threadId ?? current?.sessionId) }));
+  await ctx.channel.send(ctx.msg.chatId, { card: resumeCard(cwd, entries) }, commandReplyOptions(ctx));
 }
 
 async function applyResume(sessionId: string, ctx: CommandContext): Promise<void> {
@@ -1295,51 +1236,26 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
     if (resolved) {
       const toolId = ctx.sessionCatalogIdentity.agentId;
       const current = ctx.controls.toolBindings?.get(ctx.scope);
-      const sourceId = ctx.controls.toolRegistry?.get(toolId).sourceId ?? current?.sourceId;
+      const sourceId = ctx.controls.toolRegistry?.find(toolId)?.sourceId ?? current?.sourceId;
       if (sourceId) try {
         ctx.controls.toolBindings?.assertPersonalBinding(ctx.scope, { ...current, toolId, sourceId, nativeId: resolved.threadId ?? resolved.sessionId });
       } catch (error) {
         if (!(error instanceof PersonalBindingConflict)) throw error;
         await reply(ctx, error.message); return;
       }
-      if (resolved.threadId) {
-        try {
-          if (ctx.sessionCatalog.isThreadArchived(resolved.threadId) ||
-              await ctx.controls.codexReplySync?.isThreadArchived?.(resolved.threadId)) {
-            await reply(ctx, '会话已归档，请重新选择未归档的会话。');
-            return;
-          }
-        } catch {
-          await reply(ctx, '暂时无法确认会话归档状态，请稍后重试。');
-          return;
-        }
-      }
+      const nativeId = resolved.threadId ?? resolved.sessionId!;
+      const tool = ctx.controls.toolRegistry?.find(toolId);
+      const row = tool ? (await tool.listSessions()).find(row => row.nativeId === nativeId) : undefined;
+      if (tool && (!row || row.archived || row.cwd !== ctx.sessionCatalogIdentity.cwdRealpath)) return reply(ctx, '会话已失效或归档，请重新选择。');
       ctx.activeRuns.interrupt(ctx.scope);
-      if (ctx.sessionCatalogIdentity.agentId === 'codex') {
-        ctx.sessionCatalog.upsertActive({
-          scopeId: ctx.sessionCatalogIdentity.scopeId,
-          agentId: 'codex',
-          cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
-          policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
-          threadId: resolved.threadId!,
-          rebindArchivedScope: true,
-          botAppId: ctx.controls.profileConfig.accounts.app.id,
-        });
-      } else {
-        ctx.sessionCatalog.upsertActive({
-          scopeId: ctx.sessionCatalogIdentity.scopeId,
-          agentId: ctx.sessionCatalogIdentity.agentId,
-          cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
-          policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
-          sessionId: resolved.sessionId!,
-          botAppId: ctx.controls.profileConfig.accounts.app.id,
-        });
-        ctx.sessions.set(ctx.scope, resolved.sessionId!, ctx.sessionCatalogIdentity.cwdRealpath);
-      }
+      ctx.sessionCatalog.upsertActive({ ...ctx.sessionCatalogIdentity, ...nativeSessionFields(toolId, nativeId),
+        sourceId, rebindArchivedScope: true, botAppId: ctx.controls.profileConfig.accounts.app.id });
+      if (current && sourceId) { ctx.controls.toolBindings!.set(ctx.scope, { ...current, toolId, sourceId, nativeId, nativeCreated: true }); await ctx.controls.toolBindings!.flush(); }
+      if (toolDefinition(toolId).nativeField === 'sessionId') ctx.sessions.set(ctx.scope, nativeId, ctx.sessionCatalogIdentity.cwdRealpath);
       await reply(ctx, RESUME_APPLIED_REPLY);
       return;
     }
-    if (ctx.sessionCatalogIdentity.agentId === 'codex') {
+    if (toolDefinition(ctx.sessionCatalogIdentity.agentId).nativeField === 'threadId') {
       await reply(ctx, '当前上下文不可恢复这个会话，请先用 `/resume` 重新生成恢复候选。');
       return;
     }
@@ -1356,7 +1272,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
     return;
   }
 
-  if (ctx.controls.profileConfig.agentKind === 'codex') {
+  if (toolDefinition(ctx.controls.profileConfig.agentKind).nativeField === 'threadId') {
     await reply(ctx, '当前上下文没有可恢复的 Codex thread，请先在当前工作区完成一次运行。');
     return;
   }
@@ -1403,7 +1319,7 @@ function consumeResumeCandidate(
     candidate.cwdRealpath !== identity.cwdRealpath ||
     candidate.policyFingerprint !== identity.policyFingerprint ||
     (toolDefinition(identity.agentId).nativeField === 'sessionId' && !candidate.sessionId) ||
-    (identity.agentId === 'codex' && !candidate.threadId)
+    (toolDefinition(identity.agentId).nativeField === 'threadId' && !candidate.threadId)
   ) {
     return undefined;
   }
@@ -1473,68 +1389,6 @@ function parsePanelPage(input: string): number {
   return Number.isFinite(page) && page >= 0 ? Math.min(page, 20) : 0;
 }
 
-async function listClaudeResumeHistory(
-  ctx: CommandContext,
-  cwd: string,
-  limit: number,
-): Promise<SessionSummary[]> {
-  const provider = ctx.claudeHistoryProvider ?? listRecentSessions;
-  return provider(cwd, limit);
-}
-
-async function listCodexResumeHistory(
-  ctx: CommandContext,
-  cwd: string,
-  limit: number,
-): Promise<CodexThreadHistoryEntry[]> {
-  const codex = ctx.controls.profileConfig.codex;
-  const binary = codex?.binaryPath;
-  if (!binary) return [];
-
-  const provider = ctx.codexHistoryProvider ?? listCodexThreadHistory;
-  try {
-    return await provider({
-      binary,
-      cwd,
-      limit,
-      profileStateDir: commandProfilePaths(ctx).profileDir,
-      ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
-      ...(codex.inheritCodexHome !== undefined
-        ? { inheritCodexHome: codex.inheritCodexHome }
-        : {}),
-    });
-  } catch (err) {
-    log.warn('session', 'codex-history-failed', {
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return [];
-  }
-}
-
-async function listCodexPanelHistory(
-  ctx: CommandContext,
-  limit: number,
-): Promise<CodexThreadHistoryEntry[]> {
-  const codex = ctx.controls.profileConfig.codex;
-  const binary = codex?.binaryPath;
-  if (!binary) return [];
-  const provider = ctx.codexHistoryProvider ?? listCodexThreadHistory;
-  try {
-    return await provider({
-      binary,
-      limit,
-      profileStateDir: commandProfilePaths(ctx).profileDir,
-      ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
-      ...(codex.inheritCodexHome !== undefined
-        ? { inheritCodexHome: codex.inheritCodexHome }
-        : {}),
-    });
-  } catch (err) {
-    log.warn('session', 'codex-panel-history-failed', { message: errorText(err) });
-    return [];
-  }
-}
-
 function panelGroupIdentity(
   ctx: CommandContext,
   chatId: string,
@@ -1557,8 +1411,6 @@ function panelGroupIdentity(
     capability,
     profileConfig: ctx.controls.profileConfig,
     now: Date.now(),
-    codexHome: ctx.controls.profileConfig.codex?.codexHome,
-    inheritCodexHome: ctx.controls.profileConfig.codex?.inheritCodexHome,
   });
   if (!policy.ok) return undefined;
   return {
@@ -1571,7 +1423,7 @@ function panelGroupIdentity(
 
 function uniqueSessionGroupName(title: string, existingNames: string[]): string {
   const normalized = title.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
-  const base = (normalized || 'Codex会话').slice(0, 48);
+  const base = (normalized || 'AI会话').slice(0, 48);
   const used = new Set(existingNames.map((name) => name.trim()));
   if (!used.has(base)) return base;
   let suffix = 2;
@@ -1594,20 +1446,7 @@ function selectedResumeCwd(ctx: CommandContext): string | undefined {
 function runtimeAccessStatus(
   profileConfig: ProfileConfig,
 ): { label: string; value: string } {
-  if (profileConfig.agentKind === 'claude') {
-    return {
-      label: 'permission',
-      value: accessToClaudePermissionMode(
-        profileConfig.permissions.defaultAccess,
-        profileConfig.permissions,
-      ),
-    };
-  }
-  if ((profileConfig.agentKind === 'zcode' || profileConfig.agentKind === 'kilo' || profileConfig.agentKind === 'dsh')) return { label: 'access', value: profileConfig.permissions.defaultAccess };
-  return {
-    label: 'sandbox',
-    value: `${profileConfig.sandbox.defaultMode}/${profileConfig.sandbox.maxMode}`,
-  };
+  return { label: 'access', value: profileConfig.permissions.defaultAccess };
 }
 
 async function larkCliStatus(ctx: CommandContext): Promise<'app' | 'user-ready' | 'user-missing' | 'check-failed'> {
@@ -1645,7 +1484,7 @@ async function larkCliStatus(ctx: CommandContext): Promise<'app' | 'user-ready' 
 async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
   const cwd = effectiveWorkspaceCwd(ctx);
   const sess = ctx.sessions.getRaw(ctx.scope);
-  const isCodex = ctx.controls.profileConfig.agentKind === 'codex';
+  const isCodex = toolDefinition(ctx.controls.profileConfig.agentKind).nativeField === 'threadId';
   const catalogEntry =
     isCodex && ctx.sessionCatalog && ctx.sessionCatalogIdentity
       ? ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity)
@@ -1697,7 +1536,7 @@ async function handleFork(args: string, ctx: CommandContext): Promise<void> {
 
 async function handleNativeFork(ctx: CommandContext): Promise<void> {
   const toolId = ctx.controls.profileConfig.agentKind;
-  const tool = ctx.controls.toolRegistry?.get(toolId);
+  const tool = ctx.controls.toolRegistry?.find(toolId);
   const nativeFork = tool?.sessions?.fork;
   if (!toolDefinition(toolId).fork || (!nativeFork && !ctx.agent.forkThread) || !ctx.sessionCatalog) {
     return reply(ctx, '当前工具不支持会话分叉。');
@@ -1712,7 +1551,7 @@ async function handleNativeFork(ctx: CommandContext): Promise<void> {
   if (!sourceNativeId || source?.botAppId !== botAppId || source.agentId !== toolId || (tool && source.sourceId && source.sourceId !== tool.sourceId)) {
     return reply(ctx, `当前群尚未绑定本机器人的 ${toolDefinition(toolId).label} 会话，无法复制。`);
   }
-  if (toolId === 'zcode' && ctx.activeRuns.get(ctx.scope)) return reply(ctx, '请先停止当前 ZCode 任务，再复制会话。');
+  if (ctx.activeRuns.get(ctx.scope)) return reply(ctx, '请先停止当前任务，再复制会话。');
   const key = JSON.stringify([botAppId, toolId, tool?.sourceId, sourceNativeId]);
   if (pendingForks.has(key)) return reply(ctx, '正在创建分叉，请稍候。');
   pendingForks.add(key);
@@ -1732,7 +1571,7 @@ async function handleNativeFork(ctx: CommandContext): Promise<void> {
         const bound = await createGroupForPanelSession(ctx, token, {
           exactName: true, forked: true,
           // Preserve the existing creation-time history replay for AA groups.
-          ...(toolId === 'codex' && fork.name.startsWith('AA') ? { recentTurnReplayCount: 3 } : {}),
+          ...(fork.name.startsWith('AA') ? { recentTurnReplayCount: 3 } : {}),
         });
         if (bound) unboundForks.delete(key);
         else await reply(ctx, `⚠️ 分叉 **${fork.name}** 已创建，建群尚未完成。再次点击“分叉”可重试建群，不会重复分叉。`);
@@ -1769,80 +1608,22 @@ async function handleRefresh(_args: string, ctx: CommandContext): Promise<void> 
       return;
     }
   }
-  const codex = ctx.controls.profileConfig.agentKind === 'codex'
-    ? ctx.controls.profileConfig.codex
-    : undefined;
-  const exactEntry = ctx.sessionCatalogIdentity
-    ? ctx.sessionCatalog?.activeFor(ctx.sessionCatalogIdentity)
-    : undefined;
-  const entry = exactEntry ?? ctx.sessionCatalog?.entries()
-    .filter((candidate) =>
-      candidate.status === 'active' &&
-      candidate.agentId === 'codex' &&
-      candidate.scopeId === ctx.scope &&
-      Boolean(candidate.threadId),
-    )
-    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
-  if (!codex?.binaryPath || !entry?.threadId) {
-    if (ctx.fromCardAction) {
-      await reply(ctx, '当前卡片没有可刷新的 Codex 会话。');
-      return;
-    }
-    await handleStatus('', ctx);
+  const binding = ctx.controls.toolBindings?.get(ctx.scope);
+  const tool = binding && ctx.controls.toolRegistry?.find(binding.toolId);
+  if (!binding?.nativeId || !(tool?.agent instanceof DurableAgentAdapter) || !(await tool.agent.client.health()).capabilities?.conversation) {
+    if (ctx.fromCardAction) await reply(ctx, '当前卡片没有可刷新的会话。');
+    else await handleStatus('', ctx);
     return;
   }
-
-  const reader = new CodexThreadReader({
-    binary: codex.binaryPath,
-    profileStateDir: commandProfilePaths(ctx).profileDir,
-    ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
-    ...(codex.inheritCodexHome !== undefined
-      ? { inheritCodexHome: codex.inheritCodexHome }
-      : {}),
-  });
   try {
-    const snapshot = await reader.readThread(entry.threadId);
-    const rawTurn = snapshot.turns.at(-1);
-    if (!rawTurn) {
-      if (ctx.fromCardAction) {
-        await reply(ctx, '当前会话没有可刷新的回复。');
-        return;
-      }
-      await handleStatus('', ctx);
-      return;
-    }
-    const nowMs = Date.now();
-    const turn = isProvisionalInterruptedTurn(snapshot, rawTurn, nowMs)
-      ? { ...rawTurn, status: 'inProgress' }
-      : rawTurn;
-    const startedAtMs = turn.startedAtMs ?? snapshot.updatedAtMs ?? nowMs;
-    const state = codexTurnRunState(turn, {
-      firstSeenAtMs: startedAtMs,
-      lastActivityAtMs: snapshot.updatedAtMs ?? startedAtMs,
-      checkedAtMs: nowMs,
-    });
-    const card = renderCard({ ...state, projectName: projectNameFromCwd(entry.cwdRealpath) }, ctx.controls.runControlIcons);
-    if (ctx.fromCardAction) {
-      // Ordinary bridge replies are message-id cards, including those sent
-      // before a restart. Never send a second card when an in-place update fails.
-      await ctx.channel.updateCard(ctx.msg.messageId, card);
-    } else {
-      await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-    }
-    log.info('command', 'refresh-turn', {
-      scope: ctx.scope,
-      threadId: entry.threadId,
-      turnId: turn.id,
-      status: turn.status,
-      inPlace: ctx.fromCardAction === true,
-    });
-  } catch (err) {
-    log.warn('command', 'refresh-turn-failed', { scope: ctx.scope, message: errorText(err) });
-    if (ctx.fromCardAction) await reply(ctx, '⚠️ 刷新失败，请稍后重试。原卡片已保留。');
-    else await handleStatus('', ctx);
-  } finally {
-    await reader.stop();
-  }
+    const snapshot = await tool.agent.client.conversation(binding.nativeId), turn = snapshot.turns.at(-1);
+    if (!turn) return reply(ctx, '当前会话没有可刷新的回复。');
+    // Shared groups may only refresh a journal delivery owned by their scope.
+    if (binding.linkedSource || binding.auxiliaryWorkgroup) return reply(ctx, '请使用当前任务的刷新按钮。');
+    const card = renderCard({ ...turn.state, projectName: projectNameFromCwd(snapshot.cwd) }, ctx.controls.runControlIcons);
+    if (ctx.fromCardAction) await ctx.channel.updateCard(ctx.msg.messageId, card);
+    else await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+  } catch (error) { await reply(ctx, `⚠️ 刷新失败：${errorText(error)}。原卡片已保留。`); }
 }
 
 function formatOwnerState(ctx: CommandContext): string {
@@ -1882,35 +1663,12 @@ async function handleStop(args: string, ctx: CommandContext, strict = false): Pr
   } else ok = ctx.activeRuns.interrupt(scope);
   if (!ok && ctx.controls.workerReplySync) ok = await ctx.controls.workerReplySync.stopScope(scope);
   if (!ok && ctx.controls.nativeReplySync) ok = await ctx.controls.nativeReplySync.stopScope(scope);
-  if (!ok && ctx.controls.codexSubmissions) {
-    const threadId = ctx.sessionCatalog?.entries().filter(e => e.scopeId === scope && e.agentId === 'codex' && e.status === 'active')
-      .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.threadId;
-    const codex = ctx.controls.profileConfig.codex;
-    if (threadId && codex?.binaryPath) {
-      const remote = await resolveSharedCodexEndpoint({ remote: process.env.CODEX_QUEUE_REMOTE, codexHome: codex.codexHome });
-      if (!remote) {
-        if (strict) throw new Error('没有可用的共享连接，无法确认任务已停止。');
-        await reply(ctx, process.platform === 'win32'
-          ? '⚠️ windows不支持桥接停止会话，请在 Codex 桌面停止任务。'
-          : '⚠️ 没有可用的公开共享连接，请在 Codex 桌面停止任务。');
-        return;
-      }
-      const writer = new CodexThreadReader({ binary: codex.binaryPath, profileStateDir: commandProfilePaths(ctx).profileDir,
-        codexHome: codex.codexHome, inheritCodexHome: codex.inheritCodexHome !== false, sharedServer: true, passive: true, remote });
-      try {
-        ok = ctx.controls.toolBindings?.get(scope)?.sharedScope
-          ? await stopScopedCodexSubmissions(threadId, scope, writer, ctx.controls.codexSubmissions, strict)
-          : await stopCodexSubmissions(threadId, writer, () => waitForCodexIntake(scope, ctx.controls.codexSubmissions!));
-      }
-      catch (error) {
-        if (strict) throw error;
-        await reply(ctx, error instanceof CodexQueueContinuationError
-          ? `⚠️ ${error.message}` : `⚠️ 停止请求未确认：${errorText(error)}`);
-        if (error instanceof CodexQueueContinuationError) await ctx.controls.codexReplySync?.runNow();
-        return;
-      }
-      finally { await writer.stop(); }
-      await ctx.controls.codexReplySync?.runNow();
+  if (!ok) {
+    const binding = ctx.controls.toolBindings?.get(scope);
+    const tool = binding && ctx.controls.toolRegistry?.find(binding.toolId);
+    if (binding?.nativeId && !binding.linkedSource && !binding.auxiliaryWorkgroup && tool?.agent instanceof DurableAgentAdapter && (await tool.agent.client.health()).capabilities?.nativeTurnStop) {
+      const snapshot = await tool.agent.client.conversation(binding.nativeId), turn = snapshot.turns.at(-1);
+      if (turn?.state.terminal === 'running' && !snapshot.archived) ok = await tool.agent.client.stopNativeTurn(binding.nativeId, turn.id, snapshot.cwd);
     }
   }
   log.info('command', 'stop', {
@@ -1940,13 +1698,11 @@ async function archiveGroupInput(ctx: CommandContext, chatId: string, nativeId: 
     ctx.pending?.cancel(scope);
     await ctx.controls.workerInbox?.rejectScope(scope);
   }
-  for (const r of ctx.controls.codexSubmissions?.records() ?? []) if (matches(r.scope) && r.status === 'pending')
-    await ctx.controls.codexSubmissions!.mark(r.id, { status: 'rejected', error: '工作群已归档' }, ['pending']);
   await Promise.all([ctx.sessions.flush(), ctx.sessionCatalog?.flush()]);
 }
 
 async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
-  const toolName = ctx.controls.toolRegistry?.get(ctx.controls.profileConfig.agentKind).label ??
+  const toolName = ctx.controls.toolRegistry?.find(ctx.controls.profileConfig.agentKind)?.label ??
     (toolDefinition(ctx.controls.profileConfig.agentKind).label);
   if (ctx.chatMode === 'p2p') {
     await reply(ctx, `❌ “终止任务”只能在要结束的 ${toolName} 工作群中使用。`);
@@ -1985,35 +1741,20 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
       : undefined;
   const notified = usesArchiveNotification(ctx, ctx.msg.chatId,
     catalogEntry?.threadId ?? catalogEntry?.sessionId ?? ctx.controls.toolBindings?.get(ctx.scope)?.nativeId);
-  if (catalogEntry?.threadId && ctx.controls.profileConfig.agentKind === 'codex') {
-    if (!ctx.agent.archiveThread) {
-      await reply(ctx, '❌ 当前 Codex 适配器不支持归档会话，操作已取消。');
-      return;
-    }
-    try {
-      await ctx.agent.archiveThread(catalogEntry.threadId);
-    } catch (err) {
-      log.fail('command', err, { cmd: 'finish', step: 'archive-thread' });
-      await reply(
-        ctx,
-        `❌ Codex 会话归档失败，群保持不变：${err instanceof Error ? err.message : String(err)}`,
-      );
-      return;
-    }
+  const toolId = ctx.controls.profileConfig.agentKind;
+  const tool = ctx.controls.toolRegistry?.find(toolId), binding = ctx.controls.toolBindings?.get(ctx.scope);
+  const nativeId = catalogEntry?.threadId ?? catalogEntry?.sessionId ?? binding?.nativeId;
+  if (nativeId && tool?.sessions?.nativeArchive) {
+    try { await tool.sessions.archive(nativeId); }
+    catch (error) { await reply(ctx, `❌ 会话归档失败：${errorText(error)}`); return; }
   }
-
-  if (toolDefinition(ctx.controls.profileConfig.agentKind).backend === 'worker') {
-    const binding = ctx.controls.toolBindings?.get(ctx.scope);
-    const nativeId = catalogEntry?.sessionId ?? binding?.nativeId;
-    if (binding && nativeId) { ctx.controls.toolBindings!.archive(ctx.controls.profileConfig.agentKind, binding.sourceId, nativeId); await ctx.controls.toolBindings!.flush(); }
-    ctx.sessionCatalog?.archiveScope(ctx.scope, nativeId ?? `pending-${ctx.controls.profileConfig.agentKind}`, true);
-  }
+  if (binding && nativeId) { ctx.controls.toolBindings!.archive(toolId, binding.sourceId, nativeId); await ctx.controls.toolBindings!.flush(); }
+  ctx.sessionCatalog?.archiveScope(ctx.scope, nativeId ?? `pending-${toolId}`, true);
   if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
-    if (catalogEntry?.threadId) ctx.sessionCatalog.archiveCodexThread(catalogEntry.threadId);
+    if (nativeId) ctx.sessionCatalog.archiveNativeSession(toolId, nativeId, binding?.sourceId);
     else ctx.sessionCatalog.archiveActive({ ...ctx.sessionCatalogIdentity, now: Date.now() });
     await ctx.sessionCatalog.flush();
   }
-  const binding = ctx.controls.toolBindings?.get(ctx.scope);
   await archiveGroupInput(ctx, ctx.msg.chatId, catalogEntry?.threadId ?? catalogEntry?.sessionId ?? binding?.nativeId ?? `pending-${ctx.controls.profileConfig.agentKind}`);
   log.info('command', 'finish', { chatId: ctx.msg.chatId, threadId: catalogEntry?.threadId, stoppedRuns: groupScopes.length });
   if (notified)
@@ -2194,8 +1935,7 @@ function formatAgo(ms: number): string {
 async function handleReconnect(args: string, ctx: CommandContext): Promise<void> {
   const wait = args.trim().split(/\s+/).filter(Boolean).includes('--wait');
   log.info('command', 'reconnect', { wait });
-  await reply(ctx, wait ? '⏳ 将在当前运行结束后重连…' : ctx.agent.id === 'codex'
-    ? '⏳ 正在重连，已提交的 Codex 任务继续运行…' : '⏳ 正在停止当前运行并重连…');
+  await reply(ctx, wait ? '⏳ 将在当前运行结束后重连…' : '⏳ 正在重连，已提交的任务继续运行…');
   let resumeNewRuns: (() => void) | undefined;
   try {
     resumeNewRuns = ctx.activeRuns.pauseNewRuns('reconnect-in-progress');

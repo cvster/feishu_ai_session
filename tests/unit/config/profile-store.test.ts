@@ -192,7 +192,7 @@ it('retains the complete ZCode configuration when saving unrelated preferences r
 
 it('retains Kilo runtime and data source settings across unrelated profile saves', async () => {
   const dir = await tmpRoot(), path = join(dir, 'config.json');
-  const kilo = { binaryPath: '/native/kilo', args: ['--log-level', 'ERROR'], dataHome: '/native/data-home', preferredClient: 'desktop' as const };
+  const kilo = { binaryPath: '/native/kilo', args: ['--log-level', 'ERROR'], dataHome: '/native/data-home' };
   const root = createRootConfig('bot', createDefaultProfileConfig({ agentKind: 'kilo', accounts: { app }, kilo }));
   await saveRootConfig(root, path);
   for (const limit of [7, 9]) {

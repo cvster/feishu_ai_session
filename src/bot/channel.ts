@@ -1,3 +1,5 @@
+import { migrateMirrorLedger } from '../worker/mirror-migration';
+import { migrateLegacyIntake } from '../worker/migration';
 import { startWorkerNameSync } from './tool-name-sync';
 import { toolDefinition, workerInboxName, workerRepliesName, type ToolId } from '../tools/definitions';
 import { auxiliaryLinkError } from './auxiliary-membership';
@@ -90,23 +92,18 @@ import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import { isSoloUserBotChat } from './group';
 import { configureGroupNotifications } from './group-notifications';
-import { CodexNameSync, SessionNameSync } from './thread-name';
+import { startWorkerQuestions } from './worker-questions';
+import { loadWorkerRegistry, workerTool } from '../worker/discovery';
+import { isWorkerScopeArchived } from '../tools/context';
 import { startAaSessionGroupSync } from './aa-session-groups';
 import { createGroupCleanup } from './group-cleanup';
 import { startSessionArchiveNotifications } from './session-archive-notifications';
-import { startCodexTurnSync } from './codex-turn-sync';
-import { startKiloTurnSync } from './kilo-turn-sync';
 import { startNativeTurnSync } from './native-turn-sync';
-import { ZcodeNativeConversationReader } from '../agent/zcode/conversation';
-import { KiloNativeConversationReader } from '../agent/kilo/conversation';
 import { DurableAgentAdapter } from '../worker/adapter';
 import { startWorkerReplies } from '../worker/replies';
 import { messageRequestId } from '../worker/identity';
 import { WorkerInbox } from '../worker/inbox';
 import { isJobActive } from '../worker/protocol';
-import { CodexSubmissionStore } from '../session/codex-submissions';
-import { submitFeishuCodex } from './codex-submission-flow';
-import { startCodexUserInput } from './codex-user-input';
 import { registerLiveRunCardRefresh } from '../card/run-refresh';
 import type { AppPaths } from '../config/app-paths';
 import {
@@ -244,14 +241,15 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const executor = new RunExecutor({ agent, pool, activeRuns, sessionNameForScope: scope => controls.toolBindings?.get(scope)?.name });
   const executors = new Map<string, RunExecutor>();
   if (deps.appPaths?.profileDir) {
-    const runtimePaths = resolveAppPaths({ rootDir: dirname(controls.configPath), profile: controls.profile });
-    controls.toolRegistry = createToolRegistry(controls.profileConfig, runtimePaths, agent);
+    await migrateLegacyIntake(deps.appPaths.profileDir);
+    const runtimePaths = { ...resolveAppPaths({ rootDir: dirname(controls.configPath), profile: controls.profile }), profileDir: deps.appPaths.profileDir };
+    controls.toolRegistry ??= await createToolRegistry(controls.profileConfig, runtimePaths, agent);
     controls.defaultToolId = controls.profileConfig.agentKind;
     controls.toolBindings = new ToolBindingStore(join(deps.appPaths.profileDir, 'tool-bindings.json'));
     await controls.toolBindings.load();
     if (sessionCatalog) {
-      controls.toolBindings.enforcePersonalUniqueness(sessionCatalog, controls.profileConfig.accounts.app.id, id => controls.toolRegistry!.get(id).sourceId);
-      controls.toolBindings.migrate(sessionCatalog, id => controls.toolRegistry!.get(id).sourceId);
+      controls.toolBindings.enforcePersonalUniqueness(sessionCatalog, controls.profileConfig.accounts.app.id, id => controls.toolRegistry!.all().find(tool => tool.id === id)?.sourceId);
+      controls.toolBindings.migrate(sessionCatalog, id => controls.toolRegistry!.all().find(tool => tool.id === id)?.sourceId);
     }
     await Promise.all([controls.toolBindings.flush(), sessionCatalog?.flush()]);
     controls.workerRuntimes = new Map();
@@ -259,7 +257,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       const inbox = new WorkerInbox(join(deps.appPaths.profileDir, workerInboxName(tool.id))); await inbox.load();
       controls.workerRuntimes.set(tool.id, { inbox });
     }
-    controls.workerInbox = controls.workerRuntimes.get('claude')?.inbox;
     const nativeSessionLocks = new NativeSessionLocks();
     controls.executorForTool = id => {
       let instance = executors.get(id);
@@ -279,11 +276,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       return instance;
     };
   }
-
-  const submissions = controls.profileConfig.agentKind === 'codex' && agent.submit && deps.appPaths?.profileDir
-    ? new CodexSubmissionStore(join(deps.appPaths.profileDir, 'codex-submissions.json')) : undefined;
-  await submissions?.load();
-  controls.codexSubmissions = submissions;
 
   // Resolve the App Secret to plaintext. The config field can be a literal
   // string, a "${VAR}" template, or a {source, id} SecretRef referencing
@@ -461,8 +453,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         for (const runtime of controls.workerRuntimes?.values() ?? []) {
           if (dropped.length) await runtime.inbox.reject(chatId, dropped); await runtime.inbox.rejectScope(chatId);
         }
-        for (const r of controls.codexSubmissions?.records() ?? []) if (r.scope === chatId && r.status === 'pending')
-          await controls.codexSubmissions!.mark(r.id, { status: 'rejected', error: '共享群正在退出' }, ['pending']);
       },
     });
     await controls.auxiliary.load();
@@ -480,10 +470,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           mentionedBot: true, rawContentType: 'text', raw: undefined,
           content: `继续此前请求：${approval.text}\n本次仅执行已确认操作：${approval.action}。不要重复已完成的动作。` };
         const id = toolForScope(controls, approval.scope);
-        if (id === 'codex' && controls.codexSubmissions) {
-          const current = controls.toolBindings?.get(approval.scope)?.nativeId;
-          if (!await controls.codexSubmissions.receive(approval.scope, msg, current)) return;
-        } else if (controls.workerRuntimes?.has(id)) {
+        if (controls.workerRuntimes?.has(id)) {
           const inbox = controls.workerRuntimes.get(id)!.inbox;
           if (!await inbox.receive(approval.scope, msg)) return;
           inbox.markQueued(approval.scope, msg);
@@ -652,8 +639,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         if (scope.includes(':')) await runtime.inbox.rejectScope(scope);
         else await runtime.inbox.rejectChat(scope);
       }
-      for (const record of controls.codexSubmissions?.records() ?? []) if (matches(record.scope) && record.status === 'pending')
-        await controls.codexSubmissions!.mark(record.id, { status: 'rejected', error: '飞书群已解散' }, ['pending']);
     },
   }) : undefined;
   await groupCleanup?.start();
@@ -674,105 +659,27 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   controls.withAaSessionGroupSyncPaused = aaSessionGroupSync
     ? (operation) => aaSessionGroupSync.withPaused(operation)
     : undefined;
-  let codexNameSync = controls.profileConfig.agentKind === 'codex' && deps.appPaths?.profileDir
-    ? new CodexNameSync({
-        channel, agent, appId: cfg.accounts.app.id,
-        statePath: join(deps.appPaths.profileDir, 'codex-name-sync.json'),
-        knownChats: () => controls.knownChats ?? [],
-      })
-    : undefined;
-  try {
-    await codexNameSync?.load();
-  } catch (err) {
-    // Never reset a damaged baseline and overwrite user names, or take down
-    // the messaging service because the optional name synchronizer failed.
-    log.warn('session', 'name-sync-disabled', { err: String(err) });
-    codexNameSync = undefined;
-  }
-  const codexTurnSync =
-    sessionCatalog && deps.appPaths?.profileDir
-      ? await startCodexTurnSync({
-          channel,
-          controls,
-          sessionCatalog,
-          profileStateDir: deps.appPaths.profileDir,
-          nameSync: codexNameSync,
-          submissionStore: submissions,
-        })
-      : undefined;
-
-  const zcodeTool = controls.toolRegistry?.all().find(tool => tool.id === 'zcode');
-  const workerNameSync = sessionCatalog && deps.appPaths?.profileDir
-    ? await startWorkerNameSync({ channel, controls, catalog: sessionCatalog, profileDir: deps.appPaths.profileDir })
-    : undefined;
-
-  let zcodeTurnSync: Awaited<ReturnType<typeof startNativeTurnSync>> | undefined;
-  if (zcodeTool && sessionCatalog && deps.appPaths?.profileDir) {
-    const options = controls.profileConfig.zcode;
-    const workerAgent = zcodeTool.agent instanceof DurableAgentAdapter ? zcodeTool.agent : undefined;
-    try {
-      zcodeTurnSync = await startNativeTurnSync({ channel, controls, catalog: sessionCatalog,
-        toolId: 'zcode', displayName: 'ZCode', sourceId: zcodeTool.sourceId,
-        statePath: join(deps.appPaths.profileDir, 'zcode-turn-sync.json'),
-        reader: new ZcodeNativeConversationReader({ binary: options?.binaryPath, args: options?.args, dataDir: options?.dataDir },
-          options?.remoteControlFile && workerAgent ? async (id, turnId, cwd) => {
-            await workerAgent.prepareRun(); return workerAgent.client.stopNativeTurn(id, turnId, cwd);
-          } : undefined) });
-    } catch (error) { log.warn('zcode-turn-sync', 'disabled', { error: String(error) }); }
-  }
-
-  const kiloTool = controls.toolRegistry?.all().find(tool => tool.id === 'kilo');
-  let kiloTurnSync: Awaited<ReturnType<typeof startKiloTurnSync>> | undefined;
-  if (kiloTool?.agent instanceof DurableAgentAdapter && sessionCatalog && deps.appPaths?.profileDir) {
-    const workerAgent = kiloTool.agent, worker = workerAgent.client, options = controls.profileConfig.kilo;
-    let kiloNameSync: SessionNameSync | undefined;
-    if (kiloTool.sessions) {
-      const sessions = kiloTool.sessions;
-      kiloNameSync = new SessionNameSync({ channel, toolId: 'kilo', sourceId: kiloTool.sourceId, appId: cfg.accounts.app.id,
-        statePath: join(deps.appPaths.profileDir, 'kilo-name-sync.json'), knownChats: () => controls.knownChats ?? [],
-        renameSession: (id, name) => sessions.rename(id, name),
-        onSynchronized: async (scope, id, name) => {
-          const binding = controls.toolBindings?.get(scope);
-          if (!binding || binding.toolId !== 'kilo' || binding.sourceId !== kiloTool.sourceId || binding.nativeId !== id ||
-            binding.linkedSource || binding.auxiliaryWorkgroup || sessionCatalog.isScopeArchived(scope)) return;
-          if (binding.name !== name) { controls.toolBindings!.set(scope, { ...binding, name }); await controls.toolBindings!.flush(); }
-        } });
-      try { await kiloNameSync.load(); }
-      catch (error) { log.warn('session', 'kilo-name-sync-disabled', { error: String(error) }); kiloNameSync = undefined; }
-    }
-    try {
-      kiloTurnSync = await startKiloTurnSync({ channel, controls, catalog: sessionCatalog, sourceId: kiloTool.sourceId,
-        nameSync: kiloNameSync,
-        statePath: join(deps.appPaths.profileDir, 'kilo-turn-sync.json'),
-        reader: new KiloNativeConversationReader({ binary: options?.binaryPath, args: options?.args, dataHome: options?.dataHome, editorSync: options?.editorSync, preferredClient: options?.preferredClient },
-          async (id, turnId, cwd) => {
-            await workerAgent.prepareRun();
-            // Select compatibility before writing; a failed stop never falls back.
-            if ((await worker.health()).capabilities?.nativeTurnStop !== true) return undefined;
-            return worker.stopNativeTurn(id, turnId, cwd);
-          }),
-        ready: async () => (await worker.health()).kiloNativeInputOrigin === true });
-    } catch (error) { log.warn('kilo-turn-sync', 'disabled', { error: String(error) }); }
-  }
-  const nativeSyncForScope = (scope: string, messageId?: string) =>
-    messageId && zcodeTurnSync?.ownsMessage(scope, messageId) ? zcodeTurnSync :
-      messageId && kiloTurnSync?.ownsMessage(scope, messageId) ? kiloTurnSync :
-        toolForScope(controls, scope) === 'zcode' ? zcodeTurnSync : kiloTurnSync;
+  const nativeSyncs = new Map<string, Awaited<ReturnType<typeof startNativeTurnSync>>>();
+  const nameSyncs = new Map<string, Awaited<ReturnType<typeof startWorkerNameSync>>>();
+  const questionSyncs = new Map<string, Awaited<ReturnType<typeof startWorkerQuestions>>>();
+  const nativeSyncForScope = (scope: string, messageId?: string) => messageId
+    ? [...nativeSyncs.values()].find(sync => sync.ownsMessage(scope, messageId)) : nativeSyncs.get(toolForScope(controls, scope));
   controls.nativeReplySync = {
     ownsMessage: (scope, messageId) => nativeSyncForScope(scope, messageId)?.ownsMessage(scope, messageId) ?? false,
     stopScope: async (scope, messageId) => await nativeSyncForScope(scope, messageId)?.stopScope(scope, messageId) ?? false,
   };
-  controls.refreshMirroredRunCard = async (scope, messageId) =>
-    await codexTurnSync?.refreshMessage(scope, messageId) || await kiloTurnSync?.refreshMessage(scope, messageId) || await zcodeTurnSync?.refreshMessage(scope, messageId) || false;
-  controls.codexReplySync = controls.profileConfig.agentKind === 'codex' ? codexTurnSync : undefined;
-  controls.codexUserInput = controls.profileConfig.agentKind === 'codex' && sessionCatalog && deps.appPaths?.profileDir
-    ? await startCodexUserInput({ channel, controls, sessionCatalog, profileStateDir: deps.appPaths.profileDir })
-    : undefined;
+  controls.refreshMirroredRunCard = async (scope, messageId) => await nativeSyncForScope(scope, messageId)?.refreshMessage(scope, messageId) ?? false;
+  controls.workerQuestions = { handleAction: async (scope, messageId, token, form) => {
+    for (const handle of questionSyncs.values()) if (handle.ownsToken(token)) { await handle.handleAction(scope, messageId, token, form); return; }
+    throw new Error('问题已失效或对应 worker 尚未连接，请在工具界面回答');
+  } };
   const workerReplies: Awaited<ReturnType<typeof startWorkerReplies>>[] = [];
-  for (const tool of controls.toolRegistry?.all() ?? []) {
+  const attached = new Set<string>();
+  const attachWorker = async (tool: import('../tools/types').AgentTool) => {
     const workerTool = tool.agent; const runtime = controls.workerRuntimes?.get(tool.id);
-    if (!(workerTool instanceof DurableAgentAdapter) || !runtime || !sessionCatalog || !deps.appPaths?.profileDir) continue;
+    if (!(workerTool instanceof DurableAgentAdapter) || !runtime || !sessionCatalog || !deps.appPaths?.profileDir) return;
     const scopedControls = controlsForTool(controls, tool.id);
+    if (!attached.has(tool.id)) {
     const replies = await startWorkerReplies({
       adapter: workerTool, channel, controls: scopedControls, sessions, catalog: sessionCatalog, activeRuns,
       statePath: join(deps.appPaths.profileDir, workerRepliesName(tool.id)),
@@ -799,17 +706,58 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         }) } : {}),
       }),
     });
-    runtime.replies = replies; workerReplies.push(replies);
-  }
-  controls.claudeReplySync = controls.workerRuntimes?.get('claude')?.replies;
-
-  for (const record of submissions?.records() ?? []) {
-    if (record.status !== 'pending') continue;
-    if (controls.auxiliary?.isAuxiliary(record.scope) && !controls.auxiliary.isActive(record.scope)) {
-      await submissions!.mark(record.id, { status: 'rejected', error: '共享群未启用' }, ['pending']); continue;
+    runtime.replies = replies; workerReplies.push(replies); attached.add(tool.id);
     }
-    for (const message of record.messages) pending.push(record.scope, message);
-  }
+    const health = await workerTool.client.health().catch(() => undefined);
+    if (health?.capabilities?.conversation && !nativeSyncs.has(tool.id)) try {
+    await migrateMirrorLedger(join(deps.appPaths.profileDir, `${tool.id}-turn-sync.json`), join(deps.appPaths.profileDir, `${tool.id}-native-turn-sync.json`), tool.id, tool.sourceId, sessionCatalog);
+    nativeSyncs.set(tool.id, await startNativeTurnSync({
+      channel, controls, catalog: sessionCatalog, toolId: tool.id, displayName: tool.label, sourceId: tool.sourceId,
+      statePath: join(deps.appPaths.profileDir, `${tool.id}-native-turn-sync.json`),
+      reader: { read: id => workerTool.client.conversation(id), close: async () => {},
+        ...(health.capabilities.nativeTurnStop ? { stopTurn: async (id: string, turnId: string) => {
+          const snapshot = await workerTool.client.conversation(id); return workerTool.client.stopNativeTurn(id, turnId, snapshot.cwd);
+        } } : {}) },
+    }));
+    } catch (error) { log.warn('worker', 'native-monitor-failed', { toolId: tool.id, error: String(error) }); }
+    if (health?.capabilities?.questions && !questionSyncs.has(tool.id)) try { questionSyncs.set(tool.id, await startWorkerQuestions({
+      channel, controls, catalog: sessionCatalog, tool, client: workerTool.client, profileDir: deps.appPaths.profileDir,
+    }));
+    } catch (error) { log.warn('worker', 'question-monitor-failed', { toolId: tool.id, error: String(error) }); }
+    if (health?.capabilities?.nativeSessionNames && !nameSyncs.has(tool.id)) try { nameSyncs.set(tool.id, await startWorkerNameSync({
+      channel, controls: { ...controls, toolRegistry: { all: () => [tool] } as import('../tools/types').ToolRegistry }, catalog: sessionCatalog,
+      profileDir: deps.appPaths.profileDir,
+    }));
+    } catch (error) { log.warn('worker', 'name-monitor-failed', { toolId: tool.id, error: String(error) }); }
+  };
+  for (const tool of controls.toolRegistry?.all() ?? []) await attachWorker(tool).catch(error => log.warn('worker', 'attach-failed', { toolId: tool.id, error: String(error) }));
+  let discovering: Promise<void> | undefined;
+  const discover = () => discovering ??= (async () => {
+    if (disconnecting || !deps.appPaths?.profileDir || !controls.toolRegistry) return;
+    const discovered = await loadWorkerRegistry(deps.appPaths.profileDir, cfg.accounts.app.id);
+    for (const tool of controls.toolRegistry.all()) if (!discovered.some(record => record.health.toolId === tool.id)) {
+      await runtimeStop(tool.id); await nativeSyncs.get(tool.id)?.stop(); await questionSyncs.get(tool.id)?.stop(); await nameSyncs.get(tool.id)?.stop();
+      nativeSyncs.delete(tool.id); questionSyncs.delete(tool.id); nameSyncs.delete(tool.id); attached.delete(tool.id); executors.delete(tool.id);
+      controls.toolRegistry.remove(tool.id);
+    }
+    for (const record of discovered) {
+      const current = controls.toolRegistry.all().find(tool => tool.id === record.health.toolId);
+      if (current && (current.sourceId !== record.health.sourceId || (current.agent instanceof DurableAgentAdapter && current.agent.client.stateDir !== record.directory))) continue;
+      const tool = current ?? workerTool(record);
+      if (!current) { controls.toolRegistry.register(tool);
+        const inbox = new WorkerInbox(join(deps.appPaths.profileDir, workerInboxName(tool.id))); await inbox.load();
+        controls.workerRuntimes!.set(tool.id, { inbox });
+      }
+      controls.toolBindings?.migrate(sessionCatalog!, id => controls.toolRegistry!.all().find(tool => tool.id === id)?.sourceId);
+      await controls.toolBindings?.flush();
+      await attachWorker(tool).catch(error => log.warn('worker', 'attach-failed', { toolId: tool.id, error: String(error) }));
+
+    }
+  })().catch(error => log.warn('worker', 'discovery-failed', { error: String(error) })).finally(() => { discovering = undefined; });
+  const runtimeStop = async (id: string) => { const replies = controls.workerRuntimes?.get(id)?.replies;
+    await (replies as { stop?(): Promise<void> } | undefined)?.stop?.(); };
+  controls.refreshWorkerDiscovery = discover;
+  const discoveryTimer = setInterval(() => void discover(), 10_000); discoveryTimer.unref();
 
   const identity = channel.botIdentity;
   if (identity) for (const tool of controls.toolRegistry?.all() ?? []) tool.agent.setBotIdentity?.(identity);
@@ -859,29 +807,28 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     channel,
     disconnect: async () => {
       disconnecting = true;
+      clearInterval(discoveryTimer); await discovering;
+      controls.refreshWorkerDiscovery = undefined;
       await groupCleanup?.stop();
       activeRuns.pauseNewRuns('bridge-disconnect');
       await a2a?.close();
       pending.cancelAll();
       await Promise.all([executor, ...executors.values()].map(item => item.waitForSubmissions()));
       await activeRuns.disconnectAll();
-      if (submissions) await Promise.allSettled([...batchTasks]);
+      await Promise.allSettled([...batchTasks]);
       await Promise.all(workerReplies.map(replies => replies.stop()));
       controls.workerReplySync = undefined;
       await controls.auxiliary?.flush();
       ownerRefresh.stop();
       knownChatsRefresh.stop();
       aaSessionGroupSync?.stop();
-      await controls.codexUserInput?.stop();
-      controls.codexUserInput = undefined;
-      await codexTurnSync?.stop();
-      await kiloTurnSync?.stop();
-      await zcodeTurnSync?.stop();
-      await workerNameSync?.stop();
+      await Promise.all([...questionSyncs.values()].map(handle => handle.stop()));
+      await Promise.all([...nativeSyncs.values()].map(handle => handle.stop()));
+      await Promise.all([...nameSyncs.values()].map(handle => handle.stop()));
+      controls.workerQuestions = undefined;
       await archiveNotifications?.stop();
       controls.sessionArchiveNotifications = undefined;
       controls.nativeReplySync = undefined;
-      controls.codexReplySync = undefined;
       controls.refreshMirroredRunCard = undefined;
       keepalive.stop();
       pending.cancelAll();
@@ -894,7 +841,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         controls.toolBindings?.flush(),
         ...Array.from(controls.workerRuntimes?.values() ?? [], runtime => runtime.inbox.flush()),
         controls.auxiliaryApprovals?.flush(),
-        submissions?.flush(),
       ]);
       for (const [idx, result] of flushResults.entries()) {
         if (result.status === 'rejected') {
@@ -1047,11 +993,11 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   if (msg.chatType !== 'p2p' && sessionCatalog?.isScopeArchived(scope)) return;
   const toolId = toolForScope(rootControls, scope);
   const controls = controlsForTool(rootControls, toolId, scope);
-  const tool = rootControls.toolRegistry?.get(toolId);
+  const tool = rootControls.toolRegistry?.all().find(tool => tool.id === toolId);
   const binding = rootControls.toolBindings?.get(scope);
   if (binding && tool && binding.sourceId !== tool.sourceId) throw new Error('会话数据来源已变化，不能恢复到其他账户/目录');
   const agent = tool?.agent ?? primaryAgent;
-  const executor = rootControls.executorForTool?.(toolId) ?? primaryExecutor;
+  const executor = tool ? rootControls.executorForTool?.(toolId) ?? primaryExecutor : primaryExecutor;
   log.info('intake', 'enter', {
     scope,
     chatType: msg.chatType,
@@ -1147,17 +1093,14 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     dmGroupCreationOnly: true,
   });
   if (handled) {
-    const dropped = controls.codexSubmissions ? [] : pending.cancel(scope);
+    const stoppingReply = /^\/(?:stop(?:\s|$)|panel\s+stop(?:\s|$))/.test(emsg.content.trim());
+    const dropped = stoppingReply ? [] : pending.cancel(scope);
     if (dropped.length) await controls.workerInbox?.reject(scope, dropped);
     log.info('intake', 'command', { scope, droppedPending: dropped.length });
     return;
   }
 
-  if (controls.codexSubmissions) {
-    const currentThread = sessionCatalog?.entries().filter(e => e.scopeId === scope && e.status === 'active' && e.agentId === 'codex')
-      .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.threadId;
-    if (!await controls.codexSubmissions.receive(scope, emsg, currentThread)) return;
-  }
+  if (!tool && rootControls.toolRegistry) { await channel.send(msg.chatId, { markdown: `⚠️ ${toolDefinition(toolId).label} worker 未发现，请启动对应 worker。` }); return; }
   if (agent instanceof DurableAgentAdapter) {
     try {
       const id = messageRequestId(emsg);
@@ -1213,11 +1156,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } = deps;
   const toolId = toolForScope(rootControls, scope);
   const controls = controlsForTool(rootControls, toolId, scope);
-  const tool = rootControls.toolRegistry?.get(toolId);
+  const tool = rootControls.toolRegistry?.all().find(tool => tool.id === toolId);
   const binding = rootControls.toolBindings?.get(scope);
   if (binding && tool && binding.sourceId !== tool.sourceId) throw new Error('会话数据来源已变化，不能恢复到其他账户/目录');
   const agent = tool?.agent ?? primaryAgent;
-  const executor = rootControls.executorForTool?.(toolId) ?? primaryExecutor;
+  const executor = tool ? rootControls.executorForTool?.(toolId) ?? primaryExecutor : primaryExecutor;
   const batch = agent instanceof DurableAgentAdapter ? [...new Map(inputBatch.map(message => [messageRequestId(message), message])).values()] : inputBatch;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
@@ -1237,14 +1180,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   let attachments: LocalAttachment[];
   try {
     attachments = await media.resolve(resourceItems, { ...controls.profileConfig.attachments,
-      failOnResolutionError: Boolean(controls.codexSubmissions) });
+      failOnResolutionError: true });
   } catch (error) {
-    if (!controls.codexSubmissions) throw error;
-    for (const record of controls.codexSubmissions.records()) {
-      if (record.status === 'pending' && record.messages.some(m => batch.some(b => b.messageId === m.messageId))) {
-        await controls.codexSubmissions.mark(record.id, { status: 'rejected', error: String(error) });
-      }
-    }
+    await controls.workerInbox?.reject(scope, batch);
     await channel.send(chatId, { markdown: '⚠️ 附件下载或读取失败，消息未提交。请重新上传后再试。' },
       { replyTo: lastMsg.messageId, ...(mode === 'topic' && threadId ? { replyInThread: true } : {}) });
     return;
@@ -1338,7 +1276,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     topicContext,
     channel.botIdentity,
     ownerFFRequest ? [...(extraInstructions ?? []), '本次为当前飞书应用所有者本人请求，按个人工作群正常权限执行；历史共享群限制及确认要求不适用于本次请求，后续共享群请求仍按各自规则处理。'] : extraInstructions,
-    agentKind === 'codex',
+    true,
   );
   if (controls.auxiliary?.isAuxiliary(scope)) await controls.auxiliaryApprovals?.remember(scope, batch, basePrompt);
   const approval = controls.auxiliaryApprovals?.grant(scope, batch.map(message => message.messageId), batch.map(message => message.senderId));
@@ -1383,6 +1321,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     await commandSessionCatalogIdentity({ msg: firstMsg, scope, mode, workspaces, controls, access: accessDecision }));
   const flowInput = {
     scopeId: scope,
+    ...(controls.toolBindings?.get(scope)?.nativeCreated !== false && controls.toolBindings?.get(scope)?.nativeId ? {
+      nativeBinding: { nativeId: controls.toolBindings.get(scope)!.nativeId!, sourceId: controls.toolBindings.get(scope)!.sourceId },
+    } : {}),
     scope: scopeContext,
     prompt,
     attachments: attachments.map(toPolicyAttachment),
@@ -1393,10 +1334,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     sessionCatalog,
     workspaces,
     executor,
-    checkSessionArchived: controls.auxiliary?.isAuxiliary(scope) || controls.codexReplySync?.isScopeArchived
-      ? async () => (controls.auxiliary?.isAuxiliary(scope) && (!controls.auxiliary.isActive(scope) || controls.auxiliary.get(scope)?.generation !== auxiliaryGeneration)) ||
-        await controls.codexReplySync?.isScopeArchived?.(scope) || false
-      : undefined,
+    checkSessionArchived: async () => (controls.auxiliary?.isAuxiliary(scope) && (!controls.auxiliary.isActive(scope) || controls.auxiliary.get(scope)?.generation !== auxiliaryGeneration)) || await isWorkerScopeArchived(controls, scope),
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
     ...(agent instanceof DurableAgentAdapter ? {
@@ -1414,16 +1352,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       stage: 'submit',
     },
   } satisfies Parameters<typeof startRunFlow>[0];
-  if (agentKind === 'codex' && agent.submit && controls.codexReplySync && controls.codexSubmissions) {
-    const result = await submitFeishuCodex(flowInput, batch, controls.codexSubmissions, controls, sendOpts);
-    if (result.status === 'accepted' && result.continuationWarning) {
-      await channel.send(chatId, { markdown: `⚠️ 消息已接收，但队列启动未确认：${result.continuationWarning}。请在 Codex 桌面检查队列。` }, sendOpts);
-    }
-    if (result.status !== 'accepted' && result.status !== 'deferred') await channel.send(chatId, { markdown: result.status === 'unknown'
-      ? `⚠️ 消息接收结果暂时无法确认，未自动重发：${result.message}`
-      : `⚠️ 消息提交失败：${result.message}` }, sendOpts);
-    return;
-  }
   const flow = await startRunFlow(flowInput);
   if (!flow.ok) {
     if (controls.workerInbox && !['run-already-active', 'execution-worker-unavailable', 'pool-full', 'native-session-busy', 'reconnect-in-progress'].includes(flow.rejectReason.code)) await controls.workerInbox.reject(scope, batch);
@@ -1446,26 +1374,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } else {
     log.info('session', 'fresh', { cwd });
   }
-  let runCodexThreadId: string | undefined;
-  let runCodexTurnId: string | undefined;
   const recordSession = (evt: AgentEvent): void => {
     if (controls.auxiliary?.isAuxiliary(scope) && !controls.auxiliary.isActive(scope)) return;
     if (agent instanceof DurableAgentAdapter && (handle.interrupted || handle.detached)) return;
-    if (evt.type === 'user_input') {
-      controls.codexUserInput?.accept(evt.prompt, handle.run.runId,
-        { scope, replyTo: sendOpts.replyTo, replyInThread: sendOpts.replyInThread });
-      return;
-    }
-    if (evt.type === 'user_input_resolved') {
-      controls.codexUserInput?.resolve(evt.threadId, evt.requestId, handle.run.runId);
-      return;
-    }
-    if (evt.type === 'done' && runCodexThreadId && runCodexTurnId) {
-      controls.codexUserInput?.endTurn(runCodexThreadId, runCodexTurnId);
-    }
     if (evt.type === 'system') {
       const binding = controls.toolBindings?.get(scope);
-      const nativeId = capability.agentId === 'codex' ? evt.threadId : evt.sessionId;
+      const nativeId = evt.threadId ?? evt.sessionId;
       if (binding && nativeId && !sessionCatalog?.isScopeArchived(scope)) controls.toolBindings!.set(scope, { ...binding, nativeId, nativeCreated: true });
     }
     recordRunSessionEvent({
@@ -1491,12 +1405,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       });
     }
     if (evt.type === 'system' && evt.threadId) {
-      runCodexThreadId = evt.threadId;
-      if (evt.turnId) {
-        runCodexTurnId = evt.turnId;
-        controls.codexReplySync?.observeTurn(scope, evt.threadId, evt.turnId,
-          sendOpts.replyTo, sendOpts.replyInThread);
-      }
       log.info('session', 'set-thread', { threadId: evt.threadId });
     }
   };
@@ -1571,26 +1479,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // Add a "Typing" reaction to the triggering message as an instant ack, but
   // never let that outbound API call block agent event draining.
   const reactionPromise =
-    !controls.codexReplySync && (cotEnabled || replyMode === 'card')
+    (cotEnabled || replyMode === 'card')
       ? undefined : addWorkingReaction(channel, lastMsg.messageId);
 
   try {
-    const replySync = controls.codexReplySync;
-    if (replySync) {
-      // Submission/execution monitoring must not render a second reply. The
-      // app-server snapshot synchronizer is the sole owner of turn deliveries.
-      const finalState = await processAgentStream(handle, eventStream, scope,
-        idleTimeoutMs, recordSession, async () => {}, () => Boolean(runCodexThreadId && runCodexTurnId &&
-          controls.codexUserInput?.isWaiting(runCodexThreadId, runCodexTurnId)));
-      if (handle.detached) return;
-      await replySync.runNow();
-      // A failure before turn/start has no turn to mirror (e.g. queue rejected).
-      // Surface only that submission error, never duplicate a turn's answer.
-      if (!runCodexTurnId && finalState.terminal === 'error') {
-        await channel.send(chatId, { markdown: `⚠️ 消息提交失败：${finalState.errorMsg ?? 'Codex 未创建新轮次'}` }, sendOpts);
-      }
-      return;
-    } else if (cotEnabled) {
+    if (cotEnabled) {
       const cotPublisher = new CotPublisher({
         client: cotClient,
         chatId,
@@ -1908,9 +1801,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     log.fail('stream', err);
   } finally {
     await controls.auxiliary?.trackRun(scope, execution.handle.run.runId, lastMsg.messageId, false);
-    if (handle.interrupted && runCodexThreadId && runCodexTurnId) {
-      controls.codexUserInput?.endTurn(runCodexThreadId, runCodexTurnId);
-    }
     if (runTraceId) {
       clearCardStreamProgress(runTraceId);
       const cleanup = setTimeout(() => streamDeliveryFailures.delete(runTraceId), 60_000);

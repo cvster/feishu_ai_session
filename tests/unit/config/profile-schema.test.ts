@@ -56,14 +56,8 @@ describe('profile schema', () => {
     });
   });
 
-  it('requires codex configuration when agentKind is codex', () => {
-    expect(() =>
-      normalizeProfileConfig({
-        schemaVersion: 2,
-        agentKind: 'codex',
-        accounts: { app },
-      }),
-    ).toThrow(/codex/i);
+  it('does not require provider configuration for a bridge profile', () => {
+    expect(createDefaultProfileConfig({ agentKind: 'codex', accounts: { app } }).codex).toBeUndefined();
   });
 
   it('rejects sandbox defaults that exceed max capability as a permission error', () => {
@@ -545,8 +539,8 @@ describe('profile schema', () => {
   });
 });
 
-it.each(['vscode', 'desktop'] as const)('preserves Kilo client preference %s', preferredClient => {
-  const profile = createDefaultProfileConfig({ agentKind: 'kilo', accounts: { app }, kilo: { binaryPath: '/native/kilo', preferredClient } });
-  expect(normalizeProfileConfig(JSON.parse(JSON.stringify(profile))).kilo?.preferredClient).toBe(preferredClient);
-  expect(() => normalizeProfileConfig({ ...profile, kilo: { ...profile.kilo, preferredClient: 'other' } })).toThrow('Invalid kilo');
+it('drops obsolete Kilo client preference during legacy normalization', () => {
+  const profile = createDefaultProfileConfig({ agentKind: 'kilo', accounts: { app } });
+  for (const preferredClient of ['vscode', 'desktop']) expect(normalizeProfileConfig({ ...profile, kilo: { binaryPath: '/native/kilo', preferredClient } }).kilo).toEqual({ binaryPath: '/native/kilo' });
+  expect(() => normalizeProfileConfig({ ...profile, kilo: { binaryPath: 'kilo', preferredClient: 'other' } })).toThrow('Invalid kilo');
 });

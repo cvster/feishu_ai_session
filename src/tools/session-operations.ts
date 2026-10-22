@@ -33,4 +33,4 @@ export function nativeSessionOperations(tool: Pick<AgentTool, 'id' | 'sourceId' 
     async archive(id) { if (tool.id === 'codex') { if (!tool.agent.archiveThread) throw new Error('当前 Codex 未提供原生归档能力。'); await tool.agent.archiveThread(id); } },
   };
 }
-export function sessionOperations(tool: AgentTool): ToolSessionOperations { return tool.sessions ?? nativeSessionOperations(tool); }
+export { sessionOperations } from './session-api';

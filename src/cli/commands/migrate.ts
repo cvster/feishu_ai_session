@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { createBootstrapCodexConfig } from '../profile-bootstrap';
+import { migrateWorkerConfiguration, migrateLegacyIntake } from '../../worker/migration';
+import { resolveAppPaths } from '../../config/app-paths';
 import { promptLine } from '../prompt';
 import { stopProcessEntry } from './ps';
 import {
@@ -11,7 +12,7 @@ import {
   type MigrateV2Result,
 } from '../../config/migrate-v2';
 import { legacyPaths, paths } from '../../config/paths';
-import { agentKindFromString } from '../../config/profile-store';
+import { agentKindFromString, loadRootConfig, saveRootConfig } from '../../config/profile-store';
 import type { RootConfig } from '../../config/profile-schema';
 import { isComplete, type AppCredentials, type AppConfig } from '../../config/schema';
 import { saveConfig } from '../../config/store';
@@ -51,10 +52,18 @@ export async function runMigrate(opts: MigrateOptions): Promise<void> {
     profile: opts.profile,
     ...(agentKind ? { agentKind } : {}),
     ...(needsV2Migration && agentKind === 'codex'
-      ? { codex: await createBootstrapCodexConfig(undefined) }
+      ? { codex: { binaryPath: 'codex' } }
       : {}),
   }, opts);
   if (!result) return;
+  const root = await loadRootConfig(configPath);
+  const profile = root?.profiles[result.profile];
+  if (root && profile) {
+    const paths = resolveAppPaths({ rootDir: dirname(configPath), profile: result.profile });
+    const migrated = await migrateWorkerConfiguration(paths.profileDir, profile);
+    await migrateLegacyIntake(paths.profileDir);
+    if (migrated !== profile) { root.profiles[result.profile] = migrated; await saveRootConfig(root, configPath); }
+  }
   if (result.migrated) {
     console.log(`✓ 已升级 profile 目录结构：${result.profile}`);
   } else {

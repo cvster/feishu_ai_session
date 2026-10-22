@@ -15,6 +15,8 @@ import type { SessionNameSync } from './thread-name';
 interface Delivery {
   createdAtMs: number;
   skipped?: boolean;
+  legacyBridge?: boolean;
+  replay?: boolean;
   inputMessageId?: string;
   inputSendingAt?: number;
   cardId?: string;
@@ -28,7 +30,7 @@ interface Delivery {
 interface BindingState { baselineAtMs: number; boundAtMs?: number; turns: Record<string, Delivery> }
 interface State { version: 1; bindings: Record<string, BindingState> }
 export interface NativeTurnSyncDeps {
-  toolId: 'kilo' | 'zcode';
+  toolId: string;
   displayName: string;
   channel: LarkChannel;
   controls: Controls;
@@ -87,8 +89,8 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
     return response.data.message_id;
   }
   async function publish(scope: string, id: string, turn: NativeConversationTurn, delivery: Delivery, force = false): Promise<boolean> {
-    if (!active(scope, id) || stopped || delivery.skipped || turn.bridge) return false;
-    const input = turn.input.trim();
+    if (!active(scope, id) || stopped || delivery.skipped || (turn.bridge && !delivery.legacyBridge && !delivery.replay)) return false;
+    const input = turn.bridge ? '' : turn.input.trim();
     if (input && !delivery.inputMessageId) {
       const markdown = `💻 **来自 ${displayName} 界面**\n\n${input.slice(0, 8000)}${input.length > 8000 ? '…' : ''}`;
       delivery.inputMessageId = await send(scope, id, turn, delivery, true, 'post', JSON.stringify({ zh_cn: { title: '', content: [[{ tag: 'md', text: markdown }]] } }));
@@ -167,12 +169,13 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
           const initial = !previous || previous.boundAtMs !== boundAtMs;
           const binding = initial ? state.bindings[key] = { baselineAtMs: now(), boundAtMs, turns: {} } : previous;
           if (initial) log.info(phase, 'baseline-created', { scope, sessionId: id, turns: snapshot.turns.length });
+          const replay = new Set(initial && entry.recentTurnReplayCount ? snapshot.turns.slice(-entry.recentTurnReplayCount).map(turn => turn.id) : []);
           for (const turn of snapshot.turns) {
             if (!Number.isFinite(turn.createdAtMs)) continue;
             let delivery = binding.turns[turn.id];
             if (!delivery) {
               delivery = binding.turns[turn.id] = { createdAtMs: turn.createdAtMs, sequence: 0,
-                skipped: turn.bridge || (turn.createdAtMs <= binding.baselineAtMs && (initial || turn.state.terminal !== 'running')) };
+                replay: replay.has(turn.id), skipped: !replay.has(turn.id) && (turn.bridge || (turn.createdAtMs <= binding.baselineAtMs && (initial || turn.state.terminal !== 'running'))) };
               // A first snapshot establishes a baseline, including currently
               // running turns: never expose work that predates the binding.
               await save();
