@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { afterEach, expect, it, vi } from 'vitest';
-import type { NormalizedMessage } from '@larksuite/channel';
+import type { EventMap, NormalizedMessage } from '@larksuite/channel';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import { SessionCatalog } from '../../../src/session/catalog';
 import { SessionStore } from '../../../src/session/store';
@@ -21,8 +21,10 @@ vi.mock('../../../src/bot/codex-user-input', () => ({ startCodexUserInput: async
 import { startChannel } from '../../../src/bot/channel';
 import { commandSessionCatalogIdentity } from '../../../src/bot/session-catalog-identity';
 import { runCommandHandler } from '../../../src/commands';
+import * as cardDispatcher from '../../../src/card/dispatcher';
+import { log } from '../../../src/core/logger';
 const cleanups: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const f of cleanups.splice(0).reverse()) await f(); });
+afterEach(async () => { for (const f of cleanups.splice(0).reverse()) await f(); vi.restoreAllMocks(); });
 const originalId = '11111111-1111-4111-8111-111111111111';
 async function harness(status: 'pending' | 'active' = 'active', twoGroups = false) {
   const tmp = await createTmpProfile('aux-intake-'); cleanups.push(() => tmp.cleanup());
@@ -41,7 +43,7 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
       ...(status === 'active' ? { source, cwd: tmp.workspace } : {}) },
     ...(twoGroups ? { oc_aux_2: { chatId: 'oc_aux_2', name: '第二群', generation: 'generation-b', ownerId: 'ou_owner', status, notified: true, source, cwd: tmp.workspace } } : {}),
   } }));
-  const channel = createFakeChannel(); const handlers: { message?: (m: NormalizedMessage) => Promise<void> } = {};
+  const channel = createFakeChannel(); const handlers: Partial<Pick<EventMap, 'message' | 'cardAction'>> = {};
   const download = vi.fn(async () => { throw new Error('must not download'); });
   mock.channel = Object.assign(channel, { botIdentity: { openId: 'ou_bot', name: '示例助手' },
     on: (h: typeof handlers) => Object.assign(handlers, h), connect: async () => {}, disconnect: async () => {},
@@ -76,8 +78,56 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
     await handlers.message!({ messageId: `om_${++count}`, chatId: 'oc_aux', chatType: 'group', threadId: 'topic-a', senderId: 'ou_colleague',
       content: '同事的问题', rawContentType: 'text', resources: [], mentions: [], mentionAll: false, mentionedBot: true, createTime: Date.now(), ...overrides });
   }
-  return { controls, channel, submit, message, download, history, memberGet, createGroup, catalog, workspaces, cwd: tmp.workspace, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
+  const cardAction = (cmd: string, chatId = 'oc_callback') => handlers.cardAction!({
+    messageId: `om_${cmd}`, chatId, operator: { openId: 'ou_owner' }, action: { tag: 'button', value: { cmd } },
+  });
+  return { controls, channel, submit, message, cardAction, download, history, memberGet, createGroup, catalog, workspaces, cwd: tmp.workspace, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
 }
+it.each(['stop', 'config', 'refresh', 'fork', 'finish'])('acknowledges %s before slow card processing and completes it once', async cmd => {
+  const h = await harness();
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const finished = vi.fn();
+  const dispatch = vi.spyOn(cardDispatcher, 'handleCardAction').mockImplementationOnce(async () => {
+    await blocked;
+    finished();
+  });
+  // No timeout/race helper: the transport must get a synchronous JSON object
+  // even when the action never resolves until explicitly released below.
+  expect(h.cardAction(cmd)).toEqual({});
+  expect(dispatch).not.toHaveBeenCalled();
+  try {
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    expect(dispatch.mock.calls[0]![0].evt.action.value).toEqual({ cmd });
+    expect(finished).not.toHaveBeenCalled();
+  } finally { release(); }
+  await vi.waitFor(() => expect(finished).toHaveBeenCalledOnce());
+  expect(dispatch).toHaveBeenCalledOnce();
+});
+it('acknowledges before permission confirmation I/O and retains its failure notice', async () => {
+  const h = await harness();
+  let fail!: (error: Error) => void;
+  const blocked = new Promise<boolean>((_resolve, reject) => { fail = reject; });
+  const approval = vi.spyOn(h.controls.auxiliaryApprovals!, 'action').mockImplementationOnce(() => blocked);
+  const dispatch = vi.spyOn(cardDispatcher, 'handleCardAction');
+  expect(h.cardAction('auxiliary.approval')).toEqual({});
+  expect(approval).not.toHaveBeenCalled();
+  try { await vi.waitFor(() => expect(approval).toHaveBeenCalledOnce()); }
+  finally { fail(new Error('confirmation unavailable')); }
+  await vi.waitFor(() => expect(h.channel.sent.some(m => m.chatId === 'ou_owner' &&
+    JSON.stringify(m.content).includes('权限确认处理未完成'))).toBe(true));
+  expect(dispatch).not.toHaveBeenCalled();
+});
+it('contains detached card failures after acknowledgement and still handles another click', async () => {
+  const h = await harness();
+  const error = new Error('card lookup unavailable');
+  const failure = vi.spyOn(log, 'fail').mockImplementation(() => {});
+  const dispatch = vi.spyOn(cardDispatcher, 'handleCardAction').mockRejectedValueOnce(error).mockResolvedValue(undefined);
+  expect(h.cardAction('config')).toEqual({});
+  await vi.waitFor(() => expect(failure).toHaveBeenCalledWith('cardAction', error));
+  expect(h.cardAction('refresh')).toEqual({});
+  await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+});
 it('accepts direct owner messages in the FF personal workgroup using the original session and normal permissions', async () => {
   const h = await harness();
   const original = h.controls.toolBindings!.get('oc_aux')!;

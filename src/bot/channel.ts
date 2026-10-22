@@ -528,30 +528,41 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     reject: (evt) => {
       log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
     },
-    cardAction: async (evt) => {
-      if (sessionCatalog?.isScopeArchived(evt.chatId)) return;
-      try { if (await controls.auxiliaryApprovals?.action(evt)) return; }
-      catch (error) { await channel.send(evt.operator.openId, { text: `权限确认处理未完成：${auxiliaryLinkError(error)}。请查看原请求状态；不会自动重复执行。` }); return; }
-      try { if (await controls.auxiliary?.action(evt)) return; }
-      catch (error) { await channel.send(evt.operator.openId, { text: `会话共享未完成：${auxiliaryLinkError(error)} 可私聊发送 /aux 重新选择。` }); return; }
-      await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
-        await handleCardAction({
-          channel,
-          evt,
-          sessions,
-          sessionCatalog,
-          workspaces,
-          activeRuns,
-          agent,
-          processPool: pool,
-          runExecutor: executor,
-          controls,
-          pending,
-          chatModeCache,
-          callbackAuth,
-          callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope),
-        });
-      }).catch((err) => log.fail('cardAction', err));
+    cardAction: (evt) => {
+      if (disconnecting) return { toast: { type: 'warning', content: '桥接正在重连，请稍后再试。' } };
+      if (sessionCatalog?.isScopeArchived(evt.chatId)) return {};
+      // Feishu requires a callback response within 3s. Acknowledge receipt
+      // before any REST/worker I/O; results still use the existing card and
+      // message paths, with all authorization checks in the dispatchers.
+      // Defer to the next event-loop turn so even synchronous work cannot
+      // hold the response or the client's card/form interaction lock.
+      setImmediate(() => {
+        if (disconnecting) return;
+        void withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
+          if (sessionCatalog?.isScopeArchived(evt.chatId)) return;
+          try { if (await controls.auxiliaryApprovals?.action(evt)) return; }
+          catch (error) { await channel.send(evt.operator.openId, { text: `权限确认处理未完成：${auxiliaryLinkError(error)}。请查看原请求状态；不会自动重复执行。` }); return; }
+          try { if (await controls.auxiliary?.action(evt)) return; }
+          catch (error) { await channel.send(evt.operator.openId, { text: `会话共享未完成：${auxiliaryLinkError(error)} 可私聊发送 /aux 重新选择。` }); return; }
+          await handleCardAction({
+            channel,
+            evt,
+            sessions,
+            sessionCatalog,
+            workspaces,
+            activeRuns,
+            agent,
+            processPool: pool,
+            runExecutor: executor,
+            controls,
+            pending,
+            chatModeCache,
+            callbackAuth,
+            callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope),
+          });
+        }).catch((err) => log.fail('cardAction', err));
+      });
+      return {};
     },
     comment: async (evt) => {
       await withTrace({ chatId: 'comment' }, async () => {
