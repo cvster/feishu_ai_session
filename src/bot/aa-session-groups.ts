@@ -45,8 +45,13 @@ export function startAaSessionGroupSync(deps: AaSessionGroupSyncDeps): AaSession
   let stopped = false;
   let running: Promise<void> | undefined;
   let paused = 0;
+  let deferred = false;
   const runNow = async (): Promise<void> => {
-    if (stopped || paused > 0) return;
+    if (stopped) return;
+    if (paused > 0) {
+      deferred = true;
+      return;
+    }
     if (running) return running;
     running = syncAaSessionGroupsOnce(deps)
       .catch((err) => log.fail('aa-session-groups', err, { step: 'sync' }))
@@ -67,6 +72,10 @@ export function startAaSessionGroupSync(deps: AaSessionGroupSyncDeps): AaSession
         return await operation();
       } finally {
         paused--;
+        if (paused === 0 && deferred && !stopped) {
+          deferred = false;
+          void runNow();
+        }
       }
     },
     stop() {

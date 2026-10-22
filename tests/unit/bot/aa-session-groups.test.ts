@@ -38,9 +38,6 @@ describe('AA session automatic groups', () => {
   });
   it('pauses scans during native fork naming and resumes them after an error', async () => {
     const historyProvider = vi.fn(async () => []);
-    const profileConfig = createDefaultProfileConfig({ agentKind: 'codex',
-      accounts: { app: { id: 'app', secret: 'secret', tenant: 'feishu' } },
-      codex: { binaryPath: 'codex' } });
     const h = createHarness([]); h.deps.historyProvider = historyProvider;
     const handle = startAaSessionGroupSync(h.deps);
     try {
@@ -54,6 +51,35 @@ describe('AA session automatic groups', () => {
       await handle.runNow();
       expect(historyProvider).toHaveBeenCalledTimes(calls + 1);
     } finally { handle.stop(); }
+  });
+  it('replays a timer scan deferred by group cleanup as soon as the last pause ends', async () => {
+    vi.useFakeTimers();
+    const h = createHarness([]);
+    const list = vi.spyOn(h.deps.controls.toolRegistry!.get('codex'), 'listSessions');
+    const handle = startAaSessionGroupSync({ ...h.deps, intervalMs: 60_000 });
+    let release!: () => void;
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    try {
+      await handle.runNow();
+      const before = list.mock.calls.length;
+      const cleanup = handle.withPaused(() => handle.withPaused(() => wait));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(list).toHaveBeenCalledTimes(before);
+      release();
+      await cleanup;
+      await handle.runNow();
+      expect(list).toHaveBeenCalledTimes(before + 1);
+    } finally { release(); handle.stop(); vi.useRealTimers(); }
+  });
+  it('does not replay a deferred scan after stop', async () => {
+    const h = createHarness([]);
+    const list = vi.spyOn(h.deps.controls.toolRegistry!.get('codex'), 'listSessions');
+    const handle = startAaSessionGroupSync(h.deps);
+    await handle.runNow();
+    const before = list.mock.calls.length;
+    await handle.withPaused(async () => { await handle.runNow(); handle.stop(); });
+    await handle.runNow();
+    expect(list).toHaveBeenCalledTimes(before);
   });
   it('matches only named sessions whose trimmed name starts with uppercase AA', () => {
     const base = {
