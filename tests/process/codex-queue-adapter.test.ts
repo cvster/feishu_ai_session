@@ -12,7 +12,19 @@ describe('CodexAdapter native queue mode', () => {
   const cleanup: string[] = [];
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await Promise.all(cleanup.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  it.each([undefined, 'unix://', 'unix:///tmp/name-sync.sock'])('renames through the live shared writer (%s) without submitting input', async remote => {
+    vi.stubEnv('CODEX_QUEUE_REMOTE', undefined);
+    const fake = await createQueueCodex(); cleanup.push(fake.dir);
+    const adapter = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir, appServerRemote: remote });
+    await adapter.setThreadName('thread-existing', 'AA-tarsc学习3');
+    const requests = (await readFile(join(fake.dir, 'requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(requests.map(r => r.method)).toEqual(['initialize', 'initialized', 'thread/name/set']);
+    expect(requests.at(-1)).toMatchObject({ transport: 'shared', params: { threadId: 'thread-existing', name: 'AA-tarsc学习3' } });
+    expect(requests.at(-1).argv).toEqual(['app-server', 'proxy', ...(remote?.startsWith('unix:///') ? ['--sock', remote.slice(7)] : [])]);
   });
 
   it('accepts a message without observing an unfinished turn and validates attachments before sending', async () => {
@@ -316,7 +328,7 @@ let socket;
 let loaded = ${JSON.stringify(!startUnloaded)};
 const send = value => socket ? socket.send(JSON.stringify(value)) : console.log(JSON.stringify(value));
 function handle(req) {
-  appendFileSync(${JSON.stringify(join(dir, 'requests.jsonl'))}, JSON.stringify({ ...req, transport: args[1] === 'proxy' ? 'shared' : 'owned' }) + '\\n');
+  appendFileSync(${JSON.stringify(join(dir, 'requests.jsonl'))}, JSON.stringify({ ...req, argv: args, transport: args[1] === 'proxy' ? 'shared' : 'owned' }) + '\\n');
   if (req.method === 'initialize') {
     send({ id: req.id, result: { userAgent: 'fake' } });
     return;

@@ -107,9 +107,11 @@ ZCode. Workers recheck cwd, current turn and archive state before stopping.
 
 `nativeSessionNames` advertises automatic title synchronization. Personal groups
 have one-to-one native bindings; shared routes do not own the native title. The
-bridge checks group titles every 10 seconds and uses worker list/rename APIs.
+bridge checks group titles every 15 seconds and uses worker list/rename APIs.
 Initial and simultaneous changes prefer the group title. State survives restart;
 failed operations retain the previous baseline. No model is invoked to rename.
+Codex title writes use the live shared writer so the native Desktop also receives
+the name update notification.
 
 ## Concurrency and durability
 

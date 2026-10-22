@@ -13,7 +13,7 @@ import { DurableAgentAdapter } from '../../../src/worker/adapter';
 import { WorkerClient } from '../../../src/worker/client';
 import type { WorkerCapabilities } from '../../../src/worker/protocol';
 const cleanup: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
+afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.useRealTimers(); vi.restoreAllMocks(); });
 async function fixture(toolId: 'claude' | 'dsh' | 'zcode' = 'zcode') {
   const dir=await mkdtemp(join(tmpdir(),'zcode-names-'));cleanup.push(()=>rm(dir,{recursive:true,force:true}));
   const bindings=new ToolBindingStore(join(dir,'bindings.json'));await bindings.load();
@@ -49,7 +49,7 @@ async function fixture(toolId: 'claude' | 'dsh' | 'zcode' = 'zcode') {
   let handle:Awaited<ReturnType<typeof startToolNameSync>>;
   const start=async()=>{handle=await startToolNameSync({channel,controls,catalog,tool,ready,statePath:join(dir,'names.json'),intervalMs:60_000});cleanup.push(()=>handle.stop());await handle.tick();return handle;};
   const startRegistered=async(waitForTick=true)=>{const handle=await startWorkerNameSync({channel,controls,catalog,profileDir:dir,intervalMs:60_000});cleanup.push(()=>handle.stop());if(waitForTick)await handle.tick();return handle;};
-  return {dir,bindings,catalog,add,legacyAdd,controls,rename,list,ready,start,startRegistered,health,capabilities,update,getChatInfo,title:(v:string)=>{title=v;},group:(v:string)=>{group=v;}};
+  return {dir,bindings,catalog,add,legacyAdd,controls,channel,tool,rename,list,ready,start,startRegistered,health,capabilities,update,getChatInfo,title:(v:string)=>{title=v;},group:(v:string)=>{group=v;}};
 }
 it('repairs a copied native title from the live group, then mirrors desktop renames without submitting input',async()=>{
   const h=await fixture(),sync=await h.start();
@@ -60,6 +60,26 @@ it('repairs a copied native title from the live group, then mirrors desktop rena
   expect(h.update).toHaveBeenCalledWith(expect.objectContaining({data:{name:'AA-桌面改名'}}));
   expect(h.bindings.get('oc_group')?.name).toBe('AA-桌面改名');
   expect(JSON.parse(await readFile(join(h.dir,'names.json'),'utf8')).bindings).toHaveLength(1);
+});
+it('automatically polls and applies a group rename after 15 seconds by default',async()=>{
+  const h=await fixture();vi.useFakeTimers();
+  // Explicitly omit the test fixture's slower timer.
+  const sync=await startToolNameSync({channel:h.channel,controls:h.controls,catalog:h.catalog,tool:h.tool,
+    ready:h.ready,statePath:join(h.dir,'default-names.json')});
+  cleanup.push(()=>sync.stop());await sync.tick();
+  h.group('15秒后的群名');
+  await vi.advanceTimersByTimeAsync(14_999);
+  expect(h.list).toHaveBeenCalledOnce();expect(h.rename).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(1);await sync.tick();
+  expect(h.list).toHaveBeenCalledTimes(2);
+  expect(h.rename).toHaveBeenLastCalledWith('session_native','15秒后的群名');
+});
+it('does not skip a name poll when worker metadata latency decreases',async()=>{
+  let clock=1_030;vi.spyOn(Date,'now').mockImplementation(()=>clock);
+  const h=await fixture(),sync=await h.start();
+  // Polls are 15 seconds apart, but this lookup completes 30 ms faster.
+  clock=16_000;h.group('群改名');await sync.tick();
+  expect(h.rename).toHaveBeenLastCalledWith('session_native','群改名');
 });
 it.each(['archived','ff','auxiliary','wrong-source','wrong-bot','topic'] as const)('does not rename %s bindings',async kind=>{
   const h=await fixture();
@@ -83,7 +103,7 @@ it.each(['claude','dsh','zcode'] as const)('starts %s name synchronization from 
   const h=await fixture(toolId),first=await h.startRegistered();
   expect(h.rename).toHaveBeenCalledWith('session_native','AA-copy（ZCode）');
   await first.tick();
-  h.group('群改名');clock+=10_001;await first.tick();
+  h.group('群改名');clock+=15_001;await first.tick();
   expect(h.rename).toHaveBeenLastCalledWith('session_native','群改名');
   await first.tick();h.title('工具改名');await first.tick();
   expect(h.update).toHaveBeenCalledWith(expect.objectContaining({data:{name:'工具改名'}}));

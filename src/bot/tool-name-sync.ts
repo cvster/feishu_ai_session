@@ -4,7 +4,7 @@ import type { SessionCatalog } from '../session/catalog';
 import type { AgentTool } from '../tools/types';
 import { join } from 'node:path';
 import { DurableAgentAdapter } from '../worker/adapter';
-import { SessionNameSync } from './thread-name';
+import { NAME_SYNC_INTERVAL_MS, SessionNameSync } from './thread-name';
 import { log } from '../core/logger';
 
 /** Poll native metadata only; remote mutations go through the owning worker. */
@@ -27,6 +27,9 @@ export async function startToolNameSync(options: {
     ownedEntries().filter(row => (row.sessionId ?? row.threadId) === id).length === 1;
   const sync = new SessionNameSync({ channel: options.channel, toolId: tool.id, sourceId: tool.sourceId,
     appId: controls.profileConfig.accounts.app.id, statePath: options.statePath,
+    // This poller's timer already throttles lookups. A second throttle would
+    // skip a poll when worker metadata arrives faster than on the prior tick.
+    chatCheckIntervalMs: 0,
     knownChats: () => controls.knownChats ?? [],
     renameSession: (id, name) => tool.sessions!.rename(id, name),
     onSynchronized: async (scope, id, name) => {
@@ -53,7 +56,7 @@ export async function startToolNameSync(options: {
     }).finally(() => { running = undefined; });
     return running;
   };
-  const timer = setInterval(() => { void tick(); }, options.intervalMs ?? 10_000); timer.unref();
+  const timer = setInterval(() => { void tick(); }, options.intervalMs ?? NAME_SYNC_INTERVAL_MS); timer.unref();
   void tick();
   return { tick, async stop() { stopped = true; clearInterval(timer); await running; } };
 }

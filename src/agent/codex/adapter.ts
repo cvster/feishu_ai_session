@@ -115,6 +115,8 @@ export class CodexAdapter implements AgentAdapter {
       profileStateDir: this.profileStateDir,
       ...(this.codexHome ? { codexHome: this.codexHome } : {}),
       inheritCodexHome: this.inheritCodexHome,
+      // The live writer also notifies Desktop; an owned reader only updates history.
+      remote: this.appServerRemote ?? 'unix://',
     });
   }
 

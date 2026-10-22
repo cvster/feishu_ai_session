@@ -34,7 +34,7 @@ describe.each(['codex', 'kilo', 'zcode'] as const)('bidirectional %s / Feishu na
       getChatInfo, getChatMode, setThreadName, update, knownChats, entry,
       group: (name: string) => { groupName = name; },
       thread: (name: string) => { threadName = name; },
-      advance: (ms = 10_000) => { now += ms; },
+      advance: (ms = 15_000) => { now += ms; },
       observe: (entries = [entry], isActive?: (scope: string) => boolean) => sync.observe({ id: 'thread', name: threadName, turns: [] }, entries, isActive),
       restart: async () => { sync = create(); await sync.load(); },
     };
@@ -135,11 +135,14 @@ describe.each(['codex', 'kilo', 'zcode'] as const)('bidirectional %s / Feishu na
     expect(f.setThreadName).not.toHaveBeenCalled();
   });
 
-  it('does not repeatedly fetch group information for every 2-second snapshot', async () => {
+  it('checks group renames at 15 seconds even with more frequent snapshots', async () => {
     const f = await setup(); await f.observe();
-    for (let i = 0; i < 4; i++) { f.advance(2_000); await f.observe(); }
+    f.group('群名2');
+    for (let i = 0; i < 7; i++) { f.advance(2_000); await f.observe(); }
     expect(f.getChatInfo).toHaveBeenCalledTimes(1);
-    f.advance(2_000); await f.observe(); expect(f.getChatInfo).toHaveBeenCalledTimes(2);
+    expect(f.setThreadName).not.toHaveBeenCalled();
+    f.advance(1_000); await f.observe(); expect(f.getChatInfo).toHaveBeenCalledTimes(2);
+    expect(f.setThreadName).toHaveBeenCalledWith('thread', '群名2');
   });
 
   it('ignores wrong bot, legacy, topic, archived and mismatched thread bindings', async () => {

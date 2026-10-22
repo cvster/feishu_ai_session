@@ -146,7 +146,7 @@ it('synchronizes personal group names in both directions, including the pre-inst
     statePath: join(h.dir, 'names.json'), renameSession, now: h.now });
   let names = syncNames(); await names.load(); const first = await h.start(names);
   expect(renameSession).toHaveBeenCalledWith('ses_native', '群里刚改的名字'); expect(h.create).not.toHaveBeenCalled();
-  groupName = '再次改群名'; h.advance(12000); await first.runNow(); expect(h.snapshots.ses_native!.name).toBe('再次改群名');
+  groupName = '再次改群名'; h.advance(h.now() + 15000); await first.runNow(); expect(h.snapshots.ses_native!.name).toBe('再次改群名');
   h.snapshots.ses_native!.name = '桌面改的名字'; await first.runNow(); expect(groupName).toBe('桌面改的名字');
   expect(update).toHaveBeenCalledOnce(); await first.stop();
   names = syncNames(); await names.load(); const resumed = await h.start(names); await resumed.runNow();

@@ -7,7 +7,7 @@ import type { SessionCatalogEntry, CatalogAgentId } from '../session/catalog';
 import { renameChat } from './group';
 import type { KnownChat } from './lark-info';
 
-const CHAT_CHECK_INTERVAL_MS = 10_000;
+export const NAME_SYNC_INTERVAL_MS = 15_000;
 
 interface NameState {
   groupName: string;
@@ -29,6 +29,8 @@ export interface CodexNameSyncOptions {
 export interface SessionNameSyncOptions extends Omit<CodexNameSyncOptions, 'agent'> {
   toolId: CatalogAgentId;
   sourceId?: string;
+  /** A worker poller can supply zero when its own timer controls chat lookups. */
+  chatCheckIntervalMs?: number;
   renameSession?(id: string, name: string): Promise<void>;
   onSynchronized?(scope: string, id: string, name: string): Promise<void>;
 }
@@ -75,7 +77,7 @@ export class SessionNameSync {
         await this.sync(entry.scopeId, snapshot, () => isActive(entry.scopeId));
       } catch (err) {
         this.retryAfter.set(this.stateKey(entry.scopeId, snapshot.id),
-          (this.options.now ?? Date.now)() + CHAT_CHECK_INTERVAL_MS);
+          (this.options.now ?? Date.now)() + NAME_SYNC_INTERVAL_MS);
         log.warn('session', 'name-sync-failed', {
           chatId: entry.scopeId, threadId: snapshot.id,
           err: err instanceof Error ? err.message : String(err),
@@ -99,9 +101,8 @@ export class SessionNameSync {
     if (now < (this.retryAfter.get(key) ?? 0)) return;
     if (this.dirty) await this.flush();
     if (!isActive()) return;
-    // Acknowledgements use the existing 2-second thread polling, even when
-    // the next Feishu lookup is throttled. A subsequent rename back to the
-    // original name is then a real change, not a delayed write echo.
+    // Acknowledge snapshots even when the next Feishu lookup is throttled.
+    // Renaming back to the original name is then a real change, not a delayed echo.
     if (state?.previousThreadName !== undefined && threadName === state.threadName) {
       state = { ...state };
       delete state.previousThreadName;
@@ -110,7 +111,7 @@ export class SessionNameSync {
     const threadChanged = state && threadName && threadName !== state.threadName &&
       threadName !== state.previousThreadName;
     if (!threadChanged && now < (this.nextCheck.get(key) ?? 0)) return;
-    this.nextCheck.set(key, now + CHAT_CHECK_INTERVAL_MS);
+    this.nextCheck.set(key, now + (this.options.chatCheckIntervalMs ?? NAME_SYNC_INTERVAL_MS));
 
     let mode = this.modes.get(chatId);
     if (!mode) {
