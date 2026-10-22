@@ -241,7 +241,6 @@ export function recordRunSessionEvent(input: RecordRunSessionEventInput): void {
   if (toolDefinition(input.capability.agentId).nativeField === 'sessionId' && input.event.sessionId) {
     if (input.sessionCatalog?.isScopeArchived(input.scopeId)) return;
     const cwdRealpath = input.event.cwd ?? input.policy.cwdRealpath;
-    input.sessions.set(input.scopeId, input.event.sessionId, cwdRealpath);
     input.sessionCatalog?.upsertActive({
       scopeId: input.scopeId,
       agentId: input.capability.agentId,
@@ -250,6 +249,7 @@ export function recordRunSessionEvent(input: RecordRunSessionEventInput): void {
       sessionId: input.event.sessionId,
       ...(input.botAppId ? { botAppId: input.botAppId } : {}),
     });
+    input.sessions.set(input.scopeId, input.event.sessionId, cwdRealpath);
     return;
   }
   if (input.capability.agentId === 'codex' && input.event.threadId) {

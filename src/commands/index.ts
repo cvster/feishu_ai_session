@@ -3,7 +3,7 @@ import { isToolId, toolDefinition, type ToolId } from '../tools/definitions';
 import { controlsForTool } from '../tools/context';
 import { routeCommandContext } from '../tools/context';
 import type { ToolRegistry } from '../tools/types';
-import type { ToolBindingStore } from '../tools/bindings';
+import { isPersonalWorkgroup, PersonalBindingConflict, type ToolBindingStore } from '../tools/bindings';
 import type { CopiedSessionSource } from '../tools/bindings';
 import { currentCopySource, readCopiedSession, sessionCopyChoice, showSessionCopyMenu } from './session-copy';
 import { randomUUID } from 'node:crypto';
@@ -755,6 +755,19 @@ async function createGroupForPanelSession(
   options: { exactName?: boolean; forked?: boolean; recentTurnReplayCount?: number } = {},
 ): Promise<boolean> {
   const target = panelCandidate(ctx, token, 'session');
+  const tool = target && ctx.controls.toolRegistry?.get(target.toolId ?? 'codex');
+  const create = () => createGroupForPanelSessionUnlocked(ctx, token, options);
+  return target && tool && ctx.controls.toolBindings
+    ? ctx.controls.toolBindings.withPersonalBinding({ toolId: tool.id, sourceId: tool.sourceId, nativeId: target.threadId }, create)
+    : create();
+}
+
+async function createGroupForPanelSessionUnlocked(
+  ctx: CommandContext,
+  token: string,
+  options: { exactName?: boolean; forked?: boolean; recentTurnReplayCount?: number } = {},
+): Promise<boolean> {
+  const target = panelCandidate(ctx, token, 'session');
   if (!target) {
     await reply(ctx, '此会话操作已过期，请刷新“现有会话”后重试。');
     return false;
@@ -778,17 +791,20 @@ async function createGroupForPanelSession(
     await reply(ctx, '暂时无法确认会话归档状态，请稍后重试。');
     return false;
   }
+  const owner = tool && ctx.controls.toolBindings?.personalOwner({ toolId, sourceId: tool.sourceId, nativeId: target.threadId });
   const alreadyBound = ctx.sessionCatalog?.entries().find(
     (entry) => entry.status === 'active' && entry.agentId === toolId && (!entry.sourceId || entry.sourceId === tool?.sourceId) && (entry.threadId ?? entry.sessionId) === target.threadId &&
-      entry.botAppId === ctx.controls.profileConfig.accounts.app.id,
+      (!entry.botAppId || entry.botAppId === ctx.controls.profileConfig.accounts.app.id) && !ctx.sessionCatalog!.isScopeArchived(entry.scopeId) &&
+      isPersonalWorkgroup(entry.scopeId, ctx.controls.toolBindings?.get(entry.scopeId)),
   );
-  if (alreadyBound && ctx.controls.knownChats?.some((chat) => chat.id === alreadyBound.scopeId)) {
-    const group = ctx.controls.knownChats.find((chat) => chat.id === alreadyBound.scopeId);
+  const ownerScope = owner ?? alreadyBound?.scopeId;
+  if (ownerScope) {
+    const group = ctx.controls.knownChats?.find((chat) => chat.id === ownerScope);
     if (options.exactName && target.name && group && group.name !== target.name) {
       await renameChat(ctx.channel, group.id, target.name);
       group.name = target.name;
     }
-    await reply(ctx, `此会话已经绑定工作群 **${group?.name ?? alreadyBound.scopeId}**，未重复创建。`);
+    await reply(ctx, `此会话已经绑定工作群 **${group?.name ?? ownerScope}**，未重复创建。`);
     return true;
   }
   const workspace = await resolveWorkingDirectory(target.cwd);
@@ -1264,6 +1280,15 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
     const entry = ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity);
     const resolved = consumeResumeCandidate(sessionId, ctx.sessionCatalogIdentity);
     if (resolved) {
+      const toolId = ctx.sessionCatalogIdentity.agentId;
+      const current = ctx.controls.toolBindings?.get(ctx.scope);
+      const sourceId = ctx.controls.toolRegistry?.get(toolId).sourceId ?? current?.sourceId;
+      if (sourceId) try {
+        ctx.controls.toolBindings?.assertPersonalBinding(ctx.scope, { ...current, toolId, sourceId, nativeId: resolved.threadId ?? resolved.sessionId });
+      } catch (error) {
+        if (!(error instanceof PersonalBindingConflict)) throw error;
+        await reply(ctx, error.message); return;
+      }
       if (resolved.threadId) {
         try {
           if (ctx.sessionCatalog.isThreadArchived(resolved.threadId) ||

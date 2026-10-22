@@ -22,8 +22,9 @@ async function fixture(stoppable = false) {
   const bindings = new ToolBindingStore(join(dir, 'bindings.json')); await bindings.load();
   const catalog = new SessionCatalog(join(dir, 'catalog.json')); await catalog.load();
   cleanup.push(async () => { await bindings.flush(); await catalog.flush(); });
-  const add = (scope: string) => {
-    bindings.set(scope, { toolId: 'zcode', sourceId: 'local-zcode', nativeId: 'sess_native' });
+  const add = (scope: string, auxiliary = false) => {
+    bindings.set(scope, { toolId: 'zcode', sourceId: 'local-zcode', nativeId: 'sess_native',
+      ...(auxiliary ? { linkedSource: { toolId: 'zcode' as const, sourceId: 'local-zcode', nativeId: 'sess_native' } } : {}) });
     catalog.upsertActive({ scopeId: scope, agentId: 'zcode', cwdRealpath: dir, policyFingerprint: scope, sessionId: 'sess_native', sourceId: 'local-zcode', botAppId: 'cli_test' });
   };
   add('oc_personal');
@@ -66,7 +67,7 @@ it('does not repeat worker-origin or unknown-origin inputs/answers even with ide
 });
 it('does not broadcast to open groups, private groups, FF owner groups or topics sharing the same native session', async () => {
   const h = await fixture();
-  for (const scope of ['oc_open', 'oc_private', 'oc_ffowner', 'oc_topic:thread']) h.add(scope);
+  for (const scope of ['oc_open', 'oc_private', 'oc_ffowner', 'oc_topic:thread']) h.add(scope, true);
   h.bindings.set('oc_ffowner', { ...h.bindings.get('oc_ffowner')!, auxiliaryWorkgroup: true });
   h.controls.auxiliary = { isAuxiliary: (scope: string) => ['oc_open', 'oc_private'].includes(scope) } as any;
   const sync = await h.start(); h.advance(3000); h.snapshot.messages.push(...messages('new', 2000, 'desktop', true)); await sync.runNow();

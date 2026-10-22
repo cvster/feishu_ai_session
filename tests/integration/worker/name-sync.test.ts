@@ -1,4 +1,4 @@
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -23,6 +23,12 @@ async function fixture(toolId: 'claude' | 'dsh' | 'zcode' = 'zcode') {
     bindings.set(scope,{toolId,sourceId:'local',nativeId:id,name:'old label'});
     catalog.upsertActive({scopeId:scope,agentId:toolId,cwdRealpath:dir,policyFingerprint:scope,sessionId:id,sourceId:'local',botAppId:'bot'});
   };add('oc_group','session_native');
+  const legacyAdd=async(scope:string,id:string)=>{
+    await bindings.flush();
+    await writeFile(join(dir,'bindings.json'),JSON.stringify({version:1,archived:[],bindings:{...Object.fromEntries(bindings.entries()),[scope]:{toolId,sourceId:'local',nativeId:id}}}));
+    await bindings.load();
+    catalog.upsertActive({scopeId:scope,agentId:toolId,cwdRealpath:dir,policyFingerprint:scope,sessionId:id,sourceId:'local',botAppId:'bot'});
+  };
   let title='新会话',group='AA-copy（ZCode）';
   const rename=vi.fn(async(_id:string,name:string)=>{title=name;});
   const list=vi.fn(async()=>[{nativeId:'session_native',name:title,cwd:dir,createdAtMs:1,updatedAtMs:2}]);
@@ -43,7 +49,7 @@ async function fixture(toolId: 'claude' | 'dsh' | 'zcode' = 'zcode') {
   let handle:Awaited<ReturnType<typeof startToolNameSync>>;
   const start=async()=>{handle=await startToolNameSync({channel,controls,catalog,tool,ready,statePath:join(dir,'names.json'),intervalMs:60_000});cleanup.push(()=>handle.stop());await handle.tick();return handle;};
   const startRegistered=async(waitForTick=true)=>{const handle=await startWorkerNameSync({channel,controls,catalog,profileDir:dir,intervalMs:60_000});cleanup.push(()=>handle.stop());if(waitForTick)await handle.tick();return handle;};
-  return {dir,bindings,catalog,add,controls,rename,list,ready,start,startRegistered,health,capabilities,update,getChatInfo,title:(v:string)=>{title=v;},group:(v:string)=>{group=v;}};
+  return {dir,bindings,catalog,add,legacyAdd,controls,rename,list,ready,start,startRegistered,health,capabilities,update,getChatInfo,title:(v:string)=>{title=v;},group:(v:string)=>{group=v;}};
 }
 it('repairs a copied native title from the live group, then mirrors desktop renames without submitting input',async()=>{
   const h=await fixture(),sync=await h.start();
@@ -107,12 +113,12 @@ it('retains paired ZCode naming compatibility with v1 workers',async()=>{
   expect(h.rename).toHaveBeenCalledOnce();
 });
 it.each(['claude','dsh','zcode'] as const)('prevents multiple personal groups from fighting over a %s title',async toolId=>{
-  const h=await fixture(toolId);h.add('oc_duplicate','session_native');
+  const h=await fixture(toolId);await h.legacyAdd('oc_duplicate','session_native');
   const sync=await h.startRegistered();expect(h.rename).not.toHaveBeenCalled();expect(h.update).not.toHaveBeenCalled();
-  h.catalog.archiveScope('oc_duplicate','session_native');await sync.tick();expect(h.rename).toHaveBeenCalledOnce();
+  h.catalog.archiveScope('oc_duplicate','session_native');h.bindings.removeChat('oc_duplicate');await sync.tick();expect(h.rename).toHaveBeenCalledOnce();
 });
 it('rechecks duplicate binding ownership immediately before a name write',async()=>{
-  const h=await fixture('claude');h.getChatInfo.mockImplementation(async()=>{h.add('oc_duplicate','session_native');return{name:'new name'};});
+  const h=await fixture('claude');h.getChatInfo.mockImplementation(async()=>{await h.legacyAdd('oc_duplicate','session_native');return{name:'new name'};});
   await h.startRegistered();expect(h.rename).not.toHaveBeenCalled();expect(h.update).not.toHaveBeenCalled();
 });
 it('stops polling and prevents a late group lookup from renaming after disconnect',async()=>{

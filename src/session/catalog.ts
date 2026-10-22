@@ -83,9 +83,17 @@ export class SessionCatalog {
   private saving: Promise<void> = Promise.resolve();
   private persistenceError: unknown;
   private readonly path: string;
+  private personalBindingGuard?: (input: UpsertSessionCatalogInput) => boolean;
+  private personalBindingCommitted?: (entry: SessionCatalogEntry) => void;
 
   constructor(path = `${paths.sessionsFile}.catalog.json`) {
     this.path = path;
+  }
+
+  /** Runtime supplies group classification and the reverse native-session index. */
+  setPersonalBindingGuard(guard: (input: UpsertSessionCatalogInput) => boolean, committed: (entry: SessionCatalogEntry) => void): void {
+    this.personalBindingGuard = guard;
+    this.personalBindingCommitted = committed;
   }
 
   async load(): Promise<void> {
@@ -202,6 +210,7 @@ export class SessionCatalog {
 
   upsertActive(input: UpsertSessionCatalogInput): SessionCatalogEntry {
     assertAgentIdentity(input);
+    const personal = this.personalBindingGuard?.(input) === true;
     if (this.isChatDissolved(input.scopeId.split(':')[0]!)) throw new Error('飞书群已解散，不能重新绑定。');
     if (input.agentId === 'codex' && input.threadId && this.isThreadArchived(input.threadId)) {
       throw new Error('会话已归档，不能重新绑定。');
@@ -232,10 +241,18 @@ export class SessionCatalog {
       ...(input.threadId ? { threadId: input.threadId } : {}),
       ...(input.lastSummary ? { lastSummary: input.lastSummary } : {}),
     };
+    // Retain previous conversations as history, not simultaneous live routes.
+    if (personal) for (const [oldKey, old] of this.data) {
+      if (old.scopeId === input.scopeId && old.status === 'active' &&
+          (old.agentId !== input.agentId || (old.threadId ?? old.sessionId) !== (input.threadId ?? input.sessionId))) {
+        this.data.set(oldKey, { ...old, status: 'archived', updatedAt: entry.updatedAt });
+      }
+    }
     // Preserve last-establishment order even when timestamps tie and an
     // existing policy/workspace key is reused. Map.set alone keeps old order.
     this.data.delete(key);
     this.data.set(key, entry);
+    if (personal) this.personalBindingCommitted?.(entry);
     this.schedulePersist();
     return { ...entry };
   }
@@ -341,6 +358,7 @@ export class SessionCatalog {
       .sort((a, b) => b.updatedAt - a.updatedAt);
     const selected = candidates[0];
     if (!selected) return undefined;
+    const personal = this.personalBindingGuard?.({ ...selected, ...input }) === true;
 
     for (const legacy of candidates) {
       this.data.set(legacy.key, {
@@ -358,6 +376,7 @@ export class SessionCatalog {
       status: 'active',
     };
     this.data.set(key, migrated);
+    if (personal) this.personalBindingCommitted?.(migrated);
     this.schedulePersist();
     log.info('session-catalog', 'fingerprint-migrated', {
       scopeId: input.scopeId,

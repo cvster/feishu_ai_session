@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import type { LarkChannel } from '@larksuite/channel';
 import type { Controls } from '../../../src/commands';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
-import { ToolBindingStore } from '../../../src/tools/bindings';
+import { ToolBindingStore, type ToolBinding } from '../../../src/tools/bindings';
 import { SessionCatalog } from '../../../src/session/catalog';
 import { startKiloTurnSync } from '../../../src/bot/kilo-turn-sync';
 import { SessionNameSync } from '../../../src/bot/thread-name';
@@ -25,8 +25,8 @@ async function fixture(mode: 'card' | 'markdown' | 'text' = 'card') {
   const bindings = new ToolBindingStore(join(dir, 'bindings.json')); await bindings.load();
   const catalog = new SessionCatalog(join(dir, 'catalog.json')); await catalog.load();
   cleanup.push(async () => { await bindings.flush(); await catalog.flush(); });
-  const add = (scope: string, id: string) => {
-    bindings.set(scope, { toolId: 'kilo', sourceId: 'local-kilo', nativeId: id });
+  const add = (scope: string, id: string, extra: Partial<ToolBinding> = {}) => {
+    bindings.set(scope, { toolId: 'kilo', sourceId: 'local-kilo', nativeId: id, ...extra });
     catalog.upsertActive({ scopeId: scope, agentId: 'kilo', cwdRealpath: dir, policyFingerprint: scope, sessionId: id, sourceId: 'local-kilo', botAppId: 'cli_test' });
   };
   add('oc_group', 'ses_native');
@@ -73,7 +73,7 @@ it('routes VS Code and Desktop native sessions only to their respective bound pe
 it('excludes FF shared groups and FF owner workgroups from unsolicited mirroring', async () => {
   const h = await fixture();
   for (const scope of ['oc_ff', 'oc_ffowner']) {
-    h.add(scope, 'ses_native'); const binding = h.bindings.get(scope)!;
+    h.add(scope, 'ses_native', { linkedSource: { toolId: 'kilo', sourceId: 'local-kilo', nativeId: 'ses_source', historyPath: '/history' } }); const binding = h.bindings.get(scope)!;
     h.bindings.set(scope, { ...binding, linkedSource: { toolId: 'kilo', sourceId: 'local-kilo', nativeId: 'ses_source', historyPath: '/history' }, auxiliaryWorkgroup: scope === 'oc_ffowner' });
   }
   const sync = await h.start(); h.advance(3000); h.snapshots.ses_native!.turns.push(turn()); await sync.runNow();
@@ -150,11 +150,18 @@ it('synchronizes personal group names in both directions, including the pre-inst
   expect(renameSession).toHaveBeenCalledTimes(2); expect(update).toHaveBeenCalledOnce(); expect(h.create).not.toHaveBeenCalled();
 });
 it('does not let multiple personal groups fight over one native title and never includes FF audiences', async () => {
-  const h = await fixture(); h.add('oc_ff', 'ses_native');
+  const h = await fixture(); h.add('oc_ff', 'ses_native', { linkedSource: { toolId: 'kilo', sourceId: 'local-kilo', nativeId: 'ses_source', historyPath: '/history' } });
   h.bindings.set('oc_ff', { ...h.bindings.get('oc_ff')!, linkedSource: { toolId: 'kilo', sourceId: 'local-kilo', nativeId: 'ses_source', historyPath: '/history' } });
   const observe = vi.fn(async (..._args: any[]) => {}); const sync = await h.start({ observe });
   expect(observe).toHaveBeenCalledOnce(); expect(observe.mock.calls[0]![1].map((e: any) => e.scopeId)).toEqual(['oc_group']);
-  observe.mockClear(); h.add('oc_duplicate', 'ses_native'); await sync.runNow(); expect(observe).not.toHaveBeenCalled();
+  observe.mockClear();
+  await h.bindings.flush();
+  await writeFile(join(h.dir, 'bindings.json'), JSON.stringify({ version: 1, archived: [], bindings: {
+    ...Object.fromEntries(h.bindings.entries()), oc_duplicate: { toolId: 'kilo', sourceId: 'local-kilo', nativeId: 'ses_native' },
+  } }));
+  await h.bindings.load();
+  h.catalog.upsertActive({ scopeId: 'oc_duplicate', agentId: 'kilo', sourceId: 'local-kilo', sessionId: 'ses_native', cwdRealpath: h.dir, policyFingerprint: 'duplicate', botAppId: 'cli_test' });
+  await sync.runNow(); expect(observe).not.toHaveBeenCalled();
 });
 it('continues reply mirroring when the independent name synchronization fails', async () => {
   const h = await fixture(); const observe = vi.fn(async () => { throw Error('name service offline'); });

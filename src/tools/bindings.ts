@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import type { AgentKind } from '../config/profile-schema';
 import type { SessionCatalog } from '../session/catalog';
 import { writeFileAtomic } from '../platform/atomic-write';
+import { log } from '../core/logger';
 
 export interface LinkedSession extends SessionRef {
   historyPath?: string;
@@ -35,11 +36,23 @@ export function sessionRefKey(toolId: string, sourceId: string, nativeId: string
   return JSON.stringify([toolId, sourceId, nativeId]);
 }
 
+export function isPersonalWorkgroup(scope: string, binding?: Pick<ToolBinding, 'linkedSource' | 'sharedScope' | 'auxiliaryWorkgroup'>): boolean {
+  return scope.startsWith('oc_') && !scope.includes(':') && !binding?.linkedSource && !binding?.sharedScope && !binding?.auxiliaryWorkgroup;
+}
+
+export class PersonalBindingConflict extends Error {
+  constructor(readonly ownerScope: string) { super(`此会话已绑定个人工作群 ${ownerScope}，不能重复绑定。`); }
+}
+
 /** Group tool selection survives resets, cwd changes and restarts. */
 export class ToolBindingStore {
   private bindings: Record<string, ToolBinding> = {};
   private archived = new Set<string>();
   private saving: Promise<void> = Promise.resolve();
+  private catalog?: SessionCatalog;
+  private appId?: string;
+  private sourceFor?: (id: AgentKind) => string;
+  private bindingChains = new Map<string, Promise<unknown>>();
   constructor(private readonly path: string) {}
   async load(): Promise<void> {
     try {
@@ -84,13 +97,14 @@ export class ToolBindingStore {
     if (!binding?.linkedSource && !binding?.auxiliaryWorkgroup) return scope;
     const source = binding.linkedSource ?? binding;
     if (!source.nativeId) return;
-    const originals = this.entries().filter(([chat, b]) => !chat.includes(':') && !b.linkedSource && !b.sharedScope && !b.auxiliaryWorkgroup &&
+    const originals = this.personalBindings().filter(([, b]) =>
       b.toolId === source.toolId && b.sourceId === source.sourceId && b.nativeId === source.nativeId);
     return originals.length === 1 ? originals[0]![0] : undefined;
   }
   set(scope: string, binding: ToolBinding): void {
     const previous = this.get(scope);
     if (previous && (previous.toolId !== binding.toolId || previous.sourceId !== binding.sourceId)) throw new Error('会话创建后不能切换执行工具');
+    this.assertPersonalBinding(scope, binding);
     if (binding.sharedScope) {
       const shared = this.get(binding.sharedScope);
       if (!shared?.linkedSource || shared.sharedScope || !binding.linkedSource ||
@@ -101,6 +115,97 @@ export class ToolBindingStore {
     }
     this.bindings[scope] = { ...binding };
     this.persist();
+  }
+
+  /** All personal group creation paths hold the same lease across remote I/O. */
+  async withPersonalBinding<T>(ref: SessionRef, operation: () => Promise<T>): Promise<T> {
+    const key = sessionRefKey(ref.toolId, ref.sourceId, ref.nativeId);
+    const next = (this.bindingChains.get(key) ?? Promise.resolve()).catch(() => {}).then(operation);
+    this.bindingChains.set(key, next);
+    try { return await next; }
+    finally { if (this.bindingChains.get(key) === next) this.bindingChains.delete(key); }
+  }
+
+  personalOwner(ref: SessionRef, exceptScope?: string): string | undefined {
+    return this.personalBindings().find(([scope, binding]) => scope !== exceptScope &&
+      binding.toolId === ref.toolId && binding.sourceId === ref.sourceId && binding.nativeId === ref.nativeId)?.[0];
+  }
+
+  assertPersonalBinding(scope: string, binding: ToolBinding): void {
+    if (!binding.nativeId || !isPersonalWorkgroup(scope, binding)) return;
+    const owner = this.personalOwner({ toolId: binding.toolId, sourceId: binding.sourceId, nativeId: binding.nativeId }, scope);
+    if (owner) throw new PersonalBindingConflict(owner);
+  }
+
+  /** Upgrade legacy duplicates before any intake/reply observer starts. */
+  enforcePersonalUniqueness(catalog: SessionCatalog, appId: string, sourceFor: (id: AgentKind) => string): void {
+    this.catalog = catalog; this.appId = appId; this.sourceFor = sourceFor;
+    const latest = new Map<string, ReturnType<SessionCatalog['entries']>[number]>();
+    for (const row of catalog.entries()) {
+      if (row.status !== 'active' || catalog.isScopeArchived(row.scopeId) || (row.botAppId && row.botAppId !== appId) ||
+          !isPersonalWorkgroup(row.scopeId, this.get(row.scopeId))) continue;
+      const prior = latest.get(row.scopeId);
+      if (!prior || (row.boundAt ?? row.updatedAt) >= (prior.boundAt ?? prior.updatedAt)) latest.set(row.scopeId, row);
+    }
+    for (const [scope, row] of latest) {
+      const current = this.get(scope), sourceId = row.sourceId ?? current?.sourceId ?? sourceFor(row.agentId);
+      if (current && (current.toolId !== row.agentId || current.sourceId !== sourceId)) continue;
+      // A previous resume may have persisted the catalog before updating the tool ledger.
+      const nativeId = current?.nativeCreated === false ? current.nativeId : row.threadId ?? row.sessionId;
+      if (current && current.nativeCreated !== false && current.nativeId !== nativeId) {
+        this.bindings[scope] = { ...current, nativeId, nativeCreated: true }; this.persist();
+      }
+      for (const old of catalog.entries()) if (old.scopeId === scope && old.status === 'active' &&
+          (!old.botAppId || old.botAppId === appId) && (old.threadId ?? old.sessionId) !== nativeId) catalog.archiveActive(old);
+    }
+    const established = (scope: string) => Math.min(...catalog.entries().filter(row => row.scopeId === scope && row.status === 'active')
+      .map(row => row.boundAt ?? row.updatedAt));
+    const owners = new Map<string, string>();
+    const candidates = this.personalBindings().sort(([a], [b]) => established(a) - established(b) || a.localeCompare(b));
+    for (const [scope, binding] of candidates) {
+      const key = sessionRefKey(binding.toolId, binding.sourceId, binding.nativeId!);
+      const owner = owners.get(key);
+      if (!owner) { owners.set(key, scope); continue; }
+      // Closing a duplicate bridge route preserves its group, native data and history.
+      catalog.archiveScope(scope, binding.nativeId!);
+      log.warn('session', 'duplicate-personal-binding-retired', { scope, ownerScope: owner, toolId: binding.toolId });
+    }
+    catalog.setPersonalBindingGuard(input => {
+      const current = this.get(input.scopeId);
+      if (!isPersonalWorkgroup(input.scopeId, current)) return false;
+      if (input.botAppId && input.botAppId !== appId) return false;
+      const binding = { ...current, toolId: input.agentId, sourceId: input.sourceId ?? current?.sourceId ?? sourceFor(input.agentId),
+        nativeId: input.threadId ?? input.sessionId };
+      if (current && (current.toolId !== binding.toolId || current.sourceId !== binding.sourceId)) throw new Error('会话创建后不能切换执行工具');
+      this.assertPersonalBinding(input.scopeId, binding);
+      return true;
+    }, entry => {
+      const current = this.get(entry.scopeId);
+      this.set(entry.scopeId, { ...current, toolId: entry.agentId, sourceId: entry.sourceId ?? current?.sourceId ?? sourceFor(entry.agentId),
+        nativeId: entry.threadId ?? entry.sessionId, nativeCreated: true });
+    });
+  }
+
+  private personalBindings(): [string, ToolBinding][] {
+    const rows = this.catalog?.entries() ?? [];
+    const latest = new Map<string, ReturnType<SessionCatalog['entries']>[number]>();
+    for (const row of rows) {
+      if (row.status !== 'active' || (row.botAppId && this.appId && row.botAppId !== this.appId)) continue;
+      const prior = latest.get(row.scopeId);
+      if (!prior || (row.boundAt ?? row.updatedAt) >= (prior.boundAt ?? prior.updatedAt)) latest.set(row.scopeId, row);
+    }
+    const candidates = new Map(this.entries());
+    for (const [scope, row] of latest) if (!candidates.has(scope)) candidates.set(scope, {
+      toolId: row.agentId, sourceId: row.sourceId ?? this.sourceFor?.(row.agentId) ?? '', nativeId: row.threadId ?? row.sessionId,
+    });
+    return [...candidates].filter(([scope, binding]) => {
+      if (!binding.nativeId || !isPersonalWorkgroup(scope, binding) || this.catalog?.isScopeArchived(scope) ||
+          this.isArchived(binding.toolId, binding.sourceId, binding.nativeId)) return false;
+      const scoped = rows.filter(row => row.scopeId === scope);
+      // A retired catalog binding cannot retain reverse ownership through a stale ledger.
+      if (scoped.length && !scoped.some(row => row.status === 'active' && (!row.botAppId || !this.appId || row.botAppId === this.appId)) && binding.nativeCreated !== false) return false;
+      return true;
+    });
   }
   linkAuxiliary(scope: string, sharedScope: string): void {
     const shared = this.get(sharedScope);
@@ -136,7 +241,7 @@ export class ToolBindingStore {
   migrate(catalog: SessionCatalog, sourceFor: (id: AgentKind) => string): void {
     const latest = new Map<string, ReturnType<SessionCatalog['entries']>[number]>();
     for (const row of catalog.entries()) {
-      if (row.status !== 'active') continue;
+      if (row.status !== 'active' || catalog.isScopeArchived(row.scopeId) || (row.botAppId && this.appId && row.botAppId !== this.appId)) continue;
       const previous = latest.get(row.scopeId);
       if (previous && previous.agentId !== row.agentId) throw new Error(`工具身份冲突：${row.scopeId}`);
       if (!previous || (row.boundAt ?? row.updatedAt) >= (previous.boundAt ?? previous.updatedAt)) latest.set(row.scopeId, row);

@@ -94,7 +94,7 @@ side, with the group winning simultaneous changes. Baselines survive restarts
 in `<tool>-name-sync.json`. Failed reads or renames leave the baseline intact
 for a later retry, including worker `busy` rejections.
 
-Archived, topic, FF and auxiliary bindings are excluded, as are other accounts,
+Archived, topic and auxiliary bindings (including legacy FF groups) are excluded, as are other accounts,
 bots and data sources. The metadata pollers and Kilo reader pause name
 synchronization when multiple personal groups own the same native session.
 CLI-mode ZCode
@@ -108,6 +108,21 @@ acknowledgement never triggers a second stop via another transport. The worker
 rereads the native session and refuses archived, completed, bridge-origin,
 stale-turn or mismatched-directory requests; closing its reader detaches from
 attached editor/desktop services.
+
+Personal bindings are unique within the current bot/profile by `(toolId,
+sourceId, nativeId)`. Both the tool-binding ledger and runtime catalog writes
+enforce this rule; a new conversation retires the group's old live catalog rows
+while retaining history. Manual and automatic group creation share a lease for
+the native session across remote group creation and binding. Missing chat-list
+entries do not release ownership; confirmed group cleanup or explicit closure
+does. Resume conflicts are rejected before interrupting the current run.
+
+Startup reconciles stale catalog/tool-ledger state and legacy duplicates before
+intake starts. It retains the earliest established active personal binding
+(ties use scope ID order), closes other duplicate bridge scopes, and preserves
+groups and native histories. Shared auxiliary routes do not count as personal
+owners. New FF native sessions and FF personal groups remain disabled; existing
+FF groups are compatibility routes to the original session.
 
 ## Concurrency, durability and upgrades
 

@@ -248,8 +248,11 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     controls.defaultToolId = controls.profileConfig.agentKind;
     controls.toolBindings = new ToolBindingStore(join(deps.appPaths.profileDir, 'tool-bindings.json'));
     await controls.toolBindings.load();
-    if (sessionCatalog) controls.toolBindings.migrate(sessionCatalog, id => controls.toolRegistry!.get(id).sourceId);
-    await controls.toolBindings.flush();
+    if (sessionCatalog) {
+      controls.toolBindings.enforcePersonalUniqueness(sessionCatalog, controls.profileConfig.accounts.app.id, id => controls.toolRegistry!.get(id).sourceId);
+      controls.toolBindings.migrate(sessionCatalog, id => controls.toolRegistry!.get(id).sourceId);
+    }
+    await Promise.all([controls.toolBindings.flush(), sessionCatalog?.flush()]);
     controls.workerRuntimes = new Map();
     for (const tool of controls.toolRegistry.all()) if (tool.agent instanceof DurableAgentAdapter) {
       const inbox = new WorkerInbox(join(deps.appPaths.profileDir, workerInboxName(tool.id))); await inbox.load();

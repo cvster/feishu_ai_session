@@ -18,6 +18,7 @@ import { registerLiveRunCardRefresh } from '../../../src/card/run-refresh.js';
 import { createFakeAgent } from '../../helpers/fake-agent.js';
 import { createFakeChannel, type FakeChannel } from '../../helpers/fake-channel.js';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
+import { syncAaSessionGroupsOnce } from '../../../src/bot/aa-session-groups';
 
 interface RunOverrides {
   fromCardAction?: boolean;
@@ -50,6 +51,68 @@ interface Harness {
 const cleanups: Array<() => Promise<void>> = [];
 
 describe('Bridge command contracts', () => {
+  it('returns the original personal group even when the cached chat list is empty', async () => {
+    const h = await createHarness(), binding = await personalTools(h);
+    h.sessionCatalog.upsertActive({ scopeId: 'oc_existing', agentId: 'codex', sourceId: 'home', botAppId: 'app-id',
+      cwdRealpath: h.tmp.workspace, policyFingerprint: 'existing', threadId: 'native-one' });
+    h.controls.knownChats = [];
+    await h.run('/panel sessions');
+    const token = extractActionToken(JSON.stringify(lastContent(h.channel)), 'panel.session-group');
+    await h.run(`/panel session-group ${token}`);
+    expect(h.channel.createdChats).toHaveLength(0); expect(lastMarkdown(h.channel)).toContain('oc_existing');
+    expect(binding.personalOwner({ toolId: 'codex', sourceId: 'home', nativeId: 'native-one' })).toBe('oc_existing');
+    await binding.flush();
+  });
+
+  it('allows a first personal workgroup when auxiliary groups already share the original session', async () => {
+    const h = await createHarness(), bindings = await personalTools(h);
+    const linkedSource = { toolId: 'codex' as const, sourceId: 'home', nativeId: 'native-one' };
+    bindings.set('aux_shared', { ...linkedSource, linkedSource }); bindings.linkAuxiliary('oc_aux', 'aux_shared');
+    h.sessionCatalog.upsertActive({ scopeId: 'oc_aux', agentId: 'codex', sourceId: 'home', botAppId: 'app-id',
+      cwdRealpath: h.tmp.workspace, policyFingerprint: 'aux', threadId: 'native-one' });
+    await h.run('/panel sessions');
+    const token = extractActionToken(JSON.stringify(lastContent(h.channel)), 'panel.session-group');
+    await h.run(`/panel session-group ${token}`);
+    expect(h.channel.createdChats).toHaveLength(1);
+    expect(bindings.personalOwner(linkedSource)).toBe('oc_fake_1');
+    expect(bindings.get('oc_aux')?.nativeId).toBe('native-one'); await bindings.flush();
+  });
+
+  it.each([false, true])('creates only one group for simultaneous manual creation and %s automatic scan', async automatic => {
+    const h = await createHarness(), bindings = await personalTools(h);
+    h.controls.profileConfig.access.allowedChats = ['*'];
+    Object.assign(h.channel, { listChats: vi.fn(async () => []) });
+    await h.run('/panel sessions');
+    const token = extractActionToken(JSON.stringify(lastContent(h.channel)), 'panel.session-group');
+    const command = () => h.run(`/panel session-group ${token}`);
+    await Promise.all([command(), automatic ? syncAaSessionGroupsOnce({
+      channel: h.channel as unknown as Parameters<typeof syncAaSessionGroupsOnce>[0]['channel'],
+      controls: h.controls, sessionCatalog: h.sessionCatalog, workspaces: h.workspaces, profileStateDir: h.tmp.profile,
+    }) : command()]);
+    expect(h.channel.createdChats).toHaveLength(1);
+    expect(bindings.personalOwner({ toolId: 'codex', sourceId: 'home', nativeId: 'native-one' })).toBe('oc_fake_1');
+    expect(h.sessionCatalog.entries().filter(row => row.status === 'active' && row.threadId === 'native-one')).toHaveLength(1);
+    await bindings.flush();
+  });
+
+  it('rejects a resume into another personal group before interrupting or changing the current binding', async () => {
+    const h = await createHarness(); h.controls.profileConfig.agentKind = 'codex';
+    h.controls.profileConfig.codex = { binaryPath: 'codex' };
+    const bindings = new ToolBindingStore(join(h.tmp.profile, 'bindings')); await bindings.load();
+    bindings.enforcePersonalUniqueness(h.sessionCatalog, 'app-id', () => 'home'); h.controls.toolBindings = bindings;
+    const identity = { scopeId: 'oc_current', agentId: 'codex' as const, cwdRealpath: h.tmp.workspace, policyFingerprint: 'p' };
+    h.sessionCatalog.upsertActive({ ...identity, threadId: 'native-old', sourceId: 'home', botAppId: 'app-id' });
+    h.sessionCatalog.upsertActive({ ...identity, scopeId: 'oc_other', threadId: 'native-taken', sourceId: 'home', botAppId: 'app-id' });
+    const overrides = { scope: 'oc_current', chatId: 'oc_current', sessionCatalogIdentity: identity };
+    await h.run('/resume', { ...overrides, codexHistoryProvider: async () => [{ threadId: 'native-taken', name: 'taken', preview: '',
+      cwd: h.tmp.workspace, createdAtMs: 1, updatedAtMs: 2, source: 'appServer' }] });
+    const token = extractActionToken(JSON.stringify(lastContent(h.channel)), 'resume.use');
+    const interrupt = vi.spyOn(h.activeRuns, 'interrupt');
+    await h.run(`/resume use ${token}`, { ...overrides, chatMode: 'group' });
+    expect(lastMarkdown(h.channel)).toContain('oc_other'); expect(interrupt).not.toHaveBeenCalled();
+    expect(h.sessionCatalog.activeFor(identity)?.threadId).toBe('native-old');
+    expect(bindings.get('oc_current')?.nativeId).toBe('native-old'); await bindings.flush();
+  });
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
@@ -986,6 +1049,17 @@ async function createHarness(): Promise<Harness> {
   });
 
   return { tmp, channel, sessions, sessionCatalog, workspaces, activeRuns, agent, controls, run };
+}
+
+async function personalTools(h: Harness): Promise<ToolBindingStore> {
+  h.controls.profileConfig.agentKind = 'codex'; h.controls.profileConfig.codex = { binaryPath: 'codex' };
+  const bindings = new ToolBindingStore(join(h.tmp.profile, 'bindings'));
+  await bindings.load(); bindings.enforcePersonalUniqueness(h.sessionCatalog, 'app-id', () => 'home');
+  const registry = new ToolRegistry();
+  registry.register({ id: 'codex', label: 'Codex', sourceId: 'home', agent: h.agent,
+    listSessions: async () => [{ nativeId: 'native-one', name: 'AA-one', cwd: h.tmp.workspace, createdAtMs: 1, updatedAtMs: 2 }] });
+  h.controls.toolBindings = bindings; h.controls.toolRegistry = registry;
+  return bindings;
 }
 
 function extractActionToken(cardJson: string, cmd: string): string {

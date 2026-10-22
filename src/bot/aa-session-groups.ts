@@ -1,5 +1,6 @@
 import { nativeSessionFields, nativeSessionId, toolDefinition } from '../tools/definitions';
 import { controlsForTool } from '../tools/context';
+import { isPersonalWorkgroup } from '../tools/bindings';
 import type { AgentKind } from '../config/profile-schema';
 import type { LarkChannel } from '@larksuite/channel';
 import { capabilityForTool } from '../agent/capability';
@@ -99,7 +100,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
   if (!deps.toolId && deps.controls.profileConfig.agentKind !== 'codex') return;
   const capability = capabilityForTool(toolId, deps.controls.profileConfig);
   const nativeId = (entry: SessionCatalogEntry) => nativeSessionId(toolId, entry);
-  const isBinding = (entry: SessionCatalogEntry) => entry.agentId === toolId && (!entry.sourceId || entry.sourceId === sourceId) && isCurrentBotBinding(entry, currentBotAppId, knownChatIds);
+  const isBinding = (entry: SessionCatalogEntry) => isPersonalWorkgroup(entry.scopeId, deps.controls.toolBindings?.get(entry.scopeId)) && entry.agentId === toolId && (!entry.sourceId || entry.sourceId === sourceId) && isCurrentBotBinding(entry, currentBotAppId, knownChatIds);
   const isArchived = (id: string) => deps.controls.toolBindings?.isArchived(toolId, sourceId, id) || (toolId === 'codex' && deps.sessionCatalog.isThreadArchived?.(id));
   const isSuppressed = (id: string) => deps.sessionCatalog.isAutoGroupSuppressed?.(toolId, sourceId, id);
 
@@ -137,7 +138,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
   // An owned group missing from a partial/visibility-limited list must first be
   // checked by group cleanup, rather than immediately replaced by this scanner.
   const unverifiedOwnedThreads = new Set(catalogEntries.filter(entry => entry.agentId === toolId &&
-    entry.botAppId === currentBotAppId && entry.status === 'active' &&
+    entry.botAppId === currentBotAppId && entry.status === 'active' && isPersonalWorkgroup(entry.scopeId, deps.controls.toolBindings?.get(entry.scopeId)) &&
     (!entry.sourceId || entry.sourceId === sourceId) && !knownChatIds.has(entry.scopeId))
     .map(entry => nativeId(entry)).filter(Boolean));
   const boundThreadIds = new Set(
@@ -155,7 +156,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
     log.warn('group-avatar', 'backfill-failed', { toolId, chatId, error: errorText(error) }));
   const aaCandidates = latestVersionSessions(history).filter(
     (thread) => isAaSession(thread) && !deps.controls.auxiliary?.isAuxiliaryNative(toolId, sourceId, thread.threadId) && !boundThreadIds.has(thread.threadId) &&
-      !deps.controls.toolBindings?.hasNativeBinding(toolId, sourceId, thread.threadId, knownChatIds) &&
+      !deps.controls.toolBindings?.personalOwner({ toolId, sourceId, nativeId: thread.threadId }) &&
       !isArchived(thread.threadId) && !isSuppressed(thread.threadId) && !unverifiedOwnedThreads.has(thread.threadId),
   );
   const candidates = aaCandidates;
@@ -164,13 +165,15 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
   const usedNames = new Set(knownChatsResult.chats.map((chat) => chat.name.trim()));
   const historyByThreadId = new Map(history.map((thread) => [thread.threadId, thread]));
 
-  for (const thread of candidates) {
-    if (isArchived(thread.threadId) || isSuppressed(thread.threadId)) continue;
+  const synchronize = async (thread: CodexThreadHistoryEntry) => {
+    // The shared lease makes manual and automatic creation atomic for this native ID.
+    if (deps.controls.toolBindings?.personalOwner({ toolId, sourceId, nativeId: thread.threadId })) return;
+    if (isArchived(thread.threadId) || isSuppressed(thread.threadId)) return;
     // Another timer/manual action may have bound it while this sync was awaiting I/O.
     if (deps.sessionCatalog.entries().some(
       (entry) =>
         nativeId(entry) === thread.threadId && isBinding(entry),
-    )) continue;
+    )) return;
 
     const workspace = await resolveWorkingDirectory(thread.cwd);
     if (!workspace.ok) {
@@ -178,7 +181,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
         threadId: thread.threadId,
         cwd: thread.cwd,
       });
-      continue;
+      return;
     }
     const previous = findPreviousVersionBinding(
       thread,
@@ -218,12 +221,12 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
           chatId: previous.scopeId,
           threadId: thread.threadId,
         });
-        continue;
+        return;
       }
       try {
         if ((toolId === 'codex' && await deps.controls.codexReplySync?.isThreadArchived?.(thread.threadId)) ||
             isArchived(thread.threadId) ||
-            deps.sessionCatalog.isScopeArchived?.(previous.scopeId)) continue;
+            deps.sessionCatalog.isScopeArchived?.(previous.scopeId)) return;
         if (oldChat?.name.trim() !== name) {
           await renameChat(deps.channel, previous.scopeId, name);
         }
@@ -251,7 +254,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
           chatId: previous.scopeId,
           threadId: thread.threadId,
         });
-        continue;
+        return;
       }
       if (oldChat?.name) usedNames.delete(oldChat.name.trim());
       usedNames.add(name);
@@ -274,13 +277,13 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
         threadId: thread.threadId,
         name,
       });
-      continue;
+      return;
     }
     const name = deps.toolId ? uniqueToolGroupName(thread.name!, usedNames, toolId) : uniqueGroupName(thread.name!, usedNames);
     let created;
     try {
       if ((toolId === 'codex' && await deps.controls.codexReplySync?.isThreadArchived?.(thread.threadId)) ||
-          isArchived(thread.threadId) || isSuppressed(thread.threadId)) continue;
+          isArchived(thread.threadId) || isSuppressed(thread.threadId)) return;
       created = await createBoundChat({
         channel: deps.channel,
         name,
@@ -290,7 +293,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
       });
     } catch (err) {
       log.fail('aa-session-groups', err, { step: 'create-chat', threadId: thread.threadId });
-      continue;
+      return;
     }
 
     deps.workspaces.setCwd(created.chatId, workspace.cwdRealpath);
@@ -318,7 +321,7 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
         chatId: created.chatId,
         threadId: thread.threadId,
       });
-      continue;
+      return;
     }
     // Retire bindings for this thread that belonged to a previous bot before
     // recording the newly created group for the authenticated bot.
@@ -360,6 +363,10 @@ async function syncAaToolOnce(deps: AaSessionGroupSyncDeps): Promise<void> {
       threadId: thread.threadId,
       name: created.name,
     });
+  };
+  for (const thread of candidates) {
+    if (deps.controls.toolBindings) await deps.controls.toolBindings.withPersonalBinding({ toolId, sourceId, nativeId: thread.threadId }, () => synchronize(thread));
+    else await synchronize(thread);
   }
 }
 

@@ -96,6 +96,11 @@ it('does not guess model ownership when the original workgroup is absent or ambi
   const store = new ToolBindingStore(join(root, 'bindings')); await store.load();
   store.set('aux_shared', { toolId: 'codex', sourceId: root, nativeId: 'original', linkedSource: { toolId: 'codex', sourceId: root, nativeId: 'original' } });
   store.linkAuxiliary('oc_open', 'aux_shared'); expect(store.settingsScope('oc_open')).toBeUndefined();
-  for (const scope of ['oc_a', 'oc_b']) store.set(scope, { toolId: 'codex', sourceId: root, nativeId: 'original' });
+  await store.flush();
+  await writeFile(join(root, 'bindings'), JSON.stringify({ version: 1, archived: [], bindings: {
+    ...Object.fromEntries(store.entries()), oc_a: { toolId: 'codex', sourceId: root, nativeId: 'original' },
+    oc_b: { toolId: 'codex', sourceId: root, nativeId: 'original' },
+  } }));
+  await store.load(); // Pre-upgrade ambiguity remains readable until startup reconciliation.
   expect(store.settingsScope('oc_open')).toBeUndefined(); await store.flush();
 });

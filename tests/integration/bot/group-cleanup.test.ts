@@ -37,10 +37,11 @@ async function fixture() {
     knownChats: [{ id: 'oc_dead', name: 'AA-old' }, { id: 'oc_live', name: 'AA-live' }],
   } as unknown as Controls;
   const cancelPending = vi.fn(async (_scope: string) => {});
-  const add = (scope: string, nativeId = 'shared', botAppId = 'bot') => {
+  const add = (scope: string, nativeId = 'shared', botAppId = 'bot', auxiliary = false) => {
     catalog.upsertActive({ scopeId: scope, agentId: 'codex', threadId: nativeId, sourceId: 'legacy',
       cwdRealpath: dir, policyFingerprint: scope, botAppId });
-    bindings.set(scope, { toolId: 'codex', sourceId: 'legacy', nativeId });
+    bindings.set(scope, { toolId: 'codex', sourceId: 'legacy', nativeId,
+      ...(auxiliary ? { linkedSource: { toolId: 'codex' as const, sourceId: 'legacy', nativeId } } : {}) });
     sessions.set(scope, nativeId, dir); workspaces.setCwd(scope, dir);
   };
   const deps = { channel, controls, catalog, sessions, workspaces, cancelPending };
@@ -51,7 +52,7 @@ async function fixture() {
 }
 
 it.each(['dissolved', 'dissolved_save'])('cleans %s group/topic routes while keeping shared native history and other groups', async chat_status => {
-  const h = await fixture(); h.add('oc_dead'); h.add('oc_dead:topic'); h.add('oc_live');
+  const h = await fixture(); h.add('oc_dead'); h.add('oc_dead:topic'); h.add('oc_live', 'shared', 'bot', true);
   h.sessions.set('oc_dead:session-only', 'shared', h.dir);
   h.get.mockImplementation(async (p: any) => ({ code: 0, data: { chat_status: p.path.chat_id === 'oc_dead' ? chat_status : 'normal' } }));
   const scan = h.start(); await scan.runNow();
