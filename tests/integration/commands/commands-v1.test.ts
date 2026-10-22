@@ -575,7 +575,10 @@ describe('Bridge command contracts', () => {
       await notifications.flush(); await notifications.flush();
       const messages = h.channel.rawClient.requests.filter(r => r.method === 'im.v1.message.create');
       expect(messages).toHaveLength(1);
-      expect(messages[0]?.params).toMatchObject({ data: { receive_id: 'oc_group', content: JSON.stringify({ text: '会话已归档。' }) } });
+      expect(messages[0]?.params).toMatchObject({ data: { receive_id: 'oc_group', msg_type: 'post',
+        content: JSON.stringify({ zh_cn: { title: '', content: [[
+          { tag: 'at', user_id: 'ou-owner' }, { tag: 'text', text: ' 会话已归档。' },
+        ]] } }) } });
       expect(h.channel.sent.filter(m => JSON.stringify(m.content).includes('群和会话历史已保留'))).toEqual([]);
       if (!routed) expect(h.agent.archivedThreads).toEqual(['native-one']);
     } finally { await notifications.stop(); await bindings.flush(); }

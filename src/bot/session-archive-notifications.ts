@@ -36,8 +36,12 @@ export function startSessionArchiveNotifications(options: {
           catalog.startArchiveNotification(notice.id, now()); await catalog.flush();
           if (stopped) break;
           if (!eligible(notice)) { catalog.completeArchiveNotification(notice.id); await catalog.flush(); continue; }
+          const ownerId = controls.botOwnerId;
           const response = await channel.rawClient.im.v1.message.create({ params: { receive_id_type: 'chat_id' },
-            data: { receive_id: notice.scopeId, msg_type: 'text', content: JSON.stringify({ text: '会话已归档。' }), uuid: notice.id } });
+            data: { receive_id: notice.scopeId, msg_type: ownerId ? 'post' : 'text',
+              content: ownerId ? JSON.stringify({ zh_cn: { title: '', content: [[
+                { tag: 'at', user_id: ownerId }, { tag: 'text', text: ' 会话已归档。' },
+              ]] } }) : JSON.stringify({ text: '会话已归档。' }), uuid: notice.id } });
           if (response.code || !response.data?.message_id) throw new Error(`归档通知发送未确认：${response.code ?? 'missing-message-id'}`);
           catalog.completeArchiveNotification(notice.id); await catalog.flush();
         } catch (error) {

@@ -27,7 +27,7 @@ async function fixture(toolId: 'codex' | 'claude' | 'kilo' | 'zcode' | 'dsh' = '
   cleanup.push(() => bindings.flush());
   const profile = createDefaultProfileConfig({ agentKind: 'codex', codex: { binaryPath: 'codex' },
     accounts: { app: { id: 'bot', secret: 'test', tenant: 'feishu' } } });
-  const controls = { profileConfig: profile, toolBindings: bindings } as Controls;
+  const controls = { profileConfig: profile, toolBindings: bindings, botOwnerId: 'ou_owner' } as Controls;
   const channel = createFakeChannel();
   const originalCreate = channel.rawClient.im.v1.message.create;
   const create = vi.spyOn(channel.rawClient.im.v1.message, 'create');
@@ -64,9 +64,21 @@ it('persists an archive before notifying its current personal group, then stays 
   const first = h.start(); await first.flush();
   expect(h.create).toHaveBeenCalledOnce();
   expect(h.create.mock.calls[0]![0]).toMatchObject({ params: { receive_id_type: 'chat_id' },
-    data: { receive_id: 'oc_personal', msg_type: 'text', content: JSON.stringify({ text: '会话已归档。' }) } });
+    data: { receive_id: 'oc_personal', msg_type: 'post' } });
+  const content = JSON.parse((h.create.mock.calls[0]![0] as any).data.content);
+  expect(content.zh_cn.content).toEqual([[{ tag: 'at', user_id: 'ou_owner' }, { tag: 'text', text: ' 会话已归档。' }]]);
   h.archive(); await first.flush(); expect(h.create).toHaveBeenCalledOnce();
   await first.stop(); await h.reload(); h.archive(); await h.start().flush(); expect(h.create).toHaveBeenCalledOnce();
+  expect(h.catalog.pendingArchiveNotifications()).toEqual([]);
+});
+
+it('still sends the archive notice when the owner identity is unavailable', async () => {
+  const h = await fixture(); h.controls.botOwnerId = undefined;
+  h.add('oc_personal'); h.archive(); await h.start().flush();
+  expect(h.create).toHaveBeenCalledOnce();
+  expect(h.create.mock.calls[0]![0]).toMatchObject({ data: {
+    msg_type: 'text', content: JSON.stringify({ text: '会话已归档。' }),
+  } });
   expect(h.catalog.pendingArchiveNotifications()).toEqual([]);
 });
 
@@ -83,6 +95,9 @@ it('recovers a pending notification after restart and retries an uncertain recei
   await first.stop(); await h.reload(); const second = h.start(); await second.flush();
   expect(h.create).toHaveBeenCalledTimes(2); expect(seen.size).toBe(1); expect(h.channel.sent).toHaveLength(1);
   expect((h.create.mock.calls[0]![0] as any).data.uuid).toBe((h.create.mock.calls[1]![0] as any).data.uuid);
+  expect((h.create.mock.calls[0]![0] as any).data.content).toBe((h.create.mock.calls[1]![0] as any).data.content);
+  expect(JSON.parse((h.create.mock.calls[1]![0] as any).data.content).zh_cn.content[0][0])
+    .toEqual({ tag: 'at', user_id: 'ou_owner' });
   expect(h.catalog.pendingArchiveNotifications()).toEqual([]);
 });
 
