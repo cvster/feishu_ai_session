@@ -65,6 +65,32 @@ it('does not repeat worker-origin or unknown-origin inputs/answers even with ide
   h.snapshot.messages.push(...bridged, ...unknown); await sync.runNow(); expect(h.create).not.toHaveBeenCalled();
   h.snapshot.messages.push(...messages('native', 2500, 'desktop', true)); await sync.runNow(); expect(h.create).toHaveBeenCalledTimes(2);
 });
+it('ignores worker polling clocks, keeps running heartbeats, and updates only changed content or status after restart', async () => {
+  const h = await fixture();
+  let clock = 1000;
+  const advance = (at: number) => { clock = at; h.advance(at); };
+  h.reader.read.mockImplementation(async () => {
+    const snapshot = projectZcodeConversation(structuredClone(h.snapshot));
+    for (const turn of snapshot.turns) turn.state.runtime = {
+      startedAtMs: turn.createdAtMs, lastActivityAtMs: clock, checkedAtMs: clock, processRunning: turn.state.terminal === 'running',
+    };
+    return snapshot;
+  });
+  const first = await h.start();
+  advance(3000); h.snapshot.messages.push(...messages('worker-native', 2000)); await first.runNow();
+  const update = vi.mocked(h.channel.updateCardById);
+  expect(update).toHaveBeenCalledOnce(); expect(h.create).toHaveBeenCalledTimes(2);
+  advance(5000); await first.runNow(); expect(update).toHaveBeenCalledOnce();
+  advance(20000); await first.runNow(); expect(update).toHaveBeenCalledTimes(2); // Periodic running heartbeat.
+  advance(21000); h.snapshot.messages.at(-1).info.finish = 'stop'; await first.runNow();
+  expect(update).toHaveBeenCalledTimes(3);
+  advance(24000); await first.runNow(); expect(update).toHaveBeenCalledTimes(3);
+  await first.stop(); advance(26000); const second = await h.start();
+  expect(update).toHaveBeenCalledTimes(3); expect(h.create).toHaveBeenCalledTimes(2);
+  h.snapshot.messages.at(-1).parts[0].text = 'final answer changed'; await second.runNow();
+  expect(update).toHaveBeenCalledTimes(4); expect(h.create).toHaveBeenCalledTimes(2);
+  expect(JSON.stringify(update.mock.calls.at(-1))).toContain('final answer changed');
+});
 it('does not broadcast to open groups, private groups, FF owner groups or topics sharing the same native session', async () => {
   const h = await fixture();
   for (const scope of ['oc_open', 'oc_private', 'oc_ffowner', 'oc_topic:thread']) h.add(scope, true);

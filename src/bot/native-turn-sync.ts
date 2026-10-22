@@ -97,7 +97,11 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
       await save();
     }
     let view = getShowToolCalls(deps.controls.cfg) ? turn.state : { ...turn.state, blocks: turn.state.blocks.filter(block => block.kind !== 'tool') };
-    const hash = digest(JSON.stringify(view));
+    // Worker snapshots refresh observation clocks even for completed turns.
+    // Those clocks are replaced below; hashing them would rewrite every old
+    // card each poll and delay delivery of new native messages.
+    const { runtime: _observedRuntime, ...content } = view;
+    const hash = digest(JSON.stringify(content));
     const first = !delivery.hash;
     if (!force && delivery.hash === hash && (view.terminal !== 'running' || now() - (delivery.pushedAt ?? 0) < 15_000)) return false;
     if (delivery.hash !== hash) delivery.lastActivityAt = now();
