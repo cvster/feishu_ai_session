@@ -60,7 +60,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   const reply = vi.fn(async () => ({ code: 0, data: { message_id: 'om_reply' } }));
   const send = vi.fn(async () => ({ messageId: 'om_command' }));
   const channel = { send, listChats: async () => [{ id: 'oc_group', name: group }], getChatMode: vi.fn(async () => 'group'), getChatInfo: vi.fn(async () => ({ name: group })), createCard: vi.fn(async () => ({ cardId: 'card' })), updateCardById: vi.fn(async () => {}),
-    rawClient: { im: { v1: { message: { create, reply, patch: vi.fn(async () => ({ code: 0 })) }, chat: { delete: vi.fn(async () => ({ code: 0 })), update: vi.fn(async ({ data }: { data: { name: string } }) => { group = data.name; return { code: 0 }; }) } } } } } as unknown as LarkChannel;
+    rawClient: { im: { v1: { message: { create, reply, patch: vi.fn(async () => ({ code: 0 })) }, chat: { get: vi.fn(async () => ({ code: 0, data: { name: group, chat_mode: 'group' } })), delete: vi.fn(async () => ({ code: 0 })), update: vi.fn(async ({ data }: { data: { name: string } }) => { group = data.name; return { code: 0 }; }) } } } } } as unknown as LarkChannel;
   const activeRuns = new ActiveRuns();
   let queued!: Promise<void>;
   const pending = new PendingQueue(5, (scope, batch) => {
@@ -131,6 +131,46 @@ it.each(['codex', 'zcode', 'kilo'] as const)('syncs Web/group/native messages th
     expect((await h.service.read(id)).turns.some(t => t.input === '新的原生输入' && t.answer === '新的原生回答')).toBe(true);
   } finally { await mirror.stop(); }
 
+});
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('uses live group names for %s sidebar even with stale bindings and unavailable native name sync', async tool => {
+  const h = await harness(tool);
+  const bindings = h.bindings;
+  const original = bindings.get('oc_group')!;
+  bindings.set('oc_group', { ...original, name: '旧绑定名' });
+  h.group('AA-实际群名');
+  await h.names.stop();
+  const service = h.makeService(); await service.load();
+  expect((await service.list())[0]?.name).toBe('AA-实际群名');
+  // A transient Feishu failure retains the last confirmed group title.
+  vi.mocked(h.channel.rawClient.im.v1.chat.get).mockRejectedValueOnce(new Error('temporary lookup failure'));
+  await expect(service.send((await service.list())[0]!.id, 'group-read-failure-01', 'test')).rejects.toMatchObject({ status: 503 });
+  expect((await service.list())[0]).toMatchObject({ name: 'AA-实际群名', online: false });
+  expect(h.enqueue).not.toHaveBeenCalled();
+});
+
+it.each([{ code: 232017, data: { name: '错误返回名', chat_mode: 'group' } }, { code: 0, data: { name: '未确认群模式' } }])('keeps the confirmed title and disables writes on an invalid group response: %j', async response => {
+  const h = await harness(); await h.names.stop();
+  const id = (await h.service.list())[0]!.id;
+  vi.mocked(h.channel.rawClient.im.v1.chat.get).mockResolvedValueOnce(response as any);
+  await expect(h.service.send(id, 'invalid-group-response-01', 'test')).rejects.toMatchObject({ status: 503 });
+  expect((await h.service.list())[0]).toMatchObject({ name: 'AA-web', online: false });
+  expect(h.enqueue).not.toHaveBeenCalled();
+});
+
+it('refreshes a changed group title after 15 seconds and publishes it through SSE', async () => {
+  const h = await harness(); await h.names.stop();
+  expect((await h.service.list())[0]?.name).toBe('AA-web');
+  h.group('AA-群中改名');
+  const now = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(now + 15_001);
+  try {
+    expect((await h.service.list())[0]?.name).toBe('AA-群中改名');
+    const response = await fetch(h.web.url + '/api/events', { signal: AbortSignal.timeout(5000) });
+    const reader = response.body!.getReader(); let text = '';
+    try { while (!text.includes('event: snapshot')) text += new TextDecoder().decode((await reader.read()).value);
+      expect(text).toContain('AA-群中改名'); expect(text).not.toContain('"name":"AA-web"');
+    } finally { await reader.cancel(); }
+  } finally { clock.mockRestore(); }
 });
 
 it('coordinates Web/native/group names without old snapshots reverting an explicit rename', async () => {

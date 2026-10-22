@@ -29,7 +29,7 @@ export class PersonalSessionService {
   private metadata = new Map<string, { label: string; sourceId: string; rows: ToolSession[]; capabilities?: WorkerCapabilities; online: boolean }>();
   private listedAt = 0;
   private conversations = new Map<string, WebConversation>();
-  private groups = new Map<string, string>();
+  private groups = new Map<string, { mode: string; name?: string; bindingName?: string }>();
   private listing?: Promise<void>;
   private jobs = new Map<string, { cursor: number; state: RunState; turnId?: string; nativeId?: string; updatedAt?: number }>();
   constructor(private readonly deps: {
@@ -67,9 +67,18 @@ export class PersonalSessionService {
           this.metadata.set(tool.id, { label: tool.label, sourceId: tool.sourceId, rows, capabilities: health.capabilities, online: true });
         } catch { this.metadata.set(tool.id, { label: tool.label, sourceId: tool.sourceId, rows: previous?.sourceId === tool.sourceId ? previous.rows : [], capabilities: previous?.capabilities, online: false }); }
       }));
-      await Promise.all((this.deps.controls.toolBindings?.activePersonalBindings() ?? []).map(async ([scope]) => {
-        try { this.groups.set(scope, await this.deps.channel.getChatMode(scope)); }
-        catch { this.groups.set(scope, 'unavailable'); }
+      const bindings = this.deps.controls.toolBindings?.activePersonalBindings() ?? [];
+      const scopes = new Set(bindings.map(([scope]) => scope));
+      for (const scope of this.groups.keys()) if (!scopes.has(scope)) this.groups.delete(scope);
+      await Promise.all(bindings.map(async ([scope, binding]) => {
+        try {
+          // Read mode and the actual group title in one request, independently
+          // of worker name synchronization and old binding labels.
+          const result = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: scope } });
+          const data = result.data;
+          if (result.code || !data || !['group', 'topic', 'p2p'].includes(data.chat_mode ?? '')) throw new Error('群信息未确认');
+          this.groups.set(scope, { mode: data.chat_mode!, name: data.name?.trim() || undefined, bindingName: binding.name });
+        } catch { this.groups.set(scope, { ...this.groups.get(scope), mode: 'unavailable', bindingName: binding.name }); }
       }));
       this.listedAt = Date.now();
     })().finally(() => { this.listing = undefined; });
@@ -78,7 +87,7 @@ export class PersonalSessionService {
   async list(): Promise<WebSession[]> {
     this.owner(); await this.refresh();
     return (this.deps.controls.toolBindings?.activePersonalBindings() ?? []).flatMap(([scope, b]) => {
-      if (this.deps.controls.auxiliary?.isAuxiliary(scope) || ['topic', 'p2p'].includes(this.groups.get(scope) ?? '')) return [];
+      if (this.deps.controls.auxiliary?.isAuxiliary(scope) || ['topic', 'p2p'].includes(this.groups.get(scope)?.mode ?? '')) return [];
       const meta = this.metadata.get(b.toolId), tool = this.deps.controls.toolRegistry?.find(b.toolId);
       const row = meta?.sourceId === b.sourceId ? meta.rows.find(r => r.nativeId === b.nativeId) : undefined;
       if (row?.archived) return [];
@@ -86,9 +95,12 @@ export class PersonalSessionService {
         (!r.sourceId || r.sourceId === b.sourceId) && (!r.botAppId || r.botAppId === this.deps.controls.profileConfig.accounts.app.id) &&
         (r.threadId ?? r.sessionId) === b.nativeId).sort((a, z) => z.updatedAt - a.updatedAt)[0];
       const cwd = normalize(row?.cwd ?? catalog?.cwdRealpath ?? '.');
-      const online = this.groups.get(scope) === 'group' && meta?.online === true && !!tool && tool.sourceId === b.sourceId && !!row;
+      const online = this.groups.get(scope)?.mode === 'group' && meta?.online === true && !!tool && tool.sourceId === b.sourceId && !!row;
+      const group = this.groups.get(scope);
+      // A confirmed name sync may be newer than our 15-second group snapshot.
+      const name = group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
       return [{ id: this.identity(scope, b), scope, toolId: b.toolId, tool: meta?.label ?? b.toolId,
-        cwd, project: cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd, name: b.name ?? row?.name ?? b.nativeId!, online,
+        cwd, project: cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd, name: name ?? row?.name ?? b.nativeId!, online,
         canSend: online && meta?.capabilities?.jobs.submit === true,
         canRename: online && meta?.capabilities?.sessions.rename === true && meta?.capabilities?.nativeSessionNames === true,
         nativeConversation: meta?.capabilities?.conversation === true }];
@@ -151,6 +163,7 @@ export class PersonalSessionService {
     if (!session.canRename) throw new WebError(409, '此 worker 尚未支持名称同步');
     this.assertBinding(id, session.scope);
     await this.deps.rename(b.toolId, session.scope, b.nativeId!, name);
+    this.groups.set(session.scope, { mode: 'group', name, bindingName: this.deps.controls.toolBindings?.get(session.scope)?.name });
     this.listedAt = 0; return { name };
   }
   async control(id: string, action: string, values?: unknown) {

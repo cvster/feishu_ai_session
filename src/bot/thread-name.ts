@@ -177,6 +177,11 @@ export class SessionNameSync {
       if (groupName === state.groupName) delete confirmed.previousGroupName;
       if (threadName === state.threadName) delete confirmed.previousThreadName;
       if (JSON.stringify(confirmed) !== JSON.stringify(state)) await this.save(key, confirmed);
+      // A restored baseline can already agree on both sides while the binding
+      // label still predates it. Publish the canonical name on successful polls
+      // too, retaining our expected title during delayed rename echoes.
+      this.updateKnownChat(chatId, state.groupName);
+      if (isActive()) await this.options.onSynchronized?.(chatId, snapshot.id, state.groupName);
     }
   }
 

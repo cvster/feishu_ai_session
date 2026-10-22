@@ -14,7 +14,7 @@ import { WorkerClient } from '../../../src/worker/client';
 import type { WorkerCapabilities } from '../../../src/worker/protocol';
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.useRealTimers(); vi.restoreAllMocks(); });
-async function fixture(toolId: 'codex' | 'claude' | 'dsh' | 'zcode' = 'zcode') {
+async function fixture(toolId: 'codex' | 'claude' | 'dsh' | 'zcode' | 'kilo' = 'zcode') {
   const dir=await mkdtemp(join(tmpdir(),'zcode-names-'));cleanup.push(()=>rm(dir,{recursive:true,force:true}));
   const bindings=new ToolBindingStore(join(dir,'bindings.json'));await bindings.load();
   const catalog=new SessionCatalog(join(dir,'catalog.json'));await catalog.load();
@@ -82,6 +82,17 @@ it('repairs a copied native title from the live group, then mirrors desktop rena
   expect(h.bindings.get('oc_group')?.name).toBe('AA-桌面改名');
   expect(JSON.parse(await readFile(join(h.dir,'names.json'),'utf8')).bindings).toHaveLength(1);
 });
+it.each(['codex','claude','zcode','kilo','dsh'] as const)('backfills a stale %s binding from an unchanged persisted name baseline', async toolId => {
+  const h = await fixture(toolId); h.title('AA-copy（ZCode）');
+  const first = await h.startRegistered(); await first.stop();
+  h.bindings.set('oc_group', { ...h.bindings.get('oc_group')!, name: '旧绑定名' });
+  const restored = await h.startRegistered(); await restored.tick();
+  expect(h.bindings.get('oc_group')?.name).toBe('AA-copy（ZCode）');
+  expect(h.rename).not.toHaveBeenCalled(); expect(h.update).not.toHaveBeenCalled();
+  await h.bindings.flush();
+  expect(JSON.parse(await readFile(join(h.dir, 'bindings.json'), 'utf8')).bindings.oc_group.name).toBe('AA-copy（ZCode）');
+});
+
 it('automatically polls and applies a group rename after 15 seconds by default',async()=>{
   const h=await fixture();vi.useFakeTimers();
   // Explicitly omit the test fixture's slower timer.
