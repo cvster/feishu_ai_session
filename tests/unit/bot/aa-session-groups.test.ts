@@ -36,6 +36,18 @@ describe('AA session automatic groups', () => {
     await syncAaSessionGroupsOnce(h.deps);
     expect(h.created).toEqual([]);
   });
+  it('discovers new sessions and checks native archival every 15 seconds by default', async () => {
+    vi.useFakeTimers();
+    const h = createHarness([]);
+    const list = vi.spyOn(h.deps.controls.toolRegistry!.get('codex'), 'listSessions');
+    const handle = startAaSessionGroupSync(h.deps);
+    try {
+      await handle.runNow(); const count = list.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(14_999); expect(list).toHaveBeenCalledTimes(count);
+      await vi.advanceTimersByTimeAsync(1); expect(list).toHaveBeenCalledTimes(count + 1);
+      await vi.advanceTimersByTimeAsync(15_000); expect(list).toHaveBeenCalledTimes(count + 2);
+    } finally { handle.stop(); vi.useRealTimers(); }
+  });
   it('pauses scans during native fork naming and resumes them after an error', async () => {
     const historyProvider = vi.fn(async () => []);
     const h = createHarness([]); h.deps.historyProvider = historyProvider;
@@ -212,7 +224,7 @@ describe('AA session automatic groups', () => {
     expect(created[0]).toMatchObject({
       name: 'AA自动群',
       inviteUserIds: ['ou_owner', 'ou_admin'],
-      ownerOpenId: 'ou_owner',
+      ownerOpenId: undefined,
     });
     expect(sessionCatalog.upsertActive).toHaveBeenCalledTimes(1);
     expect(workspaces.setCwd).toHaveBeenCalledWith('oc_auto_1', process.cwd());

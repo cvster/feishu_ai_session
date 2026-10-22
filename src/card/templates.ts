@@ -255,24 +255,32 @@ export function newSessionConfirmationCard(agentKind: ToolId = 'codex'): object 
 }
 
 /** Destructive confirmation shown before archiving the session and dissolving the group. */
-export function finishTaskConfirmationCard(agentKind: ToolId = 'codex'): object {
+export function finishTaskConfirmationCard(agentKind: ToolId = 'codex', options: {
+  title?: string; archiveCmd?: string; dissolveCmd?: string; token?: string;
+} = {}): object {
   const toolName = toolDefinition(agentKind).label;
   return {
     schema: '2.0',
-    config: { summary: { content: `归档 ${toolName} 工作群` } },
+    config: { summary: { content: options.title ?? `归档 ${toolName} 工作群` } },
     body: {
       elements: [
         {
           tag: 'markdown',
           content:
-            `归档后停止当前 ${toolName} 会话，本群后续消息不再响应。\n\n` +
-            '群和会话历史保留；如需解散群，请自行在飞书中操作。',
+            `归档后停止当前 ${toolName} 会话，本群后续消息不再响应，保留群和会话历史。\n\n` +
+            '“归档并解散群”还会解散本群，保留原生会话历史。群聊解散后无法恢复。',
         },
         {
           tag: 'button',
           text: { tag: 'plain_text', content: '归档' },
           type: 'danger',
-          behaviors: [{ type: 'callback', value: { cmd: 'finish.archive' } }],
+          behaviors: [{ type: 'callback', value: { cmd: options.archiveCmd ?? 'finish.archive', ...(options.token ? { arg: options.token } : {}) } }],
+        },
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: '归档并解散群' },
+          type: 'danger',
+          behaviors: [{ type: 'callback', value: { cmd: options.dissolveCmd ?? 'finish.archive-dissolve', ...(options.token ? { arg: options.token } : {}) } }],
         },
       ],
     },

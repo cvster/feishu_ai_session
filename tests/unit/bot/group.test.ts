@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { defaultChatName, describeChatDeletionError, isDefaultChatName } from '../../../src/bot/group.js';
+import { describe, expect, it, vi } from 'vitest';
+import { defaultChatName, describeChatDeletionError, dissolveChat, isDefaultChatName } from '../../../src/bot/group.js';
 
 describe('group chat helpers', () => {
   it('explains the missing creator-management permission for a 232017 failure', () => {
@@ -7,6 +7,19 @@ describe('group chat helpers', () => {
     expect(message).toContain('im:chat:operate_as_owner');
     expect(message).toContain('发布新版本');
     expect(message).toContain('群主手动解散');
+  });
+
+  it.each([false, true])('accepts already-dissolved responses for idempotent deletion (throws: %s)', async throws => {
+    const remove = vi.fn();
+    if (throws) remove.mockRejectedValue({ response: { data: { code: 232009 } } });
+    else remove.mockResolvedValue({ code: 232009 });
+    const channel = { rawClient: { im: { v1: { chat: { delete: remove } } } } } as never;
+    await expect(dissolveChat(channel, 'oc_gone')).resolves.toBeUndefined();
+  });
+
+  it('preserves SDK response codes when deletion is rejected', async () => {
+    const channel = { rawClient: { im: { v1: { chat: { delete: vi.fn(async () => ({ code: 232017, msg: 'No permission' })) } } } } } as never;
+    await expect(dissolveChat(channel, 'oc_old')).rejects.toMatchObject({ code: 232017, msg: 'No permission' });
   });
 
   it('retains useful non-permission failure details', () => {

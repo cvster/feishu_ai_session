@@ -19,7 +19,7 @@ import { ensureSessionGroupAvatar } from './group-avatar';
 import { createBoundChat, renameChat } from './group';
 import { fetchKnownChatsResult, type KnownChat } from './lark-info';
 
-const DEFAULT_SYNC_INTERVAL_MS = 60_000;
+const DEFAULT_SYNC_INTERVAL_MS = 15_000;
 const HISTORY_LIMIT = 10_000;
 const AA_RECENT_TURN_REPLAY_COUNT = 3;
 

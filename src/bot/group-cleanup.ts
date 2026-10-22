@@ -63,7 +63,7 @@ async function removeAllowedChat(controls: Controls, chatId: string): Promise<vo
   });
 }
 
-async function cleanChat(deps: Deps, chatId: string): Promise<void> {
+export async function cleanDissolvedChat(deps: Deps, chatId: string): Promise<void> {
   const { controls, catalog, sessions, workspaces } = deps;
   const bindings = controls.toolBindings?.entries().filter(([scope]) => scope.split(':')[0] === chatId) ?? [];
   const rows = catalog.entries().filter(row => row.scopeId.split(':')[0] === chatId);
@@ -116,7 +116,7 @@ export function createGroupCleanup(deps: Deps): { start(): Promise<void>; runNow
       try {
         if (!deps.catalog.isChatDissolved(chatId) && !await chatIsDissolved(deps.channel, chatId)) continue;
         if (stopped) break;
-        await cleanChat(deps, chatId);
+        await cleanDissolvedChat(deps, chatId);
         completed.add(chatId);
       } catch (error) {
         log.warn('group-cleanup', 'check-or-cleanup-failed', { chatId, error: String(error) });

@@ -253,9 +253,9 @@ describe('Bridge command contracts', () => {
     const groupToken = extractActionToken(groupsCard, 'panel.group');
     await h.run(`/panel group-finish ${groupToken}`);
     const groupConfirmation = JSON.stringify(lastContent(h.channel));
-    expect(groupConfirmation.match(/"tag":"button"/g)).toHaveLength(1);
+    expect(groupConfirmation.match(/"tag":"button"/g)).toHaveLength(2);
     expect(groupConfirmation).toContain('"type":"danger"');
-    expect(groupConfirmation).not.toContain('归档并解散');
+    expect(groupConfirmation).toContain('归档并解散群');
     await expect(h.run(`/panel group-finish-confirm ${groupToken}`)).resolves.toBe(true);
 
     expect(h.agent.archivedThreads).toContain('thread-existing');
@@ -468,7 +468,7 @@ describe('Bridge command contracts', () => {
     expect(h.workspaces.cwdFor('oc_fake_1')).toBe(await realpath(target));
   });
 
-  it('offers one red archive button and makes legacy confirm archive without dissolving', async () => {
+  it('offers two red archive choices and makes legacy confirm archive without dissolving', async () => {
     const h = await createHarness();
     h.controls.profileConfig.agentKind = 'codex';
     const cwd = await realpath(h.tmp.workspace);
@@ -488,8 +488,9 @@ describe('Bridge command contracts', () => {
     expect(confirmationCard).toContain('finish.archive');
     expect(confirmationCard).not.toContain('finish.confirm');
     const buttons = (lastContent(h.channel) as any).card.body.elements.filter((e: any) => e.tag === 'button');
-    expect(buttons).toHaveLength(1);
+    expect(buttons).toHaveLength(2);
     expect(buttons[0]).toMatchObject({ type: 'danger', text: { content: '归档' } });
+    expect(buttons[1]).toMatchObject({ type: 'danger', text: { content: '归档并解散群' } });
     expect(h.channel.rawClient.requests).not.toContainEqual(
       expect.objectContaining({ method: 'im.v1.chat.delete' }),
     );
@@ -529,8 +530,77 @@ describe('Bridge command contracts', () => {
     expect(h.workspaces.cwdFor('chat-1')).toBe(cwd);
     expect(lastMarkdown(h.channel)).toContain('Codex 会话已归档');
     expect(h.sessionCatalog.isScopeArchived('chat-1')).toBe(true);
-    expect(lastMarkdown(h.channel)).toContain('请自行在飞书中操作');
+    expect(lastMarkdown(h.channel)).toContain('群和会话历史已保留');
     expect(h.channel.rawClient.im.v1.chat.delete).not.toHaveBeenCalled();
+  });
+
+  it('archives before dissolving and durably removes only the target group routes', async () => {
+    const h = await createHarness(), bindings = await personalTools(h);
+    const chatId = 'oc_group', identity: SessionCatalogIdentity = { scopeId: chatId, agentId: 'codex', cwdRealpath: h.tmp.workspace, policyFingerprint: 'finish' };
+    h.sessionCatalog.upsertActive({ ...identity, threadId: 'native-one', sourceId: 'home', botAppId: 'app-id' });
+    bindings.set(chatId, { toolId: 'codex', sourceId: 'home', nativeId: 'native-one' });
+    h.sessions.set(chatId, 'native-one', h.tmp.workspace); h.workspaces.setCwd(chatId, h.tmp.workspace);
+    h.workspaces.setCwd(chatId + ':topic', h.tmp.workspace);
+    h.controls.knownChats = [{ id: chatId, name: 'AA-one' }, { id: 'oc_other', name: 'other' }];
+    h.controls.profileConfig.access.allowedChats = [chatId, 'oc_other'];
+    await saveRootConfig(createRootConfig(h.controls.profile, h.controls.profileConfig), h.controls.configPath);
+    const deletion = vi.spyOn(h.channel.rawClient.im.v1.chat, 'delete').mockImplementation(async () => {
+      expect(h.agent.archivedThreads).toEqual(['native-one']);
+      expect(h.sessionCatalog.isScopeArchived(chatId)).toBe(true);
+      expect(h.channel.sent.some(m => m.chatId === chatId && JSON.stringify(m.content).includes('正在解散群'))).toBe(true);
+      return { code: 0, data: {} };
+    });
+    await h.run('/finish archive-dissolve', { chatId, chatMode: 'group', sessionCatalogIdentity: identity });
+    expect(deletion).toHaveBeenCalledOnce(); expect(bindings.get(chatId)).toBeUndefined();
+    expect(h.workspaces.cwdFor(chatId)).toBeUndefined(); expect(h.workspaces.cwdFor(chatId + ':topic')).toBeUndefined();
+    expect(h.workspaces.cwdFor('chat-1')).toBeDefined(); expect(h.sessions.getRaw(chatId)).toBeUndefined();
+    expect(h.controls.knownChats?.map(c => c.id)).toEqual(['oc_other']);
+    expect((await loadRootConfig(h.controls.configPath))?.profiles[h.controls.profile]?.access.allowedChats).toEqual(['oc_other']);
+    const restored = new SessionCatalog(join(h.tmp.profile, 'sessions.catalog.json')); await restored.load();
+    expect(restored.isChatDissolved(chatId)).toBe(true); expect(restored.isAutoGroupSuppressed('codex', 'home', 'native-one')).toBe(true);
+  });
+
+  it('keeps the archived group route when Feishu denies dissolution', async () => {
+    const h = await createHarness(), bindings = await personalTools(h);
+    bindings.set('oc_group', { toolId: 'codex', sourceId: 'home', nativeId: 'native-one' });
+    h.workspaces.setCwd('oc_group', h.tmp.workspace);
+    vi.spyOn(h.channel.rawClient.im.v1.chat, 'delete').mockResolvedValue({ code: 232017, msg: 'No permission' });
+    await h.run('/finish archive-dissolve', { chatId: 'oc_group', chatMode: 'group' });
+    expect(h.agent.archivedThreads).toEqual(['native-one']); expect(h.sessionCatalog.isScopeArchived('oc_group')).toBe(true);
+    expect(h.sessionCatalog.isChatDissolved('oc_group')).toBe(false); expect(bindings.get('oc_group')).toBeDefined();
+    expect(h.workspaces.cwdFor('oc_group')).toBe(h.tmp.workspace);
+    expect(lastMarkdown(h.channel)).toContain('会话已归档，解散群失败'); expect(lastMarkdown(h.channel)).toContain('232017');
+  });
+
+  it('does not dissolve or archive local routes after native archival fails', async () => {
+    const h = await createHarness(), bindings = await personalTools(h);
+    bindings.set('oc_group', { toolId: 'codex', sourceId: 'home', nativeId: 'native-one' });
+    h.controls.toolRegistry!.get('codex').sessions!.archive = async () => { throw new Error('native unavailable'); };
+    const deletion = vi.spyOn(h.channel.rawClient.im.v1.chat, 'delete');
+    await h.run('/finish archive-dissolve', { chatId: 'oc_group', chatMode: 'group' });
+    expect(deletion).not.toHaveBeenCalled(); expect(h.sessionCatalog.isScopeArchived('oc_group')).toBe(false);
+    expect(bindings.isArchived('codex', 'home', 'native-one')).toBe(false); expect(lastMarkdown(h.channel)).toContain('会话归档失败');
+  });
+
+  it('rejects dissolution by a colleague before stopping or archiving', async () => {
+    const h = await createHarness(); await personalTools(h);
+    const deletion = vi.spyOn(h.channel.rawClient.im.v1.chat, 'delete');
+    await h.run('/finish archive-dissolve', { chatId: 'oc_group', chatMode: 'group', senderId: 'ou-colleague' });
+    expect(deletion).not.toHaveBeenCalled(); expect(h.agent.archivedThreads).toEqual([]);
+    expect(h.sessionCatalog.isScopeArchived('oc_group')).toBe(false); expect(lastMarkdown(h.channel)).toContain('仅所有者或管理员');
+  });
+
+  it('dissolves a panel-selected group after archival and reports success to the requester', async () => {
+    const h = await createHarness(); await personalTools(h);
+    h.workspaces.setCwd('oc_group', h.tmp.workspace);
+    h.controls.knownChats = [{ id: 'oc_group', name: 'AA-one' }];
+    h.sessionCatalog.upsertActive({ scopeId: 'oc_group', agentId: 'codex', cwdRealpath: h.tmp.workspace, policyFingerprint: 'finish', threadId: 'native-one', sourceId: 'home', botAppId: 'app-id' });
+    await h.run('/panel groups'); const token = extractActionToken(JSON.stringify(lastContent(h.channel)), 'panel.group');
+    await h.run(`/panel group-finish ${token}`);
+    expect(JSON.stringify(lastContent(h.channel))).toContain('panel.group-finish-dissolve');
+    await h.run(`/panel group-finish-dissolve ${token}`);
+    expect(h.agent.archivedThreads).toEqual(['native-one']); expect(h.sessionCatalog.isChatDissolved('oc_group')).toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('会话已归档并解散群'); expect(h.channel.sent.at(-1)?.chatId).toBe('chat-1');
   });
 
   it('can archive the Codex thread while retaining the group and workspace', async () => {

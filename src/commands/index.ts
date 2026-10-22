@@ -107,7 +107,8 @@ import type { RunExecutor } from '../runtime/run-executor';
 import { RunRejected } from '../runtime/errors';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
-import { createBoundChat, defaultChatName, isDefaultChatName, renameChat } from '../bot/group';
+import { createBoundChat, defaultChatName, describeChatDeletionError, dissolveChat, isDefaultChatName, renameChat } from '../bot/group';
+import { cleanDissolvedChat } from '../bot/group-cleanup';
 import { fetchKnownChats, type KnownChat } from '../bot/lark-info';
 import { applyLarkCliIdentityPolicy, hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
 
@@ -597,17 +598,16 @@ async function handlePanel(args: string, ctx: CommandContext): Promise<void> {
   if (action === 'group-finish') {
     const target = panelCandidate(ctx, arg, 'group');
     if (!target) return reply(ctx, '此工作群操作已过期，请刷新“工作群”后重试。');
-    await showPanelCard(ctx, panelConfirmationCard({
+    await showPanelCard(ctx, finishTaskConfirmationCard(target.toolId ?? ctx.controls.profileConfig.agentKind, {
       title: `归档 ${target.name}`,
-      description: '归档后本群不再响应，会话历史保留。如需解散群，请自行在飞书中操作。',
-      confirmText: '归档',
-      confirmCmd: 'panel.group-finish-confirm',
+      archiveCmd: 'panel.group-finish-confirm',
+      dissolveCmd: 'panel.group-finish-dissolve',
       token: arg,
     }));
     return;
   }
-  if (action === 'group-finish-confirm') {
-    await finishPanelGroup(ctx, arg);
+  if (action === 'group-finish-confirm' || action === 'group-finish-dissolve') {
+    await finishPanelGroup(ctx, arg, action === 'group-finish-dissolve');
     return;
   }
   if (action === 'new') {
@@ -906,9 +906,10 @@ function usesArchiveNotification(ctx: CommandContext, scope: string, nativeId?: 
       (!row.sourceId || row.sourceId === binding.sourceId) && (!row.botAppId || row.botAppId === ctx.controls.profileConfig.accounts.app.id));
 }
 
-async function finishPanelGroup(ctx: CommandContext, token: string): Promise<void> {
+async function finishPanelGroup(ctx: CommandContext, token: string, dissolve = false): Promise<void> {
   const target = panelCandidate(ctx, token, 'group');
   if (!target) return reply(ctx, '此工作群操作已过期，请刷新“工作群”后重试。');
+  if (dissolve && !await canDissolveGroup(ctx)) return;
   const scopes = ctx.activeRuns.scopes().filter(scope => scope === target.chatId || scope.startsWith(`${target.chatId}:`));
   await ctx.activeRuns.stopScopes(scopes);
   const binding = ctx.controls.toolBindings?.get(target.chatId);
@@ -924,10 +925,12 @@ async function finishPanelGroup(ctx: CommandContext, token: string): Promise<voi
   if (binding && nativeId) { ctx.controls.toolBindings!.archive(toolId, binding.sourceId, nativeId); await ctx.controls.toolBindings!.flush(); }
   await archiveGroupInput(ctx, target.chatId, nativeId ?? `pending-${toolId}`);
   panelCandidates.delete(token);
-  const notice = `✓ 已归档工作群「${target.name}」，后续消息不再响应。群和会话历史已保留，如需解散群，请自行在飞书中操作。`;
+  const notice = `✓ 已归档工作群「${target.name}」，后续消息不再响应。` +
+    (dissolve ? '正在解散群，原生会话历史保留。' : '群和会话历史已保留。');
   if (notified) await ctx.controls.sessionArchiveNotifications!.flush();
   else await ctx.channel.send(target.chatId, { text: notice });
-  if (ctx.msg.chatId !== target.chatId) await reply(ctx, notice);
+  if (dissolve) await dissolveArchivedGroup(ctx, target.chatId);
+  else if (ctx.msg.chatId !== target.chatId) await reply(ctx, notice);
 }
 
 async function handleNewChat(
@@ -1706,6 +1709,40 @@ async function archiveGroupInput(ctx: CommandContext, chatId: string, nativeId: 
   await Promise.all([ctx.sessions.flush(), ctx.sessionCatalog?.flush()]);
 }
 
+async function canDissolveGroup(ctx: CommandContext): Promise<boolean> {
+  if (!canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok) {
+    await reply(ctx, '仅所有者或管理员可以归档并解散群。');
+    return false;
+  }
+  if (!ctx.sessionCatalog) {
+    await reply(ctx, '暂时无法保存群关联状态，请稍后重试。');
+    return false;
+  }
+  return true;
+}
+
+/** Called only after native/local archival succeeded. Never send into a deleted group. */
+async function dissolveArchivedGroup(ctx: CommandContext, chatId: string): Promise<void> {
+  try { await dissolveChat(ctx.groupChannel ?? ctx.channel, chatId); }
+  catch (error) {
+    await reply(ctx, `会话已归档，解散群失败：${describeChatDeletionError(error)}`);
+    return;
+  }
+  try {
+    await cleanDissolvedChat({ channel: ctx.groupChannel ?? ctx.channel, controls: ctx.controls,
+      catalog: ctx.sessionCatalog!, sessions: ctx.sessions, workspaces: ctx.workspaces,
+      cancelPending: async scope => {
+        ctx.pending?.cancel(scope);
+        for (const runtime of ctx.controls.workerRuntimes?.values() ?? []) await runtime.inbox.rejectScope(scope);
+      } }, chatId);
+  } catch (error) {
+    log.fail('command', error, { step: 'dissolved-group-cleanup', chatId });
+    if (ctx.fromWeb || ctx.msg.chatId !== chatId) await reply(ctx, '会话已归档，群已解散。群关联清理尚未完成，将由后台检查重试。');
+    return;
+  }
+  if (ctx.fromWeb || ctx.msg.chatId !== chatId) await reply(ctx, '✓ 会话已归档并解散群，原生会话历史已保留。');
+}
+
 async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
   const toolName = ctx.controls.toolRegistry?.find(ctx.controls.profileConfig.agentKind)?.label ??
     (toolDefinition(ctx.controls.profileConfig.agentKind).label);
@@ -1719,7 +1756,8 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
   }
 
   const action = args.trim();
-  if (action !== 'archive' && action !== 'confirm') {
+  const dissolve = action === 'archive-dissolve';
+  if (action !== 'archive' && action !== 'confirm' && !dissolve) {
     await sendManagedCard(
       ctx.channel,
       ctx.msg.chatId,
@@ -1728,6 +1766,7 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
     );
     return;
   }
+  if (dissolve && !await canDissolveGroup(ctx)) return;
 
   const groupScopes = ctx.activeRuns
     .scopes()
@@ -1764,7 +1803,9 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
   log.info('command', 'finish', { chatId: ctx.msg.chatId, threadId: catalogEntry?.threadId, stoppedRuns: groupScopes.length });
   if (notified)
     await ctx.controls.sessionArchiveNotifications!.flush();
-  else await reply(ctx, `✓ 当前 ${toolName} 会话已归档，后续消息不再响应。群和会话历史已保留，如需解散群，请自行在飞书中操作。`);
+  else await reply(ctx, `✓ 当前 ${toolName} 会话已归档，后续消息不再响应。` +
+    (dissolve ? '正在解散群，原生会话历史保留。' : '群和会话历史已保留。'));
+  if (dissolve) await dissolveArchivedGroup(ctx, ctx.msg.chatId);
 }
 
 async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {

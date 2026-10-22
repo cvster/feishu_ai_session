@@ -26,12 +26,13 @@ describe('session group avatars', () => {
   });
   it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('uses the bound %s tool for the group avatar', async toolId => {
     const h = channel();
-    await createBoundChat({ channel: h.api, name: 'AA same name', toolId, inviteOpenId: 'ou_owner' });
+    await createBoundChat({ channel: h.api, name: 'AA same name', toolId, ownerOpenId: 'ou_owner', inviteOpenId: 'ou_owner' });
     expect(h.image).toHaveBeenCalledWith({ data: { image_type: 'avatar',
       image: Buffer.from(GROUP_AVATAR_IMAGES[toolId], 'base64') } });
     expect(h.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
-      name: 'AA same name', avatar: 'img_avatar', owner_id: 'ou_owner',
+      name: 'AA same name', avatar: 'img_avatar', user_id_list: ['ou_owner'],
     }) }));
+    expect(h.create.mock.calls[0]?.[0]).not.toHaveProperty('data.owner_id');
   });
 
   it('shares concurrent uploads per tool and isolates application channels', async () => {

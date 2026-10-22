@@ -84,6 +84,16 @@ AA group. Stale creation cards cannot create a group for a known archived
 thread. Only an explicit resume selection of another unarchived thread clears
 the group's tombstone; late system events from the old task are ignored.
 
+Archive confirmation offers two red buttons in Feishu and Web. **归档** keeps
+its group and history; **归档并解散群** archives first, then dissolves the group
+and immediately applies the cleanup below. Only the owner or an administrator
+can choose dissolution. A native archive failure prevents deletion; a deletion
+failure leaves the session archived and retains its group routes. New groups
+are created using bot identity without a human `owner_id`, making that bot the
+owner; existing groups retain their original ownership and permission limits.
+AA discovery, automatic group creation and native archive checks run every
+15 seconds through the same generic worker scan.
+
 ## Dissolved groups lose their live bridge routes
 
 At startup and every minute, the bridge checks up to 50 associated Feishu

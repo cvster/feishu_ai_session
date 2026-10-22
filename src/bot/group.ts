@@ -9,7 +9,7 @@ export interface CreateBoundChatOptions {
   name: string;
   inviteOpenId?: string;
   inviteOpenIds?: readonly string[];
-  /** Human owner of the group. Defaults to the first invited user. */
+  /** Bridge owner to invite first; the creating bot remains the group owner. */
   ownerOpenId?: string;
   description?: string;
   /** Feishu create-chat idempotency key, persisted by the caller when needed. */
@@ -35,8 +35,8 @@ export async function isSoloUserBotChat(channel: LarkChannel, chatId: string): P
 }
 
 /**
- * Create a private group chat with the bot (as creator) and one user. Returns
- * the new chat_id. Requires `im:chat` scope on the bot.
+ * Create a bot-owned private group with the invited users. Returns
+ * the new chat_id. Requires `im:chat:create` scope on the bot.
  */
 const bridgeCreatedChats = new Set<string>();
 const creatingChats = new Set<Promise<unknown>>();
@@ -61,7 +61,6 @@ async function createTrackedChat(opts: CreateBoundChatOptions): Promise<CreatedC
     ...(opts.inviteOpenId ? [opts.inviteOpenId] : []),
   ].filter(Boolean))];
   if (inviteUserIds.length === 0) throw new Error('at least one invite open_id is required');
-  const ownerOpenId = opts.ownerOpenId ?? inviteUserIds[0]!;
   const avatar = opts.toolId ? await sessionGroupAvatar(channel, opts.toolId).catch(error => {
     // An optional decoration must not prevent the user from creating a session.
     log.warn('group-avatar', 'upload-failed', { toolId: opts.toolId, error: String(error) });
@@ -74,7 +73,8 @@ async function createTrackedChat(opts: CreateBoundChatOptions): Promise<CreatedC
       description,
       chat_mode: 'group',
       chat_type: 'private',
-      owner_id: ownerOpenId,
+      // The SDK client uses app identity. Omitting owner_id makes that bot
+      // the owner, retaining its permission to dissolve this group later.
       user_id_list: inviteUserIds,
       ...(avatar ? { avatar } : {}),
     },
@@ -92,9 +92,14 @@ async function createTrackedChat(opts: CreateBoundChatOptions): Promise<CreatedC
  * group and has the corresponding chat-management permission.
  */
 export async function dissolveChat(channel: LarkChannel, chatId: string): Promise<void> {
-  const response = await channel.rawClient.im.v1.chat.delete({ path: { chat_id: chatId } });
-  if (response.code && response.code !== 0) {
-    throw new Error(`Feishu rejected chat deletion (${response.code}): ${response.msg ?? 'unknown error'}`);
+  const response = await channel.rawClient.im.v1.chat.delete({ path: { chat_id: chatId } }).catch(error => {
+    const failure = error as { code?: number; response?: { data?: { code?: number } } };
+    if ((failure?.response?.data?.code ?? failure?.code) === 232009) return { code: 232009, msg: undefined };
+    throw error;
+  });
+  if (response.code && response.code !== 232009) {
+    throw Object.assign(new Error(`Feishu rejected chat deletion (${response.code}): ${response.msg ?? 'unknown error'}`),
+      { code: response.code, msg: response.msg });
   }
 }
 

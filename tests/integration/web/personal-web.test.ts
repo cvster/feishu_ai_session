@@ -60,7 +60,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   const reply = vi.fn(async () => ({ code: 0, data: { message_id: 'om_reply' } }));
   const send = vi.fn(async () => ({ messageId: 'om_command' }));
   const channel = { send, listChats: async () => [{ id: 'oc_group', name: group }], getChatMode: vi.fn(async () => 'group'), getChatInfo: vi.fn(async () => ({ name: group })), createCard: vi.fn(async () => ({ cardId: 'card' })), updateCardById: vi.fn(async () => {}),
-    rawClient: { im: { v1: { message: { create, reply, patch: vi.fn(async () => ({ code: 0 })) }, chat: { update: vi.fn(async ({ data }: { data: { name: string } }) => { group = data.name; return { code: 0 }; }) } } } } } as unknown as LarkChannel;
+    rawClient: { im: { v1: { message: { create, reply, patch: vi.fn(async () => ({ code: 0 })) }, chat: { delete: vi.fn(async () => ({ code: 0 })), update: vi.fn(async ({ data }: { data: { name: string } }) => { group = data.name; return { code: 0 }; }) } } } } } as unknown as LarkChannel;
   const activeRuns = new ActiveRuns();
   let queued!: Promise<void>;
   const pending = new PendingQueue(5, (scope, batch) => {
@@ -221,7 +221,10 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs Web controls
   expect(h.provider.archive).not.toHaveBeenCalled();
   const confirmation = flatten((await act('finish')).elements); expect(h.provider.archive).not.toHaveBeenCalled();
   const archive = confirmation.find(e => e.kind === 'button' && e.text === '归档')!; if (archive.kind !== 'button') throw Error('archive');
+  expect(archive).toMatchObject({ danger: true, primary: false });
+  expect(confirmation.find(e => e.kind === 'button' && e.text === '归档并解散群')).toMatchObject({ danger: true, primary: false });
   expect((await h.request('/api/sessions/' + id + '/control', { action: 'finish.archive' })).status).toBe(409);
+  expect((await h.request('/api/sessions/' + id + '/control', { action: 'finish.archive-dissolve' })).status).toBe(409);
   expect((await h.request('/api/sessions/' + id + '/control', { action: 'exit' })).status).toBe(409);
   expect((await h.request('/api/sessions/' + '0'.repeat(64) + '/control', { action: archive.action })).status).toBe(404);
   h.controls.botOwnerId = 'ou_other'; expect((await h.request('/api/sessions/' + id + '/control', { action: archive.action })).status).toBe(409); h.controls.botOwnerId = 'ou_owner';
@@ -229,6 +232,27 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs Web controls
   expect(h.send).not.toHaveBeenCalled();
 });
 
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('archives and dissolves a Web-confirmed %s group through the common worker interface', async tool => {
+  const h = await harness(tool), id = (await h.service.list())[0]!.id;
+  h.workspaces.setCwd('oc_group', h.dir);
+  vi.mocked(h.channel.rawClient.im.v1.chat.delete).mockImplementation(async () => {
+    expect(h.provider.archive).toHaveBeenCalledOnce(); expect(h.catalog.isScopeArchived('oc_group')).toBe(true);
+    return { code: 0 };
+  });
+  const elements = flatten((await h.service.control(id, 'finish')).elements);
+  const button = elements.find(e => e.kind === 'button' && e.text === '归档并解散群');
+  if (button?.kind !== 'button') throw Error('missing dissolve choice');
+  expect(button).toMatchObject({ danger: true, primary: false });
+  const result = await h.service.control(id, button.action);
+  expect(JSON.stringify(result)).toContain('会话已归档并解散群');
+  expect(h.channel.rawClient.im.v1.chat.delete).toHaveBeenCalledOnce(); expect(h.bindings.get('oc_group')).toBeUndefined();
+  expect(h.workspaces.cwdFor('oc_group')).toBeUndefined(); expect(h.catalog.isChatDissolved('oc_group')).toBe(true);
+  expect(h.catalog.isAutoGroupSuppressed(tool, h.client.sourceId, 'native')).toBe(true);
+  expect(await h.service.list()).toEqual([]); expect(h.send).not.toHaveBeenCalled();
+  expect(await h.webControls.execute(id, 'oc_group', 'ou_owner', button.action)).toEqual(result);
+  expect(h.channel.rawClient.im.v1.chat.delete).toHaveBeenCalledOnce();
+});
 
 it('copies through the native worker, binds one new group, preserves its real managed card and mute context, and does not fork twice on retry', async () => {
   const h = await harness('codex'), id = (await h.service.list())[0]!.id;

@@ -468,7 +468,8 @@ describe('private FF groups', () => {
     vi.mocked(h.channel.rawClient.im.v1.chat.get).mockResolvedValue({ code: 0, data: { name: 'C系列-Agent对话', chat_mode: 'group' } });
     const row = await h.groups.createPrivateGroup('oc_aux', 'ou_member');
     expect(h.create.mock.calls[0]![0]).toMatchObject({ params: { user_id_type: 'open_id', uuid: expect.any(String) },
-      data: { name: '私聊-C系列-Agent对话', chat_mode: 'group', chat_type: 'private', owner_id: 'ou_owner', user_id_list: ['ou_owner', 'ou_member'] } });
+      data: { name: '私聊-C系列-Agent对话', chat_mode: 'group', chat_type: 'private', user_id_list: ['ou_owner', 'ou_member'] } });
+    expect(h.create.mock.calls[0]![0]).not.toHaveProperty('data.owner_id');
     expect(h.bindings.get(row.chatId)?.sharedScope).toBe(h.bindings.get('oc_aux')?.sharedScope);
     expect(h.workspaces.cwdFor(row.chatId)).toBe(h.cwd);
     expect(h.groups.isActive(row.chatId)).toBe(true);
