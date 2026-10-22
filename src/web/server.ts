@@ -13,7 +13,7 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
 }
 const respond = (res: ServerResponse, status: number, value: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); };
 
-/** Cookie auth, writes over HTTP, shared read-only snapshots over SSE. */
+/** Loopback access or cookie auth, same-origin HTTP writes and shared snapshots over SSE. */
 export async function startBridgeWeb(options: { configPath: string; service: PersonalSessionService; config?: WebConfig; pollMs?: number }) {
   const initial = options.config ?? await loadWebConfig(options.configPath);
   if (!initial?.enabled) return;
@@ -21,12 +21,15 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
   let closed = false;
   const sessions = new Map<string, { owner: string; hash: string; expires: number }>();
   const failures = new Map<string, { count: number; until: number }>();
-  const streams = new Map<ServerResponse, { token: string; id?: string; previous?: string }>();
+  const streams = new Map<ServerResponse, { token?: string; local: boolean; id?: string; previous?: string }>();
   const cookie = (req: IncomingMessage) => /(?:^|;\s*)bridge_web=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
   const config = () => options.config ? Promise.resolve(options.config) : loadWebConfig(options.configPath);
-  const authenticate = async (token?: string) => {
+  const localRequest = (req: IncomingMessage) => initial.host === '127.0.0.1' && ['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '');
+  const authenticate = async (token?: string, local = false) => {
     const c = await config(), session = token ? sessions.get(token) : undefined;
-    if (!c?.enabled || c.host !== initial.host || c.port !== initial.port || !session || session.expires <= Date.now() || session.hash !== c.secretHash) throw new WebError(401, '请重新登录');
+    if (!c?.enabled || c.host !== initial.host || c.port !== initial.port) throw new WebError(401, '网页入口已禁用或配置已变化');
+    if (local) { options.service.ownerIdentity(); return; }
+    if (!session || session.expires <= Date.now() || session.hash !== c.secretHash) throw new WebError(401, '请重新登录');
     if (session.owner !== options.service.ownerIdentity()) throw new WebError(401, '所有者已变化，请重新登录');
   };
   const server = createServer((req, res) => { void (async () => {
@@ -40,7 +43,10 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     if (req.method === 'POST' && req.headers.origin !== origin) throw new WebError(403, '请求来源不匹配');
     const url = new URL(req.url ?? '/', origin);
     if (url.pathname === '/' && req.method === 'GET') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(bridgeWebPage); return; }
+    const local = localRequest(req);
+    if (url.pathname === '/api/access' && req.method === 'GET') { respond(res, 200, { loginRequired: !local }); return; }
     if (url.pathname === '/api/login' && req.method === 'POST') {
+      if (local) { await authenticate(undefined, true); respond(res, 200, { ok: true }); return; }
       const ip = req.socket.remoteAddress ?? '', failure = failures.get(ip);
       if (failure && failure.until > Date.now() && failure.count >= 8) throw new WebError(429, '登录尝试过多，请稍后重试');
       const input = await body(req), c = await config();
@@ -59,7 +65,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       res.setHeader('Set-Cookie', `bridge_web=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`);
       respond(res, 200, { ok: true }); return;
     }
-    const token = cookie(req); await authenticate(token);
+    const token = cookie(req); await authenticate(token, local);
     if (url.pathname === '/api/logout' && req.method === 'POST') {
       sessions.delete(token!); res.setHeader('Set-Cookie', 'bridge_web=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); respond(res, 200, { ok: true }); return;
     }
@@ -69,15 +75,16 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       const id = url.searchParams.get('session') ?? undefined;
       if (id && !/^[a-f0-9]{64}$/.test(id)) throw new WebError(400, '会话 ID 无效');
       res.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-      res.write('retry: 1500\n\n'); streams.set(res, { token: token!, id });
+      res.write('retry: 1500\n\n'); streams.set(res, { token, local, id });
       res.on('close', () => streams.delete(res)); void poll(); return;
     }
-    const match = /^\/api\/sessions\/([a-f0-9]{64})(?:\/(send|rename))?$/.exec(url.pathname);
+    const match = /^\/api\/sessions\/([a-f0-9]{64})(?:\/(send|rename|control))?$/.exec(url.pathname);
     if (match && req.method === 'GET' && !match[2]) { respond(res, 200, await options.service.read(match[1]!)); return; }
     if (match && req.method === 'POST') {
       const input = await body(req);
       if (match[2] === 'send' && typeof input.requestId === 'string' && typeof input.text === 'string') { respond(res, 202, await options.service.send(match[1]!, input.requestId, input.text)); return; }
       if (match[2] === 'rename' && typeof input.name === 'string') { respond(res, 200, await options.service.rename(match[1]!, input.name)); return; }
+      if (match[2] === 'control' && typeof input.action === 'string') { respond(res, 200, await options.service.control(match[1]!, input.action, input.values)); return; }
       throw new WebError(400, '请求内容无效');
     }
     throw new WebError(404, '接口不存在');
@@ -90,7 +97,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     if (running) return running;
     if (closed || !streams.size) return Promise.resolve();
     running = (async () => {
-      for (const [res, s] of streams) try { await authenticate(s.token); } catch (e) {
+      for (const [res, s] of streams) try { await authenticate(s.token, s.local); } catch (e) {
         if (e instanceof WebError && e.status === 401) { res.write('event: auth\ndata: {}\n\n'); res.end(); streams.delete(res); }
         else { res.write('event: unavailable\ndata: {}\n\n'); return; }
       }

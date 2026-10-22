@@ -1,6 +1,6 @@
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { expect, it, vi } from 'vitest';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { fixture, cleanups } from '../../helpers/worker-fixture';
@@ -14,20 +14,26 @@ import type { Controls } from '../../../src/commands';
 import { PersonalSessionService } from '../../../src/web/service';
 import { startBridgeWeb } from '../../../src/web/server';
 import { configureWeb } from '../../../src/web/config';
+import { WebSessionControls, type WebControlElement } from '../../../src/web/controls';
+import { WorkspaceStore } from '../../../src/workspace/store';
+import { createRootConfig, saveRootConfig, runtimeProfileConfig } from '../../../src/config/profile-store';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import { PendingQueue } from '../../../src/bot/pending-queue';
 import { enqueuePersonalInput } from '../../../src/bot/intake-queue';
 import { initialState, reduce } from '../../../src/card/run-state';
 import { startWorkerReplies } from '../../../src/worker/replies';
 import { startNativeTurnSync } from '../../../src/bot/native-turn-sync';
+import { configureGroupNotifications } from '../../../src/bot/group-notifications';
 import { startWorkerNameSync } from '../../../src/bot/tool-name-sync';
 
-async function harness(tool: 'codex' | 'zcode' | 'kilo' = 'kilo') {
-  const native = { nativeId: 'native', name: 'AA-web', cwd: '/project', createdAtMs: 1, updatedAtMs: 2 };
+async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'kilo', host = '127.0.0.1') {
+  const native = { nativeId: 'native', name: 'AA-web', cwd: '/project', createdAtMs: 1, updatedAtMs: 2, archived: false };
   const conversation = { id: 'native', name: native.name, cwd: native.cwd, archived: false, turns: [{ id: 'desktop-1', input: '来自桌面', bridge: false,
     createdAtMs: 10, state: reduce(reduce(initialState, { type: 'text', delta: '原生回答' }), { type: 'done', terminationReason: 'normal' }) }] };
-  const provider = { list: async () => [native], nativeNames: true, conversation: vi.fn(async () => conversation),
-    history: async () => undefined, rename: async (_id: string, name: string) => { native.name = name; } };
+  const copies: typeof native[] = [];
+  const provider = { list: async () => [native, ...copies], nativeNames: true, conversation: vi.fn(async () => conversation),
+    history: async () => undefined, rename: async (_id: string, name: string) => { native.name = name; }, archive: vi.fn(async () => { native.archived = true; }),
+    fork: vi.fn(async () => { const copy = { ...native, nativeId: 'native-fork', name: 'AA-web（分叉）' }; copies.push(copy); return copy; }) };
   const h = await fixture(tool, provider);
   h.options.cwd = native.cwd;
   if (tool === 'codex') { h.options.threadId = 'native'; h.options.sessionId = undefined; }
@@ -41,12 +47,19 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' = 'kilo') {
   bindings.set('oc_group', { toolId: tool, sourceId: h.client.sourceId, nativeId: 'native', name: 'AA-web' });
   catalog.upsertActive({ scopeId: 'oc_group', agentId: tool, cwdRealpath: native.cwd, sourceId: h.client.sourceId, botAppId: 'cli_test', policyFingerprint: 'fp', sessionId: tool === 'codex' ? undefined : 'native', threadId: tool === 'codex' ? 'native' : undefined });
   const registry = new ToolRegistry(); registry.register({ id: tool, sourceId: h.client.sourceId, label: 'Tool from manifest', agent: h.adapter,
-    listSessions: () => h.client.listSessions(), sessions: { historyPath: async () => undefined, rename: (id, name) => h.client.renameSession(id, name), archive: async () => {} } });
+    listSessions: () => h.client.listSessions(), sessions: { historyPath: async () => undefined, rename: (id, name) => h.client.renameSession(id, name), nativeArchive: true, archive: id => h.client.archiveSession(id), fork: id => h.client.forkSession(id) } });
   controls.toolRegistry = registry;
+  controls.configPath = join(h.dir, 'config.json');
+  controls.refreshOwner = async () => {};
+  const rootConfig = createRootConfig('test', profile); await saveRootConfig(rootConfig, controls.configPath);
+  controls.cfg = runtimeProfileConfig(rootConfig, 'test');
+  const sessions = new SessionStore(join(h.dir, 'sessions.json')); await sessions.load();
+  const workspaces = new WorkspaceStore(join(h.dir, 'workspaces.json')); await workspaces.load();
   let group = 'AA-web';
   const create = vi.fn(async () => ({ code: 0, data: { message_id: 'om_web' } }));
   const reply = vi.fn(async () => ({ code: 0, data: { message_id: 'om_reply' } }));
-  const channel = { getChatMode: vi.fn(async () => 'group'), getChatInfo: vi.fn(async () => ({ name: group })), createCard: vi.fn(async () => ({ cardId: 'card' })), updateCardById: vi.fn(async () => {}),
+  const send = vi.fn(async () => ({ messageId: 'om_command' }));
+  const channel = { send, listChats: async () => [{ id: 'oc_group', name: group }], getChatMode: vi.fn(async () => 'group'), getChatInfo: vi.fn(async () => ({ name: group })), createCard: vi.fn(async () => ({ cardId: 'card' })), updateCardById: vi.fn(async () => {}),
     rawClient: { im: { v1: { message: { create, reply, patch: vi.fn(async () => ({ code: 0 })) }, chat: { update: vi.fn(async ({ data }: { data: { name: string } }) => { group = data.name; return { code: 0 }; }) } } } } } as unknown as LarkChannel;
   const activeRuns = new ActiveRuns();
   let queued!: Promise<void>;
@@ -59,20 +72,26 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' = 'kilo') {
   }); cleanups.push(async () => { pending.cancelAll(); await queued; });
   const names = await startWorkerNameSync({ channel, controls, catalog, profileDir: h.dir, intervalMs: 60_000 }); await names.tick(); cleanups.push(async () => { await names.stop(); await catalog.flush(); await bindings.flush(); await inbox.flush(); });
   const enqueue = vi.fn((msg: NormalizedMessage) => enqueuePersonalInput({ agent: h.adapter, controls, activeRuns, pending, scope: msg.chatId, msg }));
+  const webControls = new WebSessionControls(async (scope, owner) => ({ channel, scope, chatMode: 'group', sessions, sessionCatalog: catalog,
+    workspaces, activeRuns, pending, agent: h.adapter, controls,
+    msg: { messageId: 'web-control', chatId: scope, chatType: 'group', senderId: owner, content: '', resources: [], mentions: [],
+      mentionedBot: true, mentionAll: false, rawContentType: 'interactive', createTime: Date.now() } }));
   const servicePath = join(h.dir, 'web-receipts.json');
   const makeService = () => new PersonalSessionService({ controls, catalog, channel, path: servicePath, enqueue,
-    rename: (id, scope, nativeId, name) => names.rename(id, scope, nativeId, name) });
+    rename: (id, scope, nativeId, name) => names.rename(id, scope, nativeId, name),
+    control: (id, scope, owner, action, values) => webControls.execute(id, scope, owner, action, values) });
   const service = makeService(); await service.load();
   const socket = createServer(); await new Promise<void>(r => socket.listen(0, '127.0.0.1', r)); const port = (socket.address() as { port: number }).port; await new Promise<void>(r => socket.close(() => r()));
   const configPath = join(h.dir, 'web.json'), { secret } = await configureWeb(configPath, '127.0.0.1', port);
+  if (host !== '127.0.0.1') await writeFile(configPath, JSON.stringify({ ...JSON.parse(await readFile(configPath, 'utf8')), host }));
   const web = (await startBridgeWeb({ configPath, service, pollMs: 30 }))!; cleanups.push(() => web.close());
   let cookie = '';
   const request = (path: string, value?: unknown, headers = {}) => fetch(web.url + path, { method: value === undefined ? 'GET' : 'POST', headers: {
     Cookie: cookie, Origin: web.url, 'Content-Type': 'application/json', ...headers }, ...(value === undefined ? {} : { body: JSON.stringify(value) }) });
-  const login = async () => { const response = await request('/api/login', { secret }); expect(response.status).toBe(200); cookie = response.headers.get('set-cookie')!.split(';')[0]!; };
-  const sessions = new SessionStore(join(h.dir, 'sessions.json')); await sessions.load();
+  const login = async () => { const response = await request('/api/login', { secret }); expect(response.status).toBe(200); cookie = response.headers.get('set-cookie')?.split(';')[0] ?? ''; };
   const replies = await startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath: join(h.dir, 'replies.json'), intervalMs: 60_000 }); cleanups.push(() => replies.stop());
-  return { ...h, bindings, catalog, controls, inbox, service, makeService, request, login, web, secret, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
+  controls.workerRuntimes!.get(tool)!.replies = replies;
+  return { ...h, bindings, catalog, controls, inbox, service, makeService, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
 }
 
 it.each(['codex', 'zcode', 'kilo'] as const)('syncs Web/group/native messages through the same durable %s worker, with retries and SSE reconnect', async tool => {
@@ -85,7 +104,7 @@ it.each(['codex', 'zcode', 'kilo'] as const)('syncs Web/group/native messages th
   expect(JSON.parse((h.create.mock.calls[0] as any)[0].data.content)).toEqual({ text: '来自网页\n' + input.text });
   await vi.waitFor(() => expect(h.calls).toHaveLength(1)); expect(h.calls[0]?.prompt).toBe(input.text);
   await h.replies.runNow(); expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls)).toContain('before restart');
-  const abort = new AbortController(); const response = await fetch(h.web.url + '/api/events?session=' + id, { headers: { Cookie: (await h.request('/api/login', { secret: h.secret })).headers.get('set-cookie')!.split(';')[0]! }, signal: abort.signal });
+  const abort = new AbortController(); const response = await fetch(h.web.url + '/api/events?session=' + id, { signal: abort.signal });
   const reader = response.body!.getReader(); let streamed = '';
   await vi.waitFor(async () => { if (!streamed.includes('before restart')) streamed += new TextDecoder().decode((await reader.read()).value); expect(streamed).toContain('before restart'); });
   expect(streamed).toContain('来自桌面'); expect(streamed).toContain('原生回答'); abort.abort(); await reader.cancel().catch(() => {});
@@ -145,10 +164,85 @@ it('recovers an ambiguous group post with its UUID and never enqueues after bind
 });
 
 it('requires cookie auth and same origin, revokes on owner/config changes, and does not reveal tool secrets', async () => {
-  const h = await harness(); expect((await h.request('/api/sessions')).status).toBe(401);
+  const h = await harness('kilo', '127.0.0.2'); expect((await h.request('/api/sessions')).status).toBe(401);
   expect((await h.request('/api/login', { secret: h.secret }, { Origin: 'https://evil.test' })).status).toBe(403);
   expect((await h.request('/api/login', { secret: 'wrong' })).status).toBe(401);
   await h.login(); const text = await (await h.request('/api/sessions')).text(); expect(text).not.toContain('cli_test'); expect(text).not.toContain('token'); expect(text).not.toContain('local-kilo');
   h.controls.botOwnerId = 'ou_other'; expect((await h.request('/api/sessions')).status).toBe(401); h.controls.botOwnerId = 'ou_owner';
-  await configureWeb(join(h.dir, 'web.json'), '127.0.0.1', Number(new URL(h.web.url).port)); expect((await h.request('/api/sessions')).status).toBe(401);
+  await writeFile(h.configPath, JSON.stringify({ ...JSON.parse(await readFile(h.configPath, 'utf8')), secretHash: '0'.repeat(64) })); expect((await h.request('/api/sessions')).status).toBe(401);
+});
+
+
+it('opens loopback without login, retains same-origin/Host checks and disables HTTP and SSE immediately', async () => {
+  const h = await harness();
+  expect(await (await h.request('/api/access')).json()).toEqual({ loginRequired: false });
+  expect((await h.request('/api/sessions')).status).toBe(200);
+  const hostileHost = await new Promise<number>(resolve => httpRequest(h.web.url + '/api/sessions', { headers: { Host: 'evil.test' } }, r => { r.resume(); resolve(r.statusCode!); }).end());
+  expect(hostileHost).toBe(403);
+  expect((await h.request('/api/sessions', undefined, { Origin: 'https://evil.test' })).status).toBe(403);
+  const id = (await h.service.list())[0]!.id;
+  expect((await h.request('/api/sessions/' + id + '/control', { action: 'stop' }, { Origin: '' })).status).toBe(403);
+  const abort = new AbortController(), response = await fetch(h.web.url + '/api/events', { signal: abort.signal });
+  const reader = response.body!.getReader(); let text = '';
+  try {
+    await vi.waitFor(async () => { text += new TextDecoder().decode((await reader.read()).value); expect(text).toContain('event: snapshot'); });
+    const cfg = JSON.parse(await readFile(h.configPath, 'utf8')); await writeFile(h.configPath, JSON.stringify({ ...cfg, enabled: false }));
+    expect((await h.request('/api/sessions')).status).toBe(401);
+    await vi.waitFor(async () => { text += new TextDecoder().decode((await reader.read()).value); expect(text).toContain('event: auth'); });
+  } finally { abort.abort(); await reader.cancel().catch(() => {}); }
+});
+
+function flatten(elements: WebControlElement[]): WebControlElement[] { return elements.flatMap(e => e.kind === 'section' ? flatten(e.elements) : [e]); }
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs Web controls through existing %s handlers: stop, settings save/preview, refresh, copy menu and confirmed archive', async tool => {
+  const h = await harness(tool), id = (await h.service.list())[0]!.id;
+  const act = async (action: string, values?: Record<string, string>) => { const r = await h.request('/api/sessions/' + id + '/control', { action, values }); expect(r.status).toBe(200); return r.json() as Promise<{ elements: WebControlElement[]; conversation: { session: { id: string } } }>; };
+  await h.service.send(id, 'control-stop-request-01', 'work'); await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+  await h.replies.runNow(); await act('stop'); await vi.waitFor(() => expect(h.stop).toHaveBeenCalledOnce());
+  const refreshed = await act('refresh'); expect(refreshed.conversation.session.id).toBe(id);
+  h.provider.conversation.mockRejectedValueOnce(new Error('temporary native read failure'));
+  expect((await act('refresh')).conversation).toMatchObject({ turns: (refreshed.conversation as any).turns, notice: '会话读取失败，稍后自动重试' });
+  const settings = flatten((await act('config')).elements);
+  const form = Object.fromEntries(settings.flatMap(e => e.kind === 'select' || e.kind === 'input' ? [[e.name, e.value]] : []));
+  const preview = settings.find(e => e.kind === 'button' && e.text.includes('推理档位'))!;
+  expect(preview.kind).toBe('button'); if (preview.kind !== 'button') throw Error('preview');
+  expect(flatten((await act(preview.action, form)).elements).some(e => e.kind === 'select' && e.name === 'reasoning_effort')).toBe(true);
+  const save = settings.find(e => e.kind === 'button' && e.text === '保存')!; if (save.kind !== 'button') throw Error('save');
+  const result = await act(save.action, { ...form, max_concurrent_runs: '7' });
+  expect(JSON.stringify(result)).toContain('偏好已保存'); expect(h.bindings.get('oc_group')?.model).toBe('default');
+  expect(JSON.parse(await readFile(h.controls.configPath, 'utf8')).profiles.test.preferences.maxConcurrentRuns).toBe(7);
+  expect(await act(save.action, { ...form, max_concurrent_runs: '7' })).toEqual(result);
+  expect((await h.request('/api/sessions/' + id + '/control', { action: save.action, values: { ...form, model: 'injected-model' } })).status).toBe(400);
+  const copy = flatten((await act('fork')).elements); expect(copy.some(e => e.kind === 'button')).toBe(true);
+  const expired = copy.find(e => e.kind === 'button')!;
+  if (expired.kind !== 'button') throw Error('copy');
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 16 * 60_000);
+  try { await expect(h.webControls.execute(id, 'oc_group', 'ou_owner', expired.action)).rejects.toMatchObject({ status: 409 }); } finally { clock.mockRestore(); }
+  expect(h.provider.archive).not.toHaveBeenCalled();
+  const confirmation = flatten((await act('finish')).elements); expect(h.provider.archive).not.toHaveBeenCalled();
+  const archive = confirmation.find(e => e.kind === 'button' && e.text === '归档')!; if (archive.kind !== 'button') throw Error('archive');
+  expect((await h.request('/api/sessions/' + id + '/control', { action: 'finish.archive' })).status).toBe(409);
+  expect((await h.request('/api/sessions/' + id + '/control', { action: 'exit' })).status).toBe(409);
+  expect((await h.request('/api/sessions/' + '0'.repeat(64) + '/control', { action: archive.action })).status).toBe(404);
+  h.controls.botOwnerId = 'ou_other'; expect((await h.request('/api/sessions/' + id + '/control', { action: archive.action })).status).toBe(409); h.controls.botOwnerId = 'ou_owner';
+  await act(archive.action); expect(h.provider.archive).toHaveBeenCalledOnce(); expect(await h.service.list()).toHaveLength(0);
+  expect(h.send).not.toHaveBeenCalled();
+});
+
+
+it('copies through the native worker, binds one new group, preserves its real managed card and mute context, and does not fork twice on retry', async () => {
+  const h = await harness('codex'), id = (await h.service.list())[0]!.id;
+  h.native.cwd = h.dir; h.workspaces.setCwd('oc_group', h.dir);
+  const chatCreate = vi.fn(async () => ({ code: 0, data: { chat_id: 'oc_copy' } }));
+  h.channel.rawClient.im.v1.chat.create = chatCreate as any;
+  const notifications = vi.fn(async (args: string[]) => args[0] === 'auth' ? { appId: 'cli_test', identities: { user: { available: true, openId: 'ou_owner' } } } : { ok: true, identity: 'user', data: { invalid_ids: [] } });
+  configureGroupNotifications(h.channel, { appId: 'cli_test', ownerId: () => 'ou_owner' }, notifications);
+  const menu = flatten((await h.service.control(id, 'fork')).elements);
+  const fork = menu.find(e => e.kind === 'button' && e.text === 'Codex')!; if (fork.kind !== 'button') throw Error('copy');
+  const result = await h.service.control(id, fork.action);
+  expect(JSON.stringify(result)).toContain('已创建分叉工作群'); expect(h.provider.fork).toHaveBeenCalledOnce(); expect(chatCreate).toHaveBeenCalledOnce();
+  expect(h.bindings.get('oc_copy')).toMatchObject({ nativeId: 'native-fork', toolId: 'codex' }); expect(h.bindings.get('oc_group')?.nativeId).toBe('native');
+  expect(notifications).toHaveBeenCalledTimes(2);
+  expect(h.send).toHaveBeenCalledWith('oc_copy', { cardId: 'card' }, undefined);
+  expect(await h.service.control(id, fork.action)).toEqual(result); expect(h.provider.fork).toHaveBeenCalledOnce(); expect(chatCreate).toHaveBeenCalledOnce();
 });

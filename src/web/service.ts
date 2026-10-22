@@ -9,6 +9,7 @@ import type { WorkerCapabilities } from '../worker/protocol';
 import type { ToolSession } from '../tools/types';
 import { initialState, reduce, type RunState } from '../card/run-state';
 import { writeFileAtomic } from '../platform/atomic-write';
+import type { WebControlResult } from './controls';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
@@ -35,6 +36,7 @@ export class PersonalSessionService {
     controls: Controls; catalog?: SessionCatalog; channel: LarkChannel; path: string;
     enqueue(msg: NormalizedMessage): Promise<void>;
     rename(toolId: string, scope: string, id: string, name: string): Promise<void>;
+    control?(id: string, scope: string, owner: string, action: string, values?: unknown): Promise<WebControlResult>;
   }) {}
   async load() {
     try { const r = JSON.parse(await readFile(this.deps.path, 'utf8')); if (r.version !== 1 || !r.receipts || Array.isArray(r.receipts)) throw new Error('网页请求账本无效'); this.receipts = r.receipts; }
@@ -150,6 +152,18 @@ export class PersonalSessionService {
     this.assertBinding(id, session.scope);
     await this.deps.rename(b.toolId, session.scope, b.nativeId!, name);
     this.listedAt = 0; return { name };
+  }
+  async control(id: string, action: string, values?: unknown) {
+    return this.serial('control:' + id, async () => {
+      const { session } = await this.resolve(id, true);
+      this.assertBinding(id, session.scope);
+      if (action === 'refresh') {
+        return { conversation: await this.read(id), elements: [] };
+      }
+      if (!this.deps.control) throw new WebError(503, '会话操作尚未就绪');
+      const result = await this.deps.control(id, session.scope, this.owner(), action, values);
+      this.listedAt = 0; return result;
+    });
   }
   async read(id: string): Promise<WebConversation> {
     const { session, b, client } = await this.resolve(id);

@@ -9,6 +9,7 @@ import { isRetiredPrivateInput } from './auxiliary-private';
 import { startBridgeWeb } from '../web/server';
 import { enqueuePersonalInput } from './intake-queue';
 import { PersonalSessionService, WebError } from '../web/service';
+import { WebSessionControls } from '../web/controls';
 import { startA2AServer } from '../a2a/server';
 import { createA2ARunner } from '../a2a/runner';
 import { NativeSessionLocks } from '../tools/locks';
@@ -796,8 +797,16 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     } catch (error) { log.warn('a2a', 'startup-failed', { error: String(error) }); }
   }
   if (deps.appPaths?.profileDir && controls.toolBindings) {
+    const webControls = new WebSessionControls(async (scope, owner) => {
+      if (disconnecting) throw new WebError(503, '桥接正在重连，请稍后重试');
+      return { channel, scope, chatMode: 'group', sessions, sessionCatalog, workspaces, activeRuns, pending,
+        processPool: pool, agent, controls,
+        msg: { messageId: 'web-control', chatId: scope, chatType: 'group', senderId: owner, content: '',
+          resources: [], mentions: [], mentionedBot: true, mentionAll: false, rawContentType: 'interactive', createTime: Date.now() } };
+    });
     const service = new PersonalSessionService({ controls, catalog: sessionCatalog, channel,
       path: join(deps.appPaths.profileDir, 'web-receipts.json'),
+      control: (id, scope, owner, action, values) => webControls.execute(id, scope, owner, action, values),
       enqueue: async msg => {
         if (disconnecting) throw new WebError(503, '桥接正在重连，请稍后重试');
         const binding = controls.toolBindings!.get(msg.chatId);

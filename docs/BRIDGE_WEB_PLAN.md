@@ -12,11 +12,11 @@ lark-channel-bridge web configure --profile <profile>
 lark-channel-bridge web status --profile <profile>
 ```
 
-默认地址 `http://127.0.0.1:3345`。configure 只显示一次随机登录码，磁盘仅保存其 SHA-256 摘要。随后启动或重启**桥接服务**即可访问，无需单独运行前端服务；configure 本身不重启服务。已有 worker 不随桥接重启。
+默认地址 `http://127.0.0.1:3345`，本机回环访问免登录，页面直接进入会话且不显示退出按钮。配置其他本机 IPv4 地址时，configure 只显示一次随机登录码，磁盘仅保存其 SHA-256 摘要。随后启动或重启**桥接服务**即可访问，无需单独运行前端服务；configure 本身不重启服务。已有 worker 不随桥接重启。
 
 可用 `--host <本机IPv4> --port <端口>` 指定监听地址，禁止 `0.0.0.0`。局域网 HTTP 适用于可信私网；默认使用本机回环。跨网络访问建议用 SSH 转发回环端口，例如 `ssh -L 3345:127.0.0.1:3345 <host>`。当前入口按配置 IP/localhost 校验 Host，不支持直接套用任意域名反向代理。
 
-登录 cookie 为 HttpOnly、SameSite=Strict，12 小时过期。登录会话绑定 profile、配置摘要及当前机器人所有者；更换登录码、禁用入口或所有者变化会撤销旧登录。配置文件在 `profiles/<profile>/web.json`，权限 600。
+非回环入口的登录 cookie 为 HttpOnly、SameSite=Strict，12 小时过期。登录会话绑定 profile、配置摘要及当前机器人所有者；更换登录码、禁用入口或所有者变化会撤销旧登录。配置文件在 `profiles/<profile>/web.json`，权限 600。
 
 ```bash
 lark-channel-bridge web disable --profile <profile>
@@ -33,10 +33,12 @@ lark-channel-bridge web disable --profile <profile>
 ```
 
 - `apps/bridge-web/page.ts`：无构建依赖的原生 DOM 页面，随 CLI 打包，不执行工具命令。答案以安全文本和代码块展示，不执行消息里的 HTML；不展示思考或工具详情。
-- `src/web/server.ts`：cookie 登录、Host/Origin 检查、JSON 请求限制、登录限流和 SSE。多个浏览器共享按会话的观察结果，慢连接会断开并重新读取快照。
-- `src/web/service.ts`：统一 `list/read/send/rename`，依据绑定、账户和 worker capabilities 授权。会话身份包含 profile、应用、群、工具、sourceId 和 nativeId，页面持有其摘要。归档/共享/辅助/话题群被排除，已失效群沿用现有群清理流程。读取失败不会被当成归档。
+- `src/web/server.ts`：127.0.0.1 本机免登录、其他地址 cookie 登录、Host/Origin 检查、JSON 请求限制、登录限流和 SSE。多个浏览器共享按会话的观察结果，慢连接会断开并重新读取快照。
+- `src/web/service.ts`：统一 `list/read/send/rename/control`，依据绑定、账户和 worker capabilities 授权。会话身份包含 profile、应用、群、工具、sourceId 和 nativeId，页面持有其摘要。归档/共享/辅助/话题群被排除，已失效群沿用现有群清理流程。读取失败不会被当成归档。
 - `src/bot/intake-queue.ts`：飞书和 Web 共用持久化收件箱、去重和 PendingQueue。执行、会话锁、回复卡片、完成时艾特所有者沿用原桥接路径。网页文本中的 `/exit` 等仅作为模型输入。
 - worker：读取原生记录、处理执行及工具协议。Claude 和 Dsh 补充了 conversation；Kilo 补充原生轮次与 job 的关联，Zcode 通过已使用的原生输入元数据关联 job。桥接仅接受可由 worker journal 验证的 job 关联。
+
+会话底部提供停止、设置、刷新、复制和归档五个按钮。`src/web/controls.ts` 将现有命令卡片转换为网页表单和按钮，复用相同命令处理器；设置、复制选项和归档确认均在网页完成。后续按钮使用服务端签发、绑定当前会话及所有者的 15 分钟令牌，仅允许已展示的命令和表单选项；提交重试复用结果。归档保留群和历史。网页设置操作等待保存结果，飞书卡片仍采用快速返回、异步更新的回调流程。
 
 新增 Web/UI/服务没有按 Codex、Claude、Zcode、Kilo、Dsh 分支。操作由 `conversation`、`sessions.rename`、`nativeSessionNames`、`jobs.submit` 决定。新增 worker 实现统一协议和能力声明后无需修改网页。桥接既有历史工具兼容代码仍存在，例如 Codex 名称账本旧键。
 
@@ -56,6 +58,6 @@ SSE 每秒共享读取订阅中的会话；完成的 job 复用缓存和事件�
 
 ## 验证
 
-`tests/integration/web/personal-web.test.ts` 使用真实本地 worker HTTP、持久 inbox、公共队列、群投递替身和 HTTP/SSE；覆盖 Codex、Zcode、Kilo 的三端消息、三处名称、并发去重、重启恢复、绑定失效、离线、认证和跨站拒绝。Claude/Dsh 记录适配另有解析测试，Dsh 有原生协议进程夹具测试。浏览器验证登录、发送/回复、改名、会话切换、HTML 文本安全以及手机布局。
+`tests/integration/web/personal-web.test.ts` 使用真实本地 worker HTTP、持久 inbox、公共队列、群投递替身和 HTTP/SSE；覆盖五个 worker 的网页停止、设置保存/预览、复制选项和归档确认，及 Codex、Zcode、Kilo 的三端消息、三处名称、并发去重、重启恢复、绑定失效、离线、本机免登录、非回环认证、同源/Host 校验、入口禁用、令牌重试及跨会话拒绝。Claude/Dsh 记录适配另有解析测试，Dsh 有原生协议进程夹具测试。浏览器验证登录、发送/回复、改名、会话切换、HTML 文本安全以及手机布局。
 
 这些是隔离集成/浏览器验证。真实飞书群及真实模型的 Web autotest 尚未执行；代码交付不自动部署或重启生产服务。旧 worker 未提供新能力时，页面会保留桥接聊天并提示原生对话读取不可用。

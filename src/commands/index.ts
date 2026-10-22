@@ -169,6 +169,8 @@ export interface Controls {
 
 export interface CommandContext {
   channel: LarkChannel;
+  /** Original Feishu channel when a presentation transport captures replies. */
+  groupChannel?: LarkChannel;
   msg: NormalizedMessage;
   /**
    * Session scope string. For p2p / regular group it equals `msg.chatId`;
@@ -202,6 +204,8 @@ export interface CommandContext {
    * new one. */
   fromCardAction?: boolean;
   nativeMirrorAction?: boolean;
+  /** Web transport awaits results; Feishu callbacks retain their detached updates. */
+  fromWeb?: boolean;
   /** Production DM policy: private chat is only a launcher for workspace groups. */
   dmGroupCreationOnly?: boolean;
 }
@@ -417,6 +421,7 @@ export async function runCommandHandler(
   try {
     await h(args, ctx);
   } catch (err) {
+    if (ctx.fromWeb) throw err;
     log.fail('command', err, { cmd: name });
     reportMetric('command_fail', 1, { step: 'handler' });
   }
@@ -827,7 +832,7 @@ async function createGroupForPanelSessionUnlocked(
   }
   let created;
   try {
-    created = await createBoundChat({ channel: ctx.channel, name, inviteOpenId: ctx.msg.senderId, toolId });
+    created = await createBoundChat({ channel: ctx.groupChannel ?? ctx.channel, name, inviteOpenId: ctx.msg.senderId, toolId });
   } catch (err) {
     await reply(ctx, `❌ 创建群失败：${errorText(err)}`);
     return false;
@@ -965,7 +970,7 @@ async function handleNewChat(
   let created;
   try {
     created = await createBoundChat({
-      channel: ctx.channel,
+      channel: ctx.groupChannel ?? ctx.channel,
       name,
       inviteOpenId: ctx.msg.senderId,
       toolId,
@@ -2653,6 +2658,7 @@ async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
     case 'models':
       return showConfigForm(ctx, Number(args.trim().split(/\s+/)[1]) || 0);
     case 'preview':
+      if (ctx.fromWeb) return showConfigForm(ctx, 0, true);
       void (async () => {
         await new Promise(resolve => setTimeout(resolve, FORM_SETTLE_MS));
         await showConfigForm(ctx, 0, true);
@@ -2717,6 +2723,10 @@ async function showResultCardInPlace(
   formMsgId: string,
   card: object,
 ): Promise<void> {
+  if (ctx.fromWeb) {
+    await sendManagedCard(ctx.channel, ctx.msg.chatId, card);
+    return;
+  }
   try {
     await updateManagedCard(ctx.channel, formMsgId, card);
   } catch (err) {
@@ -2731,6 +2741,7 @@ async function showResultCardInPlace(
 }
 
 async function cancelConfig(ctx: CommandContext): Promise<void> {
+  if (ctx.fromWeb) return showResultCardInPlace(ctx, ctx.msg.messageId, configCancelledCard());
   if (ctx.fromCardAction) {
     const formMsgId = ctx.msg.messageId;
     void (async () => {
@@ -2812,9 +2823,10 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
   // Detach: same reason as account submit — Lark's client locks the form
   // while the cardAction handler is running. Wait out FORM_SETTLE_MS *after*
   // returning so the in-place card update sticks.
-  void (async () => {
+  const save = async () => {
     const submittedAt = Date.now();
     const waitForSettle = async (): Promise<void> => {
+      if (ctx.fromWeb) return;
       const elapsed = Date.now() - submittedAt;
       if (elapsed < FORM_SETTLE_MS) {
         await new Promise<void>((r) => setTimeout(r, FORM_SETTLE_MS - elapsed));
@@ -2930,7 +2942,9 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
     if (!requireMentionInGroup) {
       await promptGroupMsgScopeIfMissing(ctx);
     }
-  })();
+  };
+  if (ctx.fromWeb) await save();
+  else void save();
 }
 
 /**

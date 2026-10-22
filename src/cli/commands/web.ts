@@ -15,11 +15,12 @@ export async function runWeb(action: 'configure' | 'status' | 'disable', options
   if (action === 'configure') {
     await mkdir(paths.profileDir, { recursive: true, mode: 0o700 });
     const { config, secret } = await configureWeb(path, options.host, options.port ? Number(options.port) : undefined);
-    console.log(`网页：http://${config.host}:${config.port}\n登录码（仅显示一次）：${secret}\n配置后需重启桥接生效；此命令不会重启。重新 configure 会更换登录码。`);
+    console.log(`网页：http://${config.host}:${config.port}\n${config.host === '127.0.0.1' ? '本机回环访问免登录。' : `登录码（仅显示一次）：${secret}`}\n配置后需重启桥接生效；此命令不会重启。`);
     return;
   }
   const config = await loadWebConfig(path);
   if (action === 'disable' && config) await writeFileAtomic(path, JSON.stringify({ ...config, enabled: false }) + '\n', { mode: 0o600 });
   console.log(JSON.stringify({ profile, configured: !!config, enabled: action === 'disable' ? false : config?.enabled ?? false,
+    ...(config ? { loginRequired: config.host !== '127.0.0.1' } : {}),
     ...(config ? { url: `http://${config.host}:${config.port}` } : {}) }));
 }

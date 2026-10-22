@@ -31,6 +31,10 @@ export async function sendManagedCard(
   card: object,
   opts: { replyTo?: string; replyInThread?: boolean; isActive?: () => boolean } = {},
 ): Promise<ManagedCardSendResult> {
+  // Alternate presentations reuse command handlers while owning their own UI.
+  // Calls to other recipients still use the original Feishu channel.
+  const transport = (channel as LarkChannel & { managedCardTransport?: typeof sendManagedCard }).managedCardTransport;
+  if (transport) return transport(channel, recipientId, card, opts);
   const checkActive = () => {
     if (opts.isActive && !opts.isActive()) throw new Error('会话已归档或已重新绑定。');
   };
