@@ -14,14 +14,15 @@ import { WorkerClient } from '../../../src/worker/client';
 import type { WorkerCapabilities } from '../../../src/worker/protocol';
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.useRealTimers(); vi.restoreAllMocks(); });
-async function fixture(toolId: 'claude' | 'dsh' | 'zcode' = 'zcode') {
+async function fixture(toolId: 'codex' | 'claude' | 'dsh' | 'zcode' = 'zcode') {
   const dir=await mkdtemp(join(tmpdir(),'zcode-names-'));cleanup.push(()=>rm(dir,{recursive:true,force:true}));
   const bindings=new ToolBindingStore(join(dir,'bindings.json'));await bindings.load();
   const catalog=new SessionCatalog(join(dir,'catalog.json'));await catalog.load();
   cleanup.push(async()=>{await bindings.flush();await catalog.flush();});
   const add=(scope:string,id:string)=>{
     bindings.set(scope,{toolId,sourceId:'local',nativeId:id,name:'old label'});
-    catalog.upsertActive({scopeId:scope,agentId:toolId,cwdRealpath:dir,policyFingerprint:scope,sessionId:id,sourceId:'local',botAppId:'bot'});
+    catalog.upsertActive({scopeId:scope,agentId:toolId,cwdRealpath:dir,policyFingerprint:scope,
+      ...(toolId==='codex'?{threadId:id}:{sessionId:id}),sourceId:'local',botAppId:'bot'});
   };add('oc_group','session_native');
   const legacyAdd=async(scope:string,id:string)=>{
     await bindings.flush();
@@ -49,8 +50,28 @@ async function fixture(toolId: 'claude' | 'dsh' | 'zcode' = 'zcode') {
   let handle:Awaited<ReturnType<typeof startToolNameSync>>;
   const start=async()=>{handle=await startToolNameSync({channel,controls,catalog,tool,ready,statePath:join(dir,'names.json'),intervalMs:60_000});cleanup.push(()=>handle.stop());await handle.tick();return handle;};
   const startRegistered=async(waitForTick=true)=>{const handle=await startWorkerNameSync({channel,controls,catalog,profileDir:dir,intervalMs:60_000});cleanup.push(()=>handle.stop());if(waitForTick)await handle.tick();return handle;};
-  return {dir,bindings,catalog,add,legacyAdd,controls,channel,tool,rename,list,ready,start,startRegistered,health,capabilities,update,getChatInfo,title:(v:string)=>{title=v;},group:(v:string)=>{group=v;}};
+  const omitCatalogSource=async()=>{
+    await catalog.flush();
+    const rows=JSON.parse(await readFile(join(dir,'catalog.json'),'utf8'));
+    for(const row of rows)delete row.sourceId;
+    await writeFile(join(dir,'catalog.json'),JSON.stringify(rows));await catalog.load();
+  };
+  return {dir,bindings,catalog,add,legacyAdd,omitCatalogSource,controls,channel,tool,rename,list,ready,start,startRegistered,health,capabilities,update,getChatInfo,title:(v:string)=>{title=v;},group:(v:string)=>{group=v;}};
 }
+it.each(['codex','zcode'] as const)('syncs legacy %s catalog rows only after verifying their current binding source',async toolId=>{
+  const h=await fixture(toolId);await h.omitCatalogSource();const sync=await h.startRegistered();
+  expect(h.rename).toHaveBeenCalledWith('session_native','AA-copy（ZCode）');await sync.tick();
+  h.title('AA-桌面改名');await sync.tick();
+  expect(h.update).toHaveBeenCalledWith(expect.objectContaining({data:{name:'AA-桌面改名'}}));
+});
+it.each(['wrong-source','wrong-session','wrong-bot','shared'] as const)('rejects legacy catalog rows with %s ownership',async kind=>{
+  const h=await fixture('codex');await h.omitCatalogSource();const b=h.bindings.get('oc_group')!;
+  if(kind==='wrong-source'){h.bindings.removeChat('oc_group');h.bindings.set('oc_group',{...b,sourceId:'another'});}
+  if(kind==='wrong-session')h.bindings.set('oc_group',{...b,nativeId:'another'});
+  if(kind==='shared')h.bindings.set('oc_group',{...b,auxiliaryWorkgroup:true});
+  if(kind==='wrong-bot')h.controls.profileConfig.accounts.app.id='another';
+  await h.startRegistered();expect(h.rename).not.toHaveBeenCalled();expect(h.update).not.toHaveBeenCalled();
+});
 it('repairs a copied native title from the live group, then mirrors desktop renames without submitting input',async()=>{
   const h=await fixture(),sync=await h.start();
   expect(h.rename).toHaveBeenCalledWith('session_native','AA-copy（ZCode）');

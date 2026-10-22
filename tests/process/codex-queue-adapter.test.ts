@@ -73,10 +73,11 @@ describe('CodexAdapter native queue mode', () => {
     expect(methods).not.toContain('thread/queue/delete');
   });
 
-  it('creates/materializes idle first-thread history then queues, without starting a bridge-owned turn', async () => {
+  it.each([undefined, 'AA-Skill-仿真展示'])('names/materializes a fresh thread before queueing (%s), without starting a bridge-owned turn', async sessionName => {
     const fake = await createQueueCodex(); cleanup.push(fake.dir);
     const run = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir }).run({
       runId: 'fresh-queue', cwd: fake.dir, prompt: 'first Feishu message', model: 'gpt-6.1-sol', reasoningEffort: 'high',
+      sessionName,
     });
     const events = await collect(run.events);
     expect(events[0]).toMatchObject({ type: 'system', threadId: 'thread-existing', model: 'gpt-6.1-sol', reasoningEffort: 'high' });
@@ -84,6 +85,8 @@ describe('CodexAdapter native queue mode', () => {
     const requests = (await readFile(join(fake.dir, 'requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     expect(requests.map(r => r.method)).toContain('thread/start');
     expect(requests.map(r => r.method)).not.toContain('turn/start');
+    expect(requests.slice(0, 5).map(r => r.method)).toEqual(['initialize', 'initialized', 'thread/start', 'thread/name/set', 'thread/read']);
+    expect(requests.find(r => r.method === 'thread/name/set').params).toEqual({ threadId: 'thread-existing', name: sessionName ?? 'Codex会话' });
     const start = requests.find(r => r.method === 'thread/start');
     expect(start.params).not.toHaveProperty('developerInstructions');
     expect(start.params).toMatchObject({ historyMode: 'legacy', model: 'gpt-6.1-sol', config: { model_reasoning_effort: 'high' } });
@@ -94,6 +97,7 @@ describe('CodexAdapter native queue mode', () => {
   it.each(['existing', 'fresh'] as const)('detaches %s execution without interrupting or deleting the accepted submission', async (kind) => {
     const fake = await createQueueCodex('inProgress'); cleanup.push(fake.dir);
     const opts = { runId: 'detach', cwd: fake.dir, prompt: 'keep running',
+      sessionName: 'AA-初始名称',
       ...(kind === 'existing' ? { threadId: 'thread-existing' } : {}) };
     const run = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir }).run(opts);
     const seen: AgentEvent[] = [];
@@ -102,6 +106,7 @@ describe('CodexAdapter native queue mode', () => {
     await run.detach!(); await drain;
     const requests = await readFile(join(fake.dir, 'requests.jsonl'), 'utf8');
     expect(requests).not.toContain('turn/interrupt'); expect(requests).not.toContain('thread/queue/delete');
+    if (kind === 'existing') expect(requests).not.toContain('thread/name/set');
     expect(seen.some(e => e.type === 'done' || e.type === 'error')).toBe(false);
     expect(JSON.parse(await readFile(join(fake.dir, 'state.json'), 'utf8')).prompt).toBe('keep running');
     expect(await run.waitForExit(0)).toBe(true);

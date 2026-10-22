@@ -20,8 +20,11 @@ export async function startToolNameSync(options: {
       !catalog.isScopeArchived(scope) && !controls.toolBindings!.isArchived(tool.id, tool.sourceId, id);
   };
   const ownedEntries = () => catalog.entries().filter(row => row.status === 'active' && row.agentId === tool.id &&
-    row.sourceId === tool.sourceId && row.botAppId === controls.profileConfig.accounts.app.id &&
-    /^oc_[A-Za-z0-9]+$/.test(row.scopeId) && !!(row.sessionId ?? row.threadId) && active(row.scopeId, (row.sessionId ?? row.threadId)!));
+    (row.sourceId === undefined || row.sourceId === tool.sourceId) && row.botAppId === controls.profileConfig.accounts.app.id &&
+    /^oc_[A-Za-z0-9]+$/.test(row.scopeId) && !!(row.sessionId ?? row.threadId) && active(row.scopeId, (row.sessionId ?? row.threadId)!))
+    // Legacy catalog rows lack sourceId. Normalize only after the current
+    // binding has verified this exact worker source and native session.
+    .map(row => row.sourceId === undefined ? { ...row, sourceId: tool.sourceId } : row);
   // Two personal groups sharing a native session must not fight over its title.
   const exclusive = (scope: string, id: string) => active(scope, id) &&
     ownedEntries().filter(row => (row.sessionId ?? row.threadId) === id).length === 1;

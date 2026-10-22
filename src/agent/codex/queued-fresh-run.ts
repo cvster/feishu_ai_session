@@ -7,6 +7,7 @@ import { join } from 'node:path';
 
 type FreshQueueOptions = Omit<Parameters<typeof createCodexQueueRun>[0], 'threadId'> & {
   developerInstructions?: string;
+  sessionName?: string;
 };
 
 /** Prefer Desktop's writer for creation and its lifecycle notifications. */
@@ -32,7 +33,7 @@ export function createCodexQueuedFreshRun(options: FreshQueueOptions): AgentRun 
         inheritCodexHome: options.inheritCodexHome, env: options.env,
         ...(remote ? { sharedServer: true, passive: true, remote } : {}),
       });
-      const threadId = await creator.createIdleThread({ ...options, threadSource: 'user' });
+      const threadId = await creator.createIdleThread({ ...options, name: options.sessionName, threadSource: 'user' });
       await creator?.stop();
       if (closed) return;
       // Expose the binding before submitting the first turn; shutdown drains

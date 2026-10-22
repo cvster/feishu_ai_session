@@ -24,6 +24,7 @@ export interface CodexAppServerRunOptions {
   cwd: string;
   sandbox: SandboxMode;
   prompt: string;
+  sessionName?: string;
   developerInstructions?: string;
   clientUserMessageId: string;
   images?: readonly string[];
@@ -37,6 +38,7 @@ const INITIALIZE_REQUEST_ID = 1;
 const THREAD_START_REQUEST_ID = 2;
 const TURN_START_REQUEST_ID = 3;
 const TURN_INTERRUPT_REQUEST_ID = 4;
+const THREAD_NAME_REQUEST_ID = 5;
 
 /**
  * Run a fresh Codex thread through app-server instead of `codex exec`.
@@ -180,6 +182,21 @@ export function createCodexAppServerRun(options: CodexAppServerRunOptions): Agen
             model: nestedString(message, ['result', 'model']) ?? options.model,
             reasoningEffort: nestedString(message, ['result', 'reasoningEffort']) ?? options.reasoningEffort,
           };
+          if (options.sessionName?.trim()) {
+            writeRequest(child, { id: THREAD_NAME_REQUEST_ID, method: 'thread/name/set',
+              params: { threadId, name: options.sessionName } });
+          } else {
+            writeRequest(child, turnStartRequest(options, threadId));
+          }
+          continue;
+        }
+
+        if (message.id === THREAD_NAME_REQUEST_ID && threadId) {
+          if (message.error) {
+            terminal = true;
+            yield terminalError(responseError(message, 'codex app-server thread/name/set failed'));
+            return;
+          }
           writeRequest(child, turnStartRequest(options, threadId));
           continue;
         }

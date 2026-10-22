@@ -16,7 +16,7 @@ describe('Codex app-server fresh thread run', () => {
     );
   });
 
-  it('creates a paginated Desktop-compatible thread and streams its first turn', async () => {
+  it.each([undefined, 'AA-Skill-仿真展示'])('creates a paginated Desktop-compatible thread and streams its first turn (%s)', async sessionName => {
     const fake = await createFakeAppServer();
     cleanup.push(fake.dir);
     const image = join(fake.dir, 'image.png');
@@ -32,6 +32,7 @@ describe('Codex app-server fresh thread run', () => {
       runId: 'run-app-server',
       cwd: fake.dir,
       prompt: 'hello',
+      sessionName,
       images: [image],
       model: 'gpt-5.6-sol',
       reasoningEffort: 'high',
@@ -78,6 +79,7 @@ describe('Codex app-server fresh thread run', () => {
       'initialize',
       'initialized',
       'thread/start',
+      ...(sessionName ? ['thread/name/set'] : []),
       'turn/start',
     ]);
     expect(requests[0]?.params).toMatchObject({
@@ -93,7 +95,8 @@ describe('Codex app-server fresh thread run', () => {
       model: 'gpt-5.6-sol',
     });
     expect(requests[2]?.params).not.toHaveProperty('developerInstructions');
-    expect(requests[3]?.params).toMatchObject({
+    if (sessionName) expect(requests[3]?.params).toEqual({ threadId: 'thread-visible', name: sessionName });
+    expect(requests.at(-1)?.params).toMatchObject({
       threadId: 'thread-visible',
       effort: 'high',
       clientUserMessageId: 'lark-channel-bridge:run-app-server',
@@ -102,6 +105,19 @@ describe('Codex app-server fresh thread run', () => {
         { type: 'localImage', path: image },
       ],
     });
+  });
+
+  it('does not send the first prompt when the requested session name is rejected', async () => {
+    const fake = await createFakeAppServer(false, true); cleanup.push(fake.dir);
+    const run = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir,
+      inheritCodexHome: true, useQueueForExistingThreads: false, stopGraceMs: 50 }).run({
+      runId: 'name-rejected', cwd: fake.dir, prompt: 'must not send', sessionName: 'AA-Skill-仿真展示',
+    });
+    const events = await collect(run.events);
+    expect(events.at(-1)).toMatchObject({ type: 'error', terminationReason: 'failed', message: 'rename rejected' });
+    expect(await run.waitForExit(2000)).toBe(true);
+    const requests = JSON.parse(await readFile(fake.recordPath, 'utf8'));
+    expect(requests.map((r: { method: string }) => r.method)).toEqual(['initialize', 'initialized', 'thread/start', 'thread/name/set']);
   });
 
   it('keeps a blocking request pending and responds on the original RPC connection', async () => {
@@ -160,7 +176,7 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
   return out;
 }
 
-async function createFakeAppServer(interactive: boolean | 'async' = false): Promise<{
+async function createFakeAppServer(interactive: boolean | 'async' = false, rejectRename = false): Promise<{
   dir: string;
   path: string;
   recordPath: string;
@@ -197,6 +213,10 @@ rl.on('line', (line) => {
   }
   if (request.method === 'thread/start') {
     send({ id: request.id, result: { thread: { id: 'thread-visible' } } });
+    return;
+  }
+  if (request.method === 'thread/name/set') {
+    send({ id: request.id, ...(${rejectRename} ? { error: { code: -32600, message: 'rename rejected' } } : { result: {} }) });
     return;
   }
   if (request.method !== 'turn/start') return;
