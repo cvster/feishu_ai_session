@@ -17,7 +17,7 @@ export interface WebSession {
   id: string; scope: string; toolId: string; tool: string; project: string; cwd: string; name: string;
   updatedAtMs: number; favorite: boolean; online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
 }
-export interface WebTurn { id: string; input: string; answer: string; progress?: string[]; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
+export interface WebTurn { id: string; input: string; answer: string; requestIds?: string[]; progress?: string[]; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
 export interface WebConversation { session: WebSession; turns: WebTurn[]; notice?: string }
 interface Receipt { fingerprint: string; sessionId: string; owner: string; createdAt: number; messageId?: string; enqueued?: boolean }
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
@@ -210,10 +210,14 @@ export class PersonalSessionService {
   }
   async read(id: string): Promise<WebConversation> {
     const { session, b, client } = await this.resolve(id);
+    const owner = this.owner(), requests = new Map<string, string[]>();
+    for (const [requestId, receipt] of Object.entries(this.receipts)) if (receipt.sessionId === id && receipt.owner === owner && receipt.messageId) {
+      const ids = requests.get(receipt.messageId) ?? []; ids.push(requestId); requests.set(receipt.messageId, ids);
+    }
     const runtime = this.deps.controls.workerRuntimes?.get(b.toolId);
     const receipts = runtime?.inbox.receipts(session.scope) ?? [];
     const turns: WebTurn[] = receipts.filter(r => r.status === 'pending' || r.status === 'rejected').map(r => ({ id: 'receipt:' + r.message.messageId,
-      input: r.message.content, answer: '', status: r.status === 'pending' ? 'queued' : 'rejected', createdAtMs: Number(r.message.createTime), origin: 'bridge' }));
+      input: r.message.content, answer: '', requestIds: requests.get(r.message.messageId), status: r.status === 'pending' ? 'queued' : 'rejected', createdAtMs: Number(r.message.createTime), origin: 'bridge' }));
     if (!session.online || !client) return { session, turns: this.conversations.get(id)?.turns ?? turns, notice: 'Worker 离线；恢复后会重新读取会话' };
     try {
       const [native, allJobs] = await Promise.all([session.nativeConversation ? client.conversation(b.nativeId!) : undefined, client.list()]);
@@ -245,6 +249,7 @@ export class PersonalSessionService {
         const nativeTurn = native?.turns.find(t => t.bridgeJobId === job.id || t.id === view!.turnId);
         if (nativeTurn) linkedTurns.add(nativeTurn.id);
         turns.push({ id: 'job:' + job.id, input: inputs.map(r => r.message.content).join('\n\n'), answer: answer(nativeTurn?.state ?? view.state), status,
+          requestIds: inputs.flatMap(r => requests.get(r.message.messageId) ?? []),
           progress: runProgress({ ...(nativeTurn?.state ?? view.state), terminal: ['running', 'accepted'].includes(job.status) ? 'running' : 'done' }),
           createdAtMs: job.createdAt, origin: 'bridge' });
       }

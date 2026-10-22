@@ -1,4 +1,5 @@
 import { runInNewContext } from 'node:vm';
+import { webcrypto } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { bridgeWebPage } from '../../../apps/bridge-web/page';
 
@@ -47,7 +48,7 @@ class Element {
   get text(): string { return this.textContent + this.children.map(child => child.text).join(''); }
 }
 
-function harness(preferences?: unknown, count = 2) {
+function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, string>) {
   const ids = [...bridgeWebPage.matchAll(/id="([^"]+)"/g)].map(match => match[1]!);
   const elements = new Map(ids.map(id => [id, new Element('div', id)]));
   const node = (id: string) => elements.get(id)!;
@@ -59,7 +60,7 @@ function harness(preferences?: unknown, count = 2) {
   const conversation = (index: number, answer = '回答', count = 12) => ({ session: rows[index], turns: Array.from({ length: count }, (_, i) => ({
     id: String(i), input: '问题' + i, answer, status: 'completed', origin: 'native', createdAtMs: 1,
   })) });
-  const requests: { id: string; path: string; data?: any; resolve(value: unknown): void }[] = [];
+  const requests: { id: string; path: string; data?: any; resolve(value: unknown): void; reject(error: Error): void }[] = [];
   class Stream {
     static all: Stream[] = [];
     listeners = new Map<string, (event: { data: string }) => void>();
@@ -70,7 +71,7 @@ function harness(preferences?: unknown, count = 2) {
     emit(name: string, data: unknown) { this.listeners.get(name)?.({ data: JSON.stringify(data) }); }
   }
   const response = (value: unknown) => ({ ok: true, json: async () => value });
-  const storage = new Map(preferences === undefined ? [] : [['bridge-web-preferences', JSON.stringify(preferences)]]);
+  const storage = savedStorage ?? new Map(preferences === undefined ? [] : [['bridge-web-preferences', JSON.stringify(preferences)]]);
   const browserWindow = { innerWidth: 1280, innerHeight: 900, addEventListener() {} };
   runInNewContext(bridgeWebPage.match(/<script>([\s\S]*?)<\/script>/)![1]!, {
     document: { getElementById: node, createElement: (tag: string) => new Element(tag), createElementNS: (_ns: string, tag: string) => new Element(tag), body: new Element('body'), addEventListener() {} },
@@ -79,9 +80,9 @@ function harness(preferences?: unknown, count = 2) {
       if (path === '/api/access') return response({ loginRequired: false });
       if (path === '/api/sessions') return response(rows);
       // Deliberately allow a response after abort to check the selection guard.
-      return new Promise(resolve => requests.push({ id: path.split('/').at(-1)!, path, data: options?.body ? JSON.parse(options.body) : undefined, resolve: value => resolve(response(value)) }));
+      return new Promise((resolve, reject) => requests.push({ id: path.split('/').at(-1)!, path, data: options?.body ? JSON.parse(options.body) : undefined, resolve: value => resolve(response(value)), reject }));
     },
-    EventSource: Stream, AbortController, localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
+    EventSource: Stream, AbortController, crypto: webcrypto, localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) },
   });
   const ready = () => vi.waitFor(() => expect(requests).toHaveLength(1));
   const choose = (index: number) => { void node('tree').querySelectorAll('button').find(button => button.textContent === rows[index]!.name)!.onclick!(); };
@@ -265,4 +266,97 @@ it('updates thought and tool count summaries through SSE as plain non-expandable
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: snapshot });
   expect(summary().text).toBe('🧠 思考完成🧰 2 个工具调用（已完成）');
   expect(h.requests).toHaveLength(1);
+});
+
+it('shows a sending bubble and clears the composer before HTTP completes, then replaces it by the confirmed turn', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  h.node('messages').scrollTop = 200; h.node('input').value = '立即显示的消息';
+  const submit = h.node('composer').onsubmit!({ preventDefault() {} });
+  expect(h.node('input').value).toBe(''); expect(h.node('send').disabled).toBe(true);
+  expect(h.node('messages').querySelectorAll('.user').filter(e => e.text === '立即显示的消息')).toHaveLength(1);
+  expect(h.node('messages').querySelector('.sending')!.text).toBe('发送中…');
+  expect(h.node('messages').scrollTop).toBe(h.node('messages').scrollHeight - h.node('messages').clientHeight);
+  const requestId = h.requests[1]!.data.requestId;
+  h.requests[1]!.resolve({ requestId, status: 'queued' }); await submit;
+  expect(h.node('messages').querySelector('.queued')!.text).toContain('已排队');
+  expect(h.node('send').disabled).toBe(false); expect(h.node('send').textContent).toBe('发送');
+  const view = h.conversation(0);
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...view, turns: [...view.turns, {
+    id: 'job:server', input: '立即显示的消息', answer: '实时回答', requestIds: [requestId], status: 'running', origin: 'bridge', createdAtMs: Date.now(),
+  }] } });
+  expect(h.node('messages').querySelectorAll('.user').filter(e => e.text === '立即显示的消息')).toHaveLength(1);
+  expect(h.node('messages').text).toContain('实时回答'); expect(h.node('messages').querySelectorAll('.queued')).toHaveLength(0);
+});
+
+it('deduplicates by request identity for identical inputs and when a batch confirms multiple optimistic messages', async () => {
+  const h = harness(); await h.ready(); const history = h.conversation(0, '', 1); history.turns[0]!.input = 'same';
+  h.requests[0]!.resolve(history); await h.settle();
+  h.node('input').value = 'same'; const first = h.node('composer').onsubmit!({ preventDefault() {} });
+  expect(h.node('messages').querySelectorAll('.user').filter(e => e.text === 'same')).toHaveLength(2);
+  const firstId = h.requests[1]!.data.requestId; h.requests[1]!.resolve({ status: 'queued' }); await first;
+  h.node('input').value = 'same'; const second = h.node('composer').onsubmit!({ preventDefault() {} });
+  const secondId = h.requests[2]!.data.requestId;
+  expect(firstId).not.toBe(secondId); expect(h.node('messages').querySelectorAll('.user')).toHaveLength(3);
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...history, turns: [...history.turns, {
+    id: 'job:batch', input: 'same\n\nsame', answer: '', requestIds: [firstId, secondId], status: 'running', origin: 'bridge', createdAtMs: Date.now(),
+  }] } });
+  h.requests[2]!.resolve({ status: 'queued' }); await second;
+  expect(h.node('messages').querySelectorAll('.user').map(e => e.text)).toEqual(['same', 'same\n\nsame']);
+  expect(h.node('messages').querySelectorAll('.sending')).toHaveLength(0);
+  expect(h.node('messages').querySelectorAll('.queued')).toHaveLength(0);
+});
+
+it('keeps a failed send across reload and reuses its request ID and bubble on retry', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0, '', 0)); await h.settle();
+  h.node('input').value = '重试消息'; const submit = h.node('composer').onsubmit!({ preventDefault() {} });
+  const data = h.requests[1]!.data;
+  h.requests[1]!.reject(new Error('network unavailable')); await submit;
+  expect(h.node('messages').querySelector('.send_unknown')!.text).toContain('发送未确认');
+  expect(h.node('send').textContent).toBe('重试');
+  const restored = harness(undefined, 2, h.storage); await restored.ready();
+  restored.requests[0]!.resolve(restored.conversation(0, '', 0)); await restored.settle();
+  expect(restored.node('messages').text).toContain('重试消息');
+  const retry = restored.node('composer').onsubmit!({ preventDefault() {} });
+  expect(restored.requests[1]!.data).toEqual(data);
+  expect(restored.node('messages').querySelectorAll('.user')).toHaveLength(1);
+  restored.requests[1]!.resolve({ status: 'queued' }); await retry;
+  expect(restored.node('messages').querySelectorAll('.user')).toHaveLength(1);
+  expect(restored.storage.has('bridge-web-draft:' + restored.rows[0]!.id)).toBe(false);
+});
+
+it('accepts SSE confirmation before a lost HTTP acknowledgement without reverting a real turn to a failed bubble', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0, '', 0)); await h.settle();
+  h.node('input').value = '已确认消息'; const submit = h.node('composer').onsubmit!({ preventDefault() {} });
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { session: h.rows[0], turns: [{
+    id: 'receipt:known', input: '已确认消息', answer: '', requestIds: [h.requests[1]!.data.requestId], status: 'queued', origin: 'bridge', createdAtMs: Date.now(),
+  }] } });
+  h.requests[1]!.reject(new Error('lost acknowledgement')); await submit;
+  expect(h.node('messages').querySelectorAll('.user')).toHaveLength(1);
+  expect(h.node('messages').querySelectorAll('.send_unknown')).toHaveLength(0);
+  expect(h.node('message-error').textContent).toBe(''); expect(h.node('send').textContent).toBe('发送');
+});
+
+it('retains an optimistic message when the initial history arrives later', async () => {
+  const h = harness(); await h.ready();
+  h.node('input').value = '历史加载中的新消息'; const submit = h.node('composer').onsubmit!({ preventDefault() {} });
+  expect(h.node('messages').text).toContain('历史加载中的新消息');
+  h.requests[0]!.resolve(h.conversation(0, '原有历史', 1)); await h.settle();
+  expect(h.node('messages').text).toContain('原有历史');
+  expect(h.node('messages').text).toContain('历史加载中的新消息');
+  h.requests[1]!.resolve({ status: 'queued' }); await submit;
+});
+
+it('isolates late send results on session switches and clears optimistic content on binding revocation and auth changes', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0, '', 0)); await h.settle();
+  h.node('input').value = '第一会话的消息'; const submit = h.node('composer').onsubmit!({ preventDefault() {} });
+  h.choose(1); h.requests[2]!.resolve(h.conversation(1, '', 0)); await h.settle();
+  h.node('input').value = '第二会话的草稿'; h.requests[1]!.reject(new Error('late failure')); await submit;
+  expect(h.node('messages').text).not.toContain('第一会话的消息'); expect(h.node('input').value).toBe('第二会话的草稿');
+  expect(h.node('message-error').textContent).toBe('');
+  h.choose(0); expect(h.node('messages').text).toContain('第一会话的消息');
+  const retry = h.node('composer').onsubmit!({ preventDefault() {} });
+  h.streams.at(-1)!.emit('snapshot', { sessions: [h.rows[1]], conversation: h.conversation(0, '', 0) });
+  h.requests[3]!.resolve({ status: 'queued' }); await retry;
+  expect(h.node('messages').text).toBe(''); expect(h.node('composer').hidden).toBe(true);
+  h.streams.at(-1)!.emit('auth', {}); expect(h.node('messages').text).toBe('');
 });

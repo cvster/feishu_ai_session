@@ -151,7 +151,7 @@ it.each(['codex', 'zcode', 'kilo'] as const)('syncs Web/group/native messages th
   expect(h.stop).not.toHaveBeenCalled(); h.finish();
   await vi.waitFor(async () => expect((await h.client.list())[0]?.status).toBe('completed')); await h.replies.runNow();
   expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls)).toContain('after restart');
-  const read: any = await (await h.request('/api/sessions/' + id)).json(); expect(read.turns.find((t: any) => t.id.startsWith('job:'))).toMatchObject({ input: input.text, answer: 'before restart\nafter restart', status: 'completed' });
+  const read: any = await (await h.request('/api/sessions/' + id)).json(); expect(read.turns.find((t: any) => t.id.startsWith('job:'))).toMatchObject({ input: input.text, requestIds: [input.requestId], answer: 'before restart\nafter restart', status: 'completed' });
   const restarted = h.makeService(); await restarted.load(); await restarted.send(id, input.requestId, input.text); expect(h.create).toHaveBeenCalledOnce(); expect(h.calls).toHaveLength(1);
   expect((await h.request('/api/sessions/' + id + '/send', { ...input, text: 'changed' })).status).toBe(409);
   const groupMessage = { ...h.inbox.receipts('oc_group')[0]!.message, messageId: 'om_group', content: '群内输入' };
