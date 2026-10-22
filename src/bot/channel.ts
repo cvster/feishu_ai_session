@@ -93,6 +93,7 @@ import { configureGroupNotifications } from './group-notifications';
 import { CodexNameSync, SessionNameSync } from './thread-name';
 import { startAaSessionGroupSync } from './aa-session-groups';
 import { createGroupCleanup } from './group-cleanup';
+import { startSessionArchiveNotifications } from './session-archive-notifications';
 import { startCodexTurnSync } from './codex-turn-sync';
 import { startKiloTurnSync } from './kilo-turn-sync';
 import { startNativeTurnSync } from './native-turn-sync';
@@ -656,6 +657,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
   }) : undefined;
   await groupCleanup?.start();
+  const archiveNotifications = sessionCatalog ? startSessionArchiveNotifications({ channel, controls, catalog: sessionCatalog }) : undefined;
+  controls.sessionArchiveNotifications = archiveNotifications;
   await controls.auxiliary?.recover().catch(error => log.warn('auxiliary', 'recovery-failed', { error: String(error) }));
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
   const aaSessionGroupSync =
@@ -875,6 +878,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       await kiloTurnSync?.stop();
       await zcodeTurnSync?.stop();
       await workerNameSync?.stop();
+      await archiveNotifications?.stop();
+      controls.sessionArchiveNotifications = undefined;
       controls.nativeReplySync = undefined;
       controls.codexReplySync = undefined;
       controls.refreshMirroredRunCard = undefined;

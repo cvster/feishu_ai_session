@@ -19,6 +19,7 @@ import { createFakeAgent } from '../../helpers/fake-agent.js';
 import { createFakeChannel, type FakeChannel } from '../../helpers/fake-channel.js';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
 import { syncAaSessionGroupsOnce } from '../../../src/bot/aa-session-groups';
+import { startSessionArchiveNotifications } from '../../../src/bot/session-archive-notifications';
 
 interface RunOverrides {
   fromCardAction?: boolean;
@@ -559,6 +560,25 @@ describe('Bridge command contracts', () => {
       expect.objectContaining({ method: 'im.v1.chat.delete' }),
     );
     expect(lastMarkdown(h.channel)).toContain('群和会话历史已保留');
+  });
+
+  it.each([false, true])('sends one concise archive notification when finishing a bound personal group with a %s routed identity', async routed => {
+    const h = await createHarness(), bindings = await personalTools(h);
+    if (!routed) h.controls.toolRegistry = undefined;
+    const identity: SessionCatalogIdentity = { scopeId: 'oc_group', agentId: 'codex', cwdRealpath: h.tmp.workspace, policyFingerprint: 'finish' };
+    h.sessionCatalog.upsertActive({ ...identity, threadId: 'native-one', sourceId: 'home', botAppId: 'app-id' });
+    const notifications = startSessionArchiveNotifications({ channel: h.channel as unknown as CommandContext['channel'],
+      controls: h.controls, catalog: h.sessionCatalog, intervalMs: 60_000 });
+    h.controls.sessionArchiveNotifications = notifications;
+    try {
+      await h.run('/finish archive', { chatId: 'oc_group', chatMode: 'group', sessionCatalogIdentity: identity });
+      await notifications.flush(); await notifications.flush();
+      const messages = h.channel.rawClient.requests.filter(r => r.method === 'im.v1.message.create');
+      expect(messages).toHaveLength(1);
+      expect(messages[0]?.params).toMatchObject({ data: { receive_id: 'oc_group', content: JSON.stringify({ text: '会话已归档。' }) } });
+      expect(h.channel.sent.filter(m => JSON.stringify(m.content).includes('群和会话历史已保留'))).toEqual([]);
+      if (!routed) expect(h.agent.archivedThreads).toEqual(['native-one']);
+    } finally { await notifications.stop(); await bindings.flush(); }
   });
 
   it('persists group archival before the first session and cancels only that group queued input', async () => {

@@ -82,6 +82,21 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
     try {
       if (!await tool.agent.isAvailable()) continue;
       const rows = await tool.listSessions();
+      let archived = false;
+      for (const row of rows) if (row.archived === true) {
+        const linked = deps.sessionCatalog.entries().some(e => e.status === 'active' && e.agentId === tool.id &&
+          nativeSessionId(tool.id, e) === row.nativeId && (!e.sourceId || e.sourceId === tool.sourceId) &&
+          (!e.botAppId || e.botAppId === deps.controls.profileConfig.accounts.app.id));
+        if (!linked) continue;
+        deps.controls.toolBindings?.archive(tool.id, tool.sourceId, row.nativeId);
+        if (tool.id === 'codex') deps.sessionCatalog.archiveCodexThread(row.nativeId);
+        else deps.sessionCatalog.archiveNativeSession(tool.id, row.nativeId, tool.sourceId, true);
+        archived = true;
+      }
+      if (archived) {
+        await Promise.all([deps.sessionCatalog.flush(), deps.controls.toolBindings?.flush()]);
+        await deps.controls.sessionArchiveNotifications?.flush();
+      }
       await syncAaToolOnce({ ...deps, toolId: tool.id, sourceId: tool.sourceId,
         controls: controlsForTool(deps.controls, tool.id),
         historyProvider: async () => rows.filter(row => !row.archived).map(row => ({

@@ -330,6 +330,7 @@ async function reconcileArchives(deps: CodexTurnSyncDeps, reader: CodexTurnReade
     changed = true;
   }
   if (changed) await deps.sessionCatalog.flush();
+  await deps.controls.sessionArchiveNotifications?.flush();
   return archived;
 }
 

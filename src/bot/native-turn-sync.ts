@@ -138,7 +138,16 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
       if (stopped) break;
       try {
         const snapshot = await deps.reader.read(id);
-        if (snapshot.id !== id || snapshot.archived) continue;
+        if (snapshot.id !== id) continue;
+        if (snapshot.archived) {
+          if (!deps.catalog.entries().some(row => scopes.includes(row.scopeId) && active(row.scopeId, id) &&
+            row.agentId === toolId && (row.sessionId ?? row.threadId) === id && resolve(row.cwdRealpath) === resolve(snapshot.cwd))) continue;
+          deps.catalog.archiveNativeSession(toolId, id, deps.sourceId, true);
+          deps.controls.toolBindings?.archive(toolId, deps.sourceId, id);
+          await Promise.all([deps.catalog.flush(), deps.controls.toolBindings?.flush()]);
+          await deps.controls.sessionArchiveNotifications?.flush();
+          continue;
+        }
         // Only a unique personal group owns the native title. Shared FF
         // audiences and ambiguous legacy bindings must never fight over it.
         const nameEntries = deps.catalog.entries().filter(row => scopes.includes(row.scopeId) && active(row.scopeId, id) &&

@@ -51,6 +51,16 @@ export interface ArchiveSessionCatalogInput extends SessionCatalogIdentity {
   now?: number;
 }
 
+export interface SessionArchiveNotification {
+  id: string;
+  scopeId: string;
+  agentId: CatalogAgentId;
+  nativeId: string;
+  sourceId?: string;
+  botAppId?: string;
+  sendingAt?: number;
+}
+
 export interface SessionCatalogGcOptions {
   now?: number;
   maxArchivedAgeMs?: number;
@@ -80,6 +90,7 @@ export class SessionCatalog {
   private archivedScopes = new Map<string, string>();
   private dissolvedChats = new Set<string>();
   private suppressedAutoGroups = new Set<string>();
+  private archiveNotifications = new Map<string, SessionArchiveNotification>();
   private saving: Promise<void> = Promise.resolve();
   private persistenceError: unknown;
   private readonly path: string;
@@ -130,19 +141,37 @@ export class SessionCatalog {
       }
       this.dissolvedChats = new Set(state.dissolvedChats ?? []);
       this.suppressedAutoGroups = new Set(state.suppressedAutoGroups ?? []);
+      if (state.notifications !== undefined && (!Array.isArray(state.notifications) ||
+          !state.notifications.every((n: SessionArchiveNotification) => n && typeof n.id === 'string' &&
+            typeof n.scopeId === 'string' && isToolId(n.agentId) && typeof n.nativeId === 'string' &&
+            (n.sourceId === undefined || typeof n.sourceId === 'string') &&
+            (n.botAppId === undefined || typeof n.botAppId === 'string') &&
+            (n.sendingAt === undefined || Number.isFinite(n.sendingAt))))) throw new Error('Invalid archive notification state');
+      this.archiveNotifications = new Map((state.notifications ?? []).map((n: SessionArchiveNotification) => [n.id, n]));
     } catch (err) {
       // A damaged archive ledger must fail closed, not silently reopen groups.
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
   }
 
-  archiveScope(scopeId: string, nativeId: string): void {
+  archiveScope(scopeId: string, nativeId: string, notify = false): void {
+    if (notify && !this.isScopeArchived(scopeId)) {
+      const row = this.latestEntries().find(e => e.scopeId === scopeId && (e.threadId ?? e.sessionId) === nativeId);
+      if (row?.status === 'active') this.queueArchiveNotification(row);
+    }
     this.archivedScopes.set(scopeId, nativeId);
     for (const [key, row] of this.data) if (row.scopeId === scopeId) this.data.set(key, { ...row, status: 'archived', updatedAt: Date.now() });
     this.schedulePersist();
   }
 
-  archiveNativeSession(agentId: CatalogAgentId, nativeId: string, sourceId?: string): void {
+  archiveNativeSession(agentId: CatalogAgentId, nativeId: string, sourceId?: string, notify = false): void {
+    // Legacy callers also use this method to retire stale bindings. Only
+    // confirmed session archival closes routes and produces a notification.
+    if (notify) for (const row of this.latestEntries()) if (row.agentId === agentId && (row.threadId ?? row.sessionId) === nativeId &&
+      (!sourceId || !row.sourceId || row.sourceId === sourceId) && row.status === 'active') {
+      if (!this.isScopeArchived(row.scopeId)) this.queueArchiveNotification(row);
+      this.archivedScopes.set(row.scopeId, nativeId);
+    }
     for (const [key, row] of this.data) {
       if (row.agentId !== agentId || (sourceId && row.sourceId && row.sourceId !== sourceId)) continue;
       if ((row.threadId ?? row.sessionId) === nativeId) this.data.set(key, { ...row, status: 'archived', updatedAt: Date.now() });
@@ -180,7 +209,10 @@ export class SessionCatalog {
       }
     }
     for (const entry of latest.values()) {
-      if (entry.threadId === threadId) this.archivedScopes.set(entry.scopeId, threadId);
+      if (entry.threadId === threadId) {
+        if (entry.status === 'active' && !this.isScopeArchived(entry.scopeId)) this.queueArchiveNotification(entry);
+        this.archivedScopes.set(entry.scopeId, threadId);
+      }
     }
     this.archiveThread(threadId, now);
     // Retire obsolete active rows in a closed group too: reply/name/question
@@ -272,6 +304,42 @@ export class SessionCatalog {
 
   entries(): SessionCatalogEntry[] {
     return [...this.data.values()].map((entry) => ({ ...entry }));
+  }
+
+  pendingArchiveNotifications(): SessionArchiveNotification[] {
+    return [...this.archiveNotifications.values()].map(n => ({ ...n }));
+  }
+
+  startArchiveNotification(id: string, now = Date.now()): void {
+    const notice = this.archiveNotifications.get(id);
+    if (notice && notice.sendingAt === undefined) {
+      this.archiveNotifications.set(id, { ...notice, sendingAt: now });
+      this.schedulePersist();
+    }
+  }
+
+  completeArchiveNotification(id: string): void {
+    if (this.archiveNotifications.delete(id)) this.schedulePersist();
+  }
+
+  private latestEntries(): SessionCatalogEntry[] {
+    const latest = new Map<string, SessionCatalogEntry>();
+    for (const row of this.data.values()) {
+      const old = latest.get(row.scopeId);
+      if (!old || (row.status === 'active' && old.status !== 'active') ||
+          (row.status === old.status && (row.boundAt ?? row.updatedAt) >= (old.boundAt ?? old.updatedAt))) latest.set(row.scopeId, row);
+    }
+    return [...latest.values()];
+  }
+
+  private queueArchiveNotification(entry: SessionCatalogEntry): void {
+    const nativeId = entry.threadId ?? entry.sessionId;
+    if (!nativeId || !/^oc_[A-Za-z0-9]+$/.test(entry.scopeId) ||
+        [...this.archiveNotifications.values()].some(n => n.scopeId === entry.scopeId && n.agentId === entry.agentId &&
+          n.nativeId === nativeId && n.sourceId === entry.sourceId)) return;
+    const notice = { id: randomUUID(), scopeId: entry.scopeId, agentId: entry.agentId, nativeId,
+      sourceId: entry.sourceId, botAppId: entry.botAppId };
+    this.archiveNotifications.set(notice.id, notice);
   }
 
   gc(options: SessionCatalogGcOptions = {}): void {
@@ -400,6 +468,7 @@ export class SessionCatalog {
     await writeFileAtomic(`${this.path}.archives.json`, `${JSON.stringify({
       threads: [...this.archivedThreads], scopes: [...this.archivedScopes],
       dissolvedChats: [...this.dissolvedChats], suppressedAutoGroups: [...this.suppressedAutoGroups],
+      notifications: [...this.archiveNotifications.values()],
     })}\n`);
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}\n`;

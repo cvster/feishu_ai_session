@@ -124,12 +124,15 @@ it('re-establishes a history baseline when the group is explicitly rebound to th
   h.catalog.upsertActive({ ...entry, now: 3500 }); h.advance(4000); await sync.runNow(); expect(h.create).toHaveBeenCalledTimes(2);
   h.snapshots.ses_native!.turns.push(turn('after-rebind', 5000)); h.advance(6000); await sync.runNow(); expect(h.create).toHaveBeenCalledTimes(4);
 });
-it('never mirrors from an archived native session or a catalog pointing at another data source', async () => {
+it.each(['archive', 'source'] as const)('never mirrors when the native %s is incompatible with the binding', async kind => {
   const h = await fixture(), sync = await h.start(); h.advance(3000); h.snapshots.ses_native!.turns.push(turn());
-  h.snapshots.ses_native!.archived = true; await sync.runNow(); expect(h.create).not.toHaveBeenCalled();
-  h.snapshots.ses_native!.archived = false;
-  const entry = h.catalog.entries().find(row => row.scopeId === 'oc_group')!;
-  h.catalog.upsertActive({ ...entry, sourceId: 'different-source' }); await sync.runNow(); expect(h.create).not.toHaveBeenCalled();
+  if (kind === 'archive') h.snapshots.ses_native!.archived = true;
+  else {
+    const entry = h.catalog.entries().find(row => row.scopeId === 'oc_group')!;
+    h.catalog.upsertActive({ ...entry, sourceId: 'different-source' });
+  }
+  await sync.runNow(); expect(h.create).not.toHaveBeenCalled();
+  if (kind === 'archive') expect(h.catalog.isScopeArchived('oc_group')).toBe(true);
 });
 
 it('synchronizes personal group names in both directions, including the pre-install rename, without starting a model turn', async () => {
