@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { loadWebConfig, webSecretHash, type WebConfig } from './config';
+import { loadWebConfig, trustedWebPeer, webListenHosts, webSecretHash, type WebConfig } from './config';
 import { PersonalSessionService, WebError } from './service';
 import { bridgeWebPage } from '../../apps/bridge-web/page';
 
@@ -13,7 +13,7 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
 }
 const respond = (res: ServerResponse, status: number, value: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); };
 
-/** Loopback access or cookie auth, same-origin HTTP writes and shared snapshots over SSE. */
+/** Direct trusted peers or cookie auth, same-origin writes and shared snapshots across listeners. */
 export async function startBridgeWeb(options: { configPath: string; service: PersonalSessionService; config?: WebConfig; pollMs?: number }) {
   const initial = options.config ?? await loadWebConfig(options.configPath);
   if (!initial?.enabled) return;
@@ -24,19 +24,22 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
   const streams = new Map<ServerResponse, { token?: string; local: boolean; id?: string; previous?: string }>();
   const cookie = (req: IncomingMessage) => /(?:^|;\s*)bridge_web=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
   const config = () => options.config ? Promise.resolve(options.config) : loadWebConfig(options.configPath);
-  const localRequest = (req: IncomingMessage) => initial.host === '127.0.0.1' && ['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '');
+  const hosts = webListenHosts(initial);
+  const accessSignature = (c: WebConfig) => JSON.stringify([webListenHosts(c), c.port, c.trustedNetworks ?? []]);
+  const initialAccess = accessSignature(initial);
+  const sameAccess = (c: WebConfig | undefined): c is WebConfig => !!c?.enabled && accessSignature(c) === initialAccess;
+  const localRequest = (req: IncomingMessage) => trustedWebPeer(initial, req.socket.remoteAddress);
   const authenticate = async (token?: string, local = false) => {
     const c = await config(), session = token ? sessions.get(token) : undefined;
-    if (!c?.enabled || c.host !== initial.host || c.port !== initial.port) throw new WebError(401, '网页入口已禁用或配置已变化');
+    if (!sameAccess(c)) throw new WebError(401, '网页入口已禁用或配置已变化');
     if (local) { options.service.ownerIdentity(); return; }
     if (!session || session.expires <= Date.now() || session.hash !== c.secretHash) throw new WebError(401, '请重新登录');
     if (session.owner !== options.service.ownerIdentity()) throw new WebError(401, '所有者已变化，请重新登录');
   };
-  const server = createServer((req, res) => { void (async () => {
+  const handler = (req: IncomingMessage, res: ServerResponse) => { void (async () => {
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
-    const expected = initial.host + ':' + initial.port;
-    const allowedHost = req.headers.host === expected || initial.host === '127.0.0.1' && req.headers.host === 'localhost:' + initial.port;
+    const allowedHost = hosts.some(ip => req.headers.host === ip + ':' + initial.port) || hosts.includes('127.0.0.1') && req.headers.host === 'localhost:' + initial.port;
     if (!allowedHost) throw new WebError(403, '访问地址不匹配');
     const origin = 'http://' + req.headers.host;
     if (req.headers.origin && req.headers.origin !== origin || req.headers['sec-fetch-site'] === 'cross-site') throw new WebError(403, '禁止跨站访问');
@@ -51,7 +54,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       if (failure && failure.until > Date.now() && failure.count >= 8) throw new WebError(429, '登录尝试过多，请稍后重试');
       const input = await body(req), c = await config();
       const value = typeof input.secret === 'string' && input.secret.length <= 200 ? webSecretHash(input.secret) : '';
-      if (!c?.enabled || c.host !== initial.host || c.port !== initial.port || !value || !timingSafeEqual(Buffer.from(value), Buffer.from(c.secretHash))) {
+      if (!sameAccess(c) || !value || !timingSafeEqual(Buffer.from(value), Buffer.from(c.secretHash))) {
         if (failures.size > 1000) failures.clear();
         failures.set(ip, { count: failure && failure.until > Date.now() ? failure.count + 1 : 1, until: Date.now() + 60_000 });
         throw new WebError(401, '登录码无效');
@@ -91,7 +94,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
   })().catch(e => {
     if (res.headersSent) { res.end(); return; }
     respond(res, e instanceof WebError ? e.status : 503, { error: e instanceof WebError ? e.message : '桥接服务暂时不可用，请稍后重试' });
-  }); });
+  }); };
   let running: Promise<void> | undefined;
   function poll(): Promise<void> {
     if (running) return running;
@@ -117,12 +120,17 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     })().catch(() => { for (const res of streams.keys()) res.write('event: unavailable\ndata: {}\n\n'); }).finally(() => { running = undefined; });
     return running;
   }
-  await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(initial.port, initial.host, () => { server.off('error', reject); accept(); }); });
+  const servers = hosts.map(() => createServer(handler));
+  const closeListeners = async () => { await Promise.all(servers.map(server => new Promise<void>(accept => { server.close(() => accept()); server.closeIdleConnections(); }))); };
+  try {
+    for (const [index, server] of servers.entries()) await new Promise<void>((accept, reject) => {
+      server.once('error', reject); server.listen(initial.port, hosts[index], () => { server.off('error', reject); accept(); });
+    });
+  } catch (error) { await closeListeners(); throw error; }
   const timer = setInterval(() => void poll(), options.pollMs ?? 1000); timer.unref();
-  return { url: `http://${initial.host}:${initial.port}`, async close() {
+  return { url: `http://${initial.host}:${initial.port}`, urls: hosts.map(ip => `http://${ip}:${initial.port}`), async close() {
     closed = true; clearInterval(timer);
     for (const res of streams.keys()) res.end(); streams.clear();
-    const closing = new Promise<void>(accept => server.close(() => accept()));
-    server.closeIdleConnections(); await closing; await running;
+    await closeListeners(); await running;
   } };
 }

@@ -16,6 +16,14 @@ lark-channel-bridge web status --profile <profile>
 
 可用 `--host <本机IPv4> --port <端口>` 指定监听地址，禁止 `0.0.0.0`。局域网 HTTP 适用于可信私网；默认使用本机回环。跨网络访问建议用 SSH 转发回环端口，例如 `ssh -L 3345:127.0.0.1:3345 <host>`。当前入口按配置 IP/localhost 校验 Host，不支持直接套用任意域名反向代理。
 
+支持通过 `--also-host <本机IPv4...>` 同时监听多个网卡，通过 `--trusted-network <IPv4 CIDR...>` 配置免登录来源。例如本机与 `192.168.188.0/24` 网段免登录：
+
+```bash
+lark-channel-bridge web configure --profile <profile> --host 127.0.0.1 --also-host 192.168.188.1 --trusted-network 192.168.188.0/24
+```
+
+免登录判断使用 TCP 连接的真实来源地址，不信任 `X-Forwarded-For` 等代理头。其他来源继续使用登录码；免登录请求同样接受 Host、同源和所有者校验。配置中的 `additionalHosts` 和 `trustedNetworks` 可选，旧配置保持原有行为；变更监听地址或免登录网段立即撤销现有访问，重启桥接后生效。
+
 非回环入口的登录 cookie 为 HttpOnly、SameSite=Strict，12 小时过期。登录会话绑定 profile、配置摘要及当前机器人所有者；更换登录码、禁用入口或所有者变化会撤销旧登录。配置文件在 `profiles/<profile>/web.json`，权限 600。
 
 ```bash

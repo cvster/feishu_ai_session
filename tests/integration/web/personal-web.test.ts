@@ -28,8 +28,9 @@ import { startWorkerNameSync } from '../../../src/bot/tool-name-sync';
 import { recordRunSessionEvent } from '../../../src/bot/run-flow';
 import { capabilityForTool } from '../../../src/agent/capability';
 import type { RunPolicyAllow } from '../../../src/policy/run-policy';
+import type { WebConfig } from '../../../src/web/config';
 
-async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'kilo', host = '127.0.0.1') {
+async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}) {
   const native = { nativeId: 'native', name: 'AA-web', cwd: '/project', createdAtMs: 1, updatedAtMs: 2, archived: false };
   const conversation = { id: 'native', name: native.name, cwd: native.cwd, archived: false, turns: [{ id: 'desktop-1', input: '来自桌面', bridge: false,
     createdAtMs: 10, state: reduce(reduce(initialState, { type: 'text', delta: '原生回答' }), { type: 'done', terminationReason: 'normal' }) }] };
@@ -86,7 +87,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   const service = makeService(); await service.load();
   const socket = createServer(); await new Promise<void>(r => socket.listen(0, '127.0.0.1', r)); const port = (socket.address() as { port: number }).port; await new Promise<void>(r => socket.close(() => r()));
   const configPath = join(h.dir, 'web.json'), { secret } = await configureWeb(configPath, '127.0.0.1', port);
-  if (host !== '127.0.0.1') await writeFile(configPath, JSON.stringify({ ...JSON.parse(await readFile(configPath, 'utf8')), host }));
+  if (host !== '127.0.0.1' || Object.keys(access).length) await writeFile(configPath, JSON.stringify({ ...JSON.parse(await readFile(configPath, 'utf8')), host, ...access }));
   const web = (await startBridgeWeb({ configPath, service, pollMs: 30 }))!; cleanups.push(() => web.close());
   let cookie = '';
   const request = (path: string, value?: unknown, headers = {}) => fetch(web.url + path, { method: value === undefined ? 'GET' : 'POST', headers: {
@@ -269,6 +270,42 @@ it('opens loopback without login, retains same-origin/Host checks and disables H
     expect((await h.request('/api/sessions')).status).toBe(401);
     await vi.waitFor(async () => { text += new TextDecoder().decode((await reader.read()).value); expect(text).toContain('event: auth'); });
   } finally { abort.abort(); await reader.cancel().catch(() => {}); }
+});
+
+it('shares multiple listeners, trusts real source addresses rather than forwarding headers, and revokes HTTP/SSE on trust changes', async () => {
+  const h = await harness('kilo', '127.0.0.2', { additionalHosts: ['127.0.0.3'], trustedNetworks: ['127.0.0.3/32'] });
+  const other = h.web.urls[1]!;
+  const direct = (url: string, source: string, headers: Record<string, string> = {}) => new Promise<{ status: number; json: any }>((resolve, reject) => {
+    httpRequest(url, { localAddress: source, headers }, res => {
+      let text = ''; res.on('data', chunk => { text += chunk; }); res.on('end', () => resolve({ status: res.statusCode!, json: JSON.parse(text) }));
+    }).on('error', reject).end();
+  });
+  for (const url of [h.web.url, other]) {
+    expect(await direct(url + '/api/access', '127.0.0.3')).toEqual({ status: 200, json: { loginRequired: false } });
+    expect((await direct(url + '/api/sessions', '127.0.0.3')).status).toBe(200);
+    expect((await direct(url + '/api/sessions', '127.0.0.1', { 'X-Forwarded-For': '127.0.0.3', 'X-Real-IP': '127.0.0.3' })).status).toBe(401);
+    expect((await direct(url + '/api/sessions', '127.0.0.3', { Host: 'evil.test' })).status).toBe(403);
+    expect((await direct(url + '/api/sessions', '127.0.0.3', { Origin: 'http://evil.test' })).status).toBe(403);
+  }
+  await h.login(); expect((await h.request('/api/sessions')).status).toBe(200);
+  const events: string[] = [];
+  const stream = httpRequest(other + '/api/events', { localAddress: '127.0.0.3' }, res => res.on('data', chunk => events.push(String(chunk))));
+  stream.end();
+  try {
+    await vi.waitFor(() => expect(events.join('')).toContain('event: snapshot'));
+    const cfg = JSON.parse(await readFile(h.configPath, 'utf8')); await writeFile(h.configPath, JSON.stringify({ ...cfg, trustedNetworks: [] }));
+    expect((await direct(other + '/api/sessions', '127.0.0.3')).status).toBe(401);
+    await vi.waitFor(() => expect(events.join('')).toContain('event: auth'));
+  } finally { stream.destroy(); }
+});
+
+it('closes previously opened listeners when a later listener cannot bind', async () => {
+  const h = await harness('kilo', '127.0.0.2');
+  const cfg: WebConfig = { ...JSON.parse(await readFile(h.configPath, 'utf8')), host: '127.0.0.3', additionalHosts: ['127.0.0.2'] };
+  await expect(startBridgeWeb({ configPath: h.configPath, service: h.service, config: cfg })).rejects.toMatchObject({ code: 'EADDRINUSE' });
+  const socket = createServer();
+  try { await new Promise<void>((resolve, reject) => { socket.once('error', reject); socket.listen(cfg.port, cfg.host, resolve); }); }
+  finally { await new Promise<void>(resolve => socket.close(() => resolve())); }
 });
 
 function flatten(elements: WebControlElement[]): WebControlElement[] { return elements.flatMap(e => e.kind === 'section' ? flatten(e.elements) : [e]); }
