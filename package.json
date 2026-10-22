@@ -55,7 +55,9 @@
     "@larksuiteoapi/node-sdk": "1.67.0",
     "commander": "^12.1.0",
     "cross-spawn": "^7.0.6",
+    "entities": "^7.0.1",
     "graceful-fs": "^4.2.11",
+    "marked": "^17.0.6",
     "proper-lockfile": "^4.1.2",
     "qrcode-terminal": "^0.12.0",
     "ws": "8.20.0"

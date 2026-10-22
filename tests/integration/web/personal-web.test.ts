@@ -11,7 +11,7 @@ import { SessionCatalog } from '../../../src/session/catalog';
 import { SessionStore } from '../../../src/session/store';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import type { Controls } from '../../../src/commands';
-import { PersonalSessionService } from '../../../src/web/service';
+import { PersonalSessionService, type WebConversation } from '../../../src/web/service';
 import { startBridgeWeb } from '../../../src/web/server';
 import { configureWeb } from '../../../src/web/config';
 import { WebSessionControls, type WebControlElement } from '../../../src/web/controls';
@@ -221,10 +221,13 @@ it('returns phase/count summaries for native and bridge turns without private de
   const h = await harness();
   const id = (await h.service.list())[0]!.id;
   let state = reduce(initialState, { type: 'thinking', delta: 'private-thought' });
+  state = reduce(state, { type: 'text', delta: 'public progress' });
   state = reduce(state, { type: 'tool_use', id: 'private-tool-id', name: 'PrivateTool', input: { command: 'private-command' } });
+  state = reduce(state, { type: 'text', delta: '**public answer**' });
   h.conversation.turns[0]!.state = state;
   const native = await h.service.read(id);
   expect(native.turns[0]?.progress).toEqual(['🧠 思考完成', '🧰 1 个工具调用（进行中）']);
+  expect(native.turns[0]?.answerSections).toHaveLength(2);
   for (const detail of ['private-thought', 'PrivateTool', 'private-command', 'private-tool-id']) expect(JSON.stringify(native)).not.toContain(detail);
   await h.service.send(id, 'progress-summary-web-01', 'public input');
   await vi.waitFor(() => expect(h.calls).toHaveLength(1));
@@ -235,6 +238,7 @@ it('returns phase/count summaries for native and bridge turns without private de
   h.finish(); await vi.waitFor(async () => expect((await h.client.list())[0]?.status).toBe('completed'));
   const finished = await h.service.read(id);
   expect(finished.turns.find(t => t.id === 'job:' + job.id)?.progress).toEqual(['🧠 思考完成', '🧰 1 个工具调用（已完成）']);
+  expect(finished.turns.find(t => t.id === 'job:' + job.id)?.answerSections).toEqual(native.turns[0]?.answerSections);
   for (const detail of ['private-thought', 'PrivateTool', 'private-command', 'private-tool-id']) expect(JSON.stringify(finished)).not.toContain(detail);
 });
 
@@ -483,4 +487,21 @@ it('publishes favorite changes to other Web clients via SSE without submitting a
     while (!text.includes('"favorite":true')) text += new TextDecoder().decode((await reader.read()).value);
     expect(text).toContain('"favorite":true'); expect(h.enqueue).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
   } finally { await reader.cancel(); }
+});
+
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('preserves visible %s answer boundaries and Markdown without exposing tool details', async tool => {
+  const h = await harness(tool), id = (await h.service.list())[0]!.id;
+  const state = { ...initialState, terminal: 'done' as const, footer: null, blocks: [
+    { kind: 'text' as const, content: '先检查配置。', streaming: false },
+    { kind: 'tool' as const, tool: { id: 'private-id', name: 'private-tool', input: 'private-command', output: 'private-output', status: 'done' as const } },
+    { kind: 'text' as const, content: '## 完成\n\n| 项目 | 状态 |\n| -- | -- |\n| 渲染 | **正常** |\n\nhttps://example.com', streaming: false },
+  ] };
+  h.conversation.turns[0]!.state = state;
+  const result = await (await h.request('/api/sessions/' + id)).json() as WebConversation;
+  expect(result.turns[0]!.answer).toBe(state.blocks.filter(b => b.kind === 'text').map(b => b.content).join('\n\n'));
+  expect(result.turns[0]!.answerSections!).toHaveLength(2);
+  expect(result.turns[0]!.answerSections![0]!.nodes[0]!.tag).toBe('p');
+  expect(result.turns[0]!.answerSections![1]!.nodes.map(n => n.tag)).toEqual(['h2', 'table', 'p']);
+  for (const detail of ['private-id', 'private-tool', 'private-command', 'private-output']) expect(JSON.stringify(result)).not.toContain(detail);
 });

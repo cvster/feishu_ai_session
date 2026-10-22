@@ -11,13 +11,14 @@ import { initialState, reduce, type RunState } from '../card/run-state';
 import { writeFileAtomic } from '../platform/atomic-write';
 import type { WebControlResult } from './controls';
 import { runProgress } from '../card/run-progress';
+import { WebMarkdown, type WebAnswerSection } from './markdown';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
   id: string; scope: string; toolId: string; tool: string; project: string; cwd: string; name: string;
   updatedAtMs: number; favorite: boolean; online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
 }
-export interface WebTurn { id: string; input: string; answer: string; requestIds?: string[]; progress?: string[]; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
+export interface WebTurn { id: string; input: string; answer: string; answerSections?: WebAnswerSection[]; requestIds?: string[]; progress?: string[]; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
 export interface WebConversation { session: WebSession; turns: WebTurn[]; notice?: string }
 interface Receipt { fingerprint: string; sessionId: string; owner: string; createdAt: number; messageId?: string; enqueued?: boolean }
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
@@ -25,6 +26,7 @@ const answer = (s: RunState) => s.blocks.flatMap(b => b.kind === 'text' ? [b.con
 
 /** Personal bindings, queue and native worker snapshots are the only sources of truth. */
 export class PersonalSessionService {
+  private markdown = new WebMarkdown();
   private receipts: Record<string, Receipt> = {};
   private favorites: Record<string, string> = {};
   private operations = new Map<string, Promise<unknown>>();
@@ -249,6 +251,7 @@ export class PersonalSessionService {
         const nativeTurn = native?.turns.find(t => t.bridgeJobId === job.id || t.id === view!.turnId);
         if (nativeTurn) linkedTurns.add(nativeTurn.id);
         turns.push({ id: 'job:' + job.id, input: inputs.map(r => r.message.content).join('\n\n'), answer: answer(nativeTurn?.state ?? view.state), status,
+          answerSections: this.markdown.sections(nativeTurn?.state ?? view.state),
           requestIds: inputs.flatMap(r => requests.get(r.message.messageId) ?? []),
           progress: runProgress({ ...(nativeTurn?.state ?? view.state), terminal: ['running', 'accepted'].includes(job.status) ? 'running' : 'done' }),
           createdAtMs: job.createdAt, origin: 'bridge' });
@@ -256,6 +259,7 @@ export class PersonalSessionService {
       const historyBoundary = Math.min(...matchedJobTimes);
       for (const turn of native?.turns ?? []) if (!linkedTurns.has(turn.id) && (!turn.bridge || turn.createdAtMs < historyBoundary)) turns.push({
         id: 'native:' + turn.id, input: turn.bridge ? '' : turn.input, answer: answer(turn.state), status: turn.state.footer === 'waiting_input' ? 'waiting_input' : turn.state.terminal,
+        answerSections: this.markdown.sections(turn.state),
         progress: runProgress(turn.state),
         createdAtMs: turn.createdAtMs, origin: turn.bridge ? 'bridge' : 'native',
       });

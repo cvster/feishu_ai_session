@@ -1,6 +1,7 @@
 import { runInNewContext } from 'node:vm';
 import { webcrypto } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
+import { WebMarkdown } from '../../../src/web/markdown';
 import { bridgeWebPage } from '../../../apps/bridge-web/page';
 
 // Exercise the shipped browser script with controlled HTTP/SSE arrival order.
@@ -359,4 +360,29 @@ it('isolates late send results on session switches and clears optimistic content
   h.requests[3]!.resolve({ status: 'queued' }); await retry;
   expect(h.node('messages').text).toBe(''); expect(h.node('composer').hidden).toBe(true);
   h.streams.at(-1)!.emit('auth', {}); expect(h.node('messages').text).toBe('');
+});
+
+
+it('renders rich Markdown and separates answer messages without losing streaming or cache updates', async () => {
+  const h = harness(); await h.ready();
+  const md = new WebMarkdown(), c = h.conversation(0, '', 1);
+  const sections = (final: string) => [{ nodes: md.parse('正在检查。') }, { nodes: md.parse(final) }];
+  const final = '## 结果\n\n| 工具 | 状态 |\n| -- | -- |\n| **Worker** | `正常` |\n\n[文档](https://example.com)\n\n3. 已修复\n4. 已验证\n\n<script>alert(1)</script>';
+  Object.assign(c.turns[0]!, { answer: '正在检查。\n\n' + final, answerSections: sections('**进行中') });
+  h.requests[0]!.resolve(c); await h.settle();
+  expect(h.node('messages').querySelectorAll('.answer-section')).toHaveLength(2);
+  Object.assign(c.turns[0]!, { answerSections: sections(final) });
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: c });
+  const box = h.node('messages'), content = box.children[0];
+  expect(box.querySelectorAll('h2').map(n => n.text)).toEqual(['结果']);
+  expect(box.querySelectorAll('td').map(n => n.text)).toEqual(['Worker', '正常']);
+  expect(box.querySelector('.table-scroll')?.getAttribute('tabindex')).toBe('0');
+  expect(box.querySelector('ol')?.getAttribute('start')).toBe('3');
+  const link = box.querySelector('a')!;
+  expect(link.getAttribute('href')).toBe('https://example.com');
+  expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+  expect(box.querySelectorAll('script')).toHaveLength(0); expect(box.text).toContain('<script>alert(1)</script>');
+  expect(box.querySelectorAll('.answer-section').map(n => n.text.startsWith('正在检查。'))).toEqual([true, false]);
+  h.choose(1); h.requests[1]!.resolve(h.conversation(1)); await h.settle(); h.choose(0);
+  expect(box.children[0]).toBe(content); expect(h.requests).toHaveLength(2);
 });
