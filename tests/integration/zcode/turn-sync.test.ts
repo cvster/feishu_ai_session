@@ -65,6 +65,31 @@ it('does not repeat worker-origin or unknown-origin inputs/answers even with ide
   h.snapshot.messages.push(...bridged, ...unknown); await sync.runNow(); expect(h.create).not.toHaveBeenCalled();
   h.snapshot.messages.push(...messages('native', 2500, 'desktop', true)); await sync.runNow(); expect(h.create).toHaveBeenCalledTimes(2);
 });
+it('splits long native output and mentions only the owner once after completion across restart and refresh', async () => {
+  const h = await fixture(); h.controls.botOwnerId = 'ou_owner';
+  const first = await h.start(); h.advance(3000);
+  h.snapshot.messages.push(...messages('long-native', 2000));
+  const full = '中文😀完整回复\n'.repeat(5000);
+  h.snapshot.messages.at(-1).parts[0].text = full;
+  await first.runNow();
+  const creates = h.create.mock.calls.length;
+  expect(creates).toBeGreaterThan(3);
+  expect(h.create.mock.calls.some(([request]) => request.data.content.includes('"tag":"at"'))).toBe(false);
+  await first.stop();
+  h.snapshot.messages.at(-1).info.finish = 'stop';
+  const second = await h.start(); await second.runNow();
+  const notifications = () => h.create.mock.calls.filter(([request]) => request.data.content.includes('"tag":"at"'));
+  expect(notifications()).toHaveLength(1);
+  expect(JSON.parse(notifications()[0]![0].data.content).zh_cn.content[0][0]).toEqual({ tag: 'at', user_id: 'ou_owner' });
+  const lastCardId = h.create.mock.calls.at(-2)![0].data.content;
+  expect(lastCardId).toContain('card_id');
+  const messageId = `om_${creates}`;
+  expect(second.ownsMessage('oc_personal', messageId)).toBe(true);
+  expect(await second.refreshMessage('oc_personal', messageId)).toBe(true);
+  expect(notifications()).toHaveLength(1);
+  const cards = vi.mocked(h.channel.updateCardById).mock.calls.map(call => call[1]);
+  expect(cards.every(card => Buffer.byteLength(JSON.stringify({ data: JSON.stringify(card) })) <= 26_000)).toBe(true);
+});
 it('ignores worker polling clocks, keeps running heartbeats, and updates only changed content or status after restart', async () => {
   const h = await fixture();
   let clock = 1000;

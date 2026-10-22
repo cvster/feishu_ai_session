@@ -217,7 +217,7 @@ function stateFrom(events: AgentEvent[]): RunState {
 }
 
 function expectCard(state: RunState) {
-  return expect(normalizeCard(renderCard(state)));
+  return expect(normalizeCard(renderCard(state, { showDetails: true })));
 }
 
 interface CardElement {

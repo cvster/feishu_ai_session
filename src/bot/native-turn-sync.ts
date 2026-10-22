@@ -10,9 +10,13 @@ import { renderText } from '../card/text-renderer';
 import { getMessageReplyMode, getShowToolCalls } from '../config/schema';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { log } from '../core/logger';
+import { publishCards, type CardPart } from '../card/multipart';
+import { notifyCompletion, type CompletionDelivery } from './completion-notification';
 import type { SessionNameSync } from './thread-name';
 
-interface Delivery {
+interface Delivery extends CompletionDelivery {
+  parts?: CardPart[];
+  completionEligible?: boolean;
   createdAtMs: number;
   skipped?: boolean;
   legacyBridge?: boolean;
@@ -22,6 +26,7 @@ interface Delivery {
   cardId?: string;
   messageId?: string;
   sendingAt?: number;
+  sendingSince?: number;
   sequence: number;
   hash?: string;
   pushedAt?: number;
@@ -103,6 +108,13 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
     const { runtime: _observedRuntime, ...content } = view;
     const hash = digest(JSON.stringify(content));
     const first = !delivery.hash;
+    // Existing completed ledgers/replayed history must not produce a burst of
+    // mentions when a render preference or bridge version changes.
+    delivery.completionEligible ??= !delivery.replay && (first || view.terminal === 'running');
+    const completion = () => notifyCompletion({ channel: deps.channel, target: { chatId: scope },
+      ownerId: deps.controls.botOwnerId, key: `${toolId}-native:${deps.sourceId}:${scope}:${id}:${turn.id}`,
+      delivery, save, active: () => active(scope, id) && !stopped, now: now() });
+    if (view.terminal !== 'running' && delivery.completionSendingSince !== undefined) await completion();
     if (!force && delivery.hash === hash && (view.terminal !== 'running' || now() - (delivery.pushedAt ?? 0) < 15_000)) return false;
     if (delivery.hash !== hash) delivery.lastActivityAt = now();
     view = { ...view, runtime: { startedAtMs: turn.createdAtMs, lastActivityAtMs: delivery.lastActivityAt ?? turn.createdAtMs,
@@ -110,17 +122,12 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
     const mode = getMessageReplyMode(deps.controls.cfg);
     if (mode === 'text' && view.terminal === 'running') return false;
     if (mode === 'card' || delivery.cardId) {
-      const card = renderCard(view, { ...deps.controls.runControlIcons, supportsFork: true, nativeMirror: true, showStopButton: !!deps.reader.stopTurn });
+      const card = renderCard(view, { ...deps.controls.runControlIcons, supportsFork: true, nativeMirror: true, showStopButton: !!deps.reader.stopTurn, showDetails: getShowToolCalls(deps.controls.cfg) });
       (card as { config: { streaming_mode: boolean } }).config.streaming_mode = false;
-      if (!delivery.cardId) { delivery.cardId = (await deps.channel.createCard(card)).cardId; await save(); }
-      if (!active(scope, id) || stopped) return false;
-      if (!delivery.messageId) {
-        delivery.messageId = await send(scope, id, turn, delivery, false, 'interactive', JSON.stringify({ type: 'card', data: { card_id: delivery.cardId } }));
-        await save();
-      }
-      delivery.sequence++; await save();
-      if (!active(scope, id) || stopped) return false;
-      await deps.channel.updateCardById(delivery.cardId!, card, delivery.sequence);
+      delivery.sendingSince ??= delivery.sendingAt; // Preserve the legacy ambiguous-send window.
+      await publishCards({ channel: deps.channel, target: { chatId: scope }, card, delivery,
+        key: `${toolId}-native:${deps.sourceId}:${scope}:${id}:${turn.id}:answer`, save,
+        active: () => active(scope, id) && !stopped, now: now(), force });
     } else {
       const content = JSON.stringify({ zh_cn: { title: '', content: [[{ tag: 'md', text: renderText(view) || '正在执行…' }]] } });
       if (!delivery.messageId) delivery.messageId = await send(scope, id, turn, delivery, false, 'post', content);
@@ -129,6 +136,7 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
         if (result.code) throw new Error(`${displayName} 同步消息更新失败`);
       }
     }
+    if (view.terminal !== 'running' && delivery.completionEligible) await completion();
     delivery.hash = hash; delivery.pushedAt = now(); await save();
     if (first || view.terminal !== 'running') log.info(phase, 'native-turn-mirrored', {
       scope, sessionId: id, turnId: turn.id, messageId: delivery.messageId, terminal: view.terminal,
@@ -184,7 +192,7 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
               // running turns: never expose work that predates the binding.
               await save();
             }
-            if (refresh && (refresh.scope !== scope || delivery.messageId !== refresh.messageId)) continue;
+            if (refresh && (refresh.scope !== scope || delivery.messageId !== refresh.messageId && !delivery.parts?.some(part => part.messageId === refresh.messageId))) continue;
             if (await publish(scope, id, turn, delivery, !!refresh)) refreshed ||= !!refresh;
           }
           const old = Object.entries(binding.turns).sort((a, b) => a[1].createdAtMs - b[1].createdAtMs);
@@ -217,7 +225,7 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
     },
     ownsMessage(scope: string, messageId: string): boolean {
       return Object.entries(state.bindings).some(([key, binding]) => JSON.parse(key)[0] === scope &&
-        Object.values(binding.turns).some(delivery => delivery.messageId === messageId));
+        Object.values(binding.turns).some(delivery => delivery.messageId === messageId || delivery.parts?.some(part => part.messageId === messageId)));
     },
     async stopScope(scope: string, messageId?: string): Promise<boolean> {
       while (running) await running;
@@ -226,7 +234,7 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
       const snapshot = await deps.reader.read(id), turn = snapshot.turns.at(-1);
       if (!turn || turn.bridge || !active(scope, id) || snapshot.archived || turn.state.terminal !== 'running') return false;
       const delivery = state.bindings[keyFor(scope, deps.sourceId, id)]?.turns[turn.id];
-      if (!delivery || delivery.skipped || !delivery.messageId || (messageId && delivery.messageId !== messageId)) return false;
+      if (!delivery || delivery.skipped || !delivery.messageId || (messageId && delivery.messageId !== messageId && !delivery.parts?.some(part => part.messageId === messageId))) return false;
       const stoppedTurn = await deps.reader.stopTurn(id, turn.id); await runNow(); return stoppedTurn;
     },
     async stop() { if (stopped) return; stopped = true; clearInterval(timer); await running; await save(); await deps.reader.close(); },

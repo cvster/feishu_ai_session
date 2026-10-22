@@ -18,6 +18,8 @@ interface TextGroup {
 type Group = ToolGroup | TextGroup;
 
 export interface RunCardRenderOptions extends RunControlIcons {
+  /** Opt in to reasoning and tool details; ordinary cards show only text. */
+  showDetails?: boolean;
   signCallback?: (action: string) => string;
   /** External Codex turns have no bridge-owned RunHandle to interrupt. */
   showStopButton?: boolean;
@@ -26,6 +28,7 @@ export interface RunCardRenderOptions extends RunControlIcons {
 }
 
 export function renderCard(state: RunState, options: RunCardRenderOptions = {}): object {
+  if (!options.showDetails) state = { ...state, reasoning: { content: '', active: false }, blocks: state.blocks.filter(block => block.kind !== 'tool') };
   const elements: object[] = options.auxiliary ? auxiliaryContent(state) : [];
 
   if (!options.auxiliary && state.reasoning.content) {

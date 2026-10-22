@@ -11,11 +11,14 @@ import { renderCard, type RunCardRenderOptions } from '../card/run-renderer';
 import { renderText } from '../card/text-renderer';
 import { getMessageReplyMode, getShowToolCalls } from '../config/schema';
 import { log } from '../core/logger';
+import { publishCards, type CardPart } from '../card/multipart';
+import { notifyCompletion, type CompletionDelivery } from '../bot/completion-notification';
 import { DurableAgentAdapter } from './adapter';
 import { isJobActive, type WorkerJob } from './protocol';
 import { nativeSessionFields } from '../tools/definitions';
 
-interface ReplyDelivery {
+interface ReplyDelivery extends CompletionDelivery {
+  parts?: CardPart[];
   mode: 'card' | 'markdown' | 'text';
   cardId?: string;
   messageId?: string;
@@ -108,36 +111,40 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     if (delivery.mode === 'text' && !finished) return;
     if (delivery.lastEvent === lastEvent && !finished && Date.now() - delivery.pushedAt < 15_000) return;
     if (deps.controls.auxiliary?.isAuxiliary(target.scope)) await deps.controls.auxiliary.trackRun(target.scope, job.id, target.replyTo, !finished, target.operatorOpenId);
-    const options = deps.renderOptions?.(job) ?? {};
+    const options = { ...deps.renderOptions?.(job), showDetails: getShowToolCalls(deps.controls.cfg) };
     // Completed personal cards retain the same group controls as Codex. Active stops stay bound to their job token.
     const card = renderCard(state, { ...options, showStopButton: true, ...(finished ? { signCallback: undefined } : {}) });
     // CardKit updates own the stream window across reconnects; avoid its 10-minute streaming timeout.
     (card as { config: { streaming_mode: boolean } }).config.streaming_mode = false;
     const text = renderText(state);
     const content = delivery.mode === 'card' ? undefined : JSON.stringify({ zh_cn: { title: '', content: [[{ tag: 'md', text: text || '正在执行…' }]] } });
-    if (delivery.mode === 'card' && !delivery.cardId) {
-      const result = await deps.channel.createCard(card); delivery.cardId = result.cardId; await save();
-    }
-    if (!delivery.messageId) {
-      // Feishu uuid deduplicates for one hour. Do not blindly retry an ambiguous
-      // send after that window: it might already be present in the chat.
-      if (delivery.sendingSince && Date.now() - delivery.sendingSince >= 55 * 60_000) throw new Error('消息发送结果未确认且已超过去重窗口，暂停自动重发；任务仍保留在执行服务中');
-      if (!delivery.sendingSince) { delivery.sendingSince = Date.now(); await save(); }
-      const uuid = createHash('sha256').update(`worker-reply:${job.id}`).digest('hex').slice(0, 48);
-      const response = await deps.channel.rawClient.im.v1.message.reply({ path: { message_id: target.replyTo },
-        data: { msg_type: delivery.mode === 'card' ? 'interactive' : 'post',
-          content: content ?? JSON.stringify({ type: 'card', data: { card_id: delivery.cardId } }),
-          ...(target.replyInThread ? { reply_in_thread: true } : {}), uuid } });
-      if (response.code || !response.data?.message_id) throw new Error(`回复未确认：${response.code ?? 'missing-message-id'} ${response.msg ?? ''}`);
-      delivery.messageId = response.data.message_id; await save();
-    }
+    const active = () => !stopped && !deps.catalog.isScopeArchived(target.scope) &&
+      (!deps.controls.auxiliary?.isAuxiliary(target.scope) || deps.controls.auxiliary.isActive(target.scope)) &&
+      deps.controls.toolBindings?.get(target.scope)?.nativeId === (init?.type === 'system' ? init.sessionId ?? init.threadId ?? binding.nativeId : binding.nativeId) &&
+      deps.controls.toolBindings?.get(target.scope)?.sourceId === target.sourceId &&
+      deps.controls.toolBindings?.get(target.scope)?.toolId === deps.adapter.id;
     if (delivery.mode === 'card') {
-      delivery.sequence++; await save();
-      await deps.channel.updateCardById(delivery.cardId!, card, delivery.sequence);
-    } else if (delivery.mode === 'markdown') {
-      const response = await deps.channel.rawClient.im.v1.message.patch({ path: { message_id: delivery.messageId }, data: { content: content! } });
-      if (response.code) throw new Error(`更新回复失败：${response.code} ${response.msg ?? ''}`);
+      await publishCards({ channel: deps.channel, target, card, delivery, key: `worker-reply:${job.id}`, save, active, force: repairControls });
+    } else {
+      if (!delivery.messageId) {
+        // Feishu uuid deduplicates for one hour. Pause ambiguous sends after it.
+        if (delivery.sendingSince && Date.now() - delivery.sendingSince >= 55 * 60_000) throw new Error('消息发送结果未确认且已超过去重窗口，暂停自动重发；任务仍保留在执行服务中');
+        if (!delivery.sendingSince) { delivery.sendingSince = Date.now(); await save(); }
+        const uuid = createHash('sha256').update(`worker-reply:${job.id}`).digest('hex').slice(0, 48);
+        const response = await deps.channel.rawClient.im.v1.message.reply({ path: { message_id: target.replyTo },
+          data: { msg_type: 'post', content: content!, ...(target.replyInThread ? { reply_in_thread: true } : {}), uuid } });
+        if (response.code || !response.data?.message_id) throw new Error(`回复未确认：${response.code ?? 'missing-message-id'} ${response.msg ?? ''}`);
+        delivery.messageId = response.data.message_id; await save();
+      }
+      if (delivery.mode === 'markdown') {
+        const response = await deps.channel.rawClient.im.v1.message.patch({ path: { message_id: delivery.messageId }, data: { content: content! } });
+        if (response.code) throw new Error(`更新回复失败：${response.code} ${response.msg ?? ''}`);
+      }
     }
+    // Finished ledgers from earlier versions are not retroactively notified.
+    if (finished && !previousDelivery?.finished) await notifyCompletion({ channel: deps.channel,
+      target: { ...target, replyTo: delivery.parts?.filter(part => part.messageId).at(-1)?.messageId ?? delivery.messageId },
+      ownerId: deps.controls.botOwnerId, key: `worker-reply:${job.id}`, delivery, save, active });
     delivery.lastEvent = lastEvent; delivery.pushedAt = Date.now(); delivery.finished = finished; delivery.controlsVersion = 1; await save();
   }
   const runNow = (): Promise<void> => {

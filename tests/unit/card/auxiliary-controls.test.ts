@@ -38,9 +38,10 @@ it('keeps a short final answer visible and folds earlier commentary and running 
   const panel = elements.find(e => e.tag === 'collapsible_panel')!;
   expect(panel.expanded).toBe(false);
   expect(JSON.stringify(panel)).toContain('Earlier progress update');
-  expect(panel.elements?.find(e => e.tag === 'collapsible_panel')?.expanded).toBe(false);
+  expect(panel.elements?.some(e => e.tag === 'collapsible_panel')).toBe(false);
+  expect(JSON.stringify(elements)).not.toContain('pwd');
   expect(JSON.stringify(elements)).not.toContain('private source history path');
-  expect(body(state, false)[0]).toMatchObject({ tag: 'collapsible_panel', expanded: false });
+  expect(body(state, false)[0]).toMatchObject({ tag: 'markdown', content: 'Earlier progress update' });
 });
 it('shows a bounded Unicode-safe preview while retaining a long Markdown answer verbatim in details', () => {
   const full = '**结论：**' + '😀'.repeat(240) + '\n\n详细说明\n```ts\nconst value = 1;\n```';

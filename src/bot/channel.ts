@@ -91,6 +91,9 @@ import { lookupMessageThreadId } from './thread-id';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import { isSoloUserBotChat } from './group';
+import { isPersonalWorkgroup } from '../tools/bindings';
+import { multipartStreamUpdater, publishCards, splitCard } from '../card/multipart';
+import { notifyCompletion } from './completion-notification';
 import { configureGroupNotifications } from './group-notifications';
 import { startWorkerQuestions } from './worker-questions';
 import { loadWorkerRegistry, workerTool } from '../worker/discovery';
@@ -697,7 +700,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           runtime.inbox!.markQueued(entry.scope, entry.message); pending.push(entry.scope, entry.message);
         }
       },
-      renderOptions: job => ({ ...controls.runControlIcons, supportsFork: true,
+      renderOptions: job => ({ ...controls.runControlIcons, showDetails: getShowToolCalls(controls.cfg), supportsFork: true,
         ...(controls.auxiliary?.isAuxiliary(job.options.delivery?.scope ?? '') ? { auxiliary: true, auxiliaryRunId: job.id, auxiliaryScope: job.options.delivery?.scope } : {}),
         ...(callbackAuth && job.options.delivery && !controls.auxiliary?.isAuxiliary(job.options.delivery.scope) ? { signCallback: action => callbackAuth.sign({
           runId: job.id, scope: job.options.delivery!.scope, chatId: job.options.delivery!.chatId,
@@ -928,6 +931,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     pool,
   } = deps;
   const msg = incomingMessage;
+  const rawSender = msg.raw as { sender?: { sender_type?: string }; event?: { sender?: { sender_type?: string } } } | undefined;
+  const senderType = rawSender?.sender?.sender_type ?? rawSender?.event?.sender?.sender_type;
+  if (msg.senderId === channel.botIdentity?.openId || ((senderType === 'app' || senderType === 'bot') && !msg.mentionedBot)) return;
   if (msg.chatType !== 'p2p' && sessionCatalog?.isScopeArchived(msg.chatId)) return;
   const auxiliary = rootControls.auxiliary;
   if (msg.chatType === 'p2p' && isRetiredPrivateInput(msg.content)) {
@@ -1037,6 +1043,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   if (
     msg.chatType !== 'p2p' &&
     getRequireMentionInGroup(controls.cfg) &&
+    !(binding && isPersonalWorkgroup(msg.chatId, binding) && !auxiliaryGroup) &&
     !msg.mentionedBot
   ) {
     let soloUserBotChat = false;
@@ -1459,7 +1466,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ? await controls.auxiliaryApprovals.review(scope, execution.handle.run.runId, lastMsg.messageId, state) : state;
   const cardRenderOptions = callbackAuth && !controls.auxiliary?.isAuxiliary(scope)
     ? {
-        ...controls.runControlIcons,
+        ...controls.runControlIcons, showDetails: getShowToolCalls(controls.cfg),
         ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope } : {}),
         signCallback: (action: string) =>
           callbackAuth.sign({
@@ -1472,7 +1479,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             ttlMs: 24 * 60 * 60 * 1000,
           }),
       }
-    : { ...controls.runControlIcons, ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope } : {}) };
+    : { ...controls.runControlIcons, showDetails: getShowToolCalls(controls.cfg), ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope } : {}) };
 
   // For non-card modes Claude's output doesn't surface visually until either
   // a first streamed token (markdown mode) or the whole run ends (text mode).
@@ -1482,6 +1489,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     (cotEnabled || replyMode === 'card')
       ? undefined : addWorkingReaction(channel, lastMsg.messageId);
 
+  const notifyLegacyCompletion = () => notifyCompletion({ channel, target: { chatId, ...sendOpts },
+    ownerId: controls.botOwnerId, key: `bridge-run:${execution.runId}`, delivery: {}, save: async () => {},
+    active: () => !sessionCatalog?.isScopeArchived(scope) &&
+      (!controls.auxiliary?.isAuxiliary(scope) || controls.auxiliary.isActive(scope)) });
   try {
     if (cotEnabled) {
       const cotPublisher = new CotPublisher({
@@ -1528,6 +1539,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           sendOpts,
           cardRenderOptions,
         });
+        await notifyLegacyCompletion();
         return;
       }
       log.warn('cot', 'fallback-existing-reply', { reason: 'create-disabled' });
@@ -1537,7 +1549,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       let latestState: RunState = initialState;
       let producerStarted = false;
       let cardCtrl:
-        | { update(next: object | ((current: object) => object)): Promise<void> }
+        | { update(next: object): Promise<void> }
         | undefined;
       const renderDone = processAgentStream(
         handle,
@@ -1559,16 +1571,19 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             initial: renderCard(initialState, cardRenderOptions),
             producer: async (ctrl) => {
               producerStarted = true;
-              cardCtrl = ctrl;
+              const update = multipartStreamUpdater({ channel, target: { chatId, ...sendOpts }, key: `bridge-run:${execution.runId}`,
+                updatePrimary: card => ctrl.update(card), active: () => !sessionCatalog?.isScopeArchived(scope) &&
+                  (!controls.auxiliary?.isAuxiliary(scope) || controls.auxiliary.isActive(scope)) });
+              cardCtrl = { update };
               const unregisterRefresh = registerLiveRunCardRefresh(ctrl.messageId, scope, async () => {
                 const runtime = latestState.runtime;
                 const refreshed = runtime
                   ? { ...latestState, runtime: { ...runtime, checkedAtMs: Date.now() } }
                   : latestState;
-                await ctrl.update(renderCard(filterForPrefs(refreshed), cardRenderOptions));
+                await cardCtrl!.update(renderCard(filterForPrefs(refreshed), cardRenderOptions));
               });
               try {
-                await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
+                await cardCtrl!.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
                 await renderDone;
               } finally {
                 unregisterRefresh();
@@ -1586,11 +1601,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         deliveryFailure: () =>
           runTraceId ? streamDeliveryFailures.get(runTraceId) : undefined,
         fallback: async (state) => {
-          await channel.send(
-            chatId,
-            { card: renderCard(filterForPrefs(await reviewState(state)), cardRenderOptions) },
-            sendOpts,
-          );
+          await sendFinalReply({ channel, chatId, scope, state: filterForPrefs(await reviewState(state)),
+            replyMode: 'card', sendOpts, cardRenderOptions });
         },
       });
     } else if (replyMode === 'markdown') {
@@ -1797,6 +1809,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         cardRenderOptions,
       });
     }
+    await notifyLegacyCompletion();
   } catch (err) {
     log.fail('stream', err);
   } finally {
@@ -1823,11 +1836,15 @@ async function sendFinalReply(input: {
   const body = renderText(input.state);
 
   if (input.replyMode === 'card') {
-    const result = await input.channel.send(
-      input.chatId,
-      { card: renderCard(input.state, input.cardRenderOptions) },
-      input.sendOpts,
-    );
+    const card = renderCard(input.state, input.cardRenderOptions);
+    let result: { messageId: string };
+    if (splitCard(card).length === 1) result = await input.channel.send(input.chatId, { card }, input.sendOpts);
+    else {
+      const delivery = { sequence: 0, messageId: undefined as string | undefined };
+      await publishCards({ channel: input.channel, target: { chatId: input.chatId, ...input.sendOpts }, card, delivery,
+        key: `bridge-final:${input.scope}:${input.sendOpts.replyTo}`, save: async () => {}, active: () => true });
+      result = { messageId: delivery.messageId! };
+    }
     log.info('outbound', 'sent', outboundLogFields(input, 'card', body, result));
   } else if (input.replyMode === 'markdown') {
     if (body.trim()) {

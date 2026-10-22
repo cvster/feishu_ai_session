@@ -179,6 +179,25 @@ it('ignores non-mentions, @all and bot senders even when global mention requirem
   await h.message({ senderId: 'ou_bot' });
   expect((await h.records())).toHaveLength(0); expect(h.submit).not.toHaveBeenCalled(); expect(h.download).not.toHaveBeenCalled();
 });
+it('accepts any human without a mention in a bound personal group, regardless of membership counts', async () => {
+  const h = await harness();
+  h.controls.profileConfig.access.requireMentionInGroup = true;
+  const sourceId = h.controls.toolRegistry!.get('codex').sourceId;
+  h.controls.toolBindings!.set('oc_personal', { toolId: 'codex', sourceId, nativeId: originalId, nativeCreated: true });
+  h.workspaces.setCwd('oc_personal', h.cwd);
+  const get = vi.fn(async () => ({ code: 0, data: { user_count: '12', bot_count: '2' } }));
+  Object.assign(h.channel.rawClient.im.v1.chat, { get });
+  Object.assign(h.channel, { getChatMode: async () => 'group' });
+  for (const senderId of ['ou_colleague', 'ou_second']) {
+    await h.message({ chatId: 'oc_personal', threadId: undefined, mentionedBot: false, senderId, content: `继续 ${senderId}` });
+    await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(senderId === 'ou_colleague' ? 1 : 2), { timeout: 3000 });
+  }
+  expect(h.submit.mock.calls.every(([options]) => options.threadId === originalId)).toBe(true);
+  await h.message({ chatId: 'oc_personal', threadId: undefined, mentionedBot: false, senderId: 'ou_bot' });
+  await h.message({ chatId: 'oc_aux', mentionedBot: false });
+  expect(h.submit).toHaveBeenCalledTimes(2);
+  expect(get).not.toHaveBeenCalled(); // No sole-member exception lookup.
+});
 it('silently ignores later messages, commands and attachments after the group is archived', async () => {
   const h = await harness(); h.catalog.archiveScope('oc_aux', 'archived');
   const sent = h.channel.sent.length;

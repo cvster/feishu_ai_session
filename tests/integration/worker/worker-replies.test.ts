@@ -31,7 +31,7 @@ async function repliesFixture(mode: 'card' | 'markdown' | 'text' = 'card', priva
   const start = () => startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath, intervalMs: 60_000, renderOptions: () => privateFF ? { auxiliary: true, auxiliaryScope: scope } : {} });
   const job = await h.client.submit({ requestKey: 'message-one', options: h.options });
   await vi.waitFor(async () => expect((await h.client.snapshot(job.id)).events.length).toBeGreaterThan(1));
-  return { ...h, job, bindings, catalog, sessions, activeRuns, channel, reply, patch, statePath, start };
+  return { ...h, job, bindings, catalog, sessions, controls, activeRuns, channel, reply, patch, statePath, start };
 }
 it('recovers the same reply card and native session after bridge restart, including output produced while disconnected', async () => {
   const h = await repliesFixture(); const first = await h.start(); await first.runNow();
@@ -46,6 +46,57 @@ it('recovers the same reply card and native session after bridge restart, includ
     expect(updates.at(-1)![0]).toBe('card_stable');
     expect(JSON.stringify(updates.at(-1)![1])).toContain('after restart');
     expect(updates.at(-1)![2]).toBeGreaterThan(updates[0]![2]); expect(h.calls).toHaveLength(1);
+  } finally { await second.stop(); await h.catalog.flush(); await h.sessions.flush(); }
+});
+
+it('mentions the owner once after the final reply, recovering an ambiguous notification across restart', async () => {
+  const h = await repliesFixture(); h.controls.botOwnerId = 'ou_owner';
+  const first = await h.start(); await first.runNow();
+  expect(h.reply).toHaveBeenCalledOnce(); // No running mention.
+  h.finish(); await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('completed'));
+  h.reply.mockRejectedValueOnce(new Error('completion ack lost'));
+  await first.runNow(); await first.stop();
+  const second = await h.start();
+  try {
+    await second.runNow(); await second.runNow();
+    expect(h.reply).toHaveBeenCalledTimes(3);
+    const requests = h.reply.mock.calls as unknown as any[][];
+    expect(requests[1]![0].data.uuid).toBe(requests[2]![0].data.uuid);
+    expect(requests[2]![0].path.message_id).toBe('om_reply');
+    expect(JSON.parse(requests[2]![0].data.content).zh_cn.content[0][0]).toEqual({ tag: 'at', user_id: 'ou_owner' });
+    expect(h.channel.createCard).toHaveBeenCalledOnce();
+  } finally { await second.stop(); await h.catalog.flush(); await h.sessions.flush(); }
+});
+it('recovers all parts of a long worker reply after restart and mentions the owner only after the last card', async () => {
+  const h = await repliesFixture(); h.controls.botOwnerId = 'ou_owner';
+  const full = Array.from({ length: 4000 }, (_, i) => `第${i}行：完整输出😀\n`).join('');
+  const snapshot = h.adapter.client.snapshot.bind(h.adapter.client);
+  vi.spyOn(h.adapter.client, 'snapshot').mockImplementation(async id => {
+    const result = await snapshot(id);
+    const event = result.events.find(row => row.event.type === 'text')!.event;
+    if (event.type === 'text') event.delta = full;
+    return result;
+  });
+  const create = vi.mocked(h.channel.createCard);
+  create.mockImplementation(async () => ({ cardId: `card_${create.mock.calls.length}` }));
+  h.reply.mockImplementation(async () => ({ code: 0, data: { message_id: `om_part_${h.reply.mock.calls.length}` } }));
+  const first = await h.start(); await first.runNow();
+  const count = create.mock.calls.length; expect(count).toBeGreaterThan(2);
+  expect(h.reply).toHaveBeenCalledTimes(count);
+  await first.stop(); h.finish();
+  await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('completed'));
+  const second = await h.start();
+  try {
+    await second.runNow(); await second.runNow();
+    expect(create).toHaveBeenCalledTimes(count);
+    expect(h.reply).toHaveBeenCalledTimes(count + 1);
+    const final = h.reply.mock.calls.at(-1)![0] as any;
+    expect(final.path.message_id).toBe(`om_part_${count}`);
+    expect(final.data.content).toContain('"tag":"at"');
+    const latest = new Map(vi.mocked(h.channel.updateCardById).mock.calls.map(([id, card]) => [id, card as any]));
+    const output = [...latest.values()].flatMap(card => card.body.elements.filter((element: any) => element.tag === 'markdown' && !element.text_size).map((element: any) => element.content)).join('');
+    expect(output).toBe(full + 'after restart');
+    expect([...latest.values()].every(card => Buffer.byteLength(JSON.stringify({ data: JSON.stringify(card) })) <= 26_000)).toBe(true);
   } finally { await second.stop(); await h.catalog.flush(); await h.sessions.flush(); }
 });
 it('recovers an ambiguous reply acknowledgement using the same uuid and does not recreate the card', async () => {
