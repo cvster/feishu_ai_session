@@ -107,3 +107,17 @@ it('preserves old card IDs and sequences including bridge-origin in-flight repli
   expect(delivery.turns.turn).toMatchObject({ cardId: 'card', messageId: 'message', sequence: 8, legacyBridge: true, skipped: false });
   await writeFile(oldPath, 'corrupt'); await migrateMirrorLedger(oldPath, newPath, 'codex', 'source', catalog); await catalog.flush();
 });
+
+it('defaults canonical Kilo settings to vscode and accepts only one explicit client mode', async () => {
+  const dir = await profile(), config = createDefaultProfileConfig({ agentKind: 'kilo', accounts: { app: { id: 'app', secret: 's', tenant: 'feishu' } } });
+  expect((await loadWorkerConfig(dir, 'kilo', config)).options.client).toBe('vscode');
+  const path = join(dir, 'workers/kilo/config.json');
+  for (const client of ['vscode', 'app']) {
+    await writeFile(path, JSON.stringify({ version: 1, toolId: 'kilo', options: { client, dataHome: '/existing' } }));
+    expect((await loadWorkerConfig(dir, 'kilo', config)).options).toEqual({ client, dataHome: '/existing' });
+  }
+  for (const client of ['both', 'desktop', null, ['vscode', 'app']]) {
+    await writeFile(path, JSON.stringify({ version: 1, toolId: 'kilo', options: { client } }));
+    await expect(loadWorkerConfig(dir, 'kilo', config)).rejects.toThrow('必须配置为 vscode 或 app');
+  }
+});

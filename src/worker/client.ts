@@ -22,7 +22,7 @@ export function validWorkerHealth(value: unknown, botAppId: string): value is Wo
     !!c.jobs && ['submit', 'read', 'stop', 'eventCursor'].every(key => c.jobs[key as keyof typeof c.jobs] === true) &&
     typeof c.models === 'boolean' && typeof c.nativeTurnStop === 'boolean' && !!c.sessions &&
     ['list', 'history', 'rename', 'archive', 'fork'].every(key => typeof c.sessions[key as keyof typeof c.sessions] === 'boolean') &&
-    ['conversation', 'questions', 'nativeSessionNames'].every(key => c[key as 'conversation'] === undefined || typeof c[key as 'conversation'] === 'boolean') &&
+    ['conversation', 'questions', 'nativeSessionNames', 'sessionListAuthoritative'].every(key => c[key as 'conversation'] === undefined || typeof c[key as 'conversation'] === 'boolean') &&
     !!m && typeof m.label === 'string' && !!m.label.trim() && m.label.length <= 100 && !/[\u0000-\u001f]/.test(m.label) &&
     ['threadId', 'sessionId'].includes(m.nativeField) && typeof m.sessionKind === 'string' && !!m.sessionKind.trim() && m.sessionKind.length <= 100 &&
     ['json', 'jsonl'].includes(m.historyFormat) && typeof m.nativeHistory === 'boolean';
@@ -32,6 +32,8 @@ export class WorkerRequestError extends Error {
   constructor(readonly status: number, message: string, readonly retryable = false, readonly code?: WorkerErrorCode) { super(message); }
 }
 export class WorkerClient {
+  private sessionRoster?: { at: number; ids: Set<string> };
+  private rosterLoading?: Promise<ToolSession[]>;
   constructor(readonly stateDir: string, readonly sourceId: string, readonly botAppId: string, readonly toolId = 'claude',
     private readonly expectedManifest?: Pick<WorkerManifest, 'nativeField' | 'sessionKind'>) {}
   private matchesIdentity(value: WorkerHealth | undefined): value is WorkerHealth {
@@ -79,7 +81,15 @@ export class WorkerClient {
   }
   async listSessions(): Promise<ToolSession[]> {
     if (!(await this.capabilities())?.sessions.list) this.unsupported();
-    return this.request('/sessions', undefined, 60_000);
+    return this.rosterLoading ??= this.request<ToolSession[]>('/sessions', undefined, 60_000).then(rows => {
+      if (!Array.isArray(rows) || rows.some(row => typeof row.nativeId !== 'string')) throw new Error('Invalid worker session list');
+      this.sessionRoster = { at: Date.now(), ids: new Set(rows.map(row => row.nativeId)) }; return rows;
+    }).finally(() => { this.rosterLoading = undefined; });
+  }
+  async sessionAvailable(id: string): Promise<boolean> {
+    if (!(await this.capabilities())?.sessionListAuthoritative) return true;
+    if (!this.sessionRoster || Date.now() - this.sessionRoster.at >= 15_000) await this.listSessions();
+    return this.sessionRoster!.ids.has(id);
   }
   async sessionHistory(id: string): Promise<WorkerSessionHistory> {
     if (!(await this.capabilities())?.sessions.history) this.unsupported();

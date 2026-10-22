@@ -44,6 +44,7 @@ export interface NativeTurnSyncDeps {
   reader: NativeConversationReader;
   statePath: string;
   ready?(): Promise<boolean>;
+  available?(id: string): Promise<boolean>;
   intervalMs?: number;
   now?(): number;
   nameSync?: Pick<SessionNameSync, 'observe'>;
@@ -151,6 +152,7 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
     for (const [id, scopes] of groups) {
       if (stopped) break;
       try {
+        if (deps.available && !await deps.available(id)) continue;
         const snapshot = await deps.reader.read(id);
         if (snapshot.id !== id) continue;
         if (snapshot.archived) {

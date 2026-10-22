@@ -48,7 +48,7 @@ function harness() {
   const node = (id: string) => elements.get(id)!;
   node('session-menu').hidden = true; node('session-menu').append(node('session-rename'), node('session-archive'), node('session-copy'));
   for (const action of ['stop', 'refresh']) { const button = new Element('button'); button.setAttribute('data-control', action); node('session-controls').append(button); }
-  const rows = ['a', 'b'].map((id, index) => ({ id: id.repeat(64), toolId: 'generic', tool: 'Tool',
+  const rows = ['a', 'b'].map((id, index) => ({ id: id.repeat(64), toolId: index ? 'another' : 'generic', tool: index ? 'Other' : 'Tool', favorite: false,
     project: 'project', cwd: '/project', scope: 'oc_' + id, name: '会话' + index, online: true, canSend: true, canRename: true }));
   const conversation = (index: number, answer = '回答', count = 12) => ({ session: rows[index], turns: Array.from({ length: count }, (_, i) => ({
     id: String(i), input: '问题' + i, answer, status: 'completed', origin: 'native', createdAtMs: 1,
@@ -170,4 +170,25 @@ it('drops late menu results after a session switch and re-enables other session 
   h.streams.at(-1)!.emit('snapshot', { sessions: [h.rows[0]], conversation: h.conversation(1) });
   h.requests[3]!.resolve({ elements: [{ kind: 'text', text: '已归档' }] }); await h.settle();
   expect(h.node('tree').querySelectorAll('.session-more').every(button => !button.disabled)).toBe(true);
+});
+
+it('renders tool icons and favorites across tools under one project, without loading conversation history', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  const root = h.node('tree'), favorite = (name: string) => root.querySelectorAll('.session-favorite').find(b => b.getAttribute('aria-label') === name + '的收藏')!;
+  expect(root.children[0]!.querySelector('summary')!.text).toBe('收藏0');
+  expect(root.querySelectorAll('.tool-icon').map(e => e.getAttribute('aria-label'))).toEqual(['Tool', 'Other']);
+  favorite(h.rows[1]!.name).onclick!({ stopPropagation() {} });
+  expect(h.requests[1]).toMatchObject({ path: '/api/sessions/' + h.rows[1]!.id + '/favorite', data: { favorite: true } });
+  expect(favorite(h.rows[1]!.name).disabled).toBe(true);
+  h.requests[1]!.resolve({ favorite: true }); await h.settle();
+  favorite(h.rows[0]!.name).onclick!({ stopPropagation() {} }); h.requests[2]!.resolve({ favorite: true }); await h.settle();
+  const saved = root.children[0]!;
+  expect(saved.querySelector('summary')!.text).toBe('收藏2');
+  expect(saved.querySelectorAll('details')).toHaveLength(1);
+  expect(saved.querySelectorAll('.session')).toHaveLength(2);
+  expect(root.querySelectorAll('.session-favorite').every(b => b.getAttribute('aria-pressed') === 'true' && b.textContent === '★')).toBe(true);
+  expect(h.node('title').textContent).toBe(h.rows[0]!.name); expect(h.requests).toHaveLength(3);
+  favorite(h.rows[1]!.name).onclick!({ stopPropagation() {} }); h.requests[3]!.resolve({ favorite: false }); await h.settle();
+  expect(root.children[0]!.querySelectorAll('.session')).toHaveLength(1);
+  expect(favorite(h.rows[1]!.name).getAttribute('aria-pressed')).toBe('false');
 });

@@ -33,7 +33,7 @@ async function fixture() {
     await symlink('socket:[12345]', join(path, 'fd/10'));
     await writeFile(join(path, 'net/tcp'), `header\n0: ${overrides.address ?? '0100007F'}:${port.toString(16).toUpperCase()} 00000000:0000 0A 0:0 0:0 0 1000 0 12345\n`);
   }
-  const discover = (path: string | undefined = cwd, sessionId?:string, preferredClient?: 'vscode' | 'desktop') => findKiloEditorServer(process.execPath, path, dataHome, { procRoot, uid: 1000, platform: 'linux' },sessionId,preferredClient);
+  const discover = (path: string | undefined = cwd, sessionId?:string, preferredClient?: 'vscode' | 'app') => findKiloEditorServer(process.execPath, path, dataHome, { procRoot, uid: 1000, platform: 'linux' },sessionId,preferredClient);
   return { cwd, dataHome, root, processEntry, discover, calls: () => calls, unhealthy: () => { healthy = false; },desktopSession:()=>{desktopSession=true;} };
 }
 it('authenticates an editor-owned same-user server for the same database and workspace', async () => {
@@ -75,7 +75,7 @@ it('does not trust an unrelated executable merely because it labels itself vscod
 const desktop = {exe:'/usr/lib/kilo-desktop/resources/kilo/linux-x64-baseline/bin/kilo',parentExe:'/usr/lib/kilo-desktop/kilo-desktop',env:{KILO_CLIENT:'',KILO_PLATFORM:'desktop',KILO_APP_NAME:'kilo-desktop'}};
 it('rejects a desktop-origin session even with a matching VS Code backend', async () => {
   const h = await fixture(); h.desktopSession(); await h.processEntry(100); await h.processEntry(101, { ...desktop, cwd: h.root });
-  await expect(h.discover(h.cwd, 'ses_existing')).rejects.toThrow('不再支持 Kilo App');
+  await expect(h.discover(h.cwd, 'ses_existing')).rejects.toThrow('不处理 Kilo App');
 });
 it('keeps VS Code sessions on their editor when App is running', async () => {
   const h = await fixture(); await h.processEntry(100); await h.processEntry(101, { ...desktop, cwd: h.root });
@@ -88,4 +88,21 @@ it('ignores Kilo App processes without making requests to them', async () => {
 it('still selects the most specific VS Code workspace while App is running', async () => {
   const h = await fixture(); await h.processEntry(100, { cwd: h.root }); await h.processEntry(102); await h.processEntry(101, { ...desktop, cwd: h.root });
   expect(await h.discover()).toMatchObject({ pid: 102, client: 'vscode' });
+});
+
+it('selects only an official App backend in app mode, independently of the runtime cwd', async () => {
+  const h = await fixture(); h.desktopSession(); await h.processEntry(100); await h.processEntry(101, { ...desktop, cwd: h.root });
+  expect(await h.discover(h.cwd, 'ses_existing', 'app')).toMatchObject({ pid: 101, client: 'desktop', sessionMetadata: { 'kilo-desktop': { workspaceId: 'desktop-workspace' } } });
+});
+it('does not fall back to VS Code in app mode or trust a forged App executable', async () => {
+  const h = await fixture(); await h.processEntry(100); await h.processEntry(101, { ...desktop, exe: '/tmp/forged/bin/kilo' });
+  expect(await h.discover(h.cwd, undefined, 'app')).toBeUndefined(); expect(h.calls()).toBe(0);
+});
+it('rejects VS Code sessions in app mode before submitting or selecting the editor', async () => {
+  const h = await fixture(); await h.processEntry(101, { ...desktop, cwd: h.root });
+  await expect(h.discover(h.cwd, 'ses_existing', 'app')).rejects.toThrow('仅支持 Kilo App');
+});
+it('inherits the native App workspace for new sessions', async () => {
+  const h = await fixture(); h.desktopSession(); await h.processEntry(101, { ...desktop, cwd: h.root });
+  expect(await h.discover(h.cwd, undefined, 'app')).toMatchObject({ client: 'desktop', sessionMetadata: { 'kilo-desktop': { workspaceId: 'desktop-workspace' } } });
 });

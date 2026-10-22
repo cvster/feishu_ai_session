@@ -154,7 +154,7 @@ lark-channel-bridge worker start --profile my-bot --tool kilo
 lark-channel-bridge worker status --profile my-bot --tool kilo
 ```
 
-只用 Kilo 时不需要安装 Codex。Kilo 保留 VS Code 插件和 CLI，Kilo App/Desktop 已移除。
+只用 Kilo 时不需要安装 Codex。Kilo worker 配置为 VS Code 插件或 App，默认 `options.client: "vscode"`，两种模式互斥。
 根配置保留机器人及通用策略；原生设置在 `workers/<tool>/config.json`，旧设置首次
 导入后不再覆盖。目录名可以任意，接口返回的工具、来源和能力用于发现与校验。
 

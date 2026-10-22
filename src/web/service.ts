@@ -14,7 +14,7 @@ import type { WebControlResult } from './controls';
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
   id: string; scope: string; toolId: string; tool: string; project: string; cwd: string; name: string;
-  online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
+  favorite: boolean; online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
 }
 export interface WebTurn { id: string; input: string; answer: string; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
 export interface WebConversation { session: WebSession; turns: WebTurn[]; notice?: string }
@@ -25,8 +25,9 @@ const answer = (s: RunState) => s.blocks.flatMap(b => b.kind === 'text' ? [b.con
 /** Personal bindings, queue and native worker snapshots are the only sources of truth. */
 export class PersonalSessionService {
   private receipts: Record<string, Receipt> = {};
+  private favorites: Record<string, string> = {};
   private operations = new Map<string, Promise<unknown>>();
-  private metadata = new Map<string, { label: string; sourceId: string; rows: ToolSession[]; capabilities?: WorkerCapabilities; online: boolean }>();
+  private metadata = new Map<string, { label: string; sourceId: string; rows: ToolSession[]; capabilities?: WorkerCapabilities; online: boolean; listed: boolean }>();
   private listedAt = 0;
   private conversations = new Map<string, WebConversation>();
   private groups = new Map<string, { mode: string; name?: string; bindingName?: string }>();
@@ -39,7 +40,15 @@ export class PersonalSessionService {
     control?(id: string, scope: string, owner: string, action: string, values?: unknown): Promise<WebControlResult>;
   }) {}
   async load() {
-    try { const r = JSON.parse(await readFile(this.deps.path, 'utf8')); if (r.version !== 1 || !r.receipts || Array.isArray(r.receipts)) throw new Error('网页请求账本无效'); this.receipts = r.receipts; }
+    try {
+      const r = JSON.parse(await readFile(this.deps.path, 'utf8'));
+      if (r.version !== 1 || !r.receipts || Array.isArray(r.receipts)) throw new Error('网页请求账本无效');
+      this.receipts = r.receipts;
+      if (r.favorites !== undefined) {
+        if (!r.favorites || typeof r.favorites !== 'object' || Array.isArray(r.favorites) || Object.entries(r.favorites).some(([id, owner]) => !/^[a-f0-9]{64}$/.test(id) || typeof owner !== 'string' || !owner)) throw new Error('网页收藏记录无效');
+        this.favorites = r.favorites;
+      }
+    }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
   }
   private owner() {
@@ -64,8 +73,8 @@ export class PersonalSessionService {
           if (!(tool.agent instanceof DurableAgentAdapter)) throw new Error('Worker required');
           const health = await tool.agent.client.health();
           const rows = health.capabilities?.sessions.list ? await tool.listSessions() : [];
-          this.metadata.set(tool.id, { label: tool.label, sourceId: tool.sourceId, rows, capabilities: health.capabilities, online: true });
-        } catch { this.metadata.set(tool.id, { label: tool.label, sourceId: tool.sourceId, rows: previous?.sourceId === tool.sourceId ? previous.rows : [], capabilities: previous?.capabilities, online: false }); }
+          this.metadata.set(tool.id, { label: tool.label, sourceId: tool.sourceId, rows, capabilities: health.capabilities, online: true, listed: health.capabilities?.sessions.list === true });
+        } catch { this.metadata.set(tool.id, { label: tool.label, sourceId: tool.sourceId, rows: previous?.sourceId === tool.sourceId ? previous.rows : [], capabilities: previous?.capabilities, online: false, listed: previous?.sourceId === tool.sourceId && previous.listed === true }); }
       }));
       const bindings = this.deps.controls.toolBindings?.activePersonalBindings() ?? [];
       const scopes = new Set(bindings.map(([scope]) => scope));
@@ -85,12 +94,12 @@ export class PersonalSessionService {
     return this.listing;
   }
   async list(): Promise<WebSession[]> {
-    this.owner(); await this.refresh();
+    this.owner(); await this.refresh(); const owner = this.owner();
     return (this.deps.controls.toolBindings?.activePersonalBindings() ?? []).flatMap(([scope, b]) => {
       if (this.deps.controls.auxiliary?.isAuxiliary(scope) || ['topic', 'p2p'].includes(this.groups.get(scope)?.mode ?? '')) return [];
       const meta = this.metadata.get(b.toolId), tool = this.deps.controls.toolRegistry?.find(b.toolId);
       const row = meta?.sourceId === b.sourceId ? meta.rows.find(r => r.nativeId === b.nativeId) : undefined;
-      if (row?.archived) return [];
+      if (row?.archived || (meta?.sourceId === b.sourceId && meta.listed && meta.capabilities?.sessionListAuthoritative && !row)) return [];
       const catalog = this.deps.catalog?.entries().filter(r => r.scopeId === scope && r.status === 'active' && r.agentId === b.toolId &&
         (!r.sourceId || r.sourceId === b.sourceId) && (!r.botAppId || r.botAppId === this.deps.controls.profileConfig.accounts.app.id) &&
         (r.threadId ?? r.sessionId) === b.nativeId).sort((a, z) => z.updatedAt - a.updatedAt)[0];
@@ -100,7 +109,7 @@ export class PersonalSessionService {
       // A confirmed name sync may be newer than our 15-second group snapshot.
       const name = group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
       return [{ id: this.identity(scope, b), scope, toolId: b.toolId, tool: meta?.label ?? b.toolId,
-        cwd, project: cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd, name: name ?? row?.name ?? b.nativeId!, online,
+        favorite: this.favorites[hash(JSON.stringify([owner, this.identity(scope, b)]))] === owner, cwd, project: cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd, name: name ?? row?.name ?? b.nativeId!, online,
         canSend: online && meta?.capabilities?.jobs.submit === true,
         canRename: online && meta?.capabilities?.sessions.rename === true && meta?.capabilities?.nativeSessionNames === true,
         nativeConversation: meta?.capabilities?.conversation === true }];
@@ -125,7 +134,21 @@ export class PersonalSessionService {
     this.operations.set(key, task); void task.finally(() => { if (this.operations.get(key) === task) this.operations.delete(key); }).catch(() => {});
     return task;
   }
-  private save() { return this.serial('ledger', () => writeFileAtomic(this.deps.path, JSON.stringify({ version: 1, receipts: this.receipts }) + '\n', { mode: 0o600 })); }
+  private save() { return this.serial('ledger', () => writeFileAtomic(this.deps.path, JSON.stringify({ version: 1, receipts: this.receipts, favorites: this.favorites }) + '\n', { mode: 0o600 })); }
+  async favorite(id: string, favorite: boolean) {
+    if (typeof favorite !== 'boolean') throw new WebError(400, '收藏状态需为布尔值');
+    return this.serial('favorite:' + id, async () => {
+      const owner = this.owner();
+      const { session } = await this.resolve(id);
+      this.assertBinding(id, session.scope);
+      if (this.owner() !== owner) throw new WebError(409, '所有者已变化');
+      const key = hash(JSON.stringify([owner, id])), previous = this.favorites[key];
+      if (favorite) this.favorites[key] = owner;
+      else delete this.favorites[key];
+      try { await this.save(); } catch (error) { if (previous) this.favorites[key] = previous; else delete this.favorites[key]; throw error; }
+      return { favorite };
+    });
+  }
   async send(id: string, requestId: string, text: string) {
     if (!/^[\w-]{16,120}$/.test(requestId) || !text.trim() || text.length > 16_000) throw new WebError(400, '需要唯一请求 ID 和 1–16000 字文本');
     return this.serial('send:' + requestId, async () => {

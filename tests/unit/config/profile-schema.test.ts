@@ -544,3 +544,9 @@ it('drops obsolete Kilo client preference during legacy normalization', () => {
   for (const preferredClient of ['vscode', 'desktop']) expect(normalizeProfileConfig({ ...profile, kilo: { binaryPath: '/native/kilo', preferredClient } }).kilo).toEqual({ binaryPath: '/native/kilo' });
   expect(() => normalizeProfileConfig({ ...profile, kilo: { binaryPath: 'kilo', preferredClient: 'other' } })).toThrow('Invalid kilo');
 });
+
+it('normalizes only exclusive Kilo vscode/app modes', () => {
+  const profile = createDefaultProfileConfig({ agentKind: 'kilo', accounts: { app } });
+  for (const client of ['vscode', 'app']) expect(normalizeProfileConfig({ ...profile, kilo: { binaryPath: '/native/kilo', client } }).kilo?.client).toBe(client);
+  for (const client of ['both', 'desktop', false, ['vscode', 'app']]) expect(() => normalizeProfileConfig({ ...profile, kilo: { binaryPath: 'kilo', client } })).toThrow('Invalid kilo');
+});

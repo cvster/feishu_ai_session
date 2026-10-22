@@ -82,12 +82,51 @@ it('rejects desktop-origin histories and mutations, and hides them from the sess
   await expect(sessions.archive('ses_source')).rejects.toThrow('Kilo App');
   expect((await h.read()).some(c => c.method === 'POST' || c.method === 'PATCH')).toBe(false);
 });
-it('uses only editor discovery without an App selection option', async () => {
+it('passes the default exclusive VS Code mode to discovery', async () => {
   const h = await editor();
   const client = new KiloClient({ binary: '/nonexistent/should-not-spawn-kilo' }, h.root);
   try {
     await client.request('GET', '/config');
-    expect(discovery.find).toHaveBeenCalledWith('/nonexistent/should-not-spawn-kilo', h.root, undefined, {}, undefined);
+    expect(discovery.find).toHaveBeenCalledWith('/nonexistent/should-not-spawn-kilo', h.root, undefined, {}, undefined, 'vscode');
   } finally { await client.close(); }
   expect(h.child.killed).toBe(false);
+});
+
+it('supports App creation, continuation and fork while filtering and rejecting all plugin sessions', async () => {
+  const h = await editor('fork-without-metadata'), metadata = { 'kilo-desktop': { workspaceId: 'workspace', workspaceFolders: [{ path: h.root }] } };
+  await h.update(s => { s.sessions.ses_app = { ...s.sessions.ses_source, id: 'ses_app', metadata }; });
+  discovery.find.mockResolvedValue({ url: h.url, authorization: h.authorization, pid: h.child.pid, client: 'desktop', sessionMetadata: metadata });
+  const options = { binary: '/nonexistent/should-not-spawn-kilo', client: 'app' as const }, sessions = new KiloSessionProvider(options, h.root);
+  expect((await sessions.listSessions()).map(s => s.nativeId)).toEqual(['ses_app']);
+  await expect(sessions.historyPath('ses_source')).rejects.toThrow('仅支持 Kilo App');
+  await expect(sessions.rename('ses_source', 'blocked')).rejects.toThrow('仅支持 Kilo App');
+  await expect(sessions.archive('ses_source')).rejects.toThrow('仅支持 Kilo App');
+  await expect(sessions.fork('ses_source')).rejects.toThrow('仅支持 Kilo App');
+  const bad = []; for await (const e of new KiloAdapter(options).run({ runId: 'bad', cwd: h.root, sessionId: 'ses_source', prompt: 'blocked' }).events) bad.push(e);
+  expect(bad.at(-1)).toMatchObject({ type: 'error', submissionStatus: 'rejected' });
+  expect((await h.read()).some(c => c.method === 'POST' || c.method === 'PATCH')).toBe(false);
+  for (const sessionId of ['ses_app', undefined]) {
+    const events = []; for await (const e of new KiloAdapter(options).run({ runId: 'app', cwd: h.root, sessionId, prompt: 'App input' }).events) events.push(e);
+    expect(events.at(-1)).toMatchObject({ type: 'done' });
+  }
+  expect((await h.read()).find(c => c.method === 'POST' && c.path === '/session')?.body.metadata).toEqual(metadata);
+  expect(await sessions.fork('ses_app')).toMatchObject({ nativeId: 'ses_copy' });
+  expect((await h.read()).find(c => c.method === 'PATCH' && c.path === '/session/ses_copy')?.body.metadata).toEqual(metadata);
+  expect((await sessions.listSessions()).map(s => s.nativeId)).toEqual(['ses_app', 'ses_created', 'ses_copy']);
+  expect(h.child.killed).toBe(false);
+});
+it('does not launch another engine when the configured App backend is absent', async () => {
+  discovery.find.mockResolvedValue(undefined);
+  const client = new KiloClient({ binary: '/nonexistent/should-not-spawn-kilo', client: 'app' });
+  try { await expect(client.request('GET', '/config')).rejects.toThrow('App 后端未启动'); } finally { await client.close(); }
+});
+it('guards direct message and mutation requests before reaching a wrong-mode session', async () => {
+  const h = await editor(); await h.update(s => { s.sessions.ses_source.metadata = { 'kilo-desktop': {} }; });
+  const client = new KiloClient({ binary: '/nonexistent/should-not-spawn-kilo' });
+  try {
+    await expect(client.request('GET', '/session/ses_source/message')).rejects.toThrow('Kilo App');
+    await expect(client.request('PATCH', '/session/ses_source', { title: 'blocked' })).rejects.toThrow('Kilo App');
+    await expect(client.request('POST', '/session/ses_source/prompt_async', { parts: [] })).rejects.toThrow('Kilo App');
+    expect((await h.read()).every(c => c.method === 'GET' && c.path === '/session/ses_source')).toBe(true);
+  } finally { await client.close(); }
 });

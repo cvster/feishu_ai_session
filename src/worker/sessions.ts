@@ -39,8 +39,8 @@ export function createWorkerSessions(input: {
     nativeArchive = false; // Claude archival belongs to the bridge catalog.
   } else if (toolId === 'kilo') {
     const sessions = new KiloSessionProvider({ binary: profile.kilo?.binaryPath, args: profile.kilo?.args,
-      dataHome: profile.kilo?.dataHome, editorSync: profile.kilo?.editorSync }, join(profileDir, 'kilo-sessions'));
-    reader = new KiloNativeConversationReader({ binary: profile.kilo?.binaryPath, args: profile.kilo?.args, dataHome: profile.kilo?.dataHome, editorSync: profile.kilo?.editorSync });
+      dataHome: profile.kilo?.dataHome, editorSync: profile.kilo?.editorSync, client: profile.kilo?.client }, join(profileDir, 'kilo-sessions'));
+    reader = new KiloNativeConversationReader({ binary: profile.kilo?.binaryPath, args: profile.kilo?.args, dataHome: profile.kilo?.dataHome, editorSync: profile.kilo?.editorSync, client: profile.kilo?.client });
     provider = sessions; list = () => sessions.listSessions();
   } else if (toolId === 'dsh') {
     const sessions = new DshSessionProvider({ binary: profile.dsh?.binaryPath, args: profile.dsh?.args,
@@ -60,6 +60,7 @@ export function createWorkerSessions(input: {
     throw new Error(`No built-in session provider for ${toolId}`);
   }
   return { list,
+    ...(toolId === 'kilo' ? { listAuthoritative: true } : {}),
     nativeNames: toolId !== 'zcode' || !!profile.zcode?.remoteControlFile,
     ...(reader ? { conversation: (id: string) => reader!.read(id), close: () => reader!.close() } : {}),
     history: id => exportWorkerHistory(provider, id),

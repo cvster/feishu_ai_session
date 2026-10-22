@@ -11,6 +11,10 @@ export async function readWorkerConfig(profileDir: string, toolId: string): Prom
   try {
     const config = JSON.parse(await readFile(join(profileDir, 'workers', toolId, 'config.json'), 'utf8')) as WorkerConfig;
     if (config.version !== 1 || config.toolId !== toolId || !config.options || typeof config.options !== 'object' || Array.isArray(config.options)) throw new Error('Invalid worker config');
+    if (toolId === 'kilo') {
+      if (config.options.client === undefined) config.options.client = 'vscode';
+      if (!['vscode', 'app'].includes(config.options.client as string)) throw new Error('Kilo client 必须配置为 vscode 或 app');
+    }
     return config;
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
 }
@@ -40,7 +44,7 @@ export async function loadWorkerConfig(profileDir: string, toolId: string, profi
   const existing = await readWorkerConfig(profileDir, toolId);
   if (existing) return existing;
   const options = { ...((profile as unknown as Record<string, unknown>)[toolId] as Record<string, unknown> ?? {}) };
-  if (toolId === 'kilo') delete options.preferredClient;
+  if (toolId === 'kilo') { delete options.preferredClient; if (options.client === undefined) options.client = 'vscode'; }
   if (toolId === 'codex' && !options.codexHome && options.inheritCodexHome === false) options.codexHome = join(profileDir, 'codex-home');
   const config: WorkerConfig = { version: 1, toolId, options };
   await writeFileAtomic(file, JSON.stringify(config, null, 2), { mode: 0o600 }); return config;

@@ -96,7 +96,7 @@ Answer text is not stored in the answer-claim or question-delivery ledger.
 | --- | --- | --- | --- | --- | --- |
 | Codex | Yes | Yes | Yes | Yes | Yes, when the native connection can answer |
 | Claude | CLI title metadata | Catalog only | No | No | No |
-| Kilo | Yes | Yes | Yes | Yes, VS Code/CLI | No |
+| Kilo | Yes | Yes | Yes | Yes, configured VS Code/CLI or App | No |
 | ZCode | Paired title or CLI labels | Catalog only | Yes | Paired mode | No |
 | DSH | Yes | Yes | Yes | No | No |
 
@@ -132,3 +132,10 @@ Errors have `{error, code, retryable}`. Codes are `invalid-request`, `unauthoriz
 `not-found`, `unsupported-operation`, `busy`, `conflict`, `unavailable`, and
 `internal-error`. Old workers missing the common manifest/capabilities require
 upgrade. See [migration instructions](WORKER_MIGRATION.md).
+
+`capabilities.sessionListAuthoritative` is optional. When true, a successful `/sessions`
+response is the complete set the current worker configuration accepts. The bridge hides
+missing bindings in Web and skips their native message synchronization, without deleting
+bindings, archiving native history, or dissolving groups. Failed lists do not imply archive;
+Web retains the last confirmed roster. Workers without this flag retain existing offline
+binding behavior. Kilo advertises it for the exclusive configured client mode.

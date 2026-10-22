@@ -92,7 +92,7 @@ export interface ProfileConfig {
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
   dsh?: { binaryPath: string; args?: string[]; homeDir?: string };
-  kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean };
+  kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean; client?: 'vscode' | 'app' };
   zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string; remoteControlFile?: string };
   attachments: AttachmentConfig;
   comments: CommentConfig;
@@ -121,7 +121,7 @@ export interface CreateDefaultProfileConfigInput {
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
   dsh?: { binaryPath: string; args?: string[]; homeDir?: string };
-  kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean };
+  kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean; client?: 'vscode' | 'app' };
   zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string; remoteControlFile?: string };
   secrets?: SecretsConfig;
 }
@@ -158,7 +158,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissions?: Partial<PermissionConfig>;
     codex?: CodexConfig & { flags?: unknown };
     dsh?: { binaryPath?: unknown; args?: unknown; homeDir?: unknown };
-    kilo?: { binaryPath?: unknown; args?: unknown; dataHome?: unknown; editorSync?: unknown; preferredClient?: unknown };
+    kilo?: { binaryPath?: unknown; args?: unknown; dataHome?: unknown; editorSync?: unknown; client?: unknown; preferredClient?: unknown };
     zcode?: { binaryPath?: unknown; args?: unknown; dataDir?: unknown; modelConfigPath?: unknown; remoteControlFile?: unknown };
     attachments?: Partial<AttachmentConfig>;
     comments?: unknown;
@@ -362,14 +362,16 @@ function normalizeZcode(input: { binaryPath?: unknown; args?: unknown; dataDir?:
   return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.dataDir ? { dataDir: input.dataDir as string } : {}), ...(input.modelConfigPath ? { modelConfigPath: input.modelConfigPath as string } : {}), ...(input.remoteControlFile ? { remoteControlFile: input.remoteControlFile as string } : {}) };
 }
 
-function normalizeKilo(input: { binaryPath?: unknown; args?: unknown; dataHome?: unknown; editorSync?: unknown; preferredClient?: unknown }): NonNullable<ProfileConfig['kilo']> {
+function normalizeKilo(input: { binaryPath?: unknown; args?: unknown; dataHome?: unknown; editorSync?: unknown; client?: unknown; preferredClient?: unknown }): NonNullable<ProfileConfig['kilo']> {
   if (typeof input.binaryPath !== 'string' || !input.binaryPath.trim() ||
       (input.args !== undefined && (!Array.isArray(input.args) || !input.args.every(v => typeof v === 'string'))) ||
       (input.dataHome !== undefined && (typeof input.dataHome !== 'string' || !input.dataHome.trim())) ||
       (input.editorSync !== undefined && typeof input.editorSync !== 'boolean') ||
+      (input.client !== undefined && input.client !== 'vscode' && input.client !== 'app') ||
       (input.preferredClient !== undefined && input.preferredClient !== 'vscode' && input.preferredClient !== 'desktop')) throw new Error('Invalid kilo configuration');
   return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.dataHome ? { dataHome: input.dataHome as string } : {}),
     ...(input.editorSync !== undefined ? { editorSync: input.editorSync as boolean } : {}),
+    ...(input.client !== undefined ? { client: input.client as 'vscode' | 'app' } : {}),
  };
 }
 

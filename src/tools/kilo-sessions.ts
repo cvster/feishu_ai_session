@@ -14,7 +14,7 @@ export class KiloSessionProvider implements ToolSessionOperations {
     try {
       const rows = await client.request('GET', '/experimental/session?limit=10000');
       if (!Array.isArray(rows)) throw new Error('Kilo 会话列表格式不兼容');
-      return rows.filter(row => !row.parentID && !row.metadata?.['kilo-desktop'] && typeof row.directory === 'string').map(row => ({
+      return rows.filter(row => !row.parentID && !!row.metadata?.['kilo-desktop'] === (this.options.client === 'app') && typeof row.directory === 'string').map(row => ({
         nativeId: kiloSessionId(row.id), name: row.title, cwd: row.directory,
         createdAtMs: row.time.created, updatedAtMs: row.time.updated, archived: !!row.time.archived,
       }));
@@ -55,6 +55,9 @@ export class KiloSessionProvider implements ToolSessionOperations {
       const result = await client.request('POST', `/session/${id}/fork`, {}, source.directory);
       const nativeId = kiloSessionId(result.id);
       if (nativeId === id || result.directory !== source.directory) throw new Error('Kilo 返回了不匹配的复制会话');
+      if (source.metadata?.['kilo-desktop'] && !result.metadata?.['kilo-desktop']) {
+        await client.request('PATCH', `/session/${nativeId}`, { metadata: { ...result.metadata, 'kilo-desktop': source.metadata['kilo-desktop'] } }, source.directory);
+      }
       return { nativeId, name: result.title, cwd: result.directory };
     } finally { await client.close(); }
   }

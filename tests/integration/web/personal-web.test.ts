@@ -30,12 +30,12 @@ import { capabilityForTool } from '../../../src/agent/capability';
 import type { RunPolicyAllow } from '../../../src/policy/run-policy';
 import type { WebConfig } from '../../../src/web/config';
 
-async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}) {
+async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}, authoritative = false) {
   const native = { nativeId: 'native', name: 'AA-web', cwd: '/project', createdAtMs: 1, updatedAtMs: 2, archived: false };
   const conversation = { id: 'native', name: native.name, cwd: native.cwd, archived: false, turns: [{ id: 'desktop-1', input: '来自桌面', bridge: false,
     createdAtMs: 10, state: reduce(reduce(initialState, { type: 'text', delta: '原生回答' }), { type: 'done', terminationReason: 'normal' }) }] };
   const copies: typeof native[] = [];
-  const provider = { list: async () => [native, ...copies], nativeNames: true, conversation: vi.fn(async () => conversation),
+  const provider = { listAuthoritative: authoritative, list: vi.fn(async () => [native, ...copies]), nativeNames: true, conversation: vi.fn(async () => conversation),
     history: async () => undefined, rename: async (_id: string, name: string) => { native.name = name; }, archive: vi.fn(async () => { native.archived = true; }),
     fork: vi.fn(async () => { const copy = { ...native, nativeId: 'native-fork', name: 'AA-web（分叉）' }; copies.push(copy); return copy; }) };
   const h = await fixture(tool, provider);
@@ -385,4 +385,53 @@ it('copies through the native worker, binds one new group, preserves its real ma
   expect(notifications).toHaveBeenCalledTimes(2);
   expect(h.send).toHaveBeenCalledWith('oc_copy', { cardId: 'card' }, undefined);
   expect(await h.service.control(id, fork.action)).toEqual(result); expect(h.provider.fork).toHaveBeenCalledOnce(); expect(chatCreate).toHaveBeenCalledOnce();
+});
+
+it('persists favorites across restarts and scopes them to the owner and stable binding identity', async () => {
+  const h = await harness(), row = (await h.service.list())[0]!;
+  expect(row.favorite).toBe(false);
+  const response = await h.request('/api/sessions/' + row.id + '/favorite', { favorite: true });
+  expect(response.status).toBe(200); expect(await response.json()).toEqual({ favorite: true });
+  const restarted = h.makeService(); await restarted.load(); expect((await restarted.list())[0]!.favorite).toBe(true);
+  h.controls.botOwnerId = 'ou_other'; expect((await restarted.list())[0]!.favorite).toBe(false);
+  await restarted.favorite(row.id, true); await restarted.favorite(row.id, false);
+  h.controls.botOwnerId = 'ou_owner'; expect((await restarted.list())[0]!.favorite).toBe(true);
+  expect((await h.request('/api/sessions/' + row.id + '/favorite', { favorite: 'yes' })).status).toBe(400);
+  expect((await h.request('/api/sessions/' + '0'.repeat(64) + '/favorite', { favorite: true })).status).toBe(404);
+  h.bindings.set('oc_group', { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'replacement' });
+  expect((await restarted.list())[0]!.favorite).toBe(false);
+  await expect(restarted.favorite(row.id, true)).rejects.toMatchObject({ status: 404 });
+  expect(h.create).not.toHaveBeenCalled(); expect(h.calls).toHaveLength(0);
+});
+it('allows favoriting an offline binding without submitting work', async () => {
+  const h = await harness(); await h.service.list();
+  vi.spyOn(h.client, 'health').mockRejectedValue(Error('offline'));
+  const offline = h.makeService(); await offline.load(); const row = (await offline.list())[0]!;
+  expect(row.online).toBe(false); await offline.favorite(row.id, true);
+  expect((await offline.list())[0]!.favorite).toBe(true); expect(h.create).not.toHaveBeenCalled();
+});
+it('hides bindings excluded by an authoritative worker roster and skips their native synchronization without archiving', async () => {
+  const h = await harness('kilo', '127.0.0.1', {}, true); h.provider.list.mockResolvedValue([]);
+  const service = h.makeService(); await service.load();
+  expect(await service.list()).toEqual([]); expect(await h.client.sessionAvailable('native')).toBe(false);
+  const read = vi.fn();
+  const sync = await startNativeTurnSync({ toolId: 'kilo', displayName: 'Generic', channel: h.channel, controls: h.controls,
+    catalog: h.catalog, sourceId: h.client.sourceId, statePath: join(h.dir, 'excluded-sync.json'), intervalMs: 60_000,
+    available: id => h.client.sessionAvailable(id), reader: { read, close: async () => {} } });
+  try { expect(read).not.toHaveBeenCalled(); expect(h.bindings.get('oc_group')).toBeDefined(); expect(h.catalog.isScopeArchived('oc_group')).toBe(false); } finally { await sync.stop(); }
+  const failed = vi.spyOn(h.client, 'health').mockRejectedValue(Error('offline'));
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 16_000);
+  try { expect(await service.list()).toEqual([]); } finally { failed.mockRestore(); clock.mockRestore(); }
+});
+
+it('publishes favorite changes to other Web clients via SSE without submitting a message', async () => {
+  const h = await harness(), id = (await h.service.list())[0]!.id;
+  const response = await fetch(h.web.url + '/api/events', { signal: AbortSignal.timeout(5000) });
+  const reader = response.body!.getReader(); let text = '';
+  try {
+    while (!text.includes('"favorite":false')) text += new TextDecoder().decode((await reader.read()).value);
+    expect((await h.request('/api/sessions/' + id + '/favorite', { favorite: true })).status).toBe(200);
+    while (!text.includes('"favorite":true')) text += new TextDecoder().decode((await reader.read()).value);
+    expect(text).toContain('"favorite":true'); expect(h.enqueue).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
+  } finally { await reader.cancel(); }
 });

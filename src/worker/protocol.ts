@@ -13,6 +13,8 @@ export interface WorkerCapabilities {
   conversation?: boolean;
   questions?: boolean;
   nativeSessionNames?: boolean;
+  /** Successful list is the complete set accepted by this worker's current configuration. */
+  sessionListAuthoritative?: boolean;
 }
 export interface WorkerManifest {
   label: string;
@@ -46,6 +48,7 @@ export interface WorkerSessionHistory {
 }
 export interface WorkerSessionService {
   list(): Promise<ToolSession[]>;
+  listAuthoritative?: boolean;
   history(nativeId: string): Promise<WorkerSessionHistory | undefined>;
   rename?(nativeId: string, name: string, cwd?: string): Promise<void>;
   archive?(nativeId: string): Promise<void>;

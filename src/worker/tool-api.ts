@@ -22,6 +22,7 @@ export function workerCapabilities(api: Pick<WorkerToolApi, 'agent' | 'sessions'
       archive: !!api.sessions?.archive, fork: !!api.sessions?.fork },
     nativeTurnStop: typeof api.agent.stopNativeTurn === 'function' &&
       (!('desktopRemoteEnabled' in api.agent) || api.agent.desktopRemoteEnabled === true),
+    ...(api.sessions?.listAuthoritative ? { sessionListAuthoritative: true } : {}),
     conversation: typeof api.sessions?.conversation === 'function',
     questions: typeof api.sessions?.questions === 'function' && typeof api.sessions?.answer === 'function',
     nativeSessionNames: api.sessions?.nativeNames ?? !!api.sessions?.rename };

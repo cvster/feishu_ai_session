@@ -42,7 +42,7 @@ lark-channel-bridge web disable --profile <profile>
 
 - `apps/bridge-web/page.ts`：无构建依赖的原生 DOM 页面，随 CLI 打包，不执行工具命令。答案以安全文本和代码块展示，不执行消息里的 HTML；不展示思考或工具详情。
 - `src/web/server.ts`：127.0.0.1 本机免登录、其他地址 cookie 登录、Host/Origin 检查、JSON 请求限制、登录限流和 SSE。多个浏览器共享按会话的观察结果，慢连接会断开并重新读取快照。
-- `src/web/service.ts`：统一 `list/read/send/rename/control`，依据绑定、账户和 worker capabilities 授权。会话身份包含 profile、应用、群、工具、sourceId 和 nativeId，页面持有其摘要。归档/共享/辅助/话题群被排除，已失效群沿用现有群清理流程。读取失败不会被当成归档。
+- `src/web/service.ts`：统一 `list/read/send/rename/control/favorite`，依据绑定、账户和 worker capabilities 授权。会话身份包含 profile、应用、群、工具、sourceId 和 nativeId，页面持有其摘要。归档/共享/辅助/话题群被排除，已失效群沿用现有群清理流程。读取失败不会被当成归档。
 - `src/bot/intake-queue.ts`：飞书和 Web 共用持久化收件箱、去重和 PendingQueue。执行、会话锁、回复卡片、完成时艾特所有者沿用原桥接路径。网页文本中的 `/exit` 等仅作为模型输入。
 - worker：读取原生记录、处理执行及工具协议。Claude 和 Dsh 补充了 conversation；Kilo 补充原生轮次与 job 的关联，Zcode 通过已使用的原生输入元数据关联 job。桥接仅接受可由 worker journal 验证的 job 关联。
 
@@ -73,3 +73,9 @@ SSE 每秒共享读取订阅中的会话；完成的 job 复用缓存和事件�
 这些是隔离集成/浏览器验证。真实飞书群及真实模型的 Web autotest 尚未执行；代码交付不自动部署或重启生产服务。旧 worker 未提供新能力时，页面会保留桥接聊天并提示原生对话读取不可用。
 
 侧边栏名称每 15 秒读取真实个人群名，独立于 worker 改名能力和旧绑定名称；飞书查询短暂失败时保留最近确认的群名，并将写入入口标为不可用。名称同步的正常检查也会回填旧绑定名称，即使原生会话和群已经同名。
+
+侧边栏开头固定提供“收藏 → 项目 → 会话”，同项目的不同工具会话汇总展示；原工具列表仍保留会话。
+每行显示取自 worker 名称的彩色工具徽标，以及亮起/取消收藏的星标。收藏按钮不切换或加载对话。
+`POST /api/sessions/:id/favorite` 显式设置布尔 `favorite`，重复设置幂等。收藏保存在桥接端
+`web-receipts.json`，按所有者和稳定会话身份隔离，刷新、重启和不同网页入口共用，SSE 同步状态。
+旧账本没有 `favorites` 字段时兼容读取；归档或失效绑定的收藏不再显示，不影响原历史。

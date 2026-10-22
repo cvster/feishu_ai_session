@@ -722,6 +722,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     nativeSyncs.set(tool.id, await startNativeTurnSync({
       channel, controls, catalog: sessionCatalog, toolId: tool.id, displayName: tool.label, sourceId: tool.sourceId,
       statePath: join(deps.appPaths.profileDir, `${tool.id}-native-turn-sync.json`),
+      ...(health.capabilities.sessionListAuthoritative ? { available: (id: string) => workerTool.client.sessionAvailable(id) } : {}),
       reader: { read: id => workerTool.client.conversation(id), close: async () => {},
         ...(health.capabilities.nativeTurnStop ? { stopTurn: async (id: string, turnId: string) => {
           const snapshot = await workerTool.client.conversation(id); return workerTool.client.stopNativeTurn(id, turnId, snapshot.cwd);

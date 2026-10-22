@@ -1,8 +1,9 @@
 # 统一 worker 迁移
 
 桥接只扫描当前 profile 的 `workers/*/endpoint.json`，调用统一 HTTP 接口。Codex
-也需要独立 worker；只用 Kilo 的部署无需安装 Codex。Kilo App/Desktop 已移除，
-保留 VS Code 插件及独立 CLI。旧 App 会话仍保留在原生数据库中，但不会列出或续聊。
+也需要独立 worker；只用 Kilo 的部署无需安装 Codex。Kilo worker 使用
+`options.client: "vscode" | "app"`，默认 `vscode`，两种模式互斥。
+仅列出和处理当前模式的会话；另一模式的绑定及原生历史保留。
 
 ## 配置与目录
 

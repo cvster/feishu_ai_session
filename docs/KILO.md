@@ -1,19 +1,19 @@
 # Kilo 接入
 
-Kilo 支持 VS Code 插件和独立 CLI，通过统一 worker 接入飞书。Kilo App/Desktop
-已移除：不会发现 App 后端，也不会列出或续聊带 `kilo-desktop` 标记的旧 App 会话；
-原生历史保留。可以只部署 Kilo，无需安装 Codex 或其他工具。
+Kilo 通过统一 worker 接入飞书，配置为 VS Code 插件或 App 两种互斥模式。
+默认插件模式只列出和处理插件/CLI 会话，App 模式只列出和处理 App 会话。
+其他模式的群绑定和原生历史保留，但不会在网页显示、扫描建群或同步内容。可以只部署 Kilo，无需安装 Codex 或其他工具。
 
 ## 本机准备
 
-先安装并登录官方 VS Code 扩展或 CLI。执行设置位于
+先安装并登录对应的官方 VS Code 扩展或 App。执行设置位于
 `profiles/<profile>/workers/kilo/config.json`：
 
 ```json
 {
   "version": 1,
   "toolId": "kilo",
-  "options": { "binaryPath": "kilo", "editorSync": true }
+  "options": { "binaryPath": "kilo", "editorSync": true, "client": "vscode" }
 }
 ```
 
@@ -25,6 +25,12 @@ Linux 默认启用 `editorSync`，连接同一 OS 用户、同一数据库且项
 VS Code 后端。多个同等候选会拒绝提交，已选后端断开后不会换后端重发。认证只在
 内存使用；不会写入配置或日志。没有匹配窗口、不支持 `/proc`、使用自定义启动参数
 时使用独立 CLI 后端。`editorSync: false` 始终使用独立后端。
+
+App 模式配置 `options.client: "app"`；切换模式需单独重启 Kilo worker。
+该模式只连接已启动、同用户且同数据库的官方 App 后端，绝不启动独立 CLI 或切换到插件。
+Linux 检查官方子进程与 App 父进程路径；没有合格后端时报告不可用。
+新建桥接会话前，需在 App 对应项目中已有一个会话以确定原生工作区，复制时保留工作区元数据。
+`client` 只接受 `vscode` 或 `app`，省略默认 `vscode`；两种模式均在读取消息和任何修改前核验原生来源。
 
 ## 启动和使用
 
