@@ -48,7 +48,7 @@ type CodexChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
 
 export class CodexAdapter implements AgentAdapter {
   readonly id = 'codex';
-  readonly displayName = 'Codex CLI';
+  readonly displayName = 'Codex';
 
   private readonly binary: string;
   private readonly profileStateDir: string;
@@ -85,7 +85,7 @@ export class CodexAdapter implements AgentAdapter {
   async checkAvailability(): Promise<AgentAvailability> {
     return checkAgentAvailability({
       agentId: 'codex',
-      agentName: 'Codex CLI',
+      agentName: this.displayName,
       command: this.binary,
       binaryPath: this.binary,
     });

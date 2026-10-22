@@ -33,7 +33,7 @@ describe('CodexAdapter prepareRun', () => {
       diagnostic: {
         code: 'agent-binary-not-found',
         agentId: 'codex',
-        agentName: 'Codex CLI',
+        agentName: 'Codex',
       },
     });
   });

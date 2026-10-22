@@ -14,7 +14,7 @@ export function zcodeWorkspace(cwd: string) {
 }
 /** The independent worker owns this connection; bridge restarts only detach observers. */
 export class ZcodeAdapter implements AgentAdapter {
-  readonly id = 'zcode'; readonly displayName = 'ZCode';
+  readonly id = 'zcode'; readonly displayName = 'Zcode';
   get desktopRemoteEnabled() { return !!this.options.remoteControlFile; }
   get desktopRemoteConfigId() { return this.options.remoteControlFile ? createHash('sha256').update(JSON.stringify([resolve(this.options.remoteControlFile), resolve(zcodeDesktopCredentialFile(this.options.modelConfigPath))])).digest('hex') : undefined; }
   constructor(readonly options: ZcodeOptions = {}) {}
@@ -22,12 +22,12 @@ export class ZcodeAdapter implements AgentAdapter {
     if (this.options.remoteControlFile) {
       try { await readZcodePairing(this.options.remoteControlFile); }
       catch {
-        const diagnostic: AgentPreflightDiagnostic = { code: 'agent-binary-not-readable', agentId: 'zcode', agentName: 'ZCode', command: 'desktop-remote', field: 'zcode.remoteControlFile' };
+        const diagnostic: AgentPreflightDiagnostic = { code: 'agent-binary-not-readable', agentId: 'zcode', agentName: this.displayName, command: 'desktop-remote', field: 'zcode.remoteControlFile' };
         return { ok: false as const, diagnostic, error: new AgentPreflightError(diagnostic, 'ZCode 远控配对文件不可用，请重新配对') };
       }
     }
     const command = zcodeCommand(this.options);
-    return checkAgentAvailability({ agentId: 'zcode', agentName: 'ZCode', command: command.binary, binaryPath: command.binary, args: [...command.args, '--version'] });
+    return checkAgentAvailability({ agentId: 'zcode', agentName: this.displayName, command: command.binary, binaryPath: command.binary, args: [...command.args, '--version'] });
   }
   async isAvailable(): Promise<boolean> { return (await this.checkAvailability()).ok; }
   listModels(options: { cwd?: string } = {}) {

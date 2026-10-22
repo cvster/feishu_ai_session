@@ -1,10 +1,10 @@
 /** Static provider manifest. Unknown tools are rejected, never treated as another provider. */
 export const TOOL_DEFINITIONS = {
   codex: { label: 'Codex', backend: 'worker', nativeField: 'threadId', fork: true, reasoning: true, sessionKind: 'codex-thread', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
-  claude: { label: 'Claude Code', backend: 'worker', nativeField: 'sessionId', fork: false, reasoning: true, sessionKind: 'claude-session', promptInjection: 'none', nativeHistory: true, legacyMarkers: ['__claude_cb'] },
-  dsh: { label: 'DeepSeek Harness', backend: 'worker', nativeField: 'sessionId', fork: true, reasoning: true, sessionKind: 'dsh-session', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
+  claude: { label: 'Claude', backend: 'worker', nativeField: 'sessionId', fork: false, reasoning: true, sessionKind: 'claude-session', promptInjection: 'none', nativeHistory: true, legacyMarkers: ['__claude_cb'] },
+  dsh: { label: 'Dsh', backend: 'worker', nativeField: 'sessionId', fork: true, reasoning: true, sessionKind: 'dsh-session', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
   kilo: { label: 'Kilo', backend: 'worker', nativeField: 'sessionId', fork: true, reasoning: true, sessionKind: 'kilo-session', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
-  zcode: { label: 'ZCode', backend: 'worker', nativeField: 'sessionId', fork: true, reasoning: true, sessionKind: 'zcode-session', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
+  zcode: { label: 'Zcode', backend: 'worker', nativeField: 'sessionId', fork: true, reasoning: true, sessionKind: 'zcode-session', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
 } as const;
 export type BuiltinToolId = keyof typeof TOOL_DEFINITIONS;
 export type ToolId = string;

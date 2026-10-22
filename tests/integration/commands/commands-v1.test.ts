@@ -207,7 +207,7 @@ describe('Bridge command contracts', () => {
     await expect(h.run('打开控制台')).resolves.toBe(true);
 
     const panel = JSON.stringify(lastContent(h.channel));
-    expect(panel).toContain('Claude Code 任务控制台');
+    expect(panel).toContain('Claude 任务控制台');
     expect(panel).toContain('panel.new');
     expect(panel).toContain('config');
     expect(panel).toContain('ws.list');
@@ -434,7 +434,7 @@ describe('Bridge command contracts', () => {
     await expect(h.run('/panel new-confirm')).resolves.toBe(true);
     expect(h.sessions.getRaw('chat-1')).toBeUndefined();
     expect(h.workspaces.cwdFor('chat-1')).toBe(await realpath(h.tmp.workspace));
-    expect(JSON.stringify(lastContent(h.channel))).toContain('Claude Code 任务控制台');
+    expect(JSON.stringify(lastContent(h.channel))).toContain('Claude 任务控制台');
   });
 
   it('increments a submitted default name if that group already exists', async () => {

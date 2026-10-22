@@ -11,7 +11,7 @@ export function dshPermission(mode: AgentRunOptions['accessMode'] | AgentRunOpti
 }
 const textOf = (content: any, type = 'text'): string => Array.isArray(content) ? content.filter(b => b.type === type).map(b => b.text ?? '').join('') : '';
 export class DshAdapter implements AgentAdapter {
-  readonly id = 'dsh'; readonly displayName = 'DeepSeek Harness';
+  readonly id = 'dsh'; readonly displayName = 'Dsh';
   constructor(readonly options: DshOptions = {}) {}
   checkAvailability() {
     const command = dshCommand(this.options);

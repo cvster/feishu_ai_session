@@ -471,5 +471,5 @@ async function maybeResolveProfileRuntime(
 
 function agentDisplay(agentKind: ProcessEntry['agentKind']): { id: string; displayName: string } {
   const kind = agentKind ?? 'claude';
-  return { id: kind, displayName: kind === 'codex' ? 'Codex CLI' : toolDefinition(kind).label };
+  return { id: kind, displayName: toolDefinition(kind).label };
 }

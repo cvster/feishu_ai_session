@@ -177,7 +177,7 @@ describe('profile-aware service commands', () => {
     expect(mocks.adapter.install).toHaveBeenCalled();
     expect(mocks.adapter.start).toHaveBeenCalled();
     expect(lines).toContain(
-      '✓ 已启动  bot: Codex Bot (cli_codex)  agent: Codex CLI (codex)  进程: p1',
+      '✓ 已启动  bot: Codex Bot (cli_codex)  agent: Codex (codex)  进程: p1',
     );
   });
 

@@ -413,7 +413,7 @@ export function newChatCreationCard(
   defaultCwd?: string,
   model = 'gpt-5.6-sol',
   reasoningEffort: string = 'high',
-  tools = [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
+  tools = [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude' }],
   defaultTool = tools[0]?.id,
 ): object {
   return {

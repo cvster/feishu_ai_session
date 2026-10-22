@@ -26,7 +26,7 @@ type ClaudeChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
 
 export class ClaudeAdapter implements AgentAdapter {
   readonly id = 'claude';
-  readonly displayName = 'Claude Code';
+  readonly displayName = 'Claude';
 
   private readonly binary: string;
   private readonly larkChannel: LarkChannelEnvContext | undefined;
@@ -43,7 +43,7 @@ export class ClaudeAdapter implements AgentAdapter {
   async checkAvailability(): Promise<AgentAvailability> {
     return checkAgentAvailability({
       agentId: 'claude',
-      agentName: 'Claude Code',
+      agentName: this.displayName,
       command: this.binary,
       binaryPath: this.binary,
     });

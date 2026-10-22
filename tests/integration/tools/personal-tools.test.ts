@@ -89,11 +89,11 @@ describe('personal multi-tool workflows', () => {
       agent: { ...h.registry.get('claude').agent, id, isAvailable: async () => id === 'dsh' ? Promise.reject(Error('offline')) : id === 'kilo' }, listSessions: async () => [] });
     await runCommandHandler('fork', '', h.context(h.groups[0]!.id, 'group'));
     expect(copyButton(h, 'Codex', 'fork.same')).toMatchObject({ cmd: 'fork.same' });
-    expect(copyButton(h, 'Claude Code')).toMatchObject({ cmd: 'fork.to' });
+    expect(copyButton(h, 'Claude')).toMatchObject({ cmd: 'fork.to' });
     expect(copyButton(h, 'Kilo')).toMatchObject({ cmd: 'fork.to' });
     expect(copyButton(h, 'Codex')).toMatchObject({ cmd: 'fork.to' });
     expect(copyButton(h, 'Codex').arg).not.toBe(copyButton(h, 'Codex', 'fork.same').arg);
-    expect(copyButton(h, 'ZCode')).toBeUndefined(); expect(copyButton(h, 'DeepSeek Harness')).toBeUndefined();
+    expect(copyButton(h, 'Zcode')).toBeUndefined(); expect(copyButton(h, 'Dsh')).toBeUndefined();
     const card = vi.mocked(h.channel.createCard).mock.calls.at(-1)![0] as any;
     expect(card.body.elements.map((row: any) => row.columns[0].elements[0].content)).toEqual(['复制会话：', '在新工具中创建会话：']);
     expect(h.groups).toHaveLength(2);
@@ -116,7 +116,7 @@ describe('personal multi-tool workflows', () => {
     const h = await harness(); await h.sync();
     const source = h.groups[0]!.id; const before = h.bindings.get(source);
     await runCommandHandler('fork', '', h.context(source, 'group'));
-    const value = copyButton(h, 'Claude Code');
+    const value = copyButton(h, 'Claude');
     await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group'));
     expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
     expect(h.workspaces.cwdFor(target)).toBe(h.dir);
@@ -141,13 +141,13 @@ describe('personal multi-tool workflows', () => {
   it('offers same-tool creation with a read button when the original tool has no native fork', async () => {
     const h = await harness(); await h.sync(); const group = h.groups[1]!.id;
     await runCommandHandler('fork', '', h.context(group, 'group'));
-    const value = copyButton(h, 'Claude Code', 'fork.same');
+    const value = copyButton(h, 'Claude', 'fork.same');
     await runCommandHandler('fork', `same ${value.arg}`, h.context(group, 'group'));
     expect(h.groups).toHaveLength(3); expect(h.bindings.get(h.groups[2]!.id)).toMatchObject({ toolId: 'claude', nativeCreated: false, copiedFrom: { toolId: 'claude' } });
   });
   it('rejects a forwarded copy choice, changed source binding, and an alternative that became unavailable', async () => {
     const h = await harness(); await h.sync(); const group = h.groups[0]!.id;
-    await runCommandHandler('fork', '', h.context(group, 'group')); const value = copyButton(h, 'Claude Code');
+    await runCommandHandler('fork', '', h.context(group, 'group')); const value = copyButton(h, 'Claude');
     const stranger = h.context(group, 'group'); stranger.msg.senderId = 'ou_other';
     await runCommandHandler('fork', `to ${value.arg}`, stranger); expect(h.groups).toHaveLength(2);
     h.registry.get('claude').agent.isAvailable = async () => false;
@@ -158,7 +158,7 @@ describe('personal multi-tool workflows', () => {
   });
   it('does not submit a history read when the persisted source account changes or history is unavailable', async () => {
     const h = await harness(); await h.sync(); const group = h.groups[0]!.id;
-    await runCommandHandler('fork', '', h.context(group, 'group')); const value = copyButton(h, 'Claude Code');
+    await runCommandHandler('fork', '', h.context(group, 'group')); const value = copyButton(h, 'Claude');
     await runCommandHandler('fork', `to ${value.arg}`, h.context(group, 'group'));
     const target = h.groups[2]!.id; const source = h.bindings.get(target)!.copiedFrom!;
     const submit = vi.fn(async () => {}); h.controls.submitMessage = submit;
@@ -187,7 +187,7 @@ describe('personal multi-tool workflows', () => {
   it('imports same name and UUID from both tools, stays idempotent, and resumes Claude with its original ID and cwd', async () => {
     const h = await harness(); await h.sync(); await h.sync();
     expect(h.groups).toHaveLength(2);
-    expect(h.groups.map(g => g.name)).toEqual(['AA-同名', 'AA-同名（Claude Code）']);
+    expect(h.groups.map(g => g.name)).toEqual(['AA-同名', 'AA-同名（Claude）']);
     expect(h.catalog.entries().filter(e => e.status === 'active').map(e => [e.agentId, e.threadId ?? e.sessionId]))
       .toEqual([['codex', 'same-uuid'], ['claude', 'same-uuid']]);
     const ctx = await routeCommandContext(h.context(h.groups[1]!.id, 'group'));
@@ -218,7 +218,7 @@ describe('personal multi-tool workflows', () => {
     await runCommandHandler('new', 'chat form', first);
     expect(h.bindings.get(h.groups[0]!.id)?.toolId).toBe('claude');
     expect(h.controls.profileConfig.agentKind).toBe('codex');
-    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('Claude Code');
+    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('Claude');
     await runCommandHandler('new', 'chat Codex task', h.context());
     expect(h.bindings.get(h.groups[1]!.id)?.toolId).toBe('codex');
     expect(() => h.bindings.set(h.groups[0]!.id, { toolId: 'codex', sourceId: 'codex-home' })).toThrow('不能切换');
