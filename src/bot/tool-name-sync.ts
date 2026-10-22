@@ -2,6 +2,8 @@ import type { Controls } from '../commands';
 import type { LarkChannel } from '@larksuite/channel';
 import type { SessionCatalog } from '../session/catalog';
 import type { AgentTool } from '../tools/types';
+import { join } from 'node:path';
+import { DurableAgentAdapter } from '../worker/adapter';
 import { SessionNameSync } from './thread-name';
 import { log } from '../core/logger';
 
@@ -17,12 +19,18 @@ export async function startToolNameSync(options: {
       !binding.linkedSource && !binding.auxiliaryWorkgroup && !controls.auxiliary?.isAuxiliary(scope) &&
       !catalog.isScopeArchived(scope) && !controls.toolBindings!.isArchived(tool.id, tool.sourceId, id);
   };
+  const ownedEntries = () => catalog.entries().filter(row => row.status === 'active' && row.agentId === tool.id &&
+    row.sourceId === tool.sourceId && row.botAppId === controls.profileConfig.accounts.app.id &&
+    /^oc_[A-Za-z0-9]+$/.test(row.scopeId) && !!(row.sessionId ?? row.threadId) && active(row.scopeId, (row.sessionId ?? row.threadId)!));
+  // Two personal groups sharing a native session must not fight over its title.
+  const exclusive = (scope: string, id: string) => active(scope, id) &&
+    ownedEntries().filter(row => (row.sessionId ?? row.threadId) === id).length === 1;
   const sync = new SessionNameSync({ channel: options.channel, toolId: tool.id, sourceId: tool.sourceId,
     appId: controls.profileConfig.accounts.app.id, statePath: options.statePath,
     knownChats: () => controls.knownChats ?? [],
     renameSession: (id, name) => tool.sessions!.rename(id, name),
     onSynchronized: async (scope, id, name) => {
-      if (!active(scope, id)) return;
+      if (!exclusive(scope, id)) return;
       const binding = controls.toolBindings!.get(scope)!;
       if (binding.name !== name) { controls.toolBindings!.set(scope, { ...binding, name }); await controls.toolBindings!.flush(); }
     } });
@@ -32,13 +40,13 @@ export async function startToolNameSync(options: {
     if (stopped) return Promise.resolve();
     if (running) return running;
     running = (async () => {
-      const entries = catalog.entries().filter(row => row.status === 'active' && row.agentId === tool.id && !!(row.sessionId ?? row.threadId) && active(row.scopeId, (row.sessionId ?? row.threadId)!));
+      const entries = ownedEntries().filter(row => exclusive(row.scopeId, (row.sessionId ?? row.threadId)!));
       if (!entries.length || !await options.ready() || stopped) return;
       const wanted = new Set(entries.map(row => row.sessionId ?? row.threadId));
       for (const row of await tool.listSessions()) {
         if (stopped) return;
         if (!row.archived && wanted.has(row.nativeId))
-          await sync.observe({ id: row.nativeId, name: row.name }, entries, scope => !stopped && active(scope, row.nativeId));
+          await sync.observe({ id: row.nativeId, name: row.name }, entries, scope => !stopped && exclusive(scope, row.nativeId));
       }
     })().catch(error => {
       if (Date.now() - lastWarning > 60_000) { lastWarning = Date.now(); log.warn('session', 'native-name-poll-failed', { toolId: tool.id, error: String(error) }); }
@@ -48,4 +56,31 @@ export async function startToolNameSync(options: {
   const timer = setInterval(() => { void tick(); }, options.intervalMs ?? 10_000); timer.unref();
   void tick();
   return { tick, async stop() { stopped = true; clearInterval(timer); await running; } };
+}
+
+/** Kilo and Codex names are observed by their existing native turn readers. */
+export async function startWorkerNameSync(options: {
+  channel: LarkChannel; controls: Controls; catalog: SessionCatalog; profileDir: string; intervalMs?: number;
+}) {
+  const handles: Awaited<ReturnType<typeof startToolNameSync>>[] = [];
+  for (const tool of options.controls.toolRegistry?.all() ?? []) {
+    if (!['claude', 'dsh', 'zcode'].includes(tool.id) || !tool.sessions || !(tool.agent instanceof DurableAgentAdapter)) continue;
+    // CLI-mode ZCode labels are local aliases, not native desktop titles.
+    if (tool.id === 'zcode' && !options.controls.profileConfig.zcode?.remoteControlFile) continue;
+    const agent = tool.agent;
+    try {
+      handles.push(await startToolNameSync({ ...options, tool,
+        statePath: join(options.profileDir, `${tool.id}-name-sync.json`),
+        ready: async () => {
+          await agent.prepareRun();
+          const health = await agent.client.health();
+          if (health.capabilities) return health.capabilities.sessions.list && health.capabilities.sessions.rename;
+          return tool.id === 'zcode' && health.zcodeSessionNames === true;
+        } }));
+    } catch (error) { log.warn('session', 'name-sync-disabled', { toolId: tool.id, error: String(error) }); }
+  }
+  return {
+    async tick() { await Promise.all(handles.map(handle => handle.tick())); },
+    async stop() { await Promise.all(handles.map(handle => handle.stop())); },
+  };
 }

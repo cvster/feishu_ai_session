@@ -1,4 +1,4 @@
-import { startToolNameSync } from './tool-name-sync';
+import { startWorkerNameSync } from './tool-name-sync';
 import { toolDefinition, workerInboxName, workerRepliesName, type ToolId } from '../tools/definitions';
 import { auxiliaryLinkError } from './auxiliary-membership';
 import { AuxiliaryApprovals } from './auxiliary-approvals';
@@ -685,15 +685,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       : undefined;
 
   const zcodeTool = controls.toolRegistry?.all().find(tool => tool.id === 'zcode');
-  let zcodeNameSync: Awaited<ReturnType<typeof startToolNameSync>> | undefined;
-  if (zcodeTool?.agent instanceof DurableAgentAdapter && zcodeTool.sessions && controls.profileConfig.zcode?.remoteControlFile && sessionCatalog && deps.appPaths?.profileDir) {
-    const workerAgent = zcodeTool.agent; const worker = workerAgent.client;
-    try {
-      zcodeNameSync = await startToolNameSync({ channel, controls, catalog: sessionCatalog, tool: zcodeTool,
-        statePath: join(deps.appPaths.profileDir, 'zcode-name-sync.json'),
-        ready: async () => { await workerAgent.prepareRun(); return (await worker.health()).zcodeSessionNames === true; } });
-    } catch (error) { log.warn('session', 'zcode-name-sync-disabled', { error: String(error) }); }
-  }
+  const workerNameSync = sessionCatalog && deps.appPaths?.profileDir
+    ? await startWorkerNameSync({ channel, controls, catalog: sessionCatalog, profileDir: deps.appPaths.profileDir })
+    : undefined;
 
   let zcodeTurnSync: Awaited<ReturnType<typeof startNativeTurnSync>> | undefined;
   if (zcodeTool && sessionCatalog && deps.appPaths?.profileDir) {
@@ -713,7 +707,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const kiloTool = controls.toolRegistry?.all().find(tool => tool.id === 'kilo');
   let kiloTurnSync: Awaited<ReturnType<typeof startKiloTurnSync>> | undefined;
   if (kiloTool?.agent instanceof DurableAgentAdapter && sessionCatalog && deps.appPaths?.profileDir) {
-    const worker = kiloTool.agent.client, options = controls.profileConfig.kilo;
+    const workerAgent = kiloTool.agent, worker = workerAgent.client, options = controls.profileConfig.kilo;
     let kiloNameSync: SessionNameSync | undefined;
     if (kiloTool.sessions) {
       const sessions = kiloTool.sessions;
@@ -733,7 +727,13 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       kiloTurnSync = await startKiloTurnSync({ channel, controls, catalog: sessionCatalog, sourceId: kiloTool.sourceId,
         nameSync: kiloNameSync,
         statePath: join(deps.appPaths.profileDir, 'kilo-turn-sync.json'),
-        reader: new KiloNativeConversationReader({ binary: options?.binaryPath, args: options?.args, dataHome: options?.dataHome, editorSync: options?.editorSync, preferredClient: options?.preferredClient }),
+        reader: new KiloNativeConversationReader({ binary: options?.binaryPath, args: options?.args, dataHome: options?.dataHome, editorSync: options?.editorSync, preferredClient: options?.preferredClient },
+          async (id, turnId, cwd) => {
+            await workerAgent.prepareRun();
+            // Select compatibility before writing; a failed stop never falls back.
+            if ((await worker.health()).capabilities?.nativeTurnStop !== true) return undefined;
+            return worker.stopNativeTurn(id, turnId, cwd);
+          }),
         ready: async () => (await worker.health()).kiloNativeInputOrigin === true });
     } catch (error) { log.warn('kilo-turn-sync', 'disabled', { error: String(error) }); }
   }
@@ -860,7 +860,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       await codexTurnSync?.stop();
       await kiloTurnSync?.stop();
       await zcodeTurnSync?.stop();
-      await zcodeNameSync?.stop();
+      await workerNameSync?.stop();
       controls.nativeReplySync = undefined;
       controls.codexReplySync = undefined;
       controls.refreshMirroredRunCard = undefined;

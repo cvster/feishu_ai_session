@@ -69,12 +69,45 @@ JSONL tail. Clients cannot supply a file path to read.
 | Worker | Native session rename | Native archive | Fork | Native desktop turn stop |
 | --- | --- | --- | --- | --- |
 | Claude | Writes CLI custom-title metadata | Unsupported; bridge catalog owns archival | Unsupported | Unsupported |
-| Kilo | Native API | Native API | Native API | Unsupported by the worker adapter; existing bridge mirror retains its native reader |
+| Kilo | Native API | Native API | Native API | Available; validates cwd, current turn and native input origin |
 | ZCode | Native title in paired mode; local labels in CLI mode | Unsupported; bridge catalog owns archival | Native fork | Available in paired mode |
 | DSH | Native API | Native API | Native API | Unsupported |
 
 All workers expose model discovery when their adapter supplies it. Supporting
 the same interface does not imply inventing a native feature absent from a tool.
+
+## Group and native session names
+
+Personal whole-group bindings synchronize names in both directions:
+
+| Tool | Automatic name synchronization | Observation |
+| --- | --- | --- |
+| Codex | Yes, in Codex primary profiles | Native thread reader |
+| Kilo | Yes | Native conversation reader |
+| Claude | Yes, with worker session list/rename capabilities | Native metadata polling through worker API |
+| DSH | Yes, with worker session list/rename capabilities | Native metadata polling through worker API |
+| ZCode | Yes, in paired desktop mode | Native metadata polling through worker API |
+
+Metadata polling runs every 10 seconds without submitting model input. The
+first observation adopts the live group name; later edits flow from either
+side, with the group winning simultaneous changes. Baselines survive restarts
+in `<tool>-name-sync.json`. Failed reads or renames leave the baseline intact
+for a later retry, including worker `busy` rejections.
+
+Archived, topic, FF and auxiliary bindings are excluded, as are other accounts,
+bots and data sources. The metadata pollers and Kilo reader pause name
+synchronization when multiple personal groups own the same native session.
+CLI-mode ZCode
+labels remain local aliases. Claude native archive/fork and Claude/DSH desktop
+turn observation remain unsupported; name synchronization does not add them.
+
+Kilo mirror stop requests use the common worker turn-stop route when advertised.
+For installed workers without that capability, compatibility is selected before
+the write and uses the existing native reader. A false stop result or a lost
+acknowledgement never triggers a second stop via another transport. The worker
+rereads the native session and refuses archived, completed, bridge-origin,
+stale-turn or mismatched-directory requests; closing its reader detaches from
+attached editor/desktop services.
 
 ## Concurrency, durability and upgrades
 

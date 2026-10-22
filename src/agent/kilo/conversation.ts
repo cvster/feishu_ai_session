@@ -1,6 +1,7 @@
 import type { NativeConversationReader, NativeConversationSnapshot, NativeConversationTurn } from '../native-conversation';
 import { initialState, projectNameFromCwd, reduce, startRunRuntime } from '../../card/run-state';
 import { KiloClient, kiloSessionId, type KiloOptions } from './client';
+import { resolve } from 'node:path';
 
 // Supported native text-part metadata stays outside the model prompt. Do not
 // guess provenance from ID shape or insert a marker into the user's text.
@@ -63,7 +64,9 @@ export function projectKiloConversation(info: any, rows: any[], busy: boolean): 
 /** Read bound native sessions only. Cached clients detach without stopping UI processes. */
 export class KiloNativeConversationReader implements KiloConversationReader {
   private clients = new Map<string, KiloClient>();
-  constructor(private options: KiloOptions = {}) {}
+  constructor(private options: KiloOptions = {},
+    // Undefined selects an installed older worker's direct path before writing.
+    private workerStop?: (id: string, turnId: string, cwd: string) => Promise<boolean | undefined>) {}
   private client(id: string): KiloClient {
     kiloSessionId(id);
     let client = this.clients.get(id);
@@ -83,9 +86,14 @@ export class KiloNativeConversationReader implements KiloConversationReader {
       this.clients.delete(id); await client.close(); throw error;
     }
   }
-  async stopTurn(id: string, turnId: string): Promise<boolean> {
+  async stopTurn(id: string, turnId: string, cwd?: string): Promise<boolean> {
     const snapshot = await this.read(id), current = snapshot.turns.at(-1);
+    if (cwd !== undefined && resolve(cwd) !== resolve(snapshot.cwd)) return false;
     if (snapshot.archived || current?.id !== turnId || current.bridge || current.state.terminal !== 'running') return false;
+    if (this.workerStop) {
+      const stopped = await this.workerStop(id, turnId, snapshot.cwd);
+      if (stopped !== undefined) return stopped;
+    }
     await this.client(id).request('POST', `/session/${id}/abort?scope=session`, undefined, snapshot.cwd);
     return true;
   }

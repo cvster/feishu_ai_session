@@ -1,10 +1,13 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types';
 import { fixture } from './fixture';
 import { wrapAuxiliaryPrompt } from '../../../src/bot/auxiliary-groups';
 import { KiloSessionProvider } from '../../../src/tools/kilo-sessions';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { kiloBridgeTextPart, KiloNativeConversationReader } from '../../../src/agent/kilo/conversation';
+import { startWorkerServer } from '../../../src/worker/server';
+import { WorkerClient } from '../../../src/worker/client';
 async function collect(h: Awaited<ReturnType<typeof fixture>>, options: Record<string, unknown> = {}) {
   const run = h.agent.run({ runId: 'one', cwd: h.root, prompt: '原样 <tag>\n第二行', ...options });
   const events: AgentEvent[] = []; for await (const e of run.events) events.push(e);
@@ -96,4 +99,44 @@ it('rejects an unavailable explicit variant before sending any input', async () 
   const h = await fixture(); const events = await collect(h, { sessionId: 'ses_source', reasoningEffort: 'removed-variant' });
   expect(events.at(-1)).toMatchObject({ type: 'error', submissionStatus: 'rejected' });
   expect((await h.read()).some(c => c.path.endsWith('/prompt_async'))).toBe(false);
+});
+
+async function nativeTurnFixture(kind = 'busy') {
+  const h = await fixture(kind);
+  await h.update(s => { s.messages.ses_source = [{ info: { id: 'msg_native', role: 'user', time: { created: 10 } }, parts: [{ type: 'text', text: 'native question' }] }]; });
+  return h;
+}
+it('exposes Kilo native turn stop through the common worker route without sending a prompt', async () => {
+  const h = await nativeTurnFixture(), stateDir = join(h.root, 'worker');
+  const server = await startWorkerServer({ stateDir, agent: h.agent, sourceId: h.root, botAppId: 'bot' });
+  try {
+    const client = new WorkerClient(stateDir, h.root, 'bot', 'kilo');
+    expect((await client.capabilities())?.nativeTurnStop).toBe(true);
+    expect(await client.stopNativeTurn('ses_source', 'msg_native', h.root)).toBe(true);
+    const calls = await h.read();
+    expect(calls.filter(c => c.path.endsWith('/abort'))).toEqual([expect.objectContaining({ path: '/session/ses_source/abort', query: { directory: h.root, scope: 'session' } })]);
+    expect(calls.some(c => c.path.endsWith('/prompt_async'))).toBe(false);
+  } finally { await server.close(); }
+});
+it.each(['cwd', 'turn', 'bridge', 'archived', 'completed'] as const)('refuses to stop when the native %s guard no longer matches', async guard => {
+  const h = await nativeTurnFixture(guard === 'completed' ? 'normal' : 'busy');
+  await h.update(s => {
+    if (guard === 'bridge') s.messages.ses_source[0].parts = [kiloBridgeTextPart('from feishu')];
+    if (guard === 'archived') s.sessions.ses_source.time.archived = 12;
+    if (guard === 'completed') s.messages.ses_source.push({ info: { id: 'answer', role: 'assistant', parentID: 'msg_native', time: { created: 11, completed: 12 } }, parts: [] });
+  });
+  expect(await h.agent.stopNativeTurn('ses_source', guard === 'turn' ? 'msg_stale' : 'msg_native', guard === 'cwd' ? '/wrong/project' : h.root)).toBe(false);
+  expect((await h.read()).some(c => c.path.endsWith('/abort') || c.path.endsWith('/prompt_async'))).toBe(false);
+});
+it.each(['success', 'false', 'error', 'legacy'] as const)('uses the selected worker stop path for %s without retrying an ambiguous mutation', async kind => {
+  const h = await nativeTurnFixture();
+  const workerStop = vi.fn(async () => { if (kind === 'error') throw Error('ack lost'); return kind === 'legacy' ? undefined : kind === 'success'; });
+  const reader = new KiloNativeConversationReader(h.options, workerStop);
+  try {
+    if (kind === 'error') await expect(reader.stopTurn('ses_source', 'msg_native')).rejects.toThrow('ack lost');
+    else expect(await reader.stopTurn('ses_source', 'msg_native')).toBe(kind !== 'false');
+    expect(workerStop).toHaveBeenCalledOnce();
+    expect(workerStop).toHaveBeenCalledWith('ses_source', 'msg_native', h.root);
+    expect((await h.read()).filter(c => c.path.endsWith('/abort'))).toHaveLength(kind === 'legacy' ? 1 : 0);
+  } finally { await reader.close(); }
 });

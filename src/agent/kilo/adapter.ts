@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { kiloBridgeTextPart } from './conversation';
+import { kiloBridgeTextPart, KiloNativeConversationReader } from './conversation';
 import { resolve } from 'node:path';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { resolveReasoningEffort } from '../models';
@@ -22,6 +22,11 @@ export class KiloAdapter implements AgentAdapter {
   }
   async isAvailable() { return (await this.checkAvailability()).ok; }
   listModels(options: { cwd?: string } = {}) { return listKiloModels(this.options, options.cwd); }
+  async stopNativeTurn(id: string, turnId: string, cwd: string): Promise<boolean> {
+    const reader = new KiloNativeConversationReader(this.options);
+    try { return await reader.stopTurn(id, turnId, cwd); }
+    finally { await reader.close(); }
+  }
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) throw new Error('Kilo requires a project directory');
     const client = new KiloClient(this.options, opts.cwd, opts.sessionId);
