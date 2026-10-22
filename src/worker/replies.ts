@@ -111,7 +111,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     if (delivery.mode === 'text' && !finished) return;
     if (delivery.lastEvent === lastEvent && !finished && Date.now() - delivery.pushedAt < 15_000) return;
     if (deps.controls.auxiliary?.isAuxiliary(target.scope)) await deps.controls.auxiliary.trackRun(target.scope, job.id, target.replyTo, !finished, target.operatorOpenId);
-    const options = { ...deps.renderOptions?.(job), showDetails: getShowToolCalls(deps.controls.cfg) };
+    const options = deps.renderOptions?.(job);
     // Completed personal cards retain the same group controls as Codex. Active stops stay bound to their job token.
     const card = renderCard(state, { ...options, showStopButton: true, ...(finished ? { signCallback: undefined } : {}) });
     // CardKit updates own the stream window across reconnects; avoid its 10-minute streaming timeout.

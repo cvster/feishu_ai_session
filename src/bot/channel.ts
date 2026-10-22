@@ -700,7 +700,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           runtime.inbox!.markQueued(entry.scope, entry.message); pending.push(entry.scope, entry.message);
         }
       },
-      renderOptions: job => ({ ...controls.runControlIcons, showDetails: getShowToolCalls(controls.cfg), supportsFork: true,
+      renderOptions: job => ({ ...controls.runControlIcons, supportsFork: true,
         ...(controls.auxiliary?.isAuxiliary(job.options.delivery?.scope ?? '') ? { auxiliary: true, auxiliaryRunId: job.id, auxiliaryScope: job.options.delivery?.scope } : {}),
         ...(callbackAuth && job.options.delivery && !controls.auxiliary?.isAuxiliary(job.options.delivery.scope) ? { signCallback: action => callbackAuth.sign({
           runId: job.id, scope: job.options.delivery!.scope, chatId: job.options.delivery!.chatId,
@@ -1466,7 +1466,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ? await controls.auxiliaryApprovals.review(scope, execution.handle.run.runId, lastMsg.messageId, state) : state;
   const cardRenderOptions = callbackAuth && !controls.auxiliary?.isAuxiliary(scope)
     ? {
-        ...controls.runControlIcons, showDetails: getShowToolCalls(controls.cfg),
+        ...controls.runControlIcons,
         ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope } : {}),
         signCallback: (action: string) =>
           callbackAuth.sign({
@@ -1479,7 +1479,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             ttlMs: 24 * 60 * 60 * 1000,
           }),
       }
-    : { ...controls.runControlIcons, showDetails: getShowToolCalls(controls.cfg), ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope } : {}) };
+    : { ...controls.runControlIcons, ...(controls.auxiliary?.isActive(scope) ? { auxiliary: true, auxiliaryRunId: execution.handle.run.runId, auxiliaryScope: scope } : {}) };
 
   // For non-card modes Claude's output doesn't surface visually until either
   // a first streamed token (markdown mode) or the whole run ends (text mode).

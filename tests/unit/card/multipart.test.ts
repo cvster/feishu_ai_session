@@ -1,28 +1,25 @@
 import { expect, it, vi } from 'vitest';
 import type { LarkChannel } from '@larksuite/channel';
 import { CARD_BUDGET_BYTES, cardBytes, publishCards, splitCard, type MultipartDelivery } from '../../../src/card/multipart';
-import { renderCard } from '../../../src/card/run-renderer';
+import { renderCard, type RunCardRenderOptions } from '../../../src/card/run-renderer';
 import { initialState, reduce } from '../../../src/card/run-state';
-import { getShowToolCalls } from '../../../src/config/schema';
 
 function card(content: string): object { return { schema: '2.0', body: { elements: [{ tag: 'markdown', content }] } }; }
 function markdowns(value: any): string[] {
   if (!value || typeof value !== 'object') return [];
   return [...(value.tag === 'markdown' ? [value.content] : []), ...Object.values(value).flatMap(markdowns)];
 }
-it('hides reasoning and every tool by default while retaining the answer and allowing explicit opt-in', () => {
+it('never serializes reasoning or tool details, including an obsolete opt-in, while retaining the answer', () => {
   let state = reduce(initialState, { type: 'thinking', delta: 'private thoughts' });
   state = reduce(state, { type: 'tool_use', id: 'tool', name: 'Bash', input: { command: 'secret command' } });
+  state = reduce(state, { type: 'tool_result', id: 'tool', output: 'private tool output', isError: false });
   state = reduce(state, { type: 'text', delta: 'visible answer' });
   for (const terminal of ['running', 'done'] as const) for (const auxiliary of [false, true]) {
-    const json = JSON.stringify(renderCard({ ...state, terminal }, { auxiliary }));
+    const json = JSON.stringify(renderCard({ ...state, terminal }, { auxiliary, showDetails: true } as RunCardRenderOptions));
     expect(json).toContain('visible answer');
     expect(json).not.toContain('private thoughts'); expect(json).not.toContain('secret command');
+    expect(json).not.toContain('private tool output'); expect(json).not.toContain('Bash');
   }
-  const details = JSON.stringify(renderCard(state, { showDetails: true }));
-  expect(details).toContain('private thoughts'); expect(details).toContain('secret command');
-  expect(getShowToolCalls({} as any)).toBe(false);
-  expect(getShowToolCalls({ preferences: { showToolCalls: true } } as any)).toBe(true);
 });
 it.each(['中文😀', '"\\\n<font color="red">x</font>'])('splits %s by serialized bytes without losing characters', unit => {
   const full = unit.repeat(18_000);

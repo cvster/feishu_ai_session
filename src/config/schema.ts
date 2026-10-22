@@ -59,7 +59,7 @@ export interface SecretsConfig {
 
 /**
  * How replies are rendered in IM chats:
- *   - `card`: full interactive card (tool panels, ⏹ button, footer status)
+ *   - `card`: interactive answer card (controls and footer status)
  *   - `markdown`: lightweight streaming markdown card (typewriter, no buttons)
  *   - `text`: plain markdown post sent once at run completion (no streaming)
  *
@@ -99,8 +99,8 @@ export interface AppPreferences {
    */
   messageReplyMigrated?: boolean;
   /**
-   * Whether to render tool-call blocks (Bash / Read / Edit / ...) in the
-   * output and reasoning details in cards. Default false; enable in /config.
+   * Legacy tool summary preference for text/markdown output. Default false.
+   * Cards always exclude reasoning and tool details.
    */
   showToolCalls?: boolean;
   /**

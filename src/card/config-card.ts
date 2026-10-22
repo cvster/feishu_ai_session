@@ -13,7 +13,6 @@ export interface ConfigFormOpts {
   modelPage?: number;
   reasoningEffort: string;
   messageReply: MessageReplyMode;
-  showToolCalls: boolean;
   cotMessages: CotMessagesMode;
   maxConcurrentRuns: number;
   /** 0 means "disabled". */
@@ -94,10 +93,6 @@ export function configFormCard(opts: ConfigFormOpts): object {
                 { value: 'card', label: '交互卡片' },
                 { value: 'text', label: '纯文本' },
                 { value: 'markdown', label: '流式消息' },
-              ]),
-              label('思考与工具调用'),
-              select('show_tool_calls', opts.showToolCalls ? 'show' : 'hide', [
-                { value: 'show', label: '显示' }, { value: 'hide', label: '隐藏' },
               ]),
               label('过程消息'),
               select('cot_messages', opts.cotMessages, [

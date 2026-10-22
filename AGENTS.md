@@ -1,6 +1,7 @@
 # Product terminology
 
 - Use **Codex**, **Claude**, **Zcode**, **Kilo**, and **Dsh** as tool display names. Protocol IDs and executable names stay unchanged.
+- Reply cards exclude reasoning and tool-call details entirely, including collapsed detail panels. Keep answer text, status and controls; do not add an opt-in setting for these details.
 - Use **会话共享** for sharing an existing AI conversation with other groups, **共享群** for groups using that shared conversation, and **AI助手** for the assistant available in those groups.
 - Use these names in user-facing cards, messages, help and current documentation. Personal workgroups retain their one-to-one native-session binding; shared groups are additional access routes to the existing conversation.
 - Reserve FF for legacy history and migration descriptions. Existing protocol names, callback IDs, `/aux`, and persisted `auxiliary` fields remain compatibility identifiers.

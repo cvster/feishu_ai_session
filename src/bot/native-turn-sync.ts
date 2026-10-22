@@ -122,7 +122,7 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
     const mode = getMessageReplyMode(deps.controls.cfg);
     if (mode === 'text' && view.terminal === 'running') return false;
     if (mode === 'card' || delivery.cardId) {
-      const card = renderCard(view, { ...deps.controls.runControlIcons, supportsFork: true, nativeMirror: true, showStopButton: !!deps.reader.stopTurn, showDetails: getShowToolCalls(deps.controls.cfg) });
+      const card = renderCard(view, { ...deps.controls.runControlIcons, supportsFork: true, nativeMirror: true, showStopButton: !!deps.reader.stopTurn });
       (card as { config: { streaming_mode: boolean } }).config.streaming_mode = false;
       delivery.sendingSince ??= delivery.sendingAt; // Preserve the legacy ambiguous-send window.
       await publishCards({ channel: deps.channel, target: { chatId: scope }, card, delivery,

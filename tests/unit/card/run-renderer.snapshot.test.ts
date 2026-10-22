@@ -43,7 +43,7 @@ describe('run card renderer snapshots', () => {
     ])).toMatchSnapshot();
   });
 
-  it('collapses consecutive tools while preserving the latest running tool', () => {
+  it('omits consecutive tools while preserving the running status', () => {
     expectCard(stateFrom([
       { type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'pwd' } },
       { type: 'tool_result', id: 'tool-1', output: '/repo', isError: false },
@@ -217,7 +217,7 @@ function stateFrom(events: AgentEvent[]): RunState {
 }
 
 function expectCard(state: RunState) {
-  return expect(normalizeCard(renderCard(state, { showDetails: true })));
+  return expect(normalizeCard(renderCard(state)));
 }
 
 interface CardElement {

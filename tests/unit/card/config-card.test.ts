@@ -4,7 +4,7 @@ import { configFormCard, configSavedCard, type ConfigFormOpts } from '../../../s
 const defaults: ConfigFormOpts = {
   modelOptions: [{ value: 'default', label: '跟随工具默认', reasoningEfforts: [{ value: 'high', label: 'High' }, { value: 'native-new', label: 'New level' }] }, { value: 'claude-opus-5-5', label: 'Opus 5.5' }],
   agentKind: 'claude', model: 'claude-opus-5-5', reasoningEffort: 'high',
-  messageReply: 'card', showToolCalls: false, cotMessages: 'brief', maxConcurrentRuns: 7,
+  messageReply: 'card', cotMessages: 'brief', maxConcurrentRuns: 7,
   runIdleTimeoutMinutes: 27, requireMentionInGroup: true, larkCliIdentity: 'bot-only',
   allowedUsers: [], allowedChats: [], admins: [], knownChats: [],
 };
@@ -27,10 +27,10 @@ describe('compact settings card', () => {
     expect(more.expanded).toBe(false);
     expect(more.elements).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: 'message_reply', initial_option: 'card' }),
-      expect.objectContaining({ name: 'show_tool_calls', initial_option: 'hide' }),
       expect.objectContaining({ name: 'cot_messages', initial_option: 'brief' }),
       expect.objectContaining({ name: 'max_concurrent_runs', default_value: '7' }),
     ]));
+    expect(JSON.stringify(card)).not.toContain('show_tool_calls');
     expect(form.elements!.length).toBeLessThanOrEqual(8);
   });
 
