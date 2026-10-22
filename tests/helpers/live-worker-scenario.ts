@@ -56,9 +56,9 @@ export async function lockLiveSuite(profileDir: string) {
 export async function runLiveWorkerScenario(worker: DiscoveredWorker, profileDir: string, workspace: string) {
   const { health, directory } = worker, toolId = health.toolId;
   const client = new WorkerClient(directory, health.sourceId, health.botAppId, toolId, health.manifest);
-  const report: { toolId: string; sourceId: string; startedAt: string; stages: string[]; nativeId?: string;
+  const report: { toolId: string; sourceId: string; cwd: string; startedAt: string; stages: string[]; nativeId?: string;
     chatId?: string; passed?: boolean; error?: string; restored?: boolean; failures: string[] } = {
-    toolId, sourceId: health.sourceId, startedAt: new Date().toISOString(), stages: [], failures: [],
+    toolId, sourceId: health.sourceId, cwd: workspace, startedAt: new Date().toISOString(), stages: [], failures: [],
   };
   const stage = (name: string) => { report.stages.push(name); console.log(`[live:${toolId}] ${name}`); };
   const attempt = async (name: string, operation: () => Promise<void>) => {
@@ -157,6 +157,7 @@ export async function runLiveWorkerScenario(worker: DiscoveredWorker, profileDir
       stage('Feishu input → native conversation verified');
       await eventually('group input and model reply reach native conversation', async () => {
         const snapshot = await client.conversation(id), turn = snapshot.turns.find(t => t.input.trim() === groupPrompt);
+        if (resolve(snapshot.cwd) !== resolve(workspace)) throw new Error('Group input changed the native project directory');
         if (turn && ['error', 'interrupted', 'idle_timeout'].includes(turn.state.terminal)) throw new Error(`Group test ended: ${turn.state.terminal}`);
         return turn?.state.terminal === 'done' && JSON.stringify(turn.state.blocks).includes(groupAck) ? turn : undefined;
       }, 180_000);
@@ -204,6 +205,7 @@ export async function runLiveWorkerScenario(worker: DiscoveredWorker, profileDir
       await eventually('Feishu group title reaches native session', async () => await nativeName(id) === groupTitle ? true : undefined);
       stage('group rename → native rename verified');
     });
+    await driver.validate(id);
     if (report.failures.length) throw new Error(report.failures.join('; '));
     report.passed = true;
   } catch (error) {
