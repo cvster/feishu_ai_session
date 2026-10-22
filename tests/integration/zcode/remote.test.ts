@@ -38,7 +38,7 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
   cleanup.push(async () => { for (const s of server.clients) s.terminate(); await new Promise<void>(resolve => server.close(() => resolve())); await new Promise<void>(resolve=>http.close(()=>resolve())); });
   const address = http.address(); if (!address || typeof address === 'string') throw new Error('invalid fixture');
   const calls: Array<{ method: string; args: any }> = [], wire: string[] = [];
-  let nativeTitle = '新会话';
+  let nativeTitle = '新会话', taskArchived = false;
   let nativeReads = 0;
   let emit!: (value: any) => void, connection: WebSocket | undefined, subscribeId: number | undefined;
   server.on('connection', (socket,request) => {
@@ -83,6 +83,9 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
         if (method === 'helloConversationV4') response = { kind: 'hello', protocolVersion: 2, clientMode: 'web-remote-replayable' };
         if (method === 'resumeSession' || method === 'createSession') response = { session: { sessionId: body[0].sessionId ?? 'sess_new' } };
         if(method==='listSessions')response=[{sessionId:'sess_original',workspace:{workspacePath:dir}}];
+        if(method==='archiveTask')taskArchived=true;
+        if(method==='getTaskMeta')response={taskId:body[0].taskId,workspacePath:dir};
+        if(method==='listArchivedTasks')response=taskArchived?[{taskId:'sess_original',workspacePath:dir}]:[];
         if(method==='renameTask') throw new Error('Fresh native sessions have no legacy task-index entry');
         if(method==='readSession')response={session:{sessionId:body[0].sessionId,title:nativeTitle},settings:{model:{current:{providerId:'account:native',modelId:'native-model'},available:[{ref:{providerId:'account:native',modelId:'native-model'},label:'Native Model',reasoning:{enabled:true,levels:[{value:'native-level',label:'Native Level'}],defaultLevel:'native-level'}}]}}};
         if (method === 'readSession' && options.nativeStop) {
@@ -116,6 +119,13 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
   return { client, calls, wire, file, dir, httpCalls, credentialFile, relay:harness.relay, emit: (value: any) => emit(value), disconnect: () => connection?.terminate() };
 }
 describe('ZCode desktop remote attachment', () => {
+  it('verifies desktop archive state from the native task index even when session metadata stays active', async () => {
+    const f = await fixture();
+    expect(await f.client.isNativeTaskArchived('sess_original')).toBe(false);
+    await f.client.request('session/archive', { sessionId: 'sess_original' });
+    expect(await f.client.isNativeTaskArchived('sess_original')).toBe(true);
+    expect((await f.client.request('session/read', { sessionId: 'sess_original' })).session.archivedAt).toBeUndefined();
+  });
   it('submits an official remote input through V4 with durable native provenance', async () => {
     const f = await fixture();
     await f.client.sendNativeText('sess_original', 'native input', { providerId: 'account:native', modelId: 'native-model' });

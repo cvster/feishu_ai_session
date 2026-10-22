@@ -2,6 +2,9 @@ import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import type { LarkChannel } from '@larksuite/channel';
+import { chatIsDissolved } from '../../src/bot/group-cleanup';
+import { cleanupLiveArtifacts, type LiveCleanupState } from './live-artifact-cleanup';
 import * as lockfile from 'proper-lockfile';
 import { WorkerClient } from '../../src/worker/client';
 import type { DiscoveredWorker } from '../../src/worker/discovery';
@@ -38,7 +41,8 @@ export async function ownerCli(appId: string, args: string[], data?: unknown): P
       try {
         const result = JSON.parse(code === 0 ? out : err);
         if (code !== 0 || result.ok !== true || result.identity !== 'user')
-          throw new Error(`Owner CLI failed: ${result.error?.subtype ?? code}`);
+          throw new Error(`Owner CLI failed: ${result.error?.subtype ?? code}${result.error?.missing_scopes?.length
+            ? ` (requires one of: ${result.error.missing_scopes.join(', ')})` : ''}`);
         resolve(result.data);
       } catch (error) { reject(error instanceof SyntaxError ? new Error(`Owner CLI invalid response (exit ${code})`) : error); }
     });
@@ -46,18 +50,19 @@ export async function ownerCli(appId: string, args: string[], data?: unknown): P
   });
 }
 
-interface SavedSession { nativeId: string; sourceId: string; cwd: string; chatId?: string; name?: string }
+interface SavedSession { nativeId: string; sourceId: string; cwd: string; chatId?: string; name?: string;
+  cleanupPending?: boolean; cleanedAt?: string; cleanup?: LiveCleanupState }
 export async function lockLiveSuite(profileDir: string) {
   const dir = join(profileDir, 'autotest'); await mkdir(dir, { recursive: true, mode: 0o700 });
   const path = join(dir, 'suite.lock'); await writeFile(path, '', { flag: 'a', mode: 0o600 });
   return lockfile.lock(path, { realpath: false, stale: 30_000, update: 5_000 });
 }
 
-export async function runLiveWorkerScenario(worker: DiscoveredWorker, profileDir: string, workspace: string) {
+export async function runLiveWorkerScenario(worker: DiscoveredWorker, profileDir: string, workspace: string, channel: LarkChannel) {
   const { health, directory } = worker, toolId = health.toolId;
   const client = new WorkerClient(directory, health.sourceId, health.botAppId, toolId, health.manifest);
   const report: { toolId: string; sourceId: string; cwd: string; startedAt: string; stages: string[]; nativeId?: string;
-    chatId?: string; passed?: boolean; error?: string; restored?: boolean; failures: string[] } = {
+    chatId?: string; passed?: boolean; error?: string; cleaned?: boolean; cleanup?: LiveCleanupState; failures: string[] } = {
     toolId, sourceId: health.sourceId, cwd: workspace, startedAt: new Date().toISOString(), stages: [], failures: [],
   };
   const stage = (name: string) => { report.stages.push(name); console.log(`[live:${toolId}] ${name}`); };
@@ -80,20 +85,81 @@ export async function runLiveWorkerScenario(worker: DiscoveredWorker, profileDir
   const saveSession = () => writeFileAtomic(savedPath, JSON.stringify(saved, null, 2), { mode: 0o600 });
   const nativeName = async (id: string) => (await client.listSessions()).find(row => row.nativeId === id)?.name;
   const chatName = async () => (await ownerCli(health.botAppId, ['im', 'chats', 'get', '--chat-id', chatId!])).name as string;
+  const cleanupArtifacts = async () => {
+    const record = saved[key];
+    if (!driver || !report.nativeId || record?.nativeId !== report.nativeId) return;
+    record.cleanupPending = true; record.cleanup ??= {}; await saveSession();
+    report.cleanup = record.cleanup;
+    await cleanupLiveArtifacts({ state: record.cleanup, hasGroup: true, save: saveSession,
+      archive: async () => {
+        if (!await driver!.isArchived(record.nativeId)) {
+          await driver!.validate(record.nativeId);
+          await driver!.archive(record.nativeId);
+        }
+      },
+      verifyArchive: async () => { await eventually('native autotest session is archived', async () =>
+        await driver!.isArchived(record.nativeId) ? true : undefined); stage('native session archived'); },
+      dissolve: async () => {
+        const bindings = new ToolBindingStore(join(profileDir, 'tool-bindings.json')); await bindings.load();
+        const owned = bindings.entries().filter(([scope, b]) => isPersonalWorkgroup(scope, b) && b.toolId === toolId &&
+          b.sourceId === health.sourceId && b.nativeId === record.nativeId);
+        if (owned.length > 1) throw new Error('Multiple personal groups found during autotest cleanup');
+        chatId ??= record.chatId ?? owned[0]?.[0];
+        if (!chatId) return;
+        report.chatId = record.chatId = chatId; await saveSession();
+        if (await chatIsDissolved(channel, chatId)) return;
+        const binding = bindings.get(chatId);
+        if (!binding || !isPersonalWorkgroup(chatId, binding) || binding.toolId !== toolId ||
+          binding.sourceId !== health.sourceId || binding.nativeId !== record.nativeId)
+          throw new Error('Autotest group has been rebound; refusing to dissolve it');
+        // The test already uses the signed-in owner for muting and group input.
+        // User deletion requires im:chat:delete (or im:chat) and group ownership.
+        // Official API: https://open.feishu.cn/document/server-docs/group/chat/delete.md
+        await ownerCli(health.botAppId, ['api', 'DELETE', `/open-apis/im/v1/chats/${chatId}`]);
+      },
+      verifyDissolved: async () => {
+        if (chatId) await eventually('autotest group is dissolved', async () =>
+          await chatIsDissolved(channel, chatId!) ? true : undefined);
+        stage(chatId ? 'Feishu group dissolved' : 'no group to dissolve');
+      },
+    });
+    record.cleanupPending = false; record.cleanedAt = new Date().toISOString(); await saveSession();
+    report.cleaned = true;
+  };
+
   try {
     if (!health.capabilities?.conversation || !health.capabilities.nativeSessionNames || !health.capabilities.sessions.rename)
       throw new Error(`${toolId} does not advertise bidirectional messages and native names`);
     const options = JSON.parse(await readFile(join(directory, 'config.json'), 'utf8')).options;
-    const rows = await client.listSessions();
-    const recorded = saved[key];
-    const existing = recorded ? rows.find(row => row.nativeId === recorded.nativeId)
-      : rows.filter(row => row.name?.startsWith(AUTOTEST_TITLE));
+    let rows = await client.listSessions();
+    let recorded = saved[key]?.cleanedAt ? undefined : saved[key];
+    if (recorded?.cleanupPending) {
+      if (resolve(recorded.cwd) !== resolve(workspace)) throw new Error('Pending autotest cleanup belongs to a different project');
+      driver = liveNativeDriver(toolId, options, health.sourceId, directory, recorded.cwd);
+      report.nativeId = recorded.nativeId; chatId = recorded.chatId;
+      await cleanupArtifacts(); await driver.close(); driver = undefined;
+      stage('recovered pending cleanup before creating another session');
+      recorded = undefined; chatId = undefined; report.nativeId = undefined; report.chatId = undefined;
+      report.cleaned = undefined; report.cleanup = undefined; rows = await client.listSessions();
+    }
+    driver ??= liveNativeDriver(toolId, options, health.sourceId, directory, workspace);
+    let existing = recorded ? rows.find(row => row.nativeId === recorded.nativeId)
+      : rows.filter(row => !row.archived && row.name?.startsWith(AUTOTEST_TITLE));
+    if (Array.isArray(existing)) {
+      const active = [];
+      for (const candidate of existing) {
+        if (candidate.cwd && resolve(candidate.cwd) !== resolve(workspace))
+          throw new Error('Existing autotest session belongs to a different project; refusing to create a duplicate');
+        // Some native runtime lists do not reflect desktop task-index archives.
+        if (!await driver.isArchived(candidate.nativeId)) active.push(candidate);
+      }
+      existing = active;
+    }
     if (Array.isArray(existing) && existing.length > 1) throw new Error('Multiple autotest sessions found; refusing to choose or create');
     const row = Array.isArray(existing) ? existing[0] : existing;
     if (row?.archived) throw new Error('Autotest session is archived; refusing to create another');
     const cwd = row?.cwd ?? recorded?.cwd ?? workspace;
     if (resolve(cwd) !== resolve(workspace)) throw new Error('Existing autotest session belongs to a different project; refusing to create a duplicate');
-    driver = liveNativeDriver(toolId, options, health.sourceId, directory, cwd);
     if (row || recorded) await driver.validate(row?.nativeId ?? recorded!.nativeId);
     const id = row?.nativeId ?? recorded?.nativeId ?? await driver.create(AUTOTEST_TITLE, async nativeId => {
       report.nativeId = nativeId;
@@ -209,19 +275,17 @@ export async function runLiveWorkerScenario(worker: DiscoveredWorker, profileDir
     if (report.failures.length) throw new Error(report.failures.join('; '));
     report.passed = true;
   } catch (error) {
-    report.passed = false; report.error = error instanceof Error ? error.message : 'Live scenario failed'; throw error;
+    report.passed = false; report.error = error instanceof Error ? error.message : 'Live scenario failed';
   } finally {
-    try {
-      if (chatId && baseline) {
-        await ownerCli(health.botAppId, ['im', '+chat-update', '--chat-id', chatId, '--name', baseline]);
-        await eventually('restore autotest baseline name', async () => await nativeName(report.nativeId!) === baseline ? true : undefined);
-        report.restored = true;
-      }
-    } catch (error) {
-      report.passed = false; report.restored = false;
-      report.error = `Name restoration failed: ${error instanceof Error ? error.message : 'unknown'}`;
-      throw error;
-    } finally { await driver?.close(); await persistReport(); }
+    try { await cleanupArtifacts(); }
+    catch (error) {
+      report.passed = false; report.cleaned = false;
+      report.failures.push(`Cleanup failed: ${error instanceof Error ? error.message : 'unknown'}`);
+    }
+    try { await driver?.close(); }
+    catch (error) { report.passed = false; report.failures.push(`Native driver close failed: ${error instanceof Error ? error.message : 'unknown'}`); }
+    await persistReport();
   }
+  if (!report.passed) throw new Error([report.error, ...report.failures, `Report: ${reportPath}`].filter(Boolean).join('; '));
   return { ...report, reportPath };
 }

@@ -11,6 +11,8 @@ export interface LiveNativeDriver {
   validate(id: string): Promise<void>;
   rename(id: string, name: string): Promise<void>;
   send(id: string, text: string): Promise<void>;
+  archive(id: string): Promise<void>;
+  isArchived(id: string): Promise<boolean>;
   close(): Promise<void>;
 }
 export function liveNativeDriver(toolId: string, options: Record<string, any>, sourceId: string,
@@ -33,6 +35,8 @@ export function liveNativeDriver(toolId: string, options: Record<string, any>, s
       rename: async (id, name) => { await reader.rpc('thread/name/set', { threadId: id, name }); },
       send: async (id, text) => { await reader.addQueuedSubmission({ threadId: id, prompt: text,
         submissionId: randomUUID(), clientUserMessageId: `autotest-native:${randomUUID()}` }); },
+      archive: async id => { await reader.rpc('thread/archive', { threadId: id }); },
+      isArchived: async id => (await reader.listArchivedThreadIds()).includes(id),
       close: () => reader.stop(),
     };
   }
@@ -48,6 +52,10 @@ export function liveNativeDriver(toolId: string, options: Record<string, any>, s
       validate: async id => { const row = await client.request('GET', `/session/${id}`, undefined, cwd);
         if (row.id !== id || row.directory !== cwd || row.time?.archived) throw new Error('Recorded Kilo session is missing, archived or has a different workspace'); },
       rename: async (id, name) => { await client.request('PATCH', `/session/${id}`, { title: name }, cwd); },
+      archive: async id => { await client.request('PATCH', `/session/${id}`, { time: { archived: Date.now() } }, cwd); },
+      isArchived: async id => { const row = await client.request('GET', `/session/${id}`, undefined, cwd);
+        if (row.id !== id || row.directory !== cwd) throw new Error('Kilo archive verification identity mismatch');
+        return !!row.time?.archived; },
       send: async (id, text) => {
         const session = await client.request('GET', `/session/${id}`, undefined, cwd);
         const messages = await client.request('GET', `/session/${id}/message`, undefined, cwd);
@@ -82,9 +90,12 @@ export function liveNativeDriver(toolId: string, options: Record<string, any>, s
         return id;
       }),
       validate: id => withClient(async client => { const row = await client.request('session/read', { sessionId: id });
-        if (row.session?.sessionId !== id || row.session?.archivedAt || row.session?.workspace?.workspacePath !== cwd)
+        if (row.session?.sessionId !== id || row.session?.archivedAt || row.session?.workspace?.workspacePath !== cwd ||
+          await client.isNativeTaskArchived(id))
           throw new Error('Recorded ZCode session is missing, archived or has a different workspace'); }),
       rename: (id, name) => withClient(async client => { await client.request('session/rename', { sessionId: id, title: name }); }),
+      archive: id => withClient(async client => { await client.request('session/archive', { sessionId: id }); }),
+      isArchived: id => withClient(client => client.isNativeTaskArchived(id)),
       send: (id, text) => withClient(async client => {
         const snapshot = await client.request('session/read', { sessionId: id });
         const current = snapshot.settings?.model?.current;

@@ -203,6 +203,21 @@ export class ZcodeRemoteClient {
     } }]);
     if (!['accepted', 'duplicate'].includes(result?.status)) throw new Error('ZCode 桌面未确认原生输入，未自动重发');
   }
+  /** Desktop archiveTask changes the native task index, not session.archivedAt. */
+  async isNativeTaskArchived(sessionId: string): Promise<boolean> {
+    await this.ready;
+    const archived = await this.call('listArchivedTasks', [this.target!], 'zcode-task');
+    if (!Array.isArray(archived)) throw new Error('ZCode 原生归档列表未返回数据');
+    const match = archived.find(row => row?.taskId === sessionId);
+    if (match) {
+      if (match.workspacePath !== this.target!.workspacePath) throw new Error('ZCode 原生归档会话项目不匹配');
+      return true;
+    }
+    const meta = await this.call('getTaskMeta', [{ ...this.target!, taskId: sessionId }], 'zcode-task');
+    if (meta?.taskId !== sessionId || meta?.workspacePath !== this.target!.workspacePath)
+      throw new Error('ZCode 原生归档状态未返回匹配的会话和项目');
+    return false;
+  }
   async request<T = any>(method: string, params: any): Promise<T> {
     await this.ready;
     const target = { ...this.target!, ...(params.sessionId ? { sessionId: params.sessionId } : {}) };
