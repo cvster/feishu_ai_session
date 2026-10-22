@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { DshAdapter, dshPermission } from '../../../src/agent/dsh/adapter';
+import { DshNativeConversationReader } from '../../../src/agent/dsh/conversation';
 import { DshClient } from '../../../src/agent/dsh/client';
 import { DshSessionProvider } from '../../../src/tools/dsh-sessions';
 import type { AgentEvent } from '../../../src/agent/types';
@@ -89,3 +90,16 @@ it('sanitizes native RPC error bodies and launch tokens',async()=>{
   finally{await client.close();}
 });
 it.each([['read-only','read-only'],['workspace','workspace-write'],['full','danger-full-access']] as const)('maps native access %s to %s', (mode,preset)=>{expect(dshPermission(mode)).toBe(preset);});
+
+
+it('exposes completed bridge turns through native conversation metadata without rebroadcasting the input', async () => {
+  const h = await harness(); const events = await h.collect('bridge input');
+  const id = events.find(e => e.type === 'system')?.sessionId!;
+  const reader = new DshNativeConversationReader(h.options);
+  try {
+    const snapshot = await reader.read(id);
+    expect(snapshot.turns).toHaveLength(1);
+    expect(snapshot.turns[0]).toMatchObject({ input: 'bridge input', bridge: true, state: { terminal: 'done', blocks: [{ kind: 'text', content: 'reply' }] } });
+    expect(events.some(e => e.type === 'system' && e.turnId === snapshot.turns[0]?.id)).toBe(true);
+  } finally { await reader.close(); }
+});

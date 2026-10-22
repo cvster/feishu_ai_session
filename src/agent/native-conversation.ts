@@ -7,6 +7,8 @@ export interface NativeConversationTurn {
   /** True also for unknown provenance: only confirmed native input may be mirrored. */
   bridge: boolean;
   input: string;
+  /** Durable worker job identity, when confirmed by native metadata/journal. */
+  bridgeJobId?: string;
   state: RunState;
 }
 export interface NativeConversationSnapshot {

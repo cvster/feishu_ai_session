@@ -191,6 +191,9 @@ export class ToolBindingStore {
     });
   }
 
+  /** Active, exclusive personal AI workgroup routes; shared/topic routes are excluded. */
+  activePersonalBindings(): [string, ToolBinding][] { return this.personalBindings(); }
+
   private personalBindings(): [string, ToolBinding][] {
     const rows = this.catalog?.entries() ?? [];
     const latest = new Map<string, ReturnType<SessionCatalog['entries']>[number]>();

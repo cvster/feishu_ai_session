@@ -149,3 +149,12 @@ it('stops polling and prevents a late group lookup from renaming after disconnec
   expect(h.rename).not.toHaveBeenCalled();expect(h.update).not.toHaveBeenCalled();
   const calls=h.list.mock.calls.length;await first.tick();expect(h.list).toHaveBeenCalledTimes(calls);
 });
+
+it('retries a failed Web group rename from the native title and keeps the saved baseline across restart', async () => {
+  const h = await fixture('claude'), sync = await h.startRegistered();
+  h.update.mockRejectedValueOnce(new Error('group write failed'));
+  await expect(sync.rename('claude', 'oc_group', 'session_native', 'AA-Web')).rejects.toThrow('group write failed');
+  await sync.stop(); const restarted = await h.startRegistered(); await restarted.tick();
+  expect(h.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: { name: 'AA-Web' } }));
+  expect(h.bindings.get('oc_group')?.name).toBe('AA-Web');
+});

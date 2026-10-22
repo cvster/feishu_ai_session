@@ -11,6 +11,8 @@ import { nativeSessionOperations } from '../tools/session-operations';
 import type { WorkerSessionHistory, WorkerSessionService } from './protocol';
 import { WorkerApiError } from './tool-api';
 import { createCodexWorkerSessions } from './codex-sessions';
+import { ClaudeNativeConversationReader } from '../agent/claude/conversation';
+import { DshNativeConversationReader } from '../agent/dsh/conversation';
 import { KiloNativeConversationReader } from '../agent/kilo/conversation';
 import { ZcodeNativeConversationReader } from '../agent/zcode/conversation';
 
@@ -30,6 +32,7 @@ export function createWorkerSessions(input: {
     remote: (profile.codex as unknown as { appServerRemote?: string })?.appServerRemote ?? process.env.CODEX_QUEUE_REMOTE }, sourceId, agent, profile.accounts.app.id);
   let reader: import('../agent/native-conversation').NativeConversationReader | undefined;
   if (toolId === 'claude') {
+    reader = new ClaudeNativeConversationReader(sourceId);
     const history = new ClaudeSessionProvider(sourceId);
     list = () => history.listSessions();
     provider = nativeSessionOperations({ id: toolId, sourceId, agent });
@@ -42,6 +45,7 @@ export function createWorkerSessions(input: {
   } else if (toolId === 'dsh') {
     const sessions = new DshSessionProvider({ binary: profile.dsh?.binaryPath, args: profile.dsh?.args,
       homeDir: profile.dsh?.homeDir }, join(profileDir, 'dsh-sessions'));
+    reader = new DshNativeConversationReader({ binary: profile.dsh?.binaryPath, args: profile.dsh?.args, homeDir: profile.dsh?.homeDir });
     provider = sessions; list = () => sessions.listSessions();
   } else if (toolId === 'zcode') {
     const sessions = new ZcodeSessionProvider({ binary: profile.zcode?.binaryPath, args: profile.zcode?.args,

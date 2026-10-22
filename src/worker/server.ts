@@ -54,8 +54,16 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     agent: options.agent, sessions: options.sessions ? { ...options.sessions,
       ...(options.sessions.conversation ? { conversation: async (nativeId: string) => {
         const snapshot = await options.sessions!.conversation!(nativeId);
-        return { ...snapshot, turns: snapshot.turns.map(turn => ({ ...turn, bridge: turn.bridge || store.list().some(job =>
-          store.snapshot(job.id)?.events.some(row => row.event.type === 'system' && (row.event.threadId ?? row.event.sessionId) === nativeId && row.event.turnId === turn.id)) })) };
+        return { ...snapshot, turns: snapshot.turns.map(turn => {
+          const job = store.list().find(job => {
+            const native = job.options.threadId ?? job.options.sessionId ?? job.options.initialSessionId;
+            return (native === nativeId && turn.bridgeJobId === job.id) || store.snapshot(job.id)?.events.some(row =>
+              row.event.type === 'system' && (row.event.threadId ?? row.event.sessionId) === nativeId && row.event.turnId === turn.id);
+          });
+          // Never trust an unverified native-to-job hint from a provider.
+          const { bridgeJobId: _hint, ...value } = turn;
+          return { ...value, bridge: turn.bridge || !!job, ...(job ? { bridgeJobId: job.id } : {}) };
+        }) };
       } } : {}),
       ...(options.sessions.questions ? { questions: async (nativeId: string) => {
         const questions = await options.sessions!.questions!(nativeId);

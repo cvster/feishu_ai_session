@@ -43,6 +43,10 @@ export class SessionNameSync {
   private readonly modes = new Map<string, string>();
   private readonly retryAfter = new Map<string, number>();
   private dirty = false;
+  private operations: Promise<unknown> = Promise.resolve();
+  private serialize<T>(action: () => Promise<T>): Promise<T> {
+    const task = this.operations.catch(() => {}).then(action); this.operations = task; return task;
+  }
 
   constructor(private readonly options: SessionNameSyncOptions) {}
 
@@ -60,7 +64,31 @@ export class SessionNameSync {
     }
   }
 
-  async observe<T extends NamedSessionSnapshot>(snapshot: T, entries: SessionCatalogEntry[], isActive: (scope: string) => boolean = () => true): Promise<void> {
+  observe<T extends NamedSessionSnapshot>(snapshot: T, entries: SessionCatalogEntry[], isActive: (scope: string) => boolean = () => true): Promise<void> {
+    return this.serialize(() => this.observeNow(snapshot, entries, isActive));
+  }
+
+  /** Explicit Web rename and periodic observations share a serialized baseline. */
+  rename(chatId: string, snapshot: NamedSessionSnapshot, name: string, isActive: () => boolean): Promise<void> {
+    return this.serialize(async () => {
+      if (!this.options.renameSession || !isActive()) throw new Error('会话绑定已失效');
+      if (await this.options.channel.getChatMode(chatId) !== 'group') throw new Error('仅支持个人 AI 会话群');
+      const oldGroup = (await this.options.channel.getChatInfo(chatId)).name?.trim() ?? '';
+      if (!isActive()) throw new Error('会话绑定已变化');
+      const key = this.stateKey(chatId, snapshot.id);
+      // Persist before writing: even a lost native acknowledgement is repaired
+      // from its next observation instead of letting the old group title win.
+      await this.save(key, { groupName: oldGroup, threadName: snapshot.name?.trim() ?? '' });
+      await this.options.renameSession(snapshot.id, name);
+      if (!isActive()) throw new Error('会话绑定已变化，请检查原工具名称');
+      await renameChat(this.options.channel, chatId, name);
+      await this.save(key, { groupName: name, threadName: name, previousGroupName: oldGroup, previousThreadName: snapshot.name?.trim() ?? '' });
+      this.updateKnownChat(chatId, name);
+      if (isActive()) await this.options.onSynchronized?.(chatId, snapshot.id, name);
+    });
+  }
+
+  private async observeNow<T extends NamedSessionSnapshot>(snapshot: T, entries: SessionCatalogEntry[], isActive: (scope: string) => boolean): Promise<void> {
     if (!this.options.renameSession) return;
     const seen = new Set<string>();
     for (const entry of entries) {

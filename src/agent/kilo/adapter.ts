@@ -135,7 +135,7 @@ export class KiloAdapter implements AgentAdapter {
         sessionId = kiloSessionId(info.id);
         if (opts.sessionId && sessionId !== opts.sessionId) throw new Error('Kilo 返回了不匹配的会话');
         if (opts.sessionId) await client.request('PATCH', `/session/${sessionId}`, { permission }, opts.cwd);
-        push({ type: 'system', sessionId, cwd: opts.cwd, ...(model ? { model } : {}), ...(effort ? { reasoningEffort: effort } : {}) });
+        push({ type: 'system', sessionId, turnId: inputId, cwd: opts.cwd, ...(model ? { model } : {}), ...(effort ? { reasoningEffort: effort } : {}) });
         await client.subscribe(opts.cwd!, e => { chain = chain.then(() => event(e)).catch(() => fail('Kilo 事件处理失败，未自动重发。')); },
           () => fail('Kilo 事件连接已断开，执行状态未确认；未自动重发。'));
         if (stopping) { push({ type: 'done', sessionId, terminationReason: 'interrupted' }); return; }

@@ -436,3 +436,7 @@ export default createAdapter;
 [MIT](./LICENSE)
 
 <img src="./assets/feedback-group-qr.png" alt="飞书反馈群二维码" width="360">
+
+### 个人 AI 会话群网页
+
+新增轻量网页，按工具 → 项目 → 会话展示已绑定个人群的会话，支持消息实时同步、改名和离线提示。部署后运行 `lark-channel-bridge web configure --profile <profile>`，重启桥接即可访问默认 `http://127.0.0.1:3345`，使用命令生成的登录码。网页按 worker 能力启用操作；详见 [网页说明](docs/BRIDGE_WEB_PLAN.md)。

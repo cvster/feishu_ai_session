@@ -21,7 +21,7 @@ export class DshAdapter implements AgentAdapter {
   listModels(options: { cwd?: string } = {}) { return listDshModels(this.options, options.cwd); }
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) throw new Error('DSH requires a project directory');
-    const client = new DshClient(this.options, opts.cwd), requestId = randomUUID();
+    const client = new DshClient(this.options, opts.cwd), requestId = `bridge-${randomUUID()}`;
     const queue: AgentEvent[] = []; let wake: (() => void) | undefined;
     let ended = false, stopping = false, sent = false, admitted = false, receipt = false, turnEnded = false;
     let sessionId: string | undefined, baseline = -1, lastSeq = -1, closeStream: (() => void) | undefined;
@@ -54,7 +54,7 @@ export class DshAdapter implements AgentAdapter {
       if (frame.type !== 'event' || !Number.isSafeInteger(frame.event?.seq) || frame.event.seq <= Math.max(baseline, lastSeq)) return;
       const e = frame.event, d = e.data; lastSeq = e.seq;
       if (e.type === 'agent/inbox/spliced' && d.inserted?.some((m: any) => m.source?.rpcId === requestId)) receipt = true;
-      if (e.type === 'user/message' && d.source?.rpcId === requestId) receipt = true;
+      if (e.type === 'user/message' && d.source?.rpcId === requestId) { receipt = true; if (d.id) push({ type: 'system', sessionId, turnId: d.id }); }
       if (!receipt) return;
       if (e.type === 'assistant/message') {
         const state = currentAttempt ? streams.get(currentAttempt) : undefined;

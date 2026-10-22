@@ -67,7 +67,9 @@ export function projectZcodeConversation(snapshot: any): NativeConversationSnaps
     else if (last?.finish && !['tool-calls', 'unknown'].includes(last.finish)) state = reduce(state, { type: 'done',
       terminationReason: ['cancelled', 'aborted'].includes(last.finish) ? 'interrupted' : 'normal' });
     else if (index < users.length - 1) state = reduce(state, { type: 'done', terminationReason: 'interrupted' });
-    return { id, createdAtMs, bridge: !isZcodeNativeInput(user.info),
+    const command = user.info.metadata?.inputIntent?.sourceCommandId ?? user.info.metadata?.conversationInputIntent?.sourceCommandId;
+    const bridgeJobId = typeof command === 'string' && command.startsWith('bridge-') ? command.slice(7) : undefined;
+    return { id, createdAtMs, bridge: !isZcodeNativeInput(user.info), ...(bridgeJobId ? { bridgeJobId } : {}),
       input: user.parts.filter((part: any) => part.type === 'text' && typeof part.text === 'string' && visiblePart(part)).map((part: any) => part.text).join('\n'), state };
   });
   return { id: session.sessionId, name: session.title, cwd: session.workspace.workspacePath, archived: !!session.archivedAt, turns };

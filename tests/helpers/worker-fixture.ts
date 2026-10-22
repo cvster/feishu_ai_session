@@ -9,7 +9,7 @@ import { DurableClaudeAdapter } from '../../src/worker/adapter';
 import type { WorkerSessionService } from '../../src/worker/protocol';
 export const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-export async function fixture(toolId: 'claude' | 'zcode' | 'kilo' | 'dsh' = 'claude', sessions?: WorkerSessionService) {
+export async function fixture(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' | 'dsh' = 'claude', sessions?: WorkerSessionService) {
   const dir = await mkdtemp(join(tmpdir(), 'durable-worker-')); cleanups.push(() => rm(dir, { recursive: true, force: true }));
   let finish!: () => void;
   const barrier = new Promise<void>(resolve => { finish = resolve; });

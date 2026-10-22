@@ -41,6 +41,7 @@ const server=http.createServer(async(req,res)=>{
       setTimeout(()=>{
         const updated=load(),r=updated.sessions[row.id];
         emit(add(r,'agent/inbox/spliced',{inserted:[{source:{rpcId:request.requestId}}]}));
+        emit(add(r,'user/message',{id:'user-'+request.requestId,role:'user',source:{kind:'user',rpcId:request.requestId},content:request.content}));
         if(updated.mode==='model-error'){emit(add(r,'turn/end',{reason:{kind:'error',error:{code:'MISSING_CREDENTIAL'}}}));r.running=false;save(updated);return;}
         const attempt='attempt-test';emit({type:'assistant-stream',frame:{type:'start',attemptId:attempt}});
         const chunk={type:'assistant-stream',frame:{type:'chunk',attemptId:attempt,index:0,chunk:{type:'text-delta',text:'reply'}}};emit(chunk);emit(chunk);

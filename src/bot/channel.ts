@@ -6,6 +6,9 @@ import { auxiliaryLinkError } from './auxiliary-membership';
 import { AuxiliaryApprovals } from './auxiliary-approvals';
 import { AuxiliaryGroups } from './auxiliary-groups';
 import { isRetiredPrivateInput } from './auxiliary-private';
+import { startBridgeWeb } from '../web/server';
+import { enqueuePersonalInput } from './intake-queue';
+import { PersonalSessionService, WebError } from '../web/service';
 import { startA2AServer } from '../a2a/server';
 import { createA2ARunner } from '../a2a/runner';
 import { NativeSessionLocks } from '../tools/locks';
@@ -374,6 +377,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
   const batchTasks = new Set<Promise<void>>();
   let a2a: Awaited<ReturnType<typeof startA2AServer>>;
+  let bridgeWeb: Awaited<ReturnType<typeof startBridgeWeb>>;
   let disconnecting = false;
 
   // Pending → run handoff: while a run is active on a chat, block its pending
@@ -791,6 +795,28 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       if (a2a) log.info('a2a', 'listening', { profile: controls.profile });
     } catch (error) { log.warn('a2a', 'startup-failed', { error: String(error) }); }
   }
+  if (deps.appPaths?.profileDir && controls.toolBindings) {
+    const service = new PersonalSessionService({ controls, catalog: sessionCatalog, channel,
+      path: join(deps.appPaths.profileDir, 'web-receipts.json'),
+      enqueue: async msg => {
+        if (disconnecting) throw new WebError(503, '桥接正在重连，请稍后重试');
+        const binding = controls.toolBindings!.get(msg.chatId);
+        const tool = binding && controls.toolRegistry?.find(binding.toolId);
+        if (!binding || !isPersonalWorkgroup(msg.chatId, binding) || !tool || tool.sourceId !== binding.sourceId ||
+          sessionCatalog?.isScopeArchived(msg.chatId)) throw new WebError(409, '会话绑定已失效');
+        const scoped = controlsForTool(controls, binding.toolId, msg.chatId);
+        if (!canUseGroup(scoped.profileConfig, scoped, msg.chatId, msg.senderId).ok) throw new WebError(403, '此群不在允许响应的范围内');
+        await enqueuePersonalInput({ agent: tool.agent, controls: scoped, activeRuns, pending, scope: msg.chatId, msg });
+      },
+      rename: async (toolId, scope, id, name) => {
+        const sync = nameSyncs.get(toolId); if (!sync) throw new WebError(503, 'Worker 名称同步尚未就绪');
+        await sync.rename(toolId, scope, id, name);
+      } });
+    try {
+      bridgeWeb = await startBridgeWeb({ configPath: join(deps.appPaths.profileDir, 'web.json'), service });
+      if (bridgeWeb) log.info('web', 'listening', { url: bridgeWeb.url });
+    } catch { log.warn('web', 'startup-failed', { reason: '请检查 web 配置或端口占用' }); }
+  }
   await controls.auxiliaryApprovals?.recover();
 
   // App-level keepalive: 15s probe + wake-up detection + HTTP reachability.
@@ -814,6 +840,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       controls.refreshWorkerDiscovery = undefined;
       await groupCleanup?.stop();
       activeRuns.pauseNewRuns('bridge-disconnect');
+      await bridgeWeb?.close();
       await a2a?.close();
       pending.cancelAll();
       await Promise.all([executor, ...executors.values()].map(item => item.waitForSubmissions()));
@@ -1108,19 +1135,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   if (!tool && rootControls.toolRegistry) { await channel.send(msg.chatId, { markdown: `⚠️ ${toolDefinition(toolId).label} worker 未发现，请启动对应 worker。` }); return; }
-  if (agent instanceof DurableAgentAdapter) {
-    try {
-      const id = messageRequestId(emsg);
-      if ((await agent.client.list()).some(job => job.options.delivery?.scope === scope && job.options.delivery.messageIds?.includes(id))) return;
-    } catch { /* Submission will fail closed if the worker remains unavailable. */ }
-    if (controls.workerInbox && !await controls.workerInbox.receive(scope, emsg)) return;
-    controls.workerInbox?.markQueued(scope, emsg);
-    if (activeRuns.get(scope)) pending.block(scope);
-  }
-
-  if (activeRuns.newRunsPaused()) return; // durable pending will resume on reconnect
-  const size = pending.push(scope, emsg);
-  log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+  await enqueuePersonalInput({ agent, controls, activeRuns, pending, scope, msg: emsg });
 }
 
 interface RunBatchDeps {

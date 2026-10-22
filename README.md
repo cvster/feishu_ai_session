@@ -346,3 +346,7 @@ tail -n 60 ~/.lark-channel/profiles/my-bot/logs/daemon/daemon-stderr.log
 真实 Codex、ZCode、Kilo 与飞书的双向消息及改名验证使用可选的 `pnpm test:live:bridge`，启用条件和项目路径参数见 [测试说明](docs/TESTING.md)。
 
 飞书桥接与 `packages/codex-core` 使用 [MIT](LICENSE)。独立的 `apps/web-app` 保留自身 GPLv3 许可证、依赖和部署流程；更新飞书桥接不会自动更新该 Web 服务。详见 [目录与许可证边界](docs/MONOREPO.md)。
+
+### Personal conversation Web
+
+A lightweight Web groups bound personal AI conversations by tool → project → session. It shares the bridge inbox, execution queue, replies and name synchronization. After deployment, run `lark-channel-bridge web configure --profile <profile>`, restart the bridge, then open `http://127.0.0.1:3345` with the generated login code. Operations follow worker capabilities. See [Web setup and architecture](docs/BRIDGE_WEB_PLAN.md).
