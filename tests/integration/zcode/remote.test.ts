@@ -19,7 +19,7 @@ vi.mock('../../../src/agent/zcode/remote-client', async importOriginal => {
 
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-async function fixture(options: { error?: boolean; workspace?: string; closeOnSend?: boolean; complete?: boolean; wait?: boolean; v2?: boolean; foreignDevice?: boolean; autoHeaders?: boolean; staleDegraded?: boolean; ownDegraded?: boolean; renameFailure?: boolean; nativeStop?: boolean; missingExecution?: boolean; wrongMessage?: boolean; changedTurn?: boolean; rejectStop?: boolean; idle?: boolean } = {}) {
+async function fixture(options: { error?: boolean; workspace?: string; closeOnSend?: boolean; complete?: boolean; wait?: boolean; v2?: boolean; foreignDevice?: boolean; autoHeaders?: boolean; staleDegraded?: boolean; ownDegraded?: boolean; renameFailure?: boolean; coldRename?: boolean; wrongResumeIdentity?: boolean; nativeStop?: boolean; missingExecution?: boolean; wrongMessage?: boolean; changedTurn?: boolean; rejectStop?: boolean; idle?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'zcode-remote-')); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const file = join(dir, 'pair.link');
   await writeFile(file, options.v2 ? 'https://zcode.z.ai/remote/v4?sid=device-1&app_version=3.16.2' : 'https://zcode.z.ai/remote/v4?sid=device-1&hash=dGVzdF9oYXNo&t=123&app_version=3.10.2', { mode: 0o600 });
@@ -39,7 +39,7 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
   const address = http.address(); if (!address || typeof address === 'string') throw new Error('invalid fixture');
   const calls: Array<{ method: string; args: any }> = [], wire: string[] = [];
   let nativeTitle = '新会话', taskArchived = false;
-  let nativeReads = 0;
+  let nativeReads = 0, loadedForRename = false;
   let emit!: (value: any) => void, connection: WebSocket | undefined, subscribeId: number | undefined;
   server.on('connection', (socket,request) => {
     if(options.v2) expect(new URL(request.url!,'http://localhost').searchParams.get('token')).toBe('A'.repeat(22));
@@ -81,7 +81,10 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
         if (kind === 102) { subscribeId = id; emit({ type: 'snapshot', snapshot: { session: { sessionId: body.sessionId } } }); return; }
         let response: any = {};
         if (method === 'helloConversationV4') response = { kind: 'hello', protocolVersion: 2, clientMode: 'web-remote-replayable' };
+        if (method === 'resumeSession') loadedForRename = true;
+        if (method === 'readSession' && options.coldRename && !loadedForRename) { rpc([202, id], { message: 'session.notLoaded' }); return; }
         if (method === 'resumeSession' || method === 'createSession') response = { session: { sessionId: body[0].sessionId ?? 'sess_new' } };
+        if (method === 'resumeSession' && options.wrongResumeIdentity) response = { session: { sessionId: 'sess_wrong' } };
         if(method==='listSessions')response=[{sessionId:'sess_original',workspace:{workspacePath:dir}}];
         if(method==='archiveTask')taskArchived=true;
         if(method==='getTaskMeta')response={taskId:body[0].taskId,workspacePath:dir};
@@ -174,7 +177,22 @@ describe('ZCode desktop remote attachment', () => {
     const f=await fixture();
     await f.client.request('session/rename',{sessionId:'sess_original',title:'AA-新名字'});
     expect(f.calls.filter(c=>c.method==='readSession')).toHaveLength(2);
+    expect(f.calls.filter(c=>c.method==='resumeSession')).toHaveLength(1);
     expect(f.calls.some(c=>['createSession','sendPrompt','renameTask'].includes(c.method))).toBe(false);
+  });
+  it('materializes an unloaded persisted session before a native title change, without sending a prompt', async () => {
+    const f = await fixture({ v2: true, coldRename: true });
+    await expect(f.client.request('session/read', { sessionId: 'sess_original' })).rejects.toThrow('桌面拒绝请求');
+    await f.client.request('session/rename', { sessionId: 'sess_original', title: 'AA-新名字' });
+    const rename = f.calls.findIndex(c => c.method === 'sendConversationCommandV4');
+    expect(f.calls.findIndex(c => c.method === 'resumeSession')).toBeLessThan(rename);
+    expect(f.calls[rename]!.args[0].envelope).toMatchObject({ type: 'renameSession', sessionId: 'sess_original' });
+    expect(f.calls.some(c => ['createSession', 'sendPrompt', 'setModel', 'setMode'].includes(c.method))).toBe(false);
+  });
+  it('does not rename when native restore returns another session', async () => {
+    const f = await fixture({ wrongResumeIdentity: true });
+    await expect(f.client.request('session/rename', { sessionId: 'sess_original', title: 'AA-新名字' })).rejects.toThrow('不匹配');
+    expect(f.calls.some(c => c.method === 'sendConversationCommandV4')).toBe(false);
   });
   it('discovers native desktop models and reasoning without injecting a CLI registry or creating a new session',async()=>{
     const f=await fixture({v2:true});await f.client.request('workspace/updateProviderRegistry',{});await f.client.close();

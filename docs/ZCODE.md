@@ -160,3 +160,8 @@ Codex、Claude、ZCode 均使用各自专用头像；手动创建、AA 自动建
 新增工具时注册能力、提供 adapter 与会话操作，并接入 registry；补充原生协议、停止、重连、来源隔离与 A2A 测试。未知工具拒绝加载，不按 Claude 或 Codex 兜底执行。
 
 协议参考：[官方 Agent 协议](https://github.com/zai-org/ZCode/blob/main/packages/shared/src/zcode-protocol/index.ts)。上游 main 可能已升级，兼容性以本机 CLI 实际协议及集成测试为准。
+
+
+原生改名前会先通过桌面远控的 `resumeSession` 加载指定的已保存会话，验证会话 ID，
+再提交改名命令并读取标题确认。会话出现在列表中并不表示桌面运行时已经加载它；
+这一步不发送提示词，不创建新会话，也不修改模型或供应商配置。

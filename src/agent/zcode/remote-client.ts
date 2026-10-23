@@ -236,6 +236,11 @@ export class ZcodeRemoteClient {
       case 'session/archive': result = await this.call('archiveTask', [{ workspacePath: target.workspacePath, taskId: params.sessionId }], 'zcode-task'); break;
       case 'session/rename': {
         if (!params.title?.trim()) throw new Error('ZCode 会话名不能为空');
+        // listSessions includes persisted conversations that the desktop's
+        // workspace CLI has not loaded yet. Materialize this exact session
+        // before reading its metadata; resume does not submit model input.
+        const restored = await this.call('resumeSession', [target]);
+        if (restored.session?.sessionId !== params.sessionId) throw new Error('ZCode 返回了不匹配的会话，未改名');
         const before = await this.call('readSession', [target]);
         if (before.session?.sessionId !== params.sessionId) throw new Error('ZCode 原生会话不存在，未改名');
         // Empty native sessions do not yet have a legacy task-index entry.
