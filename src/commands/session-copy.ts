@@ -53,7 +53,7 @@ export async function showSessionCopyMenu(ctx: CommandContext): Promise<void> {
   const available = await Promise.allSettled(tools.map(t => t.agent.isAvailable()));
   const creationTools = tools.filter((_, i) => available[i]?.status === 'fulfilled' && (available[i] as PromiseFulfilledResult<boolean>).value)
     .map(t => ({ id: t.id, token: issue(t.id) }));
-  await sendManagedCard(ctx.channel, ctx.msg.chatId, sessionCopyCard(source.toolId, issue(source.toolId), creationTools),
+  await sendManagedCard(ctx.channel, ctx.msg.chatId, sessionCopyCard(source.toolId, issue(source.toolId), creationTools, `${source.name}-2`),
     { replyTo: ctx.msg.messageId, ...(ctx.chatMode === 'topic' ? { replyInThread: true } : {}) });
 }
 

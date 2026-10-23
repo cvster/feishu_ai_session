@@ -8,7 +8,7 @@ export type WebControlElement =
   | { kind: 'text'; text: string }
   | { kind: 'button'; text: string; action: string; primary: boolean; danger?: boolean }
   | { kind: 'select'; name: string; value: string; options: { value: string; text: string }[] }
-  | { kind: 'input'; name: string; value: string }
+  | { kind: 'input'; name: string; value: string; label?: string }
   | { kind: 'section'; text: string; elements: WebControlElement[] };
 export interface WebControlResult { elements: WebControlElement[] }
 type Field = { values?: string[] };
@@ -60,7 +60,8 @@ export class WebSessionControls {
         return [{ kind: 'select', name: v.name, value: String(v.initial_option ?? ''), options }];
       }
       if (v.tag === 'input' && typeof v.name === 'string') {
-        fields.set(v.name, {}); return [{ kind: 'input', name: v.name, value: String(v.default_value ?? '') }];
+        fields.set(v.name, {}); return [{ kind: 'input', name: v.name, value: String(v.default_value ?? ''),
+          ...(v.label?.content ? { label: String(v.label.content) } : {}) }];
       }
       if (v.tag === 'button' || v.tag === 'interactive_container') {
         const payload = v.behaviors?.find((b: any) => b.type === 'callback')?.value ?? v.value;

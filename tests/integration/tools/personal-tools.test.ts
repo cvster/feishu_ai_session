@@ -78,10 +78,13 @@ async function harness() {
 }
 
 describe('personal multi-tool workflows', () => {
-  function copyButton(h: Awaited<ReturnType<typeof harness>>, label: string, command = 'fork.to') {
+  function copyElements(h: Awaited<ReturnType<typeof harness>>) {
     const card = vi.mocked(h.channel.createCard).mock.calls.at(-1)![0] as any;
-    const buttons = card.body.elements.flatMap((row: any) => row.columns?.flatMap((c: any) => c.elements) ?? []);
-    return buttons.find((b: any) => b.text?.content === label && b.behaviors?.[0]?.value?.cmd === command)?.behaviors[0].value;
+    const flatten = (row: any): any[] => [row, ...(row.elements ?? row.columns ?? []).flatMap(flatten)];
+    return flatten(card.body);
+  }
+  function copyButton(h: Awaited<ReturnType<typeof harness>>, label: string, command = 'fork.to') {
+    return copyElements(h).find((b: any) => b.text?.content === label && b.behaviors?.[0]?.value?.cmd === command)?.behaviors[0].value;
   }
   it('labels the copy and create rows and includes the current tool in both', async () => {
     const h = await harness(); await h.sync();
@@ -94,8 +97,10 @@ describe('personal multi-tool workflows', () => {
     expect(copyButton(h, 'Codex')).toMatchObject({ cmd: 'fork.to' });
     expect(copyButton(h, 'Codex').arg).not.toBe(copyButton(h, 'Codex', 'fork.same').arg);
     expect(copyButton(h, 'Zcode')).toBeUndefined(); expect(copyButton(h, 'Dsh')).toBeUndefined();
-    const card = vi.mocked(h.channel.createCard).mock.calls.at(-1)![0] as any;
-    expect(card.body.elements.map((row: any) => row.columns[0].elements[0].content)).toEqual(['复制会话：', '在新工具中创建会话：']);
+    const elements = copyElements(h);
+    expect(elements.filter(row => row.tag === 'column_set').map(row => row.columns[0].elements[0].content)).toEqual(['复制会话：', '在新工具中创建会话：']);
+    expect(elements.find(row => row.tag === 'input')).toMatchObject({ name: 'new_session_name', default_value: 'AA-同名-2', required: true });
+    expect(elements.filter(row => row.tag === 'button').every(row => row.form_action_type === 'submit' && row.name)).toBe(true);
     expect(h.groups).toHaveLength(2);
   });
   it('creates a fresh session in the original tool from the second row without forking or copying history automatically', async () => {
@@ -107,6 +112,7 @@ describe('personal multi-tool workflows', () => {
     const value = copyButton(h, 'Codex');
     await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group'));
     expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
+    expect(h.groups[2]!.name).toBe('AA-同名-2');
     expect(h.workspaces.cwdFor(target)).toBe(h.dir);
     expect(h.bindings.get(target)).toMatchObject({ toolId: 'codex', nativeCreated: false, reasoningEffort: 'high', copiedFrom: { toolId: 'codex', nativeId: 'same-uuid' } });
     expect(h.bindings.get(target)?.nativeId).not.toBe('same-uuid');
@@ -121,10 +127,12 @@ describe('personal multi-tool workflows', () => {
     const source = h.groups[0]!.id; const before = h.bindings.get(source);
     await runCommandHandler('fork', '', h.context(source, 'group'));
     const value = copyButton(h, targetTool === 'kilo' ? 'Kilo' : 'Claude');
-    await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group'));
+    const creation = h.context(source, 'group'); creation.formValue = { new_session_name: '  AA-自定义会话  ' };
+    await runCommandHandler('fork', `to ${value.arg}`, creation);
     expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
+    expect(h.groups[2]!.name).toBe('AA-自定义会话');
     expect(h.workspaces.cwdFor(target)).toBe(h.dir);
-    expect(h.bindings.get(target)).toMatchObject({ toolId: targetTool, nativeCreated: false, model: 'default', reasoningEffort: 'default',
+    expect(h.bindings.get(target)).toMatchObject({ toolId: targetTool, name: 'AA-自定义会话', nativeCreated: false, model: 'default', reasoningEffort: 'default',
       copiedFrom: { toolId: 'codex', sourceId: 'codex-home', nativeId: 'same-uuid', name: 'AA-同名', cwd: h.dir } });
     expect(controlsForTool(h.controls, targetTool, target).profileConfig.preferences.reasoningEffort).toBe('default');
     expect(h.bindings.get(source)).toEqual(before); expect(h.runs).toEqual([]);
@@ -149,6 +157,40 @@ describe('personal multi-tool workflows', () => {
     const value = copyButton(h, 'Claude', 'fork.same');
     await runCommandHandler('fork', `same ${value.arg}`, h.context(group, 'group'));
     expect(h.groups).toHaveLength(3); expect(h.bindings.get(h.groups[2]!.id)).toMatchObject({ toolId: 'claude', nativeCreated: false, copiedFrom: { toolId: 'claude' } });
+    expect(h.groups[2]!.name).toBe('AA-同名（Claude）-2');
+  });
+  it.each(['', '   ', 'x'.repeat(101), 'name\ninvalid', 42])('rejects invalid new names before native copy or fresh creation: %s', async name => {
+    const h = await harness(); await h.sync(); const group = h.groups[0]!.id;
+    const fork = vi.fn(); h.registry.get('codex').agent.forkThread = fork;
+    await runCommandHandler('fork', '', h.context(group, 'group'));
+    const values = [copyButton(h, 'Codex', 'fork.same'), copyButton(h, 'Claude')];
+    for (const value of values) {
+      const ctx = h.context(group, 'group'); ctx.formValue = { new_session_name: name };
+      await runCommandHandler('fork', `${value.cmd.split('.')[1]} ${value.arg}`, ctx);
+    }
+    expect(h.groups).toHaveLength(2); expect(fork).not.toHaveBeenCalled();
+  });
+  it('retries naming and group creation with the same native copy and keeps the scanner paused', async () => {
+    const h = await harness(); await h.sync(); const group = h.groups[0]!.id;
+    let paused = false;
+    h.controls.withAaSessionGroupSyncPaused = async operation => { paused = true; try { return await operation(); } finally { paused = false; } };
+    const fork = vi.fn(async () => { expect(paused).toBe(true); return { nativeId: 'copy-retry', name: 'native default', cwd: h.dir }; });
+    const rename = vi.fn(async () => { expect(paused).toBe(true); }).mockRejectedValueOnce(Error('rename temporarily unavailable'));
+    h.registry.get('codex').sessions = { fork, rename, archive: async () => {}, historyPath: async () => undefined };
+    await runCommandHandler('fork', '', h.context(group, 'group')); const value = copyButton(h, 'Codex', 'fork.same');
+    const ctx = h.context(group, 'group'); ctx.formValue = { new_session_name: 'AA-重试副本' };
+    await runCommandHandler('fork', `same ${value.arg}`, ctx);
+    expect(h.groups).toHaveLength(2); expect(fork).toHaveBeenCalledOnce();
+    vi.spyOn(h.channel.rawClient.im.v1.chat, 'create').mockRejectedValueOnce(Error('group temporarily unavailable'));
+    await runCommandHandler('fork', `same ${value.arg}`, ctx);
+    expect(h.groups).toHaveLength(2);
+    await runCommandHandler('fork', `same ${value.arg}`, ctx);
+    await runCommandHandler('fork', `same ${value.arg}`, ctx);
+    expect(fork).toHaveBeenCalledOnce(); expect(rename).toHaveBeenCalledTimes(2);
+    expect(rename).toHaveBeenLastCalledWith('copy-retry', 'AA-重试副本');
+    expect(h.groups[2]?.name).toBe('AA-重试副本');
+    expect(h.bindings.get(group)).toMatchObject({ nativeId: 'same-uuid', name: 'AA-同名' });
+    expect(paused).toBe(false);
   });
   it('rejects a forwarded copy choice, changed source binding, and an alternative that became unavailable', async () => {
     const h = await harness(); await h.sync(); const group = h.groups[0]!.id;

@@ -964,7 +964,7 @@ async function handleNewChat(
     sourceCwd = workspace.cwdRealpath;
   }
   let name = rawName;
-  if (!name || isDefaultChatName(name)) {
+  if (!name || (!options.copiedFrom && isDefaultChatName(name))) {
     const knownChats = await refreshKnownChatsForNaming(ctx);
     const existingNames = knownChats.map((chat) => chat.name);
     if (!name || existingNames.includes(name)) name = defaultChatName(existingNames);
@@ -1524,30 +1524,41 @@ async function handleFork(args: string, ctx: CommandContext): Promise<void> {
     if (!action) { await showSessionCopyMenu(ctx); return; }
     if (action !== 'same' && action !== 'to') return reply(ctx, '请重新打开复制会话面板。');
     const choice = token ? await sessionCopyChoice(ctx, token) : undefined;
-    if (action === 'same' && (!choice || choice.target === ctx.controls.profileConfig.agentKind) && toolDefinition(ctx.controls.profileConfig.agentKind).fork) {
+    if (action === 'same' && !choice && toolDefinition(ctx.controls.profileConfig.agentKind).fork) {
       await handleNativeFork(ctx); return;
     }
     if (!choice || (action === 'same' && choice.target !== ctx.controls.profileConfig.agentKind)) throw new Error('复制入口已失效，请重新打开。');
     if (choice.creating) return reply(ctx, '正在创建会话，请稍候。');
     if (choice.created) return reply(ctx, '此会话已创建，请到新群继续。');
-    if (!ctx.controls.toolBindings || !ctx.controls.toolRegistry) throw new Error('工具会话管理尚未就绪。');
+    const rawName = ctx.formValue?.new_session_name ?? `${choice.source.name}-2`;
+    if (typeof rawName !== 'string') throw new Error('名称需为 1–100 字。');
+    const name = rawName.trim();
+    if (!name || name.length > 100 || /[\u0000-\u001f]/.test(name)) throw new Error('名称需为 1–100 字，不能包含控制字符。');
+    if (choice.name && choice.name !== name) throw new Error('此操作已提交，请重新打开复制会话面板。');
+    choice.name = name;
     choice.creating = true;
     try {
+      if (action === 'same' && toolDefinition(choice.target).fork) {
+        if (await handleNativeFork(ctx, name)) choice.created = true;
+        return;
+      }
+      if (!ctx.controls.toolBindings || !ctx.controls.toolRegistry) throw new Error('工具会话管理尚未就绪。');
       const source = await currentCopySource(ctx);
-      const name = choice.name ??= uniqueSessionGroupName(`${source.name}（${toolDefinition(choice.target).label}）`,
-        (await refreshKnownChatsForNaming(ctx)).map(c => c.name));
       const created = await handleNewChat(name, ctx, source.cwd, choice.target, { copiedFrom: choice.source, uuid: choice.source.copyId });
       if (created) choice.created = true;
     } finally { choice.creating = false; }
   } catch (error) { await reply(ctx, `❌ ${errorText(error)}`); }
 }
 
-async function handleNativeFork(ctx: CommandContext): Promise<void> {
+async function handleNativeFork(ctx: CommandContext, name?: string): Promise<boolean> {
   const toolId = ctx.controls.profileConfig.agentKind;
   const tool = ctx.controls.toolRegistry?.find(toolId);
   const nativeFork = tool?.sessions?.fork;
   if (!toolDefinition(toolId).fork || (!nativeFork && !ctx.agent.forkThread) || !ctx.sessionCatalog) {
-    return reply(ctx, '当前工具不支持会话分叉。');
+    await reply(ctx, '当前工具不支持会话分叉。'); return false;
+  }
+  if (name && !tool?.sessions?.rename && !ctx.agent.renameSession) {
+    await reply(ctx, '当前工具不支持修改新会话名字。'); return false;
   }
   const botAppId = ctx.controls.profileConfig.accounts.app.id;
   const exact = ctx.sessionCatalogIdentity ? ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity) : undefined;
@@ -1557,11 +1568,11 @@ async function handleNativeFork(ctx: CommandContext): Promise<void> {
     .sort((a, b) => b.updatedAt - a.updatedAt)[0];
   const sourceNativeId = source && nativeSessionId(toolId, source);
   if (!sourceNativeId || source?.botAppId !== botAppId || source.agentId !== toolId || (tool && source.sourceId && source.sourceId !== tool.sourceId)) {
-    return reply(ctx, `当前群尚未绑定本机器人的 ${toolDefinition(toolId).label} 会话，无法复制。`);
+    await reply(ctx, `当前群尚未绑定本机器人的 ${toolDefinition(toolId).label} 会话，无法复制。`); return false;
   }
-  if (ctx.activeRuns.get(ctx.scope)) return reply(ctx, '请先停止当前任务，再复制会话。');
+  if (ctx.activeRuns.get(ctx.scope)) { await reply(ctx, '请先停止当前任务，再复制会话。'); return false; }
   const key = JSON.stringify([botAppId, toolId, tool?.sourceId, sourceNativeId]);
-  if (pendingForks.has(key)) return reply(ctx, '正在创建分叉，请稍候。');
+  if (pendingForks.has(key)) { await reply(ctx, '正在创建分叉，请稍候。'); return false; }
   pendingForks.add(key);
   try {
     const createForkAndGroup = async () => {
@@ -1574,6 +1585,11 @@ async function handleNativeFork(ctx: CommandContext): Promise<void> {
       }
       // A group-creation retry must not create another native fork.
       unboundForks.set(key, fork);
+      if (name && fork.name !== name) {
+        if (tool?.sessions?.rename) await tool.sessions.rename(fork.threadId, name);
+        else await ctx.agent.renameSession!(fork.threadId, name, fork.cwd);
+        fork.name = name;
+      }
       const token = issuePanelCandidate(ctx, { kind: 'session', ...fork, toolId, sourceId: tool?.sourceId, preview: fork.name });
       try {
         const bound = await createGroupForPanelSession(ctx, token, {
@@ -1583,20 +1599,22 @@ async function handleNativeFork(ctx: CommandContext): Promise<void> {
         });
         if (bound) unboundForks.delete(key);
         else await reply(ctx, `⚠️ 分叉 **${fork.name}** 已创建，建群尚未完成。再次点击“分叉”可重试建群，不会重复分叉。`);
+        return bound;
       } finally { panelCandidates.delete(token); }
     };
     // Cover naming AND direct binding: the periodic AA scanner must not
     // discover the new thread in the gap and create a competing group.
     if (ctx.controls.withAaSessionGroupSyncPaused) {
-      await ctx.controls.withAaSessionGroupSyncPaused(createForkAndGroup);
+      return await ctx.controls.withAaSessionGroupSyncPaused(createForkAndGroup);
     } else {
-      await createForkAndGroup();
+      return await createForkAndGroup();
     }
   } catch (err) {
     const fork = unboundForks.get(key);
     await reply(ctx, fork
-      ? `⚠️ 分叉 **${fork.name}** 已创建，建群失败：${errorText(err)}。再次点击可重试建群。`
+      ? `⚠️ 分叉 **${fork.name}** 已创建，命名或建群失败：${errorText(err)}。再次点击可重试，不会重复分叉。`
       : `❌ 分叉失败：${errorText(err)}`);
+    return false;
   } finally {
     pendingForks.delete(key);
   }

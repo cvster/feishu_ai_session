@@ -11,6 +11,7 @@ class Element {
   className = '';
   hidden = false;
   value = '';
+  name = '';
   disabled = false;
   clientHeight = 480;
   private top = 0;
@@ -44,7 +45,7 @@ class Element {
   get scrollHeight(): number { return this.id === 'messages' ? Math.max(480, (this.children[0]?.children.length ?? 0) * 240) : 480; }
   get scrollTop() { return Math.min(this.top, this.scrollHeight - this.clientHeight); }
   set scrollTop(value: number) { this.top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); }
-  querySelectorAll(selector: string): Element[] { const match = (child: Element) => selector.startsWith('.') ? child.className.split(' ').includes(selector.slice(1)) : selector === 'button:not(:disabled)' ? child.tag === 'button' && !child.disabled : child.tag === selector; return this.children.flatMap(child => [...(match(child) ? [child] : []), ...child.querySelectorAll(selector)]); }
+  querySelectorAll(selector: string): Element[] { const match = (child: Element) => selector.startsWith('.') ? child.className.split(' ').includes(selector.slice(1)) : selector === 'button:not(:disabled)' ? child.tag === 'button' && !child.disabled : selector === 'input[name],select[name]' ? ['input', 'select'].includes(child.tag) && !!child.name : child.tag === selector; return this.children.flatMap(child => [...(match(child) ? [child] : []), ...child.querySelectorAll(selector)]); }
   querySelector(tag: string) { return this.querySelectorAll(tag)[0]; }
   get text(): string { return this.textContent + this.children.map(child => child.text).join(''); }
 }
@@ -167,6 +168,21 @@ it.each(['session-archive', 'session-copy'])('keeps %s confirmation callbacks ti
   expect(h.node('controls-title').textContent).toContain('会话1'); expect(h.node('title').textContent).toBe('会话0');
   h.node('controls-body').querySelector('button')!.onclick!();
   expect(h.requests[2]).toMatchObject({ path: '/api/sessions/' + h.rows[1]!.id + '/control', data: { action: 'signed-target-choice' } });
+  h.requests[2]!.resolve({ elements: [{ kind: 'text', text: '完成' }] }); await h.settle();
+});
+
+it('shows the default copy name with its label and submits edits for the sidebar target', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  h.menu(1); h.node('session-copy').onclick!();
+  h.requests[1]!.resolve({ elements: [
+    { kind: 'input', name: 'new_session_name', label: '新会话名字', value: '会话1-2' },
+    { kind: 'button', text: '复制', action: 'signed-copy-choice' },
+  ] }); await h.settle();
+  const input = h.node('controls-body').querySelector('input')!;
+  expect(input.value).toBe('会话1-2'); expect(input.getAttribute('aria-label')).toBe('新会话名字');
+  expect(h.node('controls-body').querySelector('label')?.text).toBe('新会话名字');
+  input.value = '自定义名字'; h.node('controls-body').querySelector('button')!.onclick!();
+  expect(h.requests[2]).toMatchObject({ path: '/api/sessions/' + h.rows[1]!.id + '/control', data: { action: 'signed-copy-choice', values: { new_session_name: '自定义名字' } } });
   h.requests[2]!.resolve({ elements: [{ kind: 'text', text: '完成' }] }); await h.settle();
 });
 

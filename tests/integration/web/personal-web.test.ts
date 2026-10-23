@@ -36,7 +36,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
     createdAtMs: 10, state: reduce(reduce(initialState, { type: 'text', delta: '原生回答' }), { type: 'done', terminationReason: 'normal' }) }] };
   const copies: typeof native[] = [];
   const provider = { listAuthoritative: authoritative, list: vi.fn(async () => [native, ...copies]), nativeNames: true, conversation: vi.fn(async () => conversation),
-    history: async () => undefined, rename: async (_id: string, name: string) => { native.name = name; }, archive: vi.fn(async () => { native.archived = true; }),
+    history: async () => undefined, rename: async (id: string, name: string) => { const session = [native, ...copies].find(row => row.nativeId === id); if (!session) throw Error('missing session'); session.name = name; }, archive: vi.fn(async () => { native.archived = true; }),
     fork: vi.fn(async () => { const copy = { ...native, nativeId: 'native-fork', name: 'AA-web（分叉）' }; copies.push(copy); return copy; }) };
   const h = await fixture(tool, provider);
   h.options.cwd = native.cwd;
@@ -467,21 +467,26 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('archives and diss
   expect(h.channel.rawClient.im.v1.chat.delete).toHaveBeenCalledOnce();
 });
 
-it('copies through the native worker, binds one new group, preserves its real managed card and mute context, and does not fork twice on retry', async () => {
-  const h = await harness('codex'), id = (await h.service.list())[0]!.id;
+it.each(['codex', 'zcode', 'kilo', 'dsh'] as const)('copies through the %s worker with the chosen name, binds one new group, and does not fork twice on retry', async tool => {
+  const h = await harness(tool), id = (await h.service.list())[0]!.id;
   h.native.cwd = h.dir; h.workspaces.setCwd('oc_group', h.dir);
   const chatCreate = vi.fn(async () => ({ code: 0, data: { chat_id: 'oc_copy' } }));
   h.channel.rawClient.im.v1.chat.create = chatCreate as any;
   const notifications = vi.fn(async (args: string[]) => args[0] === 'auth' ? { appId: 'cli_test', identities: { user: { available: true, openId: 'ou_owner' } } } : { ok: true, identity: 'user', data: { invalid_ids: [] } });
   configureGroupNotifications(h.channel, { appId: 'cli_test', ownerId: () => 'ou_owner' }, notifications);
   const menu = flatten((await h.service.control(id, 'fork')).elements);
-  const fork = menu.find(e => e.kind === 'button' && e.text === 'Codex')!; if (fork.kind !== 'button') throw Error('copy');
-  const result = await h.service.control(id, fork.action);
+  expect(menu.find(e => e.kind === 'input')).toMatchObject({ name: 'new_session_name', label: '新会话名字', value: 'AA-web-2' });
+  const fork = menu.find(e => e.kind === 'button')!; if (fork.kind !== 'button') throw Error('copy');
+  const values = { new_session_name: 'AA-web自定义副本' };
+  const result = await h.service.control(id, fork.action, values);
   expect(JSON.stringify(result)).toContain('已创建分叉工作群'); expect(h.provider.fork).toHaveBeenCalledOnce(); expect(chatCreate).toHaveBeenCalledOnce();
-  expect(h.bindings.get('oc_copy')).toMatchObject({ nativeId: 'native-fork', toolId: 'codex' }); expect(h.bindings.get('oc_group')?.nativeId).toBe('native');
+  expect(h.bindings.get('oc_copy')).toMatchObject({ nativeId: 'native-fork', toolId: tool, name: values.new_session_name });
+  expect((await h.client.listSessions()).find(row => row.nativeId === 'native-fork')?.name).toBe(values.new_session_name);
+  expect(chatCreate.mock.calls[0]).toMatchObject([{ data: { name: values.new_session_name } }]);
+  expect(h.bindings.get('oc_group')).toMatchObject({ nativeId: 'native', name: 'AA-web' }); expect(h.native.name).toBe('AA-web');
   expect(notifications).toHaveBeenCalledTimes(2);
   expect(h.send).toHaveBeenCalledWith('oc_copy', { cardId: 'card' }, undefined);
-  expect(await h.service.control(id, fork.action)).toEqual(result); expect(h.provider.fork).toHaveBeenCalledOnce(); expect(chatCreate).toHaveBeenCalledOnce();
+  expect(await h.service.control(id, fork.action, values)).toEqual(result); expect(h.provider.fork).toHaveBeenCalledOnce(); expect(chatCreate).toHaveBeenCalledOnce();
 });
 
 it('persists favorites across restarts and scopes them to the owner and stable binding identity', async () => {

@@ -6,6 +6,7 @@ interface ButtonSpec {
   text: string;
   value: Record<string, unknown>;
   style?: 'primary' | 'danger' | 'default';
+  submitName?: string;
 }
 
 function button(spec: ButtonSpec): object {
@@ -30,6 +31,7 @@ function cardKitButton(spec: ButtonSpec): object {
     tag: 'button',
     text: { tag: 'plain_text', content: spec.text },
     type: spec.style ?? 'default',
+    ...(spec.submitName ? { name: spec.submitName, form_action_type: 'submit' } : {}),
     behaviors: [{ type: 'callback', value: spec.value }],
   };
 }
@@ -142,16 +144,17 @@ export function newChatWorkspaceCard(
   };
 }
 
-export function sessionCopyCard(current: ToolId, token: string, tools: { id: ToolId; token: string }[]): object {
+export function sessionCopyCard(current: ToolId, token: string, tools: { id: ToolId; token: string }[], defaultName: string): object {
   return {
     schema: '2.0',
     header: { title: { tag: 'plain_text', content: '复制会话' } },
-    body: { elements: [
-      cardKitButtonRow([{ text: toolDefinition(current).label, value: { cmd: 'fork.same', arg: token }, style: 'primary' }], '复制会话：'),
+    body: { elements: [{ tag: 'form', name: 'session_copy_form', elements: [
+      { tag: 'input', name: 'new_session_name', label: { tag: 'plain_text', content: '新会话名字' }, default_value: defaultName, required: true },
+      cardKitButtonRow([{ text: toolDefinition(current).label, value: { cmd: 'fork.same', arg: token }, style: 'primary', submitName: 'copy_same' }], '复制会话：'),
       ...(tools.length ? [cardKitButtonRow(tools.map(tool => ({
-        text: toolDefinition(tool.id).label, value: { cmd: 'fork.to', arg: tool.token },
+        text: toolDefinition(tool.id).label, value: { cmd: 'fork.to', arg: tool.token }, submitName: `create_${tool.id}`,
       })), '在新工具中创建会话：')] : []),
-    ] },
+    ] }] },
   };
 }
 
