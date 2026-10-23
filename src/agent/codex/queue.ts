@@ -400,14 +400,16 @@ async function runQueueCommand(
 }
 
 function turnContainsPrompt(turn: CodexThreadTurn, prompt: string): boolean {
+  // The writer appends a newline and may persist text in several parts.
+  // Match the complete input while preserving meaningful internal spacing.
   return turn.items.some(
     (item) =>
       item.type === 'userMessage' &&
       Array.isArray(item.content) &&
-      item.content.some((content) => {
+      item.content.map((content) => {
         const value = recordValue(content);
-        return value?.type === 'text' && value.text === prompt;
-      }),
+        return value?.type === 'text' && typeof value.text === 'string' ? value.text : '';
+      }).filter(Boolean).join('\n').trim() === prompt.trim(),
   );
 }
 

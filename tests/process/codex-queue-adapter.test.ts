@@ -213,6 +213,25 @@ describe('CodexAdapter native queue mode', () => {
     expect(requests.some(r => ['turn/interrupt', 'thread/queue/delete', 'thread/resume'].includes(r.method))).toBe(false);
   });
 
+  it.each(['newline', 'parts'] as const)('recognizes completed queued input with native %s formatting and releases its observer', async formatting => {
+    const fake = await createQueueCodex('completed', false, formatting); cleanup.push(fake.dir);
+    const prompt = formatting === 'parts' ? 'first line\nsecond line' : 'group request';
+    const run = createCodexQueueRun({ runId: 'native-format', binary: fake.path, profileStateDir: fake.dir,
+      codexHome: fake.dir, inheritCodexHome: false, remote: 'unix://', cwd: fake.dir,
+      sandbox: 'read-only', prompt, threadId: 'thread-existing', clientUserMessageId: 'native-format' });
+    try {
+      const seen: AgentEvent[] = [];
+      const drain = (async () => { for await (const event of run.events) seen.push(event); })();
+      await vi.waitFor(() => expect(seen.at(-1)).toMatchObject({ type: 'done', terminationReason: 'normal' }));
+      await drain;
+      expect(seen).toContainEqual({ type: 'system', threadId: 'thread-existing', turnId: 'turn-queued' });
+      expect(seen).toContainEqual({ type: 'text', delta: 'queued response' });
+      expect(await run.waitForExit(0)).toBe(true);
+      const requests = await readFile(join(fake.dir, 'requests.jsonl'), 'utf8');
+      expect(requests).not.toContain('turn/interrupt'); expect(requests).not.toContain('thread/queue/delete');
+    } finally { await run.detach!(); }
+  });
+
   it('does not queue when the writer rejects the selected model', async () => {
     const fake = await createQueueCodex();
     cleanup.push(fake.dir);
@@ -328,6 +347,7 @@ async function createQueueCodex(
   turnStatus: 'completed' | 'interrupted' | 'provisional-interrupted' |
     'provisional-completed-interrupted' | 'inProgress' | 'missing-queue' | 'stale-projection' = 'completed',
   startUnloaded = false,
+  inputFormatting: 'original' | 'newline' | 'parts' = 'original',
 ): Promise<{ dir: string; path: string }> {
   const dir = await mkdtemp(join(tmpdir(), 'codex-queue-test-'));
   const statePath = join(dir, 'state.json');
@@ -474,7 +494,9 @@ function handle(req) {
         : Date.now() / 1000,
     error: null,
     items: [
-      { type: 'userMessage', id: 'user-1', content: [{ type: 'text', text: queued.prompt }] },
+      { type: 'userMessage', id: 'user-1', content: ${JSON.stringify(inputFormatting)} === 'parts'
+        ? queued.prompt.split('\\n').map(text => ({ type: 'text', text }))
+        : [{ type: 'text', text: queued.prompt + (${JSON.stringify(inputFormatting)} === 'newline' ? '\\n' : '') }] },
       ...(includeAgentMessage
         ? [{ type: 'agentMessage', id: 'agent-1', text: 'queued response', phase: 'final_answer' }]
         : [])
