@@ -90,7 +90,6 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       const console = options.consoleService;
       if (!console) throw new WebError(503, '控制台尚未就绪');
       if (url.pathname === '/api/console' && req.method === 'GET') { respond(res, 200, await console.snapshot(url.searchParams.get('refresh') === '1')); return; }
-      if (url.pathname === '/api/console/logs' && req.method === 'GET') { respond(res, 200, await console.logs(url.searchParams.get('q') ?? '', url.searchParams.get('level') ?? '')); return; }
       const item = /^\/api\/console\/items\/([a-f0-9]{64})$/.exec(url.pathname);
       if (item && req.method === 'GET') { respond(res, 200, await console.detail(item[1]!)); return; }
       if (url.pathname === '/api/console/action' && req.method === 'POST') {

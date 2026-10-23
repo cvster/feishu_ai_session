@@ -12,6 +12,7 @@ import { SessionStore } from '../../../src/session/store';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import type { Controls } from '../../../src/commands';
 import { PersonalSessionService, type WebConversation } from '../../../src/web/service';
+import { cleanDissolvedChat } from '../../../src/bot/group-cleanup';
 import { BridgeConsoleService } from '../../../src/web/console';
 import { AuxiliaryGroups } from '../../../src/bot/auxiliary-groups';
 import { startBridgeWeb } from '../../../src/web/server';
@@ -90,8 +91,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   const socket = createServer(); await new Promise<void>(r => socket.listen(0, '127.0.0.1', r)); const port = (socket.address() as { port: number }).port; await new Promise<void>(r => socket.close(() => r()));
   const configPath = join(h.dir, 'web.json'), { secret } = await configureWeb(configPath, '127.0.0.1', port);
   if (host !== '127.0.0.1' || Object.keys(access).length) await writeFile(configPath, JSON.stringify({ ...JSON.parse(await readFile(configPath, 'utf8')), host, ...access }));
-  const consoleLogs: string[] = [];
-  const consoleService = new BridgeConsoleService({ controls, catalog, channel, personal: service, syncNames: async () => { await names.tick(); }, logs: async () => consoleLogs.join('\n') });
+  const consoleService = new BridgeConsoleService({ controls, catalog, channel, personal: service, syncNames: async () => { await names.tick(); }, cleanDissolvedGroup: chatId => cleanDissolvedChat({ channel, controls, catalog, sessions, workspaces, cancelPending: scope => inbox.rejectChat(scope).then(() => {}) }, chatId) });
   const web = (await startBridgeWeb({ configPath, service, consoleService, pollMs: 30 }))!; cleanups.push(() => web.close());
   let cookie = '';
   const request = (path: string, value?: unknown, headers = {}) => fetch(web.url + path, { method: value === undefined ? 'GET' : 'POST', headers: {
@@ -99,7 +99,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   const login = async () => { const response = await request('/api/login', { secret }); expect(response.status).toBe(200); cookie = response.headers.get('set-cookie')?.split(';')[0] ?? ''; };
   const replies = await startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath: join(h.dir, 'replies.json'), intervalMs: 60_000 }); cleanups.push(() => replies.stop());
   controls.workerRuntimes!.get(tool)!.replies = replies;
-  return { ...h, bindings, catalog, controls, sessions, inbox, service, consoleService, consoleLogs, makeService, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
+  return { ...h, bindings, catalog, controls, sessions, inbox, service, consoleService, makeService, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
 }
 
 async function sharedInput(h: Awaited<ReturnType<typeof harness>>, options: { name?: string; content?: string } = {}) {
@@ -722,7 +722,7 @@ it.each(['codex', 'zcode', 'kilo', 'claude', 'dsh'] as const)('console observes 
   expect(snapshot.bindings[0]).toMatchObject({ kind: '个人 AI 群', groupName: 'AA-web', sessionName: 'AA-web', issues: [] });
   expect(snapshot.items[0]).toMatchObject({ text: msg.content, status: 'pending', sender: '<Nick>', canRetry: true });
   expect(JSON.stringify(snapshot)).not.toContain('private-console-token');
-  const page = await h.request('/console'); expect(await page.text()).toContain('诊断日志');
+  const page = await h.request('/console'); expect(await page.text()).toContain('AI会话群管理');
   h.controls.ownerRefreshState = 'failed'; expect((await h.request('/api/console')).status).toBe(503);
 });
 
@@ -746,17 +746,14 @@ it('console keeps pending retry separate from accepted jobs and reconciles fresh
   expect(JSON.stringify(detail)).not.toContain('PRIVATE-POLICY');
 });
 
-it('console reports name mismatches, uses the existing sync path, and filters sanitized diagnostic logs', async () => {
+it('console reports name mismatches, uses the existing sync path, and removes diagnostic log access', async () => {
   const h = await harness(); await h.replies.stop();
   h.group('网页群改名');
   expect((await h.consoleService.snapshot(true)).bindings[0]!.issues).toContain('群名与会话名不一致');
   expect((await h.request('/api/console/action', { action: 'sync-names' })).status).toBe(200);
   expect(h.native.name).toBe('网页群改名');
-  h.consoleLogs.push(JSON.stringify({ ts: '2026-10-23 22:00:00', level: 'warn', phase: 'run-flow', event: 'rejected', scope: 'oc_group',
-    reason: '归档查询失败 Bearer super-secret-value sk-test-1234567890123456', token: 'NEVER-RETURN-TOKEN', prompt: 'PRIVATE-POLICY' }), '{broken');
-  const logs = await (await h.request('/api/console/logs?q=oc_group&level=warn')).json() as Awaited<ReturnType<BridgeConsoleService['logs']>>; expect(logs).toHaveLength(1);
-  expect(logs[0]).toMatchObject({ phase: 'run-flow', fields: { scope: 'oc_group' } });
-  expect(JSON.stringify(logs)).not.toMatch(/super-secret-value|sk-test|NEVER-RETURN|PRIVATE-POLICY/);
+  expect((await h.request('/api/console/logs')).status).toBe(404);
+  expect(await (await h.request('/console')).text()).not.toContain('诊断日志');
   expect((await h.request('/api/console/action', { action: 'stop' })).status).toBe(400);
 });
 
@@ -872,4 +869,95 @@ it('console preserves historical missing or unknown receipts without counting th
   expect(snapshot.sharedGroups[0]).toMatchObject({ busy: false, canBind: true });
   expect((await h.request('/api/console/action', { action: 'shared-bind', id: snapshot.sharedGroups[0]!.id, target: snapshot.sharedTargets.find(t => t.name === 'AA-new')!.id })).status).toBe(200);
   expect(h.bindings.get('oc_shared')?.nativeId).toBe('another'); expect(h.inbox.receipts('oc_shared')[0]?.status).toBe('accepted'); expect(h.calls).toHaveLength(0);
+});
+
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('AI group management reconciles both sides of %s through the same interfaces and retains dissolved associations', async tool => {
+  const h = await harness(tool); await h.replies.stop();
+  let row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(row).toMatchObject({ groupState: 'active', sessionState: 'active', canDissolve: false, canArchive: false });
+  expect((await h.request('/api/console/action', { action: 'personal-dissolve', id: row.id })).status).toBe(409);
+  h.native.archived = true;
+  row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(row).toMatchObject({ groupState: 'active', sessionState: 'archived', canDissolve: true, canArchive: false });
+  const deletion = vi.spyOn(h.channel.rawClient.im.v1.chat, 'delete');
+  expect((await h.request('/api/console/action', { action: 'personal-dissolve', id: row.id })).status).toBe(200);
+  expect(deletion).toHaveBeenCalledTimes(1); expect(h.bindings.get('oc_group')).toBeUndefined();
+  h.catalog.gc({ now: Date.now() + 100 * 86400_000 }); await h.catalog.flush();
+  const restored = new SessionCatalog(join(h.dir, 'catalog.json')); await restored.load();
+  expect(restored.dissolvedPersonalGroups()).toHaveLength(1);
+  row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(row).toMatchObject({ groupState: 'dissolved', sessionState: 'archived', canDissolve: false, canArchive: false, groupName: 'AA-web', cwd: '/project' });
+  h.native.archived = false;
+  row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(row).toMatchObject({ groupState: 'dissolved', sessionState: 'active', canDissolve: false, canArchive: true });
+  expect((await h.request('/api/console/action', { action: 'personal-archive', id: row.id })).status).toBe(200);
+  expect(h.provider.archive).toHaveBeenCalledWith('native');
+  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: 'archived', canArchive: false });
+  expect((await h.request('/api/console/action', { action: 'personal-archive', id: row.id })).status).toBe(409);
+  expect(h.provider.archive).toHaveBeenCalledTimes(1); expect(h.calls).toHaveLength(0);
+});
+
+it('AI group management excludes shared, private and topic routes and shows one row for each last personal binding', async () => {
+  const h = await harness(); await h.replies.stop(); await managedShared(h);
+  h.bindings.set('oc_group:topic', { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'topic' });
+  h.bindings.set('oc_private', { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'private', auxiliaryWorkgroup: true });
+  const snapshot = await h.consoleService.snapshot(true);
+  expect(snapshot.bindings.map(b => b.scope)).toEqual(['oc_group']);
+  expect(snapshot.sharedGroups.map(g => g.chatId)).toContain('oc_shared');
+});
+
+it.each(['permission', 'network', 'missing-data', 'worker', 'identity'] as const)('AI group actions fail closed for %s state instead of treating uncertainty as dissolution', async failure => {
+  const h = await harness(); await h.replies.stop();
+  const get = vi.spyOn(h.channel.rawClient.im.v1.chat, 'get');
+  if (failure === 'permission') get.mockResolvedValue({ code: 232011, msg: 'not a member' });
+  if (failure === 'network') get.mockRejectedValue(Error('timeout'));
+  if (failure === 'missing-data') get.mockResolvedValue({ code: 0 });
+  if (failure === 'worker') vi.spyOn(h.client, 'listSessions').mockRejectedValue(Error('roster unavailable'));
+  if (failure === 'identity') h.controls.toolRegistry!.find('kilo')!.sourceId = 'other-worker';
+  const row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(row.canArchive).toBe(false); expect(row.canDissolve).toBe(false);
+  expect((await h.request('/api/console/action', { action: 'personal-archive', id: row.id })).status).toBe(409);
+  expect(vi.mocked(h.channel.rawClient.im.v1.chat.delete)).not.toHaveBeenCalled(); expect(h.provider.archive).not.toHaveBeenCalled();
+});
+
+it.each(['returned', 'thrown', 'status'] as const)('AI group management recognizes proven dissolution (%s) before the cleanup scan runs', async kind => {
+  const h = await harness(); await h.replies.stop(); const get = vi.spyOn(h.channel.rawClient.im.v1.chat, 'get');
+  if (kind === 'returned') get.mockResolvedValue({ code: 232009 });
+  if (kind === 'thrown') get.mockRejectedValue({ response: { data: { code: 232009 } } });
+  if (kind === 'status') get.mockResolvedValue({ code: 0, data: { chat_status: 'dissolved_save' } });
+  const row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(row).toMatchObject({ groupState: 'dissolved', sessionState: 'active', canArchive: true, canDissolve: false });
+});
+
+it('AI group deletion failures preserve the binding, and stale or unauthorized actions cannot target a replacement', async () => {
+  const h = await harness('kilo', '127.0.0.2', { trustedNetworks: [] }); await h.replies.stop(); h.native.archived = true;
+  const row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect((await h.request('/api/console/action', { action: 'personal-dissolve', id: row.id })).status).toBe(401);
+  await h.login(); expect((await h.request('/api/console/action', { action: 'personal-dissolve', id: row.id }, { Origin: 'http://evil.test' })).status).toBe(403);
+  const deletion = vi.spyOn(h.channel.rawClient.im.v1.chat, 'delete').mockResolvedValue({ code: 232017 });
+  const denied = await h.request('/api/console/action', { action: 'personal-dissolve', id: row.id });
+  expect(denied.status).toBe(409); expect(await denied.text()).toContain('机器人没有解散此群的权限');
+  expect(h.bindings.get('oc_group')).toBeDefined(); expect(h.catalog.isChatDissolved('oc_group')).toBe(false);
+  h.bindings.set('oc_group', { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'replacement' });
+  expect((await h.request('/api/console/action', { action: 'personal-dissolve', id: row.id })).status).toBe(409);
+  expect(deletion).toHaveBeenCalledTimes(1);
+});
+
+it('disables group deletion on offline or unreadable workers even with an old confirmed archive marker', async () => {
+  const h = await harness(); await h.replies.stop(); h.bindings.archive('kilo', h.client.sourceId, 'native');
+  const list = vi.spyOn(h.client, 'listSessions').mockRejectedValue(Error('unreadable'));
+  let row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(row.canDissolve).toBe(false);
+  list.mockRestore(); vi.spyOn(h.client, 'health').mockRejectedValue(Error('offline'));
+  row = (await h.consoleService.snapshot(true)).bindings[0]!; expect(row.canDissolve).toBe(false);
+});
+
+it('archives a proven dissolved chat before scanning without enqueueing a notification to it', async () => {
+  const h = await harness(); await h.replies.stop();
+  vi.spyOn(h.channel.rawClient.im.v1.chat, 'get').mockResolvedValue({ code: 232009 });
+  const row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect((await h.request('/api/console/action', { action: 'personal-archive', id: row.id })).status).toBe(200);
+  expect(h.catalog.pendingArchiveNotifications()).toHaveLength(0); expect(h.catalog.isChatDissolved('oc_group')).toBe(true);
+  expect(h.catalog.dissolvedPersonalGroups()).toHaveLength(1); expect(h.bindings.get('oc_group')).toBeUndefined();
 });

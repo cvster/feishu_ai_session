@@ -64,6 +64,12 @@ export interface SessionArchiveNotification {
   sendingAt?: number;
 }
 
+/** A closed chat retains its last personal relationship independently of route-history GC. */
+export interface DissolvedPersonalGroup {
+  chatId: string; agentId: CatalogAgentId; sourceId: string; nativeId: string;
+  name?: string; cwd?: string; botAppId?: string; boundAt?: number;
+}
+
 export interface SessionCatalogGcOptions {
   now?: number;
   maxArchivedAgeMs?: number;
@@ -136,6 +142,7 @@ export class SessionCatalog {
   private archivedThreads = new Set<string>();
   private archivedScopes = new Map<string, string>();
   private dissolvedChats = new Set<string>();
+  private dissolvedPersonal = new Map<string, DissolvedPersonalGroup>();
   private suppressedAutoGroups = new Set<string>();
   private archiveNotifications = new Map<string, SessionArchiveNotification>();
   private saving: Promise<void> = Promise.resolve();
@@ -209,6 +216,12 @@ export class SessionCatalog {
       }
       this.dissolvedChats = new Set(state.dissolvedChats ?? []);
       this.suppressedAutoGroups = new Set(state.suppressedAutoGroups ?? []);
+      if (state.dissolvedPersonal !== undefined && (!Array.isArray(state.dissolvedPersonal) ||
+          !state.dissolvedPersonal.every((r: DissolvedPersonalGroup) => r && /^oc_[^:]+$/.test(r.chatId) &&
+            isToolId(r.agentId) && typeof r.sourceId === 'string' && typeof r.nativeId === 'string' && !!r.nativeId &&
+            ['name', 'cwd', 'botAppId'].every(k => (r as unknown as Record<string, unknown>)[k] === undefined || typeof (r as unknown as Record<string, unknown>)[k] === 'string') &&
+            (r.boundAt === undefined || Number.isFinite(r.boundAt))))) throw new Error('Invalid dissolved personal relationships');
+      this.dissolvedPersonal = new Map((state.dissolvedPersonal ?? []).map((r: DissolvedPersonalGroup) => [r.chatId, r]));
       if (state.notifications !== undefined && (!Array.isArray(state.notifications) ||
           !state.notifications.every((n: SessionArchiveNotification) => n && typeof n.id === 'string' &&
             typeof n.scopeId === 'string' && isToolId(n.agentId) && typeof n.nativeId === 'string' &&
@@ -223,11 +236,21 @@ export class SessionCatalog {
     for (const [key, row] of this.data) if (row.status === 'active' && this.isScopeArchived(row.scopeId)) {
       this.data.set(key, { ...row, status: 'archived' }); migrate = true;
     }
+    // Recover pre-ledger records once, before ordinary history GC can remove them.
+    let recovered = false;
+    for (const row of this.latestEntries()) {
+      const nativeId = row.threadId ?? row.sessionId;
+      if (!row.scopeId.includes(':') && this.isChatDissolved(row.scopeId) && row.sourceId && nativeId &&
+          this.isAutoGroupSuppressed(row.agentId, row.sourceId, nativeId) && !this.dissolvedPersonal.has(row.scopeId)) {
+        this.dissolvedPersonal.set(row.scopeId, { chatId: row.scopeId, agentId: row.agentId, sourceId: row.sourceId,
+          nativeId, cwd: row.cwdRealpath, botAppId: row.botAppId, boundAt: row.boundAt }); recovered = true;
+      }
+    }
     if (migrate) {
       try { await copyFile(this.path, `${this.path}.v1-backup`, constants.COPYFILE_EXCL); await chmod(`${this.path}.v1-backup`, 0o600); }
       catch (err) { if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err; }
-      await this.persist();
     }
+    if (migrate || recovered) await this.persist();
   }
 
   archiveScope(scopeId: string, nativeId: string, notify = false): void {
@@ -265,12 +288,20 @@ export class SessionCatalog {
   isThreadArchived(threadId: string): boolean { return this.archivedThreads.has(threadId); }
   isChatDissolved(chatId: string): boolean { return this.dissolvedChats.has(chatId); }
   dissolvedChatIds(): string[] { return [...this.dissolvedChats]; }
+  dissolvedPersonalGroups(): DissolvedPersonalGroup[] { return [...this.dissolvedPersonal.values()].map(r => ({ ...r })); }
   isAutoGroupSuppressed(agentId: CatalogAgentId, sourceId: string, nativeId: string): boolean {
     return this.suppressedAutoGroups.has(JSON.stringify([agentId, sourceId, nativeId]));
   }
 
   /** Close bridge routes without archiving a native conversation shared elsewhere. */
-  markChatDissolved(chatId: string, personalSessions: Array<{ agentId: CatalogAgentId; sourceId: string; nativeId: string }>): void {
+  markChatDissolved(chatId: string, personalSessions: Array<{ agentId: CatalogAgentId; sourceId: string; nativeId: string }>, personalGroup?: Pick<DissolvedPersonalGroup, 'agentId' | 'sourceId' | 'nativeId' | 'name'>): void {
+    if (!this.dissolvedPersonal.has(chatId) && personalSessions.length) {
+      const row = this.latestEntries().find(r => r.scopeId === chatId);
+      const ref = personalGroup ?? personalSessions.find(r => r.agentId === row?.agentId && r.sourceId === row.sourceId && r.nativeId === (row.threadId ?? row.sessionId));
+      if (ref) this.dissolvedPersonal.set(chatId, { chatId, ...ref,
+        cwd: row && (row.threadId ?? row.sessionId) === ref.nativeId ? row.cwdRealpath : undefined,
+        botAppId: row?.botAppId, boundAt: row?.boundAt });
+    }
     this.dissolvedChats.add(chatId);
     this.archiveScope(chatId, 'dissolved');
     for (const entry of this.data.values()) if (entry.scopeId.startsWith(`${chatId}:`)) this.archiveScope(entry.scopeId, 'dissolved');
@@ -388,6 +419,7 @@ export class SessionCatalog {
 
   /** Remove local associations without archiving native data or dissolving a group. */
   unlinkChat(chatId: string, refs: Array<{ agentId: CatalogAgentId; sourceId: string; nativeId: string }> = []): void {
+    this.dissolvedPersonal.delete(chatId);
     this.archivedScopes.set(chatId, 'unlinked');
     for (const [key, row] of this.data) if (row.scopeId === chatId || row.scopeId.startsWith(`${chatId}:`)) {
       this.archivedScopes.set(row.scopeId, 'unlinked'); this.data.delete(key);
@@ -563,7 +595,7 @@ export class SessionCatalog {
     await mkdir(dirname(this.path), { recursive: true });
     await writeFileAtomic(`${this.path}.archives.json`, `${JSON.stringify({
       threads: [...this.archivedThreads], scopes: [...this.archivedScopes],
-      dissolvedChats: [...this.dissolvedChats], suppressedAutoGroups: [...this.suppressedAutoGroups],
+      dissolvedChats: [...this.dissolvedChats], dissolvedPersonal: [...this.dissolvedPersonal.values()], suppressedAutoGroups: [...this.suppressedAutoGroups],
       notifications: [...this.archiveNotifications.values()],
     })}\n`);
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;

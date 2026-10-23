@@ -104,7 +104,7 @@ import { startWorkerQuestions } from './worker-questions';
 import { loadWorkerRegistry, workerTool } from '../worker/discovery';
 import { isWorkerScopeArchived } from '../tools/context';
 import { startAaSessionGroupSync } from './aa-session-groups';
-import { createGroupCleanup } from './group-cleanup';
+import { cleanDissolvedChat, createGroupCleanup } from './group-cleanup';
 import { startSessionArchiveNotifications } from './session-archive-notifications';
 import { isArchivedGroupAction } from './archived-group-actions';
 import { startNativeTurnSync } from './native-turn-sync';
@@ -640,9 +640,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
   });
   await ownerRefresh.start();
-  const groupCleanup = sessionCatalog ? createGroupCleanup({
+  const groupCleanupDeps = sessionCatalog ? {
     channel, controls, catalog: sessionCatalog, sessions, workspaces,
-    cancelPending: async scope => {
+    cancelPending: async (scope: string) => {
       const matches = (other: string) => other === scope || (!scope.includes(':') && other.startsWith(`${scope}:`));
       for (const item of pending.snapshot()) if (matches(item.scope)) pending.cancel(item.scope);
       for (const runtime of controls.workerRuntimes?.values() ?? []) {
@@ -650,7 +650,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         else await runtime.inbox.rejectChat(scope);
       }
     },
-  }) : undefined;
+  } : undefined;
+  const groupCleanup = groupCleanupDeps ? createGroupCleanup(groupCleanupDeps) : undefined;
   await groupCleanup?.start();
   const archiveNotifications = sessionCatalog ? startSessionArchiveNotifications({ channel, controls, catalog: sessionCatalog }) : undefined;
   controls.sessionArchiveNotifications = archiveNotifications;
@@ -826,6 +827,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       } });
     try {
       const consoleService = new BridgeConsoleService({ controls, catalog: sessionCatalog, channel, personal: service,
+        cleanDissolvedGroup: groupCleanupDeps ? async chatId => {
+          if (disconnecting) throw new WebError(503, '桥接正在重连，请稍后重试');
+          await cleanDissolvedChat(groupCleanupDeps, chatId);
+        } : undefined,
         syncNames: async toolId => { await Promise.all([...nameSyncs].filter(([id]) => !toolId || id === toolId).map(([, sync]) => sync.tick())); } });
       bridgeWeb = await startBridgeWeb({ configPath: join(deps.appPaths.profileDir, 'web.json'), service, consoleService });
       if (bridgeWeb) log.info('web', 'listening', { url: bridgeWeb.url });

@@ -413,6 +413,36 @@ describe('agent-aware session catalog', () => {
   });
 });
 
+it('recovers only the last legacy dissolved personal relationship and keeps it independently of route GC and reload', async () => {
+  const file = await path(), catalog = new SessionCatalog(file);
+  const base = { scopeId: 'oc_dead', agentId: 'claude' as const, cwdRealpath: '/repo', policyFingerprint: 'fp', sourceId: 'source', botAppId: 'bot' };
+  catalog.upsertActive({ ...base, sessionId: 'old', now: 1 });
+  catalog.upsertActive({ ...base, sessionId: 'new', now: 2 });
+  catalog.markChatDissolved('oc_dead', [{ agentId: 'claude', sourceId: 'source', nativeId: 'new' }]); await catalog.flush();
+  const archivePath = file + '.archives.json', raw = JSON.parse(await readFile(archivePath, 'utf8'));
+  delete raw.dissolvedPersonal; await writeFile(archivePath, JSON.stringify(raw));
+  const restored = new SessionCatalog(file); await restored.load();
+  expect(restored.dissolvedPersonalGroups()).toEqual([{ chatId: 'oc_dead', agentId: 'claude', sourceId: 'source', nativeId: 'new', cwd: '/repo', botAppId: 'bot', boundAt: 2 }]);
+  restored.gc({ now: Date.now() + 100 * 86400_000, maxEntriesPerProfile: 0 }); await restored.flush();
+  expect(restored.entries()).toHaveLength(0);
+  const again = new SessionCatalog(file); await again.load();
+  expect(again.dissolvedPersonalGroups()).toEqual(restored.dissolvedPersonalGroups());
+  expect(again.isThreadArchived('new')).toBe(false);
+  again.unlinkChat('oc_dead'); await again.flush(); expect(again.dissolvedPersonalGroups()).toHaveLength(0);
+});
+
+it('retains the explicit personal binding when history is stale, while topic and shared cleanup never create personal rows', async () => {
+  const file = await path(), catalog = new SessionCatalog(file);
+  catalog.upsertActive({ scopeId: 'oc_personal', agentId: 'claude', cwdRealpath: '/old-project', policyFingerprint: 'fp', sourceId: 'source', sessionId: 'old', now: 1 });
+  catalog.markChatDissolved('oc_personal', [{ agentId: 'claude', sourceId: 'source', nativeId: 'new' }], { agentId: 'claude', sourceId: 'source', nativeId: 'new', name: '最后的群名' });
+  catalog.upsertActive({ scopeId: 'oc_topic:thread', agentId: 'claude', cwdRealpath: '/repo', policyFingerprint: 'fp', sourceId: 'source', sessionId: 'topic', now: 2 });
+  catalog.markChatDissolved('oc_topic', [{ agentId: 'claude', sourceId: 'source', nativeId: 'topic' }]);
+  catalog.markChatDissolved('oc_shared', []); await catalog.flush();
+  expect(catalog.dissolvedPersonalGroups()).toHaveLength(1);
+  expect(catalog.dissolvedPersonalGroups()[0]).toMatchObject({ nativeId: 'new', name: '最后的群名', cwd: undefined });
+  expect(catalog.isAutoGroupSuppressed('claude', 'source', 'topic')).toBe(true);
+});
+
 async function path(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'session-catalog-test-'));
   cleanups.push(() => rm(dir, { recursive: true, force: true }));

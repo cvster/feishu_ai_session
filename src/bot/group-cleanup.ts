@@ -79,7 +79,10 @@ export async function cleanDissolvedChat(deps: Deps, chatId: string): Promise<vo
       })),
   ] : [];
   // Write ahead: a crash during route removal must not permit automatic replacement groups.
-  catalog.markChatDissolved(chatId, refs);
+  const binding = controls.toolBindings?.get(chatId);
+  const personalGroup = personal && binding?.nativeId && !binding.linkedSource && !binding.sharedScope && !binding.auxiliaryWorkgroup
+    ? { agentId: binding.toolId, sourceId: binding.sourceId, nativeId: binding.nativeId, name: binding.name } : undefined;
+  catalog.markChatDissolved(chatId, refs, personalGroup);
   await catalog.flush();
   await controls.auxiliary?.closeDissolvedChat(chatId);
   const scopes = new Set([chatId, ...bindings.map(([scope]) => scope), ...rows.map(row => row.scopeId),
