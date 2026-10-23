@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -128,6 +128,10 @@ describe('CodexAdapter native queue mode', () => {
       }
       await writeFile(join(fake.dir, 'liveness.json'), JSON.stringify({ mode: 'unavailable' }));
       await expect(run.checkLiveness!()).rejects.toThrow('queue unavailable');
+      await writeFile(join(fake.dir, 'liveness.json'), JSON.stringify({ mode: 'idle' }));
+      await appendFile(join(fake.dir, 'rollout.jsonl'), JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 'hidden-executed-turn' } }) + '\n');
+      // An executed turn hidden by the native index must not be reported lost.
+      await expect(run.checkLiveness!()).resolves.toMatchObject({ state: 'unknown' });
     } finally { await run.detach!(); await drain; }
     const requests = (await readFile(join(fake.dir, 'requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     expect(requests.filter(r => r.method === 'thread/queue/list').every(r => r.transport === 'shared')).toBe(true);
@@ -191,6 +195,22 @@ describe('CodexAdapter native queue mode', () => {
       cwd: fake.dir, approvalPolicy: 'never',
       sandboxPolicy: { type: 'workspaceWrite', writableRoots: [fake.dir], networkAccess: false },
     });
+  });
+
+  it('returns the durable answer when the shared writer index omits a completed execution', async () => {
+    const fake = await createQueueCodex('stale-projection'); cleanup.push(fake.dir);
+    const run = createCodexQueueRun({ runId: 'stale', binary: fake.path, profileStateDir: fake.dir, codexHome: fake.dir,
+      inheritCodexHome: false, remote: 'unix://', cwd: fake.dir, sandbox: 'read-only', prompt: 'raw request',
+      threadId: 'thread-existing', clientUserMessageId: 'bridge-stale' });
+    expect(await collect(run.events)).toEqual([
+      { type: 'system', threadId: 'thread-existing', cwd: fake.dir },
+      { type: 'system', threadId: 'thread-existing', turnId: 'turn-queued' },
+      { type: 'text', delta: 'durable answer' },
+      { type: 'done', threadId: 'thread-existing', terminationReason: 'normal' },
+    ]);
+    const requests = (await readFile(join(fake.dir, 'requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(requests.filter(r => r.method === 'thread/read').every(r => r.transport === 'shared')).toBe(true);
+    expect(requests.some(r => ['turn/interrupt', 'thread/queue/delete', 'thread/resume'].includes(r.method))).toBe(false);
   });
 
   it('does not queue when the writer rejects the selected model', async () => {
@@ -306,7 +326,7 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
 
 async function createQueueCodex(
   turnStatus: 'completed' | 'interrupted' | 'provisional-interrupted' |
-    'provisional-completed-interrupted' | 'inProgress' | 'missing-queue' = 'completed',
+    'provisional-completed-interrupted' | 'inProgress' | 'missing-queue' | 'stale-projection' = 'completed',
   startUnloaded = false,
 ): Promise<{ dir: string; path: string }> {
   const dir = await mkdtemp(join(tmpdir(), 'codex-queue-test-'));
@@ -339,14 +359,21 @@ if (args[0] === 'queue') {
   if (existsSync(${JSON.stringify(join(dir, 'started.txt'))}) && !existsSync(${JSON.stringify(join(dir, 'materialized.txt'))})) process.exit(7);
   const prompt = args[args.indexOf('--message') + 1];
   writeFileSync(statePath, JSON.stringify({ prompt }));
-  writeFileSync(rolloutPath, JSON.stringify({
+  writeFileSync(rolloutPath, ${JSON.stringify(turnStatus)} === 'missing-queue' ? '' : JSON.stringify({
     type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-queued' }
   }) + '\\n');
-  if (existsSync(settingsPath)) {
+  if (existsSync(settingsPath) && ${JSON.stringify(turnStatus)} !== 'missing-queue') {
     const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
     appendFileSync(rolloutPath, JSON.stringify({
       type: 'turn_context', payload: { turn_id: 'turn-queued', model: settings.model, effort: settings.effort }
     }) + '\\n');
+  }
+  if (${JSON.stringify(turnStatus)} === 'stale-projection') {
+    for (const item of [
+      { type: 'UserMessage', id: 'u', content: [{ type: 'text', text: prompt }] },
+      { type: 'AgentMessage', id: 'a', content: [{ type: 'Text', text: 'durable answer' }], phase: 'final_answer' }
+    ]) appendFileSync(rolloutPath, JSON.stringify({ type: 'event_msg', payload: { type: 'item_completed', thread_id: 'thread-existing', turn_id: 'turn-queued', item } }) + '\\n');
+    appendFileSync(rolloutPath, JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-queued' } }) + '\\n');
   }
   console.log('Queued message queue-1 for thread thread-existing.');
   process.exit(0);
@@ -439,7 +466,7 @@ function handle(req) {
   }
   const includeAgentMessage = configuredStatus !== 'provisional-completed-interrupted' ||
     queuedReads > 1;
-  const turns = configuredStatus === 'missing-queue' ? (mode === 'newturn' ? [{ id: 'turn-other', status: 'completed', items: [] }] : []) : queued ? [{
+  const turns = configuredStatus === 'missing-queue' || configuredStatus === 'stale-projection' ? (mode === 'newturn' ? [{ id: 'turn-other', status: 'completed', items: [] }] : []) : queued ? [{
     id: 'turn-queued',
     status,
     completedAt: status === 'interrupted' && configuredStatus === 'provisional-interrupted'

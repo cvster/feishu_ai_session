@@ -1387,14 +1387,20 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } satisfies Parameters<typeof startRunFlow>[0];
   const flow = await startRunFlow(flowInput);
   if (!flow.ok) {
-    if (controls.workerInbox && !['run-already-active', 'execution-worker-unavailable', 'pool-full', 'native-session-busy', 'reconnect-in-progress'].includes(flow.rejectReason.code)) await controls.workerInbox.reject(scope, batch);
+    if (controls.workerInbox) {
+      if (flow.rejectReason.retryable) controls.workerInbox.defer(scope, batch);
+      else await controls.workerInbox.reject(scope, batch);
+    }
     log.info('run-flow', 'rejected', { scope, code: flow.rejectReason.code });
     log.warn('policy', 'denied', {
       scope,
       source: 'im',
       code: flow.rejectReason.code,
     });
-    if (!controls.workerInbox || await controls.workerInbox.notifyOnce(scope, batch)) await channel.send(chatId, { markdown: flow.rejectReason.userVisible }, sendOpts);
+    if (!controls.workerInbox || await controls.workerInbox.notifyOnce(scope, batch)) await channel.send(chatId, {
+      markdown: flow.rejectReason.retryable && controls.workerInbox
+        ? `${flow.rejectReason.userVisible}\n消息已保留，服务恢复后会自动重试。` : flow.rejectReason.userVisible,
+    }, sendOpts);
     return;
   }
 

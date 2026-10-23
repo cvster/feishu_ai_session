@@ -1,5 +1,6 @@
 import { open, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import type { CodexThreadItem, CodexThreadSnapshot, CodexThreadTurn } from './thread-client';
 
 export type CodexPersistedTurnTerminal = 'completed' | 'interrupted';
 
@@ -16,6 +17,8 @@ interface RolloutCursor {
   unscopedAbortSeen: boolean;
   terminals: Map<string, CodexPersistedTurnTerminal>;
   executions: Map<string, CodexTurnExecutionInfo>;
+  startedTurns: Set<string>;
+  turns: Map<string, { threadId?: string; turn: CodexThreadTurn }>;
 }
 
 const INITIAL_TAIL_BYTES = 4 * 1024 * 1024;
@@ -44,6 +47,21 @@ export class CodexTurnTerminalVerifier {
     return (await this.loadCursor(rolloutPath))?.executions ?? new Map();
   }
 
+  async startedTurnsFor(rolloutPath: string | undefined): Promise<ReadonlySet<string>> {
+    return (await this.loadCursor(rolloutPath))?.startedTurns ?? new Set();
+  }
+
+  /** Recover only attributed, durable turns missing from the native index. */
+  async recoverMissingTurns(snapshot: CodexThreadSnapshot): Promise<CodexThreadTurn[]> {
+    const cursor = await this.loadCursor(snapshot.rolloutPath);
+    if (!cursor) return snapshot.turns;
+    const known = new Set(snapshot.turns.map(turn => turn.id));
+    const latest = Math.max(0, ...snapshot.turns.map(turn => turn.startedAtMs ?? 0));
+    const missing = [...cursor.turns.values()].filter(({ threadId, turn }) => threadId === snapshot.id && !known.has(turn.id) &&
+      (turn.startedAtMs ?? 0) >= latest && turn.items.some(item => item.type === 'userMessage'));
+    return [...snapshot.turns, ...missing.map(({ turn }) => ({ ...turn, items: [...turn.items] }))];
+  }
+
   private async loadCursor(rolloutPath: string | undefined): Promise<RolloutCursor | undefined> {
     const path = localPath(rolloutPath);
     if (!path) return undefined;
@@ -65,6 +83,8 @@ export class CodexTurnTerminalVerifier {
         unscopedAbortSeen: false,
         terminals: new Map(),
         executions: new Map(),
+        startedTurns: new Set(),
+        turns: new Map(),
       };
       this.cursors.set(path, cursor);
     }
@@ -102,7 +122,8 @@ function recordEvent(line: string, cursor: RolloutCursor): void {
     !line.includes('task_complete') &&
     !line.includes('turn_complete') &&
     !line.includes('turn_aborted') &&
-    !line.includes('turn_context')
+    !line.includes('turn_context') &&
+    !line.includes('item_completed')
   ) {
     return;
   }
@@ -116,6 +137,7 @@ function recordEvent(line: string, cursor: RolloutCursor): void {
   if (envelope?.type === 'turn_context') {
     const contextTurnId = stringValue(payload?.turn_id) ?? cursor.activeTurnId;
     if (contextTurnId) {
+      cursor.startedTurns.add(contextTurnId);
       const model = stringValue(payload?.model);
       const effort = stringValue(payload?.effort) ?? stringValue(payload?.reasoning_effort);
       cursor.executions.set(contextTurnId, {
@@ -123,19 +145,36 @@ function recordEvent(line: string, cursor: RolloutCursor): void {
         ...(model ? { model } : {}),
         ...(effort ? { reasoningEffort: effort } : {}),
       });
+      const stored = cursor.turns.get(contextTurnId);
+      if (stored) Object.assign(stored.turn, cursor.executions.get(contextTurnId));
     }
     return;
   }
   if (envelope?.type !== 'event_msg') return;
   const type = stringValue(payload?.type);
   const turnId = stringValue(payload?.turn_id);
+  if (type === 'item_completed' && turnId) {
+    const stored = cursor.turns.get(turnId), item = durableItem(payload?.item);
+    const threadId = stringValue(payload?.thread_id);
+    if (!stored || !item || !threadId || (stored.threadId && stored.threadId !== threadId)) return;
+    stored.threadId = threadId;
+    const index = stored.turn.items.findIndex(previous => previous.id === item.id);
+    if (index < 0) stored.turn.items.push(item); else stored.turn.items[index] = item;
+    return;
+  }
   if ((type === 'task_started' || type === 'turn_started') && turnId) {
+    cursor.startedTurns.add(turnId);
     cursor.activeTurnId = turnId;
+    cursor.turns.set(turnId, { turn: { id: turnId, status: 'inProgress', items: [],
+      startedAtMs: timestampMs(payload?.started_at) ?? timestampMs(envelope?.timestamp) } });
     cursor.unscopedAbortSeen = false;
     return;
   }
   if ((type === 'task_complete' || type === 'turn_complete') && turnId) {
+    cursor.startedTurns.add(turnId);
     cursor.terminals.set(turnId, 'completed');
+    const stored = cursor.turns.get(turnId);
+    if (stored) { stored.turn.status = 'completed'; stored.turn.completedAtMs = timestampMs(payload?.completed_at) ?? timestampMs(envelope?.timestamp); }
     if (cursor.activeTurnId === turnId) cursor.activeTurnId = undefined;
     cursor.unscopedAbortSeen = false;
     return;
@@ -144,6 +183,8 @@ function recordEvent(line: string, cursor: RolloutCursor): void {
   const abortedTurnId = turnId ?? cursor.activeTurnId;
   if (abortedTurnId) {
     cursor.terminals.set(abortedTurnId, 'interrupted');
+    const stored = cursor.turns.get(abortedTurnId);
+    if (stored) { stored.turn.status = 'interrupted'; stored.turn.completedAtMs = timestampMs(envelope?.timestamp); }
     if (cursor.activeTurnId === abortedTurnId) cursor.activeTurnId = undefined;
     cursor.unscopedAbortSeen = false;
   } else {
@@ -151,6 +192,25 @@ function recordEvent(line: string, cursor: RolloutCursor): void {
     // reconstructed tail turn, matching app-server's own recovery logic.
     cursor.unscopedAbortSeen = true;
   }
+}
+
+function durableItem(input: unknown): CodexThreadItem | undefined {
+  const raw = recordValue(input), kind = stringValue(raw?.type), id = stringValue(raw?.id);
+  if (!raw || !kind || !id) return;
+  const type = kind[0]!.toLowerCase() + kind.slice(1);
+  if (!['userMessage', 'agentMessage', 'reasoning', 'commandExecution', 'mcpToolCall'].includes(type)) return;
+  return { ...raw, type, id,
+    ...(type === 'userMessage' ? { clientId: raw.client_id ?? raw.clientId } : {}),
+    ...(type === 'agentMessage' ? { text: Array.isArray(raw.content) ? raw.content.map(value => stringValue(recordValue(value)?.text) ?? '').join('') : stringValue(raw.text) ?? '' } : {}),
+    ...(type === 'reasoning' ? { summary: raw.summary_text ?? raw.summary, content: raw.raw_content ?? raw.content } : {}),
+    ...(type === 'commandExecution' ? { exitCode: raw.exit_code ?? raw.exitCode, aggregatedOutput: raw.aggregated_output ?? raw.aggregatedOutput } : {}),
+  };
+}
+
+function timestampMs(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value < 1e12 ? value * 1000 : value;
+  if (typeof value !== 'string') return;
+  const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function localPath(input: string | undefined): string | undefined {

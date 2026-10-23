@@ -10,6 +10,7 @@ import { RunExecutor } from '../../../src/runtime/run-executor';
 import { SessionStore } from '../../../src/session/store';
 import { SessionCatalog } from '../../../src/session/catalog';
 import { WorkspaceStore } from '../../../src/workspace/store';
+import { RunRejected } from '../../../src/runtime/errors';
 import { FakeAgentAdapter } from '../../helpers/fake-agent';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile';
 
@@ -81,9 +82,32 @@ describe('IM run flow', () => {
     expect(result).toMatchObject({ ok: false, rejectReason: {
       code: mode === 'unavailable' ? 'archive-check-unavailable' : 'session-archived',
       userVisible: mode === 'unavailable' ? '暂时无法确认会话归档状态，请稍后重试。' : '会话已归档。请通过控制台手动绑定未归档的会话。',
+      ...(mode === 'unavailable' ? { retryable: true } : {}),
     } });
     expect(h.agent.runOptions).toEqual([]);
     await catalog.flush();
+  });
+
+  it.each(['initial', 'before-spawn'] as const)('marks a temporary archive lookup failure retryable at %s', async phase => {
+    const h = await createHarness({ defaultWorkspace: true }); let checks = 0;
+    const input = { scopeId: 'chat-1', scope: { source: 'im' as const, chatId: 'chat-1', actorId: 'ou_user' },
+      prompt: 'continue', attachments: [], access: { ok: true as const, reason: 'allowed-user' as const },
+      capability: claudeCapability(h.profileConfig), profileConfig: h.profileConfig,
+      sessions: h.sessions, workspaces: h.workspaces, executor: h.executor, now: 1000,
+      checkSessionArchived: async () => { if (phase === 'initial' || ++checks > 1) throw new Error('worker offline'); return false; } };
+    expect(await startRunFlow(input)).toMatchObject({ ok: false, rejectReason: { code: 'archive-check-unavailable', retryable: true } });
+    expect(h.agent.runOptions).toEqual([]);
+  });
+
+  it('keeps permanent binding failures non-retryable', async () => {
+    const h = await createHarness({ defaultWorkspace: true });
+    expect(await startRunFlow({ scopeId: 'chat-1', scope: { source: 'im', chatId: 'chat-1', actorId: 'ou_user' },
+      prompt: 'continue', attachments: [], access: { ok: true, reason: 'allowed-user' },
+      capability: claudeCapability(h.profileConfig), profileConfig: h.profileConfig, sessions: h.sessions,
+      workspaces: h.workspaces, executor: h.executor, now: 1000,
+      checkSessionArchived: async () => { throw new RunRejected('archive-check-unavailable', 'wrong account'); },
+    })).toMatchObject({ ok: false, rejectReason: { retryable: false } });
+    expect(h.agent.runOptions).toEqual([]);
   });
 
   it('rechecks archival after the initial lookup and before any task spawn', async () => {

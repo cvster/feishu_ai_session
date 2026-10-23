@@ -18,7 +18,8 @@ export type SpawnFailedCode =
 export class RunRejected extends Error {
   readonly code: RunRejectedCode;
 
-  constructor(code: RunRejectedCode, message: string) {
+  constructor(code: RunRejectedCode, message: string, readonly retryable =
+    ['pool-full', 'reconnect-in-progress', 'run-already-active', 'native-session-busy', 'execution-worker-unavailable'].includes(code)) {
     super(message);
     this.name = 'RunRejected';
     this.code = code;

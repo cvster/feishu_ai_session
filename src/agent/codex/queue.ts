@@ -83,6 +83,7 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
   let selectedTurnId: string | undefined;
   let queuedSubmissionId: string | undefined;
   let knownTurnIds: Set<string> | undefined;
+  let knownPersistedTurnIds: Set<string> | undefined;
   let sharedEndpointAvailable = false;
   let provisionalInterruptedTurnId: string | undefined;
   let interruptedObservedAtMs: number | undefined;
@@ -100,18 +101,22 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
   const events = (async function* (): AsyncGenerator<AgentEvent> {
     started = true;
     try {
-      const baseline = await reader.readThread(options.threadId);
+      const codexHome = options.codexHome ?? options.env?.CODEX_HOME ?? process.env.CODEX_HOME ??
+        (options.inheritCodexHome ? join(homedir(), '.codex') : join(options.profileStateDir, 'codex-home'));
+      sharedEndpointAvailable = Boolean(await resolveSharedCodexEndpoint({ remote, codexHome }));
+      // The writer and its history projection must share one transport.
+      // Independent readers can project another rollout when IDs were copied.
+      const historyReader = sharedEndpointAvailable ? settingsClient : reader;
+      const baseline = await historyReader.readThread(options.threadId);
       if (controller.signal.aborted) {
         if (!detached) yield interrupted(options.threadId);
         return;
       }
       const knownTurns = new Set(baseline.turns.map((turn) => turn.id));
       knownTurnIds = knownTurns;
+      knownPersistedTurnIds = new Set(await historyReader.persistedTurnIds(baseline));
       // Queue CLI flags configure the client, not the loaded thread. Update
       // the actual writer before adding input; never resume a competing server.
-      const codexHome = options.codexHome ?? options.env?.CODEX_HOME ?? process.env.CODEX_HOME ??
-        (options.inheritCodexHome ? join(homedir(), '.codex') : join(options.profileStateDir, 'codex-home'));
-      sharedEndpointAvailable = Boolean(await resolveSharedCodexEndpoint({ remote, codexHome }));
       if (sharedEndpointAvailable) {
         await settingsClient.updateThreadSettings(options.threadId, {
           model: options.model,
@@ -174,7 +179,7 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
       while (!controller.signal.aborted) {
         let snapshot: CodexThreadSnapshot;
         try {
-          snapshot = await reader.readThread(options.threadId);
+          snapshot = await historyReader.readThread(options.threadId);
           consecutiveReadFailures = 0;
         } catch (err) {
           if (controller.signal.aborted) break;
@@ -222,7 +227,7 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
             return;
           }
           if (isInterruptedTurnStatus(selected.status)) {
-            const persistedTerminal = await reader.persistedTurnTerminal(snapshot, selected.id);
+            const persistedTerminal = await historyReader.persistedTurnTerminal(snapshot, selected.id);
             if (persistedTerminal) {
               const terminalKey = `${selected.id}:${persistedTerminal}`;
               if (persistedTerminalSeen !== terminalKey) {
@@ -308,6 +313,10 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
       if ((await settingsClient.listQueuedSubmissions(options.threadId)).length) return { state: 'busy' };
       const snapshot = await settingsClient.readThread(options.threadId);
       if (snapshot.status?.type !== 'idle' || snapshot.turns.some(turn => !knownTurnIds!.has(turn.id))) return { state: 'unknown' };
+      // A stale native projection can hide a real executed turn. Durable
+      // start/completion records are proof that the input did not disappear.
+      const persisted = await settingsClient.persistedTurnIds(snapshot);
+      if ([...persisted].some(id => !knownPersistedTurnIds?.has(id))) return { state: 'unknown' };
       // Recheck after history: dequeue/start, a new input, or a blocking prompt
       // must reset the worker's consecutive confirmation count.
       if ((await settingsClient.listQueuedSubmissions(options.threadId)).length) return { state: 'busy' };

@@ -45,11 +45,12 @@ export class WorkerClient {
   }
   private async request<T>(path: string, body?: unknown, timeoutMs = 15_000): Promise<T> {
     const endpoint = JSON.parse(await readFile(join(this.stateDir, 'endpoint.json'), 'utf8')) as WorkerEndpoint;
-    if (endpoint.version !== 1 || !/^http:\/\/127\.0\.0\.1:\d+$/.test(endpoint.url) || typeof endpoint.token !== 'string') throw new Error('Invalid worker endpoint');
+    if (endpoint.version !== 1 || !/^http:\/\/127\.0\.0\.1:\d+$/.test(endpoint.url) || typeof endpoint.token !== 'string') throw new WorkerRequestError(400, 'Invalid worker endpoint', false, 'invalid-request');
     if (path !== '/health') {
       const identity = await fetch(`${endpoint.url}/health`, { headers: { Authorization: `Bearer ${endpoint.token}` }, signal: AbortSignal.timeout(2000) });
-      const value = identity.ok ? await identity.json() as WorkerHealth : undefined;
-      if (!this.matchesIdentity(value)) throw new Error('Worker identity changed or unavailable');
+      if (!identity.ok) throw new WorkerRequestError(identity.status, 'Worker unavailable', identity.status >= 500 || identity.status === 429, 'unavailable');
+      const value = await identity.json() as WorkerHealth;
+      if (!this.matchesIdentity(value)) throw new WorkerRequestError(409, 'Worker identity changed or unavailable', false, 'conflict');
     }
     const result = await fetch(`${endpoint.url}${path}`, { method: body === undefined ? 'GET' : 'POST',
       headers: { Authorization: `Bearer ${endpoint.token}`, 'Content-Type': 'application/json' },
@@ -60,7 +61,7 @@ export class WorkerClient {
   }
   async health(): Promise<HealthDetails> {
     const value = await this.request<WorkerHealth>('/health');
-    if (!this.matchesIdentity(value)) throw new Error('执行服务的工具、账户目录、会话格式或飞书应用不匹配');
+    if (!this.matchesIdentity(value)) throw new WorkerRequestError(409, '执行服务的工具、账户目录、会话格式或飞书应用不匹配', false, 'conflict');
     const { version: _version, toolId: _toolId, sourceId: _sourceId, botAppId: _botAppId, ...details } = value;
     return details;
   }

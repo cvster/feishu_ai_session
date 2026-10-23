@@ -141,6 +141,20 @@ time alone, a missing queue acknowledgement, or a new/selected native turn canno
 prove this condition. Other adapters keep their current behavior until they can
 provide equally reliable evidence; no provider branches are added to the bridge.
 
+Codex queue observers read through the same shared writer used for settings.
+Local durable `task_started`/`item_completed`/`task_complete` records recover newer
+turns omitted by a stale native history index. Recovery requires matching native
+thread IDs and recorded user input; existing projected turns are not duplicated.
+New durable execution evidence also prevents an orphan proof when the index is
+behind. This is a read-only fallback: it does not edit native files/databases,
+restart the writer, or resubmit accepted input.
+
+Before submission, temporary archive/status lookup failures retain the bridge
+inbox receipt and defer it for five seconds. The normal worker reconciliation
+retries after service recovery and notifies once. Confirmed archival, identity
+mismatch, missing native sessions and changed workspace bindings remain permanent
+rejections; uncertain already-accepted worker jobs are never retried this way.
+
 Worker/host restart does not guarantee task continuation. Unfinished uncertain
 jobs are marked unknown and never automatically rerun. Codex still submits to its
 existing native queue/shared writer inside its worker. This migration does not

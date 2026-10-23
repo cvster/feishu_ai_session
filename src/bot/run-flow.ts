@@ -70,6 +70,7 @@ export type StartRunFlowResult =
       rejectReason: {
         code: RunFlowRejectCode;
         userVisible: string;
+        retryable?: boolean;
       };
       workspace?: WorkingDirectoryResolveResult;
     };
@@ -95,9 +96,10 @@ export async function prepareRunFlow(input: StartRunFlowInput): Promise<Prepared
       return { ok: false, rejectReason: { code: 'session-archived',
         userVisible: '会话已归档。请通过控制台手动绑定未归档的会话。' } };
     }
-  } catch {
+  } catch (error) {
     return { ok: false, rejectReason: { code: 'archive-check-unavailable',
-      userVisible: '暂时无法确认会话归档状态，请稍后重试。' } };
+      userVisible: '暂时无法确认会话归档状态，请稍后重试。',
+      retryable: !(error instanceof RunRejected) || error.retryable } };
   }
   const requestedCwd =
     input.workspaces.cwdFor(input.scopeId) ?? input.profileConfig.workspaces.default ?? '';
@@ -189,7 +191,8 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       beforeSpawn: input.checkSessionArchived ? async () => {
         let archived: boolean;
         try { archived = await input.checkSessionArchived!(); }
-        catch { throw new RunRejected('archive-check-unavailable', '暂时无法确认会话归档状态，请稍后重试。'); }
+        catch (error) { throw new RunRejected('archive-check-unavailable', '暂时无法确认会话归档状态，请稍后重试。',
+          !(error instanceof RunRejected) || error.retryable); }
         if (archived) throw new RunRejected('session-archived', '会话已归档。请通过控制台手动绑定未归档的会话。');
       } : undefined,
       scopeId: input.scopeId,
@@ -217,6 +220,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
         ok: false,
         rejectReason: {
           code: err.code,
+          retryable: err.retryable,
           userVisible:
             err.code === 'session-archived' || err.code === 'archive-check-unavailable' || err.code === 'native-session-busy' || err.code === 'execution-worker-unavailable' || err.code === 'model-unavailable'
               ? err.message

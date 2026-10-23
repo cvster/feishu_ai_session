@@ -205,7 +205,7 @@ export class CodexThreadReader {
     const executions = await this.terminalVerifier.executionsFor(thread.rolloutPath);
     return {
       ...thread,
-      turns: thread.turns.map((turn) => ({ ...turn, ...executions.get(turn.id) })),
+      turns: (await this.terminalVerifier.recoverMissingTurns(thread)).map((turn) => ({ ...turn, ...executions.get(turn.id) })),
     };
   }
 
@@ -397,6 +397,10 @@ export class CodexThreadReader {
     turnId: string,
   ): Promise<CodexPersistedTurnTerminal | undefined> {
     return this.terminalVerifier.terminalFor(snapshot.rolloutPath, turnId);
+  }
+
+  async persistedTurnIds(snapshot: CodexThreadSnapshot): Promise<ReadonlySet<string>> {
+    return this.terminalVerifier.startedTurnsFor(snapshot.rolloutPath);
   }
 
   async stop(): Promise<void> {

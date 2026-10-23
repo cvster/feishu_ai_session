@@ -12,6 +12,7 @@ import { createFakeChannel } from '../../helpers/fake-channel';
 import { createTmpProfile } from '../../helpers/tmp-profile';
 import { startWorkerServer } from '../../../src/worker/server';
 import { WorkerInbox } from '../../../src/worker/inbox';
+import { WorkerApiError } from '../../../src/worker/tool-api';
 const mock = vi.hoisted(() => ({ channel: undefined as unknown }));
 vi.mock('@larksuite/channel', async original => ({ ...await original<typeof import('@larksuite/channel')>(), createLarkChannel: () => mock.channel }));
 vi.mock('../../../src/bot/aa-session-groups', () => ({ startAaSessionGroupSync: () => ({ stop() {}, withPaused: async (f: () => Promise<unknown>) => f() }) }));
@@ -20,6 +21,24 @@ const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
 
 describe('Codex through the common worker transport', () => {
+  it('retains input during an archive-query outage and submits it once when the worker recovers', async () => {
+    const h = await harness(); h.lookupUnavailable(true); await h.message('offline');
+    await vi.waitFor(() => expect(JSON.stringify(h.channel.sent)).toContain('服务恢复后会自动重试'), { timeout: 3000 });
+    expect(h.raw.runOptions).toHaveLength(0);
+    const inbox = new WorkerInbox(join(h.tmp.profile, 'codex-inbox.json')); await inbox.load();
+    expect(inbox.receipts('oc_group')).toMatchObject([{ status: 'pending', message: { messageId: 'offline' } }]);
+    h.lookupUnavailable(false);
+    await vi.waitFor(() => expect(h.raw.runOptions).toHaveLength(1), { timeout: 9000 });
+    await vi.waitFor(() => expect(h.worker.store.list()[0]?.status).toBe('completed'));
+    await h.message('offline'); expect(h.raw.runOptions).toHaveLength(1);
+  }, 12000);
+  it('rejects confirmed archived sessions instead of retaining them for retry', async () => {
+    const h = await harness(); h.archived(true); await h.message('archived');
+    await vi.waitFor(() => expect(JSON.stringify(h.channel.sent)).toContain('会话已归档'), { timeout: 3000 });
+    const inbox = new WorkerInbox(join(h.tmp.profile, 'codex-inbox.json')); await inbox.load();
+    expect(inbox.receipts('oc_group')).toMatchObject([{ status: 'rejected' }]);
+    expect(h.raw.runOptions).toHaveLength(0);
+  });
   it('submits raw input once and lets the journal own the reply even with native mirroring and CoT enabled', async () => {
     const h = await harness(); await h.message('raw');
     await vi.waitFor(() => expect(h.worker.store.list()[0]?.status).toBe('completed'));
@@ -71,11 +90,15 @@ async function harness(late = false, restoredMedia = false) {
     ownerRefreshState: 'ok', refreshOwner: async () => {}, restart: async () => {}, exit: async () => {}, processId: 'test' } as unknown as Controls;
   const raw = new FakeAgentAdapter({ id: 'codex', events: [{ type: 'system', threadId: 'native', turnId: 'turn' }, { type: 'text', delta: 'worker answer' }, { type: 'done', threadId: 'native', terminationReason: 'normal' }] });
   let worker: Awaited<ReturnType<typeof startWorkerServer>>;
+  let lookupUnavailable = false, archived = false;
   const launch = async () => {
     worker = await startWorkerServer({ stateDir: join(tmp.profile, 'workers', 'any-name'), sourceId: 'source', botAppId: 'cli_test', agent: raw,
       manifest: { label: 'Codex', nativeField: 'threadId', sessionKind: 'codex-thread', historyFormat: 'jsonl', nativeHistory: false },
       sessions: { list: async () => [{ nativeId: 'native', cwd: tmp.workspace, createdAtMs: 1, updatedAtMs: 2 }], history: async () => undefined,
-        conversation: async id => ({ id, cwd: tmp.workspace, archived: false, turns: [{ id: 'turn', createdAtMs: 1, bridge: true, input: '原样输入', state: { blocks: [{ kind: 'text', content: 'worker answer', streaming: false }], terminal: 'done', reasoning: { content: '', active: false }, footer: null } }] }) } });
+        conversation: async id => {
+          if (lookupUnavailable) throw new WorkerApiError(503, 'worker restarting', 'unavailable');
+          return { id, cwd: tmp.workspace, archived, turns: [{ id: 'turn', createdAtMs: 1, bridge: true, input: '原样输入', state: { blocks: [{ kind: 'text', content: 'worker answer', streaming: false }], terminal: 'done', reasoning: { content: '', active: false }, footer: null } }] };
+        } } });
     cleanups.push(() => worker.close());
   };
   if (!late) await launch();
@@ -88,5 +111,6 @@ async function harness(late = false, restoredMedia = false) {
     sessionCatalog: new SessionCatalog(join(tmp.profile, 'catalog.json')), workspaces: new WorkspaceStore(join(tmp.profile, 'workspaces.json')),
     appPaths: { profileDir: tmp.profile, mediaDir: join(tmp.profile, 'media'), secretsFile: join(tmp.profile, 'secrets'), keystoreSaltFile: join(tmp.profile, 'salt') } }); cleanups.push(() => bridge.disconnect()); };
   await connect();
-  return { tmp, channel, controls, raw, get worker() { return worker; }, get bridge() { return bridge; }, launch, connect, message: (id: string, content?: string) => handlers.message!(msg(id, content)) };
+  return { tmp, channel, controls, raw, lookupUnavailable(value: boolean) { lookupUnavailable = value; }, archived(value: boolean) { archived = value; },
+    get worker() { return worker; }, get bridge() { return bridge; }, launch, connect, message: (id: string, content?: string) => handlers.message!(msg(id, content)) };
 }

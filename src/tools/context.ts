@@ -3,6 +3,8 @@ import { canUseDm, canUseGroup } from '../policy/access';
 import type { Controls, CommandContext } from '../commands';
 import { toolProfile } from './runtime';
 import type { AgentKind } from '../config/profile-schema';
+import { RunRejected } from '../runtime/errors';
+import { WorkerRequestError } from '../worker/client';
 
 const roots = new WeakMap<Controls, Controls>();
 
@@ -55,15 +57,22 @@ export async function isWorkerScopeArchived(controls: Controls, scope: string): 
   const binding = controls.toolBindings?.get(scope);
   if (!binding?.nativeId) return false;
   const tool = controls.toolRegistry?.find(binding.toolId);
-  if (!tool || tool.sourceId !== binding.sourceId) throw new Error('会话 worker 身份不匹配');
+  if (!tool) throw new RunRejected('execution-worker-unavailable', '会话 worker 暂时不可用');
+  if (tool.sourceId !== binding.sourceId) throw new RunRejected('archive-check-unavailable', '会话 worker 身份不匹配');
   const { DurableAgentAdapter } = await import('../worker/adapter');
   if (!(tool.agent instanceof DurableAgentAdapter)) return false;
-  const health = await tool.agent.client.health();
-  if (health.capabilities?.conversation) return (await tool.agent.client.conversation(binding.nativeId)).archived;
-  if (health.capabilities?.sessions.list) {
-    const row = (await tool.listSessions()).find(row => row.nativeId === binding.nativeId);
-    if (!row && binding.nativeCreated !== false) throw new Error('无法确认原会话状态');
-    return row?.archived === true;
+  try {
+    const health = await tool.agent.client.health();
+    if (health.capabilities?.conversation) return (await tool.agent.client.conversation(binding.nativeId)).archived;
+    if (health.capabilities?.sessions.list) {
+      const row = (await tool.listSessions()).find(row => row.nativeId === binding.nativeId);
+      if (!row && binding.nativeCreated !== false) throw new RunRejected('archive-check-unavailable', '无法确认原会话状态');
+      return row?.archived === true;
+    }
+    throw new RunRejected('archive-check-unavailable', 'worker 不支持会话状态查询');
+  } catch (error) {
+    if (error instanceof WorkerRequestError && !error.retryable && (error.status < 500 || error.status === 501))
+      throw new RunRejected('archive-check-unavailable', '无法确认原会话状态');
+    throw error;
   }
-  throw new Error('worker 不支持会话状态查询');
 }
