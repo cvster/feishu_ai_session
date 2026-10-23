@@ -795,13 +795,13 @@ it('console keeps pending messages visible but forbids retry when worker receipt
 it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('console manages pending and active %s shared groups through owner selection without creating a native session', async tool => {
   const h = await harness(tool); await h.replies.stop(); const groups = await managedShared(h);
   const before = await h.consoleService.snapshot(true), group = before.sharedGroups[0]!, target = before.sharedTargets[0]!;
-  expect(group).toMatchObject({ status: 'pending', canBind: true, canLeave: true, sessionName: '尚未关联' });
+  expect(group).toMatchObject({ status: 'pending', canBind: true, canLeave: true, sessionName: '尚未关联', associationId: undefined });
   expect(before.bindings.some(b => b.scope === 'oc_shared')).toBe(false);
   expect((await h.request('/api/console/action', { action: 'shared-bind', id: group.id, target: target.id })).status).toBe(200);
   expect(groups.isActive('oc_shared')).toBe(true); expect(h.bindings.get('oc_shared')?.nativeId).toBe('native');
   expect(h.bindings.get('oc_group')?.nativeId).toBe('native'); expect(h.native.archived).toBe(false); expect(h.calls).toHaveLength(0);
   const after = await h.consoleService.snapshot(true);
-  expect(after.sharedGroups[0]).toMatchObject({ status: 'active', targetId: target.id, sessionName: 'AA-web', canBind: true });
+  expect(after.sharedGroups[0]).toMatchObject({ status: 'active', targetId: target.id, associationId: target.id, sessionName: 'AA-web', canBind: true });
   expect(after.sharedGroups[0]!.sessionId).toBe((await h.service.list())[0]!.id);
   const other = { ...h.native, nativeId: 'another', name: 'AA-另一个会话' }; h.provider.list.mockResolvedValue([h.native, other]);
   const choices = await h.consoleService.snapshot(true), next = choices.sharedTargets.find(t => t.name === other.name)!;
@@ -812,6 +812,7 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('console manages p
   const stop = vi.fn(async () => false); h.controls.workerRuntimes!.get(tool)!.replies = { runNow: async () => {}, stopScope: stop };
   expect((await h.request('/api/console/action', { action: 'shared-leave', id: current.id })).status).toBe(200);
   expect(stop).toHaveBeenCalledWith('oc_shared'); expect(groups.get('oc_shared')!.status).toBe('archived');
+  expect((await h.consoleService.snapshot(true)).sharedGroups[0]).toMatchObject({ associationId: next.id, targetId: undefined });
   expect(vi.mocked(h.channel.rawClient.im.v1.chatMembers.delete)).toHaveBeenCalledWith({ path: { chat_id: 'oc_shared' }, params: { member_id_type: 'app_id' }, data: { id_list: ['cli_test'] } });
   expect(h.provider.archive).not.toHaveBeenCalled(); expect(h.bindings.get('oc_group')?.nativeId).toBe('native');
 });

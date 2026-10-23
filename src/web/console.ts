@@ -142,6 +142,7 @@ export class BridgeConsoleService {
       return { id: this.groupId(row), chatId: row.chatId, name: group?.name ?? row.name, status: row.status,
         active: c.auxiliary!.isActive(row.chatId), kind: row.privateGroup ? '私聊群' : '共享群',
         toolId: ref?.toolId, tool: o?.label ?? ref?.toolId ?? '未选择', sessionName: native?.name ?? (binding?.nativeId === ref?.nativeId ? binding?.name : undefined) ?? ref?.nativeId ?? '尚未关联',
+        associationId: ref ? this.targetId(ref.toolId, ref.sourceId, ref.nativeId) : undefined,
         targetId: row.status === 'active' && ref ? this.targetId(ref.toolId, ref.sourceId, ref.nativeId) : undefined, cwd: native?.cwd ?? row.cwd ?? '',
         parentChatId: row.privateGroup?.parentChatId, issues, busy,
         sessionId: ref ? personalRows.find(s => { const b = c.toolBindings?.get(s.scope); return b?.toolId === ref.toolId && b.sourceId === ref.sourceId && b.nativeId === ref.nativeId; })?.id : undefined,

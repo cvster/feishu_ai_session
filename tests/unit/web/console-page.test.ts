@@ -26,8 +26,8 @@ function harness(loginRequired = true, authorized = true) {
     bindings: [{ id: 'b', tool: 'Tool', groupName: '群', sessionName: '会话', kind: '个人 AI 群', cwd: '/project', issues: ['群名与会话名不一致'], canSync: true, groupState: 'active', sessionState: 'active', canDissolve: false, canArchive: false },
       { id: 'dissolve', tool: 'Tool', groupName: '待解散群', sessionName: '已归档会话', issues: [], groupState: 'active', sessionState: 'archived', canDissolve: true, canArchive: false },
       { id: 'archive', tool: 'Tool', groupName: '已解散群', sessionName: '待归档会话', issues: [], groupState: 'dissolved', sessionState: 'active', canDissolve: false, canArchive: true }],
-    sharedGroups: [{ id: 'shared', chatId: 'oc_shared', name: '<群>', kind: '共享群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, targetId: 'current', canBind: true, canLeave: true, issues: [] },
-      { id: 'private', chatId: 'oc_private', name: '私聊群', kind: '私聊群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, canBind: false, canLeave: true, issues: [] }],
+    sharedGroups: [{ id: 'shared', chatId: 'oc_shared', name: '<群>', kind: '共享群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, targetId: 'current', canBind: true, canLeave: true, issues: [] },
+      { id: 'private', chatId: 'oc_private', name: '私聊群', kind: '私聊群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, canBind: false, canLeave: true, issues: [] }],
     sharedTargets: [{ id: 'current', name: '会话', toolId: 'generic', tool: 'Tool', cwd: '/project' }, { id: 'next', name: '<新会话>', toolId: 'other', tool: 'Other', cwd: '/next' }],
     items: [{ id: 'pending', toolId: 'generic', tool: 'Tool', name: '会话', sender: 'Nick', text: '<img src=x onerror=attack()>', status: 'pending', createdAt: Date.now(), canRetry: true },
       { id: 'accepted', toolId: 'generic', tool: 'Tool', name: '会话', sender: 'Nick', text: '已提交消息', status: 'running', createdAt: Date.now(), canRetry: false }] };
@@ -120,4 +120,25 @@ it('cascades tools, full project paths and session choices without retaining a h
   expect(h.get('shared-target').value).toBe(''); expect(h.get('shared-project').value).toBe('');
   await h.get('shared-form').onsubmit!({ preventDefault() {} });
   expect(h.requests.some(r => r.body?.action === 'shared-bind')).toBe(false);
+});
+
+it('groups multiple shared and private chats under the real session identity, separates same names and pending chats, and preserves expansion', async () => {
+  const h = harness(false); await h.ready();
+  h.snapshot.sharedGroups.push({ ...h.snapshot.sharedGroups[0]!, id: 'same-name', chatId: 'oc_other', name: '同名会话的其他群', associationId: 'different-worker-session', canLeave: false, canBind: false },
+    { ...h.snapshot.sharedGroups[0]!, id: 'pending', chatId: 'oc_pending', name: '待绑定的群', associationId: undefined, targetId: undefined, status: 'pending', sessionName: '尚未关联' });
+  await h.nav[3]!.onclick!();
+  const panels = h.get('shared-list').children;
+  expect(panels).toHaveLength(3); expect(panels.map(p => p.tag)).toEqual(['details', 'details', 'details']);
+  expect(panels[0]!.children[0]!.text).toContain('2 个群');
+  expect(panels[0]!.text).toContain('<群>'); expect(panels[0]!.text).toContain('私聊群');
+  expect(panels[0]!.text).not.toContain('同名会话的其他群');
+  expect(panels[1]!.text).toContain('同名会话的其他群');
+  expect(panels[2]!.children[0]!.text).toContain('待关联'); expect(panels[2]!.text).toContain('待绑定的群');
+  panels[0]!.open = false; panels[0]!.handlers.toggle!();
+  h.get('shared-search').value = '私聊群'; h.get('shared-search').handlers.input!();
+  expect(h.get('shared-list').children).toHaveLength(1);
+  expect(h.get('shared-list').children[0]!.open).toBe(false);
+  expect(h.get('shared-list').children[0]!.text).not.toContain('<群>');
+  h.get('shared-search').value = ''; h.get('shared-search').handlers.input!();
+  expect(h.get('shared-list').children[0]!.open).toBe(false);
 });
