@@ -25,7 +25,7 @@ async function fixture(stoppable = false) {
   const add = (scope: string, auxiliary = false) => {
     bindings.set(scope, { toolId: 'zcode', sourceId: 'local-zcode', nativeId: 'sess_native',
       ...(auxiliary ? { linkedSource: { toolId: 'zcode' as const, sourceId: 'local-zcode', nativeId: 'sess_native' } } : {}) });
-    catalog.upsertActive({ scopeId: scope, agentId: 'zcode', cwdRealpath: dir, policyFingerprint: scope, sessionId: 'sess_native', sourceId: 'local-zcode', botAppId: 'cli_test' });
+    catalog.upsertActive({ scopeId: scope, agentId: 'zcode', cwdRealpath: dir, policyFingerprint: scope, sessionId: 'sess_native', sourceId: 'local-zcode', botAppId: 'cli_test', now: 1000 });
   };
   add('oc_personal');
   const profile = createDefaultProfileConfig({ agentKind: 'codex', codex: { binaryPath: 'codex', inheritCodexHome: true }, accounts: { app: { id: 'cli_test', secret: 'test', tenant: 'feishu' } } });
@@ -64,6 +64,40 @@ it('does not repeat worker-origin or unknown-origin inputs/answers even with ide
   const unknown = messages('unknown', 2000, 'desktop', true); delete unknown[0].info.metadata;
   h.snapshot.messages.push(...bridged, ...unknown); await sync.runNow(); expect(h.create).not.toHaveBeenCalled();
   h.snapshot.messages.push(...messages('native', 2500, 'desktop', true)); await sync.runNow(); expect(h.create).toHaveBeenCalledTimes(2);
+});
+it('attaches an already running native tail during creation replay and delivers its completion once across restart', async () => {
+  const h = await fixture(); h.controls.botOwnerId = 'ou_owner';
+  h.catalog.upsertActive({ ...h.catalog.entries()[0]!, preserveBinding: true, recentTurnReplayCount: 3 });
+  h.snapshot.messages.push(...messages('live-before-group', 900));
+  const first = await h.start();
+  expect(h.create).toHaveBeenCalledTimes(4); // Historical input/card plus current input/card.
+  expect(h.create.mock.calls.some(([r]) => r.data.content.includes('"tag":"at"'))).toBe(false);
+  await first.stop();
+  h.snapshot.messages.at(-1).parts[0].text = 'live task completed';
+  h.snapshot.messages.at(-1).info.finish = 'stop';
+  const second = await h.start(); await second.runNow();
+  expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls.at(-1))).toContain('live task completed');
+  expect(h.create.mock.calls.filter(([r]) => r.data.content.includes('"tag":"at"'))).toHaveLength(1);
+  expect(h.create.mock.calls.filter(([r]) => r.data.msg_type === 'interactive')).toHaveLength(2);
+  expect(h.catalog.entries()[0]!.recentTurnReplayCount).toBeUndefined();
+});
+it('delivers a native turn completed between binding and the first read, without replaying older history', async () => {
+  const h = await fixture(); h.advance(3000);
+  h.snapshot.messages.push(...messages('polling-gap', 2000, 'desktop', true));
+  const sync = await h.start(); await sync.runNow();
+  expect(h.create).toHaveBeenCalledTimes(2);
+  expect(h.channel.createCard).toHaveBeenCalledOnce();
+});
+it.each(['bridge', 'unknown', 'desktop'] as const)('keeps the %s baseline tail skipped without a native creation replay', async origin => {
+  const h = await fixture();
+  const tail = messages('tail-before-group', 900, origin);
+  if (origin === 'unknown') delete tail[0].info.metadata;
+  if (origin !== 'desktop') h.catalog.upsertActive({ ...h.catalog.entries()[0]!, preserveBinding: true, recentTurnReplayCount: 3 });
+  // Isolate the running tail from completed history.
+  h.snapshot.messages = tail;
+  const sync = await h.start();
+  tail.at(-1).info.finish = 'stop'; await sync.runNow();
+  expect(h.create).not.toHaveBeenCalled();
 });
 it('splits long native output and mentions only the owner once after completion across restart and refresh', async () => {
   const h = await fixture(); h.controls.botOwnerId = 'ou_owner';

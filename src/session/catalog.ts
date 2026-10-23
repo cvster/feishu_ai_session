@@ -24,7 +24,7 @@ export interface SessionCatalogEntry extends SessionCatalogIdentity {
   /** Native tool data source that established this binding. Legacy entries omit it. */
   sourceId?: string;
   botAppId?: string;
-  /** Number of recent completed native turns to replay when this chat is first attached. */
+  /** Recent completed turns to replay on first attachment, also enabling the current native live turn. */
   recentTurnReplayCount?: number;
   status: SessionCatalogStatus;
   /** Last binding establishment time; archival must not reorder current bindings. */

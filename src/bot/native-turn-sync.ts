@@ -181,11 +181,18 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
           const key = keyFor(scope, deps.sourceId, id);
           const previous = state.bindings[key], boundAtMs = entry.boundAt ?? entry.updatedAt;
           const initial = !previous || previous.boundAtMs !== boundAtMs;
-          const binding = initial ? state.bindings[key] = { baselineAtMs: now(), boundAtMs, turns: {} } : previous;
+          // Group creation and the first worker read are separate operations.
+          // Turns started after binding must survive that polling gap.
+          const binding = initial ? state.bindings[key] = { baselineAtMs: Math.min(now(), boundAtMs), boundAtMs, turns: {} } : previous;
           if (initial) log.info(phase, 'baseline-created', { scope, sessionId: id, turns: snapshot.turns.length });
           const replay = new Set(initial && entry.recentTurnReplayCount ? snapshot.turns
             .filter(turn => turn.createdAtMs <= boundAtMs && turn.state.terminal !== 'running')
             .slice(-entry.recentTurnReplayCount).map(turn => turn.id) : []);
+          // Auto-created groups attach while their first native task may
+          // already be running. Keep that live tail under normal delivery
+          // (including completion notification), alongside historical replay.
+          const tail = snapshot.turns.at(-1);
+          const liveTail = initial && entry.recentTurnReplayCount && tail && !tail.bridge && tail.state.terminal === 'running' ? tail.id : undefined;
           // Persist the complete replay plan before sending or consuming the
           // marker. A failed send/restart resumes these deliveries, not a new
           // history replay that could also pick up the worker's current turn.
@@ -196,9 +203,8 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
             if (!delivery) {
               changed = true;
               delivery = binding.turns[turn.id] = { createdAtMs: turn.createdAtMs, sequence: 0,
-                replay: replay.has(turn.id), skipped: !replay.has(turn.id) && (turn.bridge || (turn.createdAtMs <= binding.baselineAtMs && (initial || turn.state.terminal !== 'running'))) };
-              // A first snapshot establishes a baseline, including currently
-              // running turns: never expose work that predates the binding.
+                replay: replay.has(turn.id), skipped: !replay.has(turn.id) && turn.id !== liveTail &&
+                  (turn.bridge || (turn.createdAtMs <= binding.baselineAtMs && (initial || turn.state.terminal !== 'running'))) };
             }
           }
           if (changed) await save();
