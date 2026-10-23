@@ -10,6 +10,8 @@ interface Attempt { at: number; turnId?: string; queueId?: string; confirmed?: b
 
 /** Provider-owned maintenance of conversations currently observed by the bridge.
  * Like the desktop Resume button, it starts only existing queued input.
+ * Submitted input awaiting execution is still in the native queue. An active
+ * response is already executing; a terminal interrupted response is not pending.
  * Empty queues need no action. Never inject a continuation prompt or alter goals.
  * Persist per queue item before starting: uncertain receipts cannot replay it.
  */
@@ -33,16 +35,21 @@ export function startCodexAutoContinue(deps: {
       let claimedKey: string | undefined;
       try {
         if ((await deps.client.readThreadStatus(id))?.type !== 'idle') continue;
+        // Pending work is the first gate, not a historical interruption or an
+        // unfinished worker observer. Unsent bridge input follows normal intake
+        // and becomes eligible only after Codex accepts it into this queue.
+        const queued = await deps.client.listQueuedSubmissions(id), next = queued[0];
+        if (!next) continue;
+        const key = JSON.stringify([id, 'queue', next.id]);
+        if (attempts[key]) continue;
         const snapshot = await deps.client.readThread(id), tail = snapshot.turns.at(-1);
         if (snapshot.id !== id || snapshot.status?.type !== 'idle') continue;
         if (!tail || !isInterruptedTurnStatus(tail.status) ||
           await deps.client.persistedTurnTerminal(snapshot, tail.id) !== 'interrupted') continue;
         if ((await deps.client.listArchivedThreadIds()).includes(id)) continue;
-        const queued = await deps.client.listQueuedSubmissions(id);
-        const next = queued[0];
-        if (!next) continue;
-        const key = JSON.stringify([id, 'queue', next.id]);
-        if (attempts[key]) continue;
+        // A user/another client can consume or remove queued input while history
+        // is being checked. Do not resume a stale head or claim its receipt.
+        if ((await deps.client.listQueuedSubmissions(id))[0]?.id !== next.id) continue;
         const current = await deps.client.readThread(id);
         if (stopped || !deps.targets().includes(id) || current.id !== id || current.status?.type !== 'idle' ||
           current.turns.at(-1)?.id !== tail?.id || current.turns.at(-1)?.status !== tail?.status) continue;

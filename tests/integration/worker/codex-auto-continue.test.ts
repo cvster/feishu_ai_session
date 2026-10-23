@@ -52,9 +52,33 @@ it('never synthesizes input for an empty queue, and resumes real input arriving 
   expect(h.client.addQueuedSubmission).not.toHaveBeenCalled();
   expect(h.client.startQueuedTurn).not.toHaveBeenCalled();
   expect(h.client.rpc).not.toHaveBeenCalled();
+  expect(h.client.readThread).not.toHaveBeenCalled();
   h.client.listQueuedSubmissions.mockResolvedValue([{ id: 'arrived-later', input: [] }]);
   await h.handle.runNow();
   expect(h.client.startQueuedTurn).toHaveBeenCalledWith('thread', 'arrived-later');
+});
+
+it('waits for already submitted work while active, then resumes it only if it is queued under a confirmed pause', async () => {
+  const h = await fixture();
+  h.snapshot.status.type = 'active'; h.snapshot.turns[0]!.status = 'inProgress';
+  await h.handle.runNow();
+  expect(h.client.startQueuedTurn).not.toHaveBeenCalled();
+  h.snapshot.status.type = 'idle'; h.snapshot.turns[0]!.status = 'interrupted';
+  await h.handle.runNow();
+  expect(h.client.startQueuedTurn).toHaveBeenCalledWith('thread', 'existing');
+  expect(h.client.addQueuedSubmission).not.toHaveBeenCalled();
+});
+
+it.each(['removed', 'replaced'] as const)('does not resume input %s during the pending-work check', async kind => {
+  const h = await fixture();
+  h.client.listQueuedSubmissions.mockResolvedValueOnce([{ id: 'existing', input: [] }])
+    .mockResolvedValueOnce(kind === 'removed' ? [] : [{ id: 'replacement', input: [] }]);
+  await h.handle.runNow();
+  expect(h.client.startQueuedTurn).not.toHaveBeenCalled();
+  await expect(readFile(h.statePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  // A transient queue change cannot block later confirmed work.
+  await h.handle.runNow();
+  expect(h.client.startQueuedTurn).toHaveBeenCalledWith('thread', 'existing');
 });
 
 it('starts the existing queue head without adding or replacing any input', async () => {

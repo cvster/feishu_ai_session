@@ -135,8 +135,13 @@ resubmitted; recovery does not call native interrupt or queue deletion.
 
 Codex additionally checks bridge-observed native conversations every 15 seconds,
 independently of worker job activity. For an idle interrupted conversation confirmed
-by durable interruption records, it uses `thread/queue/start` on the existing queue
-head, matching the Codex desktop Resume button. Empty queues do not start a turn;
+by durable interruption records, pending native input must exist before it uses
+`thread/queue/start` on the existing queue head, matching the Codex desktop Resume
+button. Submitted input that has not started is pending in this native queue;
+unsent bridge input follows normal intake before it is eligible. Active responses
+are left running, and terminal interrupted responses are not pending work. Queue
+head and thread state are checked again before reserving a start receipt, so removed
+or already-consumed input does not trigger resume. Empty queues do not start a turn;
 maintenance never adds user input or changes goal state. Each native queue item has
 a persisted start receipt, so later input under the same interrupted turn remains
 eligible. Uncertain writes are not replayed on later polls or worker restart;
