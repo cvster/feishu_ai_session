@@ -17,7 +17,7 @@ import { BridgeConsoleService } from '../../../src/web/console';
 import { AuxiliaryGroups } from '../../../src/bot/auxiliary-groups';
 import { startBridgeWeb } from '../../../src/web/server';
 import { configureWeb, webPasswordHash } from '../../../src/web/config';
-import { WebSessionControls, type WebControlElement } from '../../../src/web/controls';
+import { WebSessionControls, type WebControlElement, type WebControlResult } from '../../../src/web/controls';
 import { WorkspaceStore } from '../../../src/workspace/store';
 import { createRootConfig, saveRootConfig, runtimeProfileConfig } from '../../../src/config/profile-store';
 import { ActiveRuns } from '../../../src/bot/active-runs';
@@ -635,6 +635,22 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('archives and diss
   expect(await h.service.list()).toEqual([]); expect(h.send).not.toHaveBeenCalled();
   expect(await h.webControls.execute(id, 'oc_group', 'ou_owner', button.action)).toEqual(result);
   expect(h.channel.rawClient.im.v1.chat.delete).toHaveBeenCalledOnce();
+});
+
+it('offers the next unused copy name in Web, including unbound and archived native sessions', async () => {
+  const h = await harness('kilo');
+  h.native.name = 'AA-web-2'; h.group(h.native.name);
+  h.bindings.set('oc_group', { ...h.bindings.get('oc_group')!, name: h.native.name });
+  h.provider.list.mockResolvedValue([h.native,
+    { ...h.native, nativeId: 'unbound-3', name: 'AA-web-3' },
+    { ...h.native, nativeId: 'archived-4', name: 'AA-web-4', archived: true },
+  ]);
+  const id = (await h.service.list())[0]!.id;
+  const response = await h.request('/api/sessions/' + id + '/control', { action: 'fork' });
+  expect(response.status).toBe(200);
+  const menu = flatten(((await response.json()) as WebControlResult).elements);
+  expect(menu.find(e => e.kind === 'input')).toMatchObject({ name: 'new_session_name', value: 'AA-web-5' });
+  expect(h.provider.fork).not.toHaveBeenCalled();
 });
 
 it.each(['codex', 'zcode', 'kilo', 'dsh'] as const)('copies through the %s worker with the chosen name, binds one new group, and does not fork twice on retry', async tool => {

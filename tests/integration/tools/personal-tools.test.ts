@@ -119,6 +119,29 @@ describe('personal multi-tool workflows', () => {
     expect(h.bindings.get(source)).toEqual(before); expect(fork).not.toHaveBeenCalled(); expect(h.runs).toEqual([]);
     expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('读取原会话内容');
   });
+  it.each([
+    ['AA-同名', [], 'AA-同名-2'],
+    ['AA-同名-2', [], 'AA-同名-3'],
+    ['AA-同名-9', ['AA-同名-10', 'AA-同名-11'], 'AA-同名-12'],
+    ['AA-同名-v2', ['AA-同名-v2-2'], 'AA-同名-v2-3'],
+  ] as const)('suggests the next unused suffix for %s and reuses it for submissions without form values', async (sourceName, taken, expected) => {
+    const h = await harness(); await h.sync(); const source = h.groups[0]!.id;
+    h.bindings.set(source, { ...h.bindings.get(source)!, name: sourceName });
+    vi.spyOn(h.registry.get('claude'), 'listSessions').mockResolvedValue(taken.map((name, i) => ({ nativeId: 'unbound-' + i, name, cwd: h.dir, createdAtMs: 1, updatedAtMs: 2 })));
+    await runCommandHandler('fork', '', h.context(source, 'group'));
+    expect(copyElements(h).find(row => row.tag === 'input')?.default_value).toBe(expected);
+    const value = copyButton(h, 'Claude');
+    await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group'));
+    expect(h.groups.at(-1)?.name).toBe(expected);
+  });
+  it('skips names held by pending group bindings when native session listings fail', async () => {
+    const h = await harness(); await h.sync(); const source = h.groups[0]!.id;
+    h.bindings.set(source, { ...h.bindings.get(source)!, name: 'AA-同名-2' });
+    h.bindings.set('oc_pending', { toolId: 'claude', sourceId: 'claude-home', nativeId: 'pending', nativeCreated: false, name: 'AA-同名-3' });
+    vi.spyOn(h.registry.get('claude'), 'listSessions').mockRejectedValue(Error('listing unavailable'));
+    await runCommandHandler('fork', '', h.context(source, 'group'));
+    expect(copyElements(h).find(row => row.tag === 'input')?.default_value).toBe('AA-同名-4');
+  });
   it.each(['claude', 'kilo'] as const)('creates a fresh %s cross-tool group with native model defaults and only imports history on click after restart', async targetTool => {
     const h = await harness(); h.controls.profileConfig.preferences.reasoningEffort = 'high';
     if (targetTool === 'kilo') h.registry.register({ id: 'kilo', sourceId: 'kilo-home', label: 'Kilo',

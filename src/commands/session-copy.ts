@@ -19,8 +19,17 @@ interface CopyChoice {
   creating?: boolean;
   created?: boolean;
   name?: string;
+  defaultName: string;
 }
 const choices = new Map<string, CopyChoice>();
+
+function nextCopyName(name: string, existing: Set<string>): string {
+  const suffix = /^(.*)-(\d+)$/.exec(name);
+  const base = suffix ? suffix[1]! : name;
+  let number = suffix ? BigInt(suffix[2]!) + 1n : 2n;
+  while (existing.has(`${base}-${number}`)) number++;
+  return `${base}-${number}`;
+}
 
 export async function currentCopySource(ctx: CommandContext): Promise<CopiedSessionSource> {
   const toolId = ctx.controls.profileConfig.agentKind;
@@ -42,18 +51,25 @@ export async function currentCopySource(ctx: CommandContext): Promise<CopiedSess
 
 export async function showSessionCopyMenu(ctx: CommandContext): Promise<void> {
   const source = await currentCopySource(ctx);
+  const tools = ctx.controls.toolRegistry?.all() ?? [];
+  const available = await Promise.allSettled(tools.map(t => t.agent.isAvailable()));
+  const creationTools = tools.filter((_, i) => available[i]?.status === 'fulfilled' && (available[i] as PromiseFulfilledResult<boolean>).value);
+  // Include unbound native sessions and pending group bindings, not only the
+  // Web sidebar. Both copy rows share the same suggested name across tools.
+  const rosters = await Promise.allSettled(creationTools.map(t => t.listSessions()));
+  const existing = new Set([source.name,
+    ...(ctx.controls.toolBindings?.entries() ?? []).map(([, b]) => b.name ?? ''),
+    ...rosters.flatMap(r => r.status === 'fulfilled' ? r.value.map(s => s.name ?? '') : []),
+  ].map(name => name.trim()).filter(Boolean));
+  const defaultName = nextCopyName(source.name, existing);
   for (const [key, choice] of choices) if (choice.expires < Date.now()) choices.delete(key);
   const issue = (target: ToolId) => {
     const token = randomUUID();
     choices.set(token, { actor: ctx.msg.senderId, scope: ctx.scope, appId: ctx.controls.profileConfig.accounts.app.id,
-      source: { ...source, copyId: randomUUID() }, target, targetSource: ctx.controls.toolRegistry?.find(target)?.sourceId, expires: Date.now() + 15 * 60_000 });
+      source: { ...source, copyId: randomUUID() }, target, targetSource: ctx.controls.toolRegistry?.find(target)?.sourceId, defaultName, expires: Date.now() + 15 * 60_000 });
     return token;
   };
-  const tools = ctx.controls.toolRegistry?.all() ?? [];
-  const available = await Promise.allSettled(tools.map(t => t.agent.isAvailable()));
-  const creationTools = tools.filter((_, i) => available[i]?.status === 'fulfilled' && (available[i] as PromiseFulfilledResult<boolean>).value)
-    .map(t => ({ id: t.id, token: issue(t.id) }));
-  await sendManagedCard(ctx.channel, ctx.msg.chatId, sessionCopyCard(source.toolId, issue(source.toolId), creationTools, `${source.name}-2`),
+  await sendManagedCard(ctx.channel, ctx.msg.chatId, sessionCopyCard(source.toolId, issue(source.toolId), creationTools.map(t => ({ id: t.id, token: issue(t.id) })), defaultName),
     { replyTo: ctx.msg.messageId, ...(ctx.chatMode === 'topic' ? { replyInThread: true } : {}) });
 }
 

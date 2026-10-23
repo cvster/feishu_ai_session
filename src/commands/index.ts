@@ -1530,7 +1530,7 @@ async function handleFork(args: string, ctx: CommandContext): Promise<void> {
     if (!choice || (action === 'same' && choice.target !== ctx.controls.profileConfig.agentKind)) throw new Error('复制入口已失效，请重新打开。');
     if (choice.creating) return reply(ctx, '正在创建会话，请稍候。');
     if (choice.created) return reply(ctx, '此会话已创建，请到新群继续。');
-    const rawName = ctx.formValue?.new_session_name ?? `${choice.source.name}-2`;
+    const rawName = ctx.formValue?.new_session_name ?? choice.defaultName;
     if (typeof rawName !== 'string') throw new Error('名称需为 1–100 字。');
     const name = rawName.trim();
     if (!name || name.length > 100 || /[\u0000-\u001f]/.test(name)) throw new Error('名称需为 1–100 字，不能包含控制字符。');
