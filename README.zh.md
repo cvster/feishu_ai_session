@@ -439,4 +439,4 @@ export default createAdapter;
 
 ### 个人 AI 会话群网页
 
-新增轻量网页，按工具 → 项目 → 会话展示已绑定个人群的会话，支持消息实时同步、改名和离线提示。部署后运行 `lark-channel-bridge web configure --profile <profile>`，重启桥接即可访问默认 `http://127.0.0.1:3345`，本机回环和显式配置的可信来源网段免登录，其他来源使用命令生成的登录码。侧边栏会话菜单提供改名、归档和复制，输入框左侧提供停止、刷新，网页按 worker 能力启用操作；详见 [网页说明](docs/BRIDGE_WEB_PLAN.md)。
+新增轻量网页，按工具 → 项目 → 会话展示已绑定个人群的会话，支持消息实时同步、改名和离线提示。部署后运行 `lark-channel-bridge web configure --profile <profile>`，重启桥接即可访问默认 `http://127.0.0.1:3345`。支持监听所有网口、自定义端口；本机回环和显式配置的可信来源网段免登录，其他来源使用固定密码或登录 Token。侧边栏会话菜单提供改名、归档和复制，输入框左侧提供停止、刷新，网页按 worker 能力启用操作；详见 [网页说明](docs/BRIDGE_WEB_PLAN.md)。

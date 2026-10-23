@@ -349,4 +349,4 @@ tail -n 60 ~/.lark-channel/profiles/my-bot/logs/daemon/daemon-stderr.log
 
 ### Personal conversation Web
 
-A lightweight Web groups bound personal AI conversations by tool → project → session. It shares the bridge inbox, execution queue, replies and name synchronization. After deployment, run `lark-channel-bridge web configure --profile <profile>`, restart the bridge, then open `http://127.0.0.1:3345` with the generated login code. Operations follow worker capabilities. See [Web setup and architecture](docs/BRIDGE_WEB_PLAN.md).
+A lightweight Web groups bound personal AI conversations by tool → project → session. It shares the bridge inbox, execution queue, replies and name synchronization. After deployment, run `lark-channel-bridge web configure --profile <profile>`, restart the bridge, then open `http://127.0.0.1:3345`. All-interface listeners and custom ports are supported. Loopback and explicitly trusted source networks skip login; other sources use a fixed password or generated login token. Operations follow worker capabilities. See [Web setup and architecture](docs/BRIDGE_WEB_PLAN.md).

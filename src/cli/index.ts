@@ -98,9 +98,10 @@ program.command('zcode').description('ZCode desktop remote-control integration')
 const web = program.command('web').description('Personal AI workgroup Web (never restarts services)');
 for (const action of ['configure', 'status', 'disable'] as const) {
   web.command(action).option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
-    .option('--host <ipv4>', 'local IPv4 (default 127.0.0.1)').option('--port <port>', 'HTTP port (default 3345)')
+    .option('--host <address>', 'local IPv4, 0.0.0.0 for all IPv4, or :: for all IPv4/IPv6 (default 127.0.0.1)').option('--port <port>', 'HTTP port (default 3345)')
     .option('--also-host <ipv4...>', 'additional local IPv4 listeners on the same port')
     .option('--trusted-network <cidr...>', 'direct IPv4 source networks allowed without login')
+    .option('--password-env <name>', 'environment variable containing an optional fixed Web login password')
     .action(options => runWeb(action, options));
 }
 const a2a = program.command('a2a').description('Manage FF project-assistant A2A HTTP endpoints (never restarts services)');

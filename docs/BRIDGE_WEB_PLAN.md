@@ -12,19 +12,24 @@ lark-channel-bridge web configure --profile <profile>
 lark-channel-bridge web status --profile <profile>
 ```
 
-默认地址 `http://127.0.0.1:3345`，本机回环访问免登录，页面直接进入会话且不显示退出按钮。配置其他本机 IPv4 地址时，configure 只显示一次随机登录码，磁盘仅保存其 SHA-256 摘要。随后启动或重启**桥接服务**即可访问，无需单独运行前端服务；configure 本身不重启服务。已有 worker 不随桥接重启。
+默认地址 `http://127.0.0.1:3345`，本机回环访问免登录，页面直接进入会话且不显示退出按钮。configure 只显示一次随机登录 Token，磁盘仅保存其 SHA-256 摘要；也可配置固定密码，磁盘保存带随机盐的 scrypt 哈希。随后启动或重启**桥接服务**即可访问，无需单独运行前端服务；configure 本身不重启服务。已有 worker 不随桥接重启。
 
-可用 `--host <本机IPv4> --port <端口>` 指定监听地址，禁止 `0.0.0.0`。局域网 HTTP 适用于可信私网；默认使用本机回环。跨网络访问建议用 SSH 转发回环端口，例如 `ssh -L 3345:127.0.0.1:3345 <host>`。当前入口按配置 IP/localhost 校验 Host，不支持直接套用任意域名反向代理。
+可用 `--host <本机IPv4> --port <端口>` 指定监听地址；`--host 0.0.0.0` 监听所有 IPv4 网口，`--host ::` 同时监听所有 IPv4/IPv6 网口。通配监听的 Host 校验使用连接实际到达的本机 IP，回环入口也接受 localhost；不接受任意域名 Host。
 
 支持通过 `--also-host <本机IPv4...>` 同时监听多个网卡，通过 `--trusted-network <IPv4 CIDR...>` 配置免登录来源。例如本机与 `192.168.188.0/24` 网段免登录：
 
 ```bash
 lark-channel-bridge web configure --profile <profile> --host 127.0.0.1 --also-host 192.168.188.1 --trusted-network 192.168.188.0/24
+# 所有网口使用 36666，本机与指定网段免登录，其他来源用固定密码或 Token：
+read -rs -p '固定密码: ' BRIDGE_WEB_PASSWORD
+export BRIDGE_WEB_PASSWORD
+lark-channel-bridge web configure --profile <profile> --host :: --port 36666 --trusted-network 192.168.188.0/24 --password-env BRIDGE_WEB_PASSWORD
+unset BRIDGE_WEB_PASSWORD
 ```
 
-免登录判断使用 TCP 连接的真实来源地址，不信任 `X-Forwarded-For` 等代理头。其他来源继续使用登录码；免登录请求同样接受 Host、同源和所有者校验。配置中的 `additionalHosts` 和 `trustedNetworks` 可选，旧配置保持原有行为；变更监听地址或免登录网段立即撤销现有访问，重启桥接后生效。
+免登录判断使用 TCP 连接的真实来源地址，不信任 `X-Forwarded-For` 等代理头。通配监听不会扩大免登录网段，本机回环保留免登录，`::` 的 IPv6 回环也免登录。其他来源在登录框输入固定密码或登录 Token；程序也可通过 `Authorization: Bearer <网页登录 Token>` 访问 HTTP/SSE API。写请求仍须发送与访问地址一致的 Origin。免登录请求同样接受 Host、同源和所有者校验。配置中的 `additionalHosts` 和 `trustedNetworks` 可选，旧配置保持原有行为；通配监听不与额外监听地址组合，变更监听地址或免登录网段立即撤销现有访问，重启桥接后生效。
 
-非回环入口的登录 cookie 为 HttpOnly、SameSite=Strict，12 小时过期。登录会话绑定 profile、配置摘要及当前机器人所有者；更换登录码、禁用入口或所有者变化会撤销旧登录。配置文件在 `profiles/<profile>/web.json`，权限 600。
+非回环入口的登录 cookie 为 HttpOnly、SameSite=Strict，12 小时过期。登录会话绑定 profile、配置摘要及当前机器人所有者；更换密码或 Token、禁用入口或所有者变化会撤销旧登录。Token 验证实时读取配置，轮换后旧 Bearer 请求和 SSE 也失效。配置文件在 `profiles/<profile>/web.json`，权限 600。
 
 ```bash
 lark-channel-bridge web disable --profile <profile>
@@ -41,7 +46,7 @@ lark-channel-bridge web disable --profile <profile>
 ```
 
 - `apps/bridge-web/page.ts`：无构建依赖的原生 DOM 页面，随 CLI 打包，不执行工具命令。答案以安全文本和代码块展示，不执行消息里的 HTML；保留思考状态和工具调用数量、状态的纯文字摘要，不展示思考或工具详情，也不提供展开入口。
-- `src/web/server.ts`：127.0.0.1 本机免登录、其他地址 cookie 登录、Host/Origin 检查、JSON 请求限制、登录限流和 SSE。多个浏览器共享按会话的观察结果，慢连接会断开并重新读取快照。
+- `src/web/server.ts`：按真实连接来源判断免登录，其他来源使用密码/Token 登录 cookie 或 Bearer Token，包含 Host/Origin 检查、JSON 请求限制、登录限流和 SSE。多个浏览器共享按会话的观察结果，慢连接会断开并重新读取快照。
 - `src/web/service.ts`：统一 `list/read/send/rename/control/favorite`，依据绑定、账户和 worker capabilities 授权。会话身份包含 profile、应用、群、工具、sourceId 和 nativeId，页面持有其摘要。归档/共享/辅助/话题群被排除，已失效群沿用现有群清理流程。读取失败不会被当成归档。
 - `src/bot/intake-queue.ts`：飞书和 Web 共用持久化收件箱、去重和 PendingQueue。执行、会话锁、回复卡片、完成时艾特所有者沿用原桥接路径。网页文本中的 `/exit` 等仅作为模型输入。
 - worker：读取原生记录、处理执行及工具协议。Claude 和 Dsh 补充了 conversation；Kilo 补充原生轮次与 job 的关联，Zcode 通过已使用的原生输入元数据关联 job。桥接仅接受可由 worker journal 验证的 job 关联。

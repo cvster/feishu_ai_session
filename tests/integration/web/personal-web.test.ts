@@ -13,7 +13,7 @@ import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import type { Controls } from '../../../src/commands';
 import { PersonalSessionService, type WebConversation } from '../../../src/web/service';
 import { startBridgeWeb } from '../../../src/web/server';
-import { configureWeb } from '../../../src/web/config';
+import { configureWeb, webPasswordHash } from '../../../src/web/config';
 import { WebSessionControls, type WebControlElement } from '../../../src/web/controls';
 import { WorkspaceStore } from '../../../src/workspace/store';
 import { createRootConfig, saveRootConfig, runtimeProfileConfig } from '../../../src/config/profile-store';
@@ -349,6 +349,50 @@ it('shares multiple listeners, trusts real source addresses rather than forwardi
     const cfg = JSON.parse(await readFile(h.configPath, 'utf8')); await writeFile(h.configPath, JSON.stringify({ ...cfg, trustedNetworks: [] }));
     expect((await direct(other + '/api/sessions', '127.0.0.3')).status).toBe(401);
     await vi.waitFor(() => expect(events.join('')).toContain('event: auth'));
+  } finally { stream.destroy(); }
+});
+
+it.each(['0.0.0.0', '::'])('serves all %s interfaces with fixed-password/token auth and revokes HTTP/SSE after credential changes', async host => {
+  const h = await harness('kilo', host, { trustedNetworks: ['127.0.0.3/32'] });
+  if (host === '::') expect(await (await fetch(h.web.urls.find(url => url.includes('[::1]'))! + '/api/access')).json()).toEqual({ loginRequired: false });
+  const password = 'integration-fixed-password';
+  const cfg = JSON.parse(await readFile(h.configPath, 'utf8'));
+  cfg.passwordHash = await webPasswordHash(password); await writeFile(h.configPath, JSON.stringify(cfg));
+  const direct = (path: string, source: string, value?: unknown, headers: Record<string, string> = {}) => new Promise<{ status: number; cookie?: string; json: any }>((resolve, reject) => {
+    const req = httpRequest(h.web.url + path, { localAddress: source, method: value === undefined ? 'GET' : 'POST',
+      headers: { Origin: h.web.url, 'Content-Type': 'application/json', ...headers } }, res => {
+      let text = ''; res.on('data', chunk => { text += chunk; }); res.on('end', () => resolve({ status: res.statusCode!, cookie: res.headers['set-cookie']?.[0]?.split(';')[0], json: JSON.parse(text) }));
+    }); req.on('error', reject); req.end(value === undefined ? undefined : JSON.stringify(value));
+  });
+  for (const source of ['127.0.0.1', '127.0.0.3']) {
+    expect((await direct('/api/access', source)).json).toEqual({ loginRequired: false });
+    expect((await direct('/api/sessions', source)).status).toBe(200);
+  }
+  expect((await direct('/api/access', '127.0.0.2')).json).toEqual({ loginRequired: true });
+  expect((await direct('/api/sessions', '127.0.0.2', undefined, { 'X-Forwarded-For': '127.0.0.3' })).status).toBe(401);
+  expect((await direct('/api/sessions', '127.0.0.2', undefined, { Host: 'evil.test' })).status).toBe(403);
+  expect((await direct('/api/login', '127.0.0.2', { secret: 'wrong' })).status).toBe(401);
+  const login = await direct('/api/login', '127.0.0.2', { secret: password }); expect(login.status).toBe(200);
+  expect((await direct('/api/sessions', '127.0.0.2', undefined, { Cookie: login.cookie! })).status).toBe(200);
+  expect((await direct('/api/login', '127.0.0.2', { secret: h.secret })).status).toBe(200);
+  expect((await direct('/api/sessions', '127.0.0.2', undefined, { Authorization: `Bearer ${h.secret}` })).status).toBe(200);
+  expect((await direct('/api/sessions', '127.0.0.2', undefined, { Authorization: 'Bearer wrong' })).status).toBe(401);
+  expect((await direct('/api/sessions', '127.0.0.2', undefined, { Authorization: `Bearer ${password}` })).status).toBe(401);
+  const events: string[] = [];
+  const stream = httpRequest(h.web.url + '/api/events', { localAddress: '127.0.0.2', headers: { Cookie: login.cookie! } }, res => res.on('data', chunk => events.push(String(chunk))));
+  stream.end();
+  try {
+    await vi.waitFor(() => expect(events.join('')).toContain('event: snapshot'));
+    cfg.passwordHash = await webPasswordHash('changed-password'); await writeFile(h.configPath, JSON.stringify(cfg));
+    expect((await direct('/api/sessions', '127.0.0.2', undefined, { Cookie: login.cookie! })).status).toBe(401);
+    await vi.waitFor(() => expect(events.join('')).toContain('event: auth'));
+    expect((await direct('/api/login', '127.0.0.2', { secret: password })).status).toBe(401);
+    expect((await direct('/api/login', '127.0.0.2', { secret: 'changed-password' })).status).toBe(200);
+    cfg.secretHash = '0'.repeat(64); await writeFile(h.configPath, JSON.stringify(cfg));
+    expect((await direct('/api/sessions', '127.0.0.2', undefined, { Authorization: `Bearer ${h.secret}` })).status).toBe(401);
+    const attempts = await Promise.all(Array.from({ length: 10 }, () => direct('/api/login', '127.0.0.4', { secret: 'wrong' })));
+    expect(attempts.filter(row => row.status === 401)).toHaveLength(8);
+    expect(attempts.filter(row => row.status === 429)).toHaveLength(2);
   } finally { stream.destroy(); }
 });
 

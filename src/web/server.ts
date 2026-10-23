@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { loadWebConfig, trustedWebPeer, webListenHosts, webSecretHash, type WebConfig } from './config';
+import { randomBytes } from 'node:crypto';
+import { loadWebConfig, trustedWebPeer, webListenHosts, webAccessUrls, webHostAllowed, verifyWebCredential, webCredentialSignature, type WebConfig } from './config';
 import { PersonalSessionService, WebError } from './service';
 import { bridgeWebPage } from '../../apps/bridge-web/page';
 import { GROUP_AVATAR_IMAGES } from '../bot/group-avatar-images';
@@ -22,7 +22,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
   let closed = false;
   const sessions = new Map<string, { owner: string; hash: string; expires: number }>();
   const failures = new Map<string, { count: number; until: number }>();
-  const streams = new Map<ServerResponse, { token?: string; local: boolean; id?: string; previous?: string }>();
+  const streams = new Map<ServerResponse, { token?: string; bearer?: string; local: boolean; id?: string; previous?: string }>();
   const cookie = (req: IncomingMessage) => /(?:^|;\s*)bridge_web=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
   const config = () => options.config ? Promise.resolve(options.config) : loadWebConfig(options.configPath);
   const hosts = webListenHosts(initial);
@@ -30,18 +30,21 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
   const initialAccess = accessSignature(initial);
   const sameAccess = (c: WebConfig | undefined): c is WebConfig => !!c?.enabled && accessSignature(c) === initialAccess;
   const localRequest = (req: IncomingMessage) => trustedWebPeer(initial, req.socket.remoteAddress);
-  const authenticate = async (token?: string, local = false) => {
+  const authenticate = async (token?: string, local = false, bearer?: string) => {
     const c = await config(), session = token ? sessions.get(token) : undefined;
     if (!sameAccess(c)) throw new WebError(401, '网页入口已禁用或配置已变化');
     if (local) { options.service.ownerIdentity(); return; }
-    if (!session || session.expires <= Date.now() || session.hash !== c.secretHash) throw new WebError(401, '请重新登录');
+    if (bearer !== undefined) {
+      if (!await verifyWebCredential(c, bearer, false)) throw new WebError(401, 'Token 无效');
+      options.service.ownerIdentity(); return;
+    }
+    if (!session || session.expires <= Date.now() || session.hash !== webCredentialSignature(c)) throw new WebError(401, '请重新登录');
     if (session.owner !== options.service.ownerIdentity()) throw new WebError(401, '所有者已变化，请重新登录');
   };
   const handler = (req: IncomingMessage, res: ServerResponse) => { void (async () => {
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
-    const allowedHost = hosts.some(ip => req.headers.host === ip + ':' + initial.port) || hosts.includes('127.0.0.1') && req.headers.host === 'localhost:' + initial.port;
-    if (!allowedHost) throw new WebError(403, '访问地址不匹配');
+    if (!webHostAllowed(initial, req.headers.host, req.socket.localAddress)) throw new WebError(403, '访问地址不匹配');
     const origin = 'http://' + req.headers.host;
     if (req.headers.origin && req.headers.origin !== origin || req.headers['sec-fetch-site'] === 'cross-site') throw new WebError(403, '禁止跨站访问');
     if (req.method === 'POST' && req.headers.origin !== origin) throw new WebError(403, '请求来源不匹配');
@@ -58,25 +61,28 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     if (url.pathname === '/api/access' && req.method === 'GET') { respond(res, 200, { loginRequired: !local }); return; }
     if (url.pathname === '/api/login' && req.method === 'POST') {
       if (local) { await authenticate(undefined, true); respond(res, 200, { ok: true }); return; }
-      const ip = req.socket.remoteAddress ?? '', failure = failures.get(ip);
-      if (failure && failure.until > Date.now() && failure.count >= 8) throw new WebError(429, '登录尝试过多，请稍后重试');
+      const ip = req.socket.remoteAddress ?? '';
       const input = await body(req), c = await config();
-      const value = typeof input.secret === 'string' && input.secret.length <= 200 ? webSecretHash(input.secret) : '';
-      if (!sameAccess(c) || !value || !timingSafeEqual(Buffer.from(value), Buffer.from(c.secretHash))) {
-        if (failures.size > 1000) failures.clear();
-        failures.set(ip, { count: failure && failure.until > Date.now() ? failure.count + 1 : 1, until: Date.now() + 60_000 });
-        throw new WebError(401, '登录码无效');
+      // Reserve before the asynchronous password hash so concurrent attempts
+      // cannot bypass the existing per-source rate limit.
+      if (failures.size > 1000) failures.clear();
+      const failure = failures.get(ip);
+      if (failure && failure.until > Date.now() && failure.count >= 8) throw new WebError(429, '登录尝试过多，请稍后重试');
+      failures.set(ip, { count: failure && failure.until > Date.now() ? failure.count + 1 : 1, until: Date.now() + 60_000 });
+      if (!sameAccess(c) || !await verifyWebCredential(c, input.secret)) {
+        throw new WebError(401, '密码或 Token 无效');
       }
       const owner = options.service.ownerIdentity();
       failures.delete(ip);
       for (const [t, s] of sessions) if (s.expires < Date.now()) sessions.delete(t);
       if (sessions.size >= 64) sessions.delete(sessions.keys().next().value!);
       const token = randomBytes(32).toString('base64url');
-      sessions.set(token, { owner, hash: c.secretHash, expires: Date.now() + 12 * 60 * 60_000 });
+      sessions.set(token, { owner, hash: webCredentialSignature(c), expires: Date.now() + 12 * 60 * 60_000 });
       res.setHeader('Set-Cookie', `bridge_web=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`);
       respond(res, 200, { ok: true }); return;
     }
-    const token = cookie(req); await authenticate(token, local);
+    const token = cookie(req), bearer = req.headers.authorization?.match(/^Bearer ([^\s]+)$/i)?.[1];
+    await authenticate(token, local, bearer);
     if (url.pathname === '/api/logout' && req.method === 'POST') {
       sessions.delete(token!); res.setHeader('Set-Cookie', 'bridge_web=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); respond(res, 200, { ok: true }); return;
     }
@@ -86,7 +92,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       const id = url.searchParams.get('session') ?? undefined;
       if (id && !/^[a-f0-9]{64}$/.test(id)) throw new WebError(400, '会话 ID 无效');
       res.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-      res.write('retry: 1500\n\n'); streams.set(res, { token, local, id });
+      res.write('retry: 1500\n\n'); streams.set(res, { token, bearer, local, id });
       res.on('close', () => streams.delete(res)); void poll(); return;
     }
     const match = /^\/api\/sessions\/([a-f0-9]{64})(?:\/(send|rename|control|favorite))?$/.exec(url.pathname);
@@ -109,7 +115,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     if (running) return running;
     if (closed || !streams.size) return Promise.resolve();
     running = (async () => {
-      for (const [res, s] of streams) try { await authenticate(s.token, s.local); } catch (e) {
+      for (const [res, s] of streams) try { await authenticate(s.token, s.local, s.bearer); } catch (e) {
         if (e instanceof WebError && e.status === 401) { res.write('event: auth\ndata: {}\n\n'); res.end(); streams.delete(res); }
         else { res.write('event: unavailable\ndata: {}\n\n'); return; }
       }
@@ -137,7 +143,8 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     });
   } catch (error) { await closeListeners(); throw error; }
   const timer = setInterval(() => void poll(), options.pollMs ?? 1000); timer.unref();
-  return { url: `http://${initial.host}:${initial.port}`, urls: hosts.map(ip => `http://${ip}:${initial.port}`), async close() {
+  const urls = webAccessUrls(initial);
+  return { url: urls[0]!, urls, async close() {
     closed = true; clearInterval(timer);
     for (const res of streams.keys()) res.end(); streams.clear();
     await closeListeners(); await running;
