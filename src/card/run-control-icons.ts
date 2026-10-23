@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { writeFileAtomic } from '../platform/atomic-write';
-import { RUN_BUTTON_IMAGES, type RunButtonAction } from './run-button-images';
+import { COMPLETED_STOP_IMAGE, RUN_BUTTON_IMAGES, type RunButtonAction } from './run-button-images';
 
 // Rasterized at 4x from a 24px vector: three circular Git nodes, with a
 // single lower stem branching into two upper arms. Blue is Feishu #3370FF.
@@ -16,6 +16,7 @@ export interface RunControlIcons {
   auxiliaryRunId?: string;
   auxiliaryScope?: string;
   forkIconKey?: string;
+  completedStopImageKey?: string;
   buttonImageKeys?: Partial<Record<RunButtonAction, string>>;
 }
 
@@ -29,18 +30,20 @@ export async function prepareRunControlIcons(options: {
   upload(png: Buffer): Promise<string>;
 }): Promise<RunControlIcons> {
   const png = gitForkIconPng();
-  const digest = createHash('sha256').update(png).update(JSON.stringify(RUN_BUTTON_IMAGES)).digest('hex');
+  const completedStopPng = Buffer.from(COMPLETED_STOP_IMAGE, 'base64');
+  const digest = createHash('sha256').update(png).update(JSON.stringify(RUN_BUTTON_IMAGES)).update(completedStopPng).digest('hex');
   try {
     const cached = JSON.parse(await readFile(options.cachePath, 'utf8')) as {
-      appId?: string; digest?: string; forkIconKey?: string;
+      appId?: string; digest?: string; forkIconKey?: string; completedStopImageKey?: string;
       buttonImageKeys?: Partial<Record<RunButtonAction, string>>;
     };
     if (cached.appId === options.appId && cached.digest === digest &&
       typeof cached.forkIconKey === 'string' && cached.forkIconKey.trim() &&
+      typeof cached.completedStopImageKey === 'string' && cached.completedStopImageKey.trim() &&
       Object.keys(RUN_BUTTON_IMAGES).every((key) =>
         typeof cached.buttonImageKeys?.[key as RunButtonAction] === 'string' &&
         cached.buttonImageKeys[key as RunButtonAction]?.trim())) {
-      return { forkIconKey: cached.forkIconKey, buttonImageKeys: cached.buttonImageKeys };
+      return { forkIconKey: cached.forkIconKey, completedStopImageKey: cached.completedStopImageKey, buttonImageKeys: cached.buttonImageKeys };
     }
   } catch {
     // Missing/invalid caches are replaced after a successful upload.
@@ -53,7 +56,9 @@ export async function prepareRunControlIcons(options: {
     if (!key.trim()) throw new Error(`Control image upload returned no key: ${action}`);
     buttonImageKeys[action as RunButtonAction] = key;
   }
+  const completedStopImageKey = await options.upload(completedStopPng);
+  if (!completedStopImageKey.trim()) throw new Error('Completed stop image upload returned no image key');
   await writeFileAtomic(options.cachePath,
-    `${JSON.stringify({ appId: options.appId, digest, forkIconKey, buttonImageKeys })}\n`);
-  return { forkIconKey, buttonImageKeys };
+    `${JSON.stringify({ appId: options.appId, digest, forkIconKey, completedStopImageKey, buttonImageKeys })}\n`);
+  return { forkIconKey, completedStopImageKey, buttonImageKeys };
 }

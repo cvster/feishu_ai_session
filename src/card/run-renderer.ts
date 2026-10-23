@@ -146,8 +146,8 @@ function controlButtonRow(options: RunCardRenderOptions, completed: boolean): ob
     columns: buttons.map((button) => {
       if (options.auxiliaryScope) button.behaviors[0].value.auxiliaryScope = options.auxiliaryScope;
       const action = button.behaviors[0].value.cmd as RunButtonAction;
-      // Keep the stop glyph grey on completion instead of using the red stop PNG.
-      const imageKey = button.disabled ? undefined : options.buttonImageKeys?.[action];
+      // Both stop states use the same framed image layout, differing only in color.
+      const imageKey = action === 'stop' && completed ? options.completedStopImageKey : options.buttonImageKeys?.[action];
       return {
       tag: 'column',
       // Icon-only controls have no labels to truncate. Equal weighted columns

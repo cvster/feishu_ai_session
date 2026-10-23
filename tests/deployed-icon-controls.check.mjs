@@ -88,6 +88,15 @@ test('deployed production controls use centered framed images with clickable cal
     assert.equal(control.behaviors[0].value.cmd, actions[index]);
   }
   assert.equal(controls[0].behaviors[0].value.bridge_token, 'signed-stop');
+  const completed = api.renderCard({ ...initial, terminal: 'done' }, { buttonImageKeys, completedStopImageKey: 'img_stop_grey' });
+  const grey = completed.body.elements.at(-1).columns[0].elements[0];
+  assert.equal(grey.elements[0].img_key, 'img_stop_grey');
+  assert.equal(grey.disabled, true);
+  assert.equal(grey.border_color, 'grey');
+  for (const key of ['tag', 'has_border', 'width', 'height', 'padding', 'horizontal_align', 'vertical_align'])
+    assert.equal(grey[key], controls[0][key]);
+  for (const key of ['tag', 'size', 'scale_type', 'margin', 'transparent', 'preview'])
+    assert.equal(grey.elements[0][key], controls[0].elements[0][key]);
 });
 
 test('deployed custom Git fork image preserves its callback', () => {

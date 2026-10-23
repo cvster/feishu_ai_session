@@ -165,7 +165,7 @@ describe('run card renderer snapshots', () => {
       .toEqual(['setting_outlined', 'refresh_outlined', 'mindmap-down_outlined', 'archive_outlined']);
   });
 
-  it('keeps a disabled grey stop on completion even with uploaded red stop imagery and no native stop capability', () => {
+  it('falls back to a disabled grey stop when completed imagery is unavailable', () => {
     const done = stateFrom([{ type: 'done', terminationReason: 'normal' }]);
     for (const auxiliary of [false, true]) {
       const card = renderCard(done, { auxiliary, showStopButton: false, buttonImageKeys: { stop: 'img_stop' }, signCallback: () => 'unused' });
@@ -215,6 +215,13 @@ describe('run card renderer snapshots', () => {
     });
     expect(controls[0]?.behaviors?.[0]?.value?.bridge_token).toBe('signed-stop');
     expect(JSON.stringify(controls)).not.toContain('markdown');
+    const completed = renderCard({ ...initialState, terminal: 'done' }, { buttonImageKeys, completedStopImageKey: 'img_stop_grey' }) as { body: { elements: CardElement[] } };
+    const grey = completed.body.elements.flatMap(buttonsIn)[0]!;
+    expect(grey).toMatchObject({ ...controls[0], border_color: 'grey', disabled: true,
+      hover_tips: { tag: 'plain_text', content: '本次任务已完成' },
+      behaviors: [{ type: 'callback', value: { cmd: 'stop' } }],
+      elements: [{ ...controls[0]!.elements![0], img_key: 'img_stop_grey', alt: { tag: 'plain_text', content: '本次任务已完成' } }],
+    });
   });
 
   it('keeps local paths in user-visible cards and text fallbacks', () => {

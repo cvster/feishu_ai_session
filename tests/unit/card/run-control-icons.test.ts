@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { gitForkIconPng, prepareRunControlIcons } from '../../../src/card/run-control-icons';
-import { RUN_BUTTON_IMAGES } from '../../../src/card/run-button-images';
+import { COMPLETED_STOP_IMAGE, RUN_BUTTON_IMAGES } from '../../../src/card/run-button-images';
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -24,9 +24,9 @@ describe('app-scoped Git fork icon cache', () => {
     expect(png[25]).toBe(6); // RGBA, not an opaque background.
   });
 
-  it('contains five transparent 128px framed button images', () => {
+  it('contains five transparent 128px framed controls and the matching completed stop image', () => {
     expect(Object.keys(RUN_BUTTON_IMAGES)).toEqual(['stop', 'config', 'refresh', 'fork', 'finish']);
-    for (const base64 of Object.values(RUN_BUTTON_IMAGES)) {
+    for (const base64 of [...Object.values(RUN_BUTTON_IMAGES), COMPLETED_STOP_IMAGE]) {
       const png = Buffer.from(base64, 'base64');
       expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
       expect(png.readUInt32BE(16)).toBe(128);
@@ -42,12 +42,13 @@ describe('app-scoped Git fork icon cache', () => {
       .toEqual(expectedIcons('img_app_a'));
     expect(await prepareRunControlIcons({ appId: 'app-a', cachePath: path, upload }))
       .toEqual(expectedIcons('img_app_a'));
-    expect(upload).toHaveBeenCalledTimes(6);
+    expect(upload).toHaveBeenCalledTimes(7);
     expect(upload).toHaveBeenCalledWith(gitForkIconPng());
+    expect(upload).toHaveBeenCalledWith(Buffer.from(COMPLETED_STOP_IMAGE, 'base64'));
     const otherUpload = vi.fn(async () => 'img_app_b');
     expect(await prepareRunControlIcons({ appId: 'app-b', cachePath: path, upload: otherUpload }))
       .toEqual(expectedIcons('img_app_b'));
-    expect(otherUpload).toHaveBeenCalledTimes(6);
+    expect(otherUpload).toHaveBeenCalledTimes(7);
   });
 
   it('reuploads when an asset changes or a cache is malformed', async () => {
@@ -57,7 +58,7 @@ describe('app-scoped Git fork icon cache', () => {
     await prepareRunControlIcons({ appId: 'app-a', cachePath: path, upload });
     await writeFile(path, '{invalid');
     await prepareRunControlIcons({ appId: 'app-a', cachePath: path, upload });
-    expect(upload).toHaveBeenCalledTimes(12);
+    expect(upload).toHaveBeenCalledTimes(14);
   });
 
   it('does not replace a cache with an empty or failed upload', async () => {
@@ -83,5 +84,5 @@ describe('app-scoped Git fork icon cache', () => {
 });
 
 function expectedIcons(key: string) {
-  return { forkIconKey: key, buttonImageKeys: Object.fromEntries(Object.keys(RUN_BUTTON_IMAGES).map((action) => [action, key])) };
+  return { forkIconKey: key, completedStopImageKey: key, buttonImageKeys: Object.fromEntries(Object.keys(RUN_BUTTON_IMAGES).map((action) => [action, key])) };
 }
