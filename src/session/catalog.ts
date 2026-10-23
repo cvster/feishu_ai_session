@@ -1,6 +1,7 @@
 import { isToolId, toolDefinition } from '../tools/definitions';
 import { randomUUID } from 'node:crypto';
-import { open, readFile, rename, mkdir } from 'node:fs/promises';
+import { open, readFile, rename, mkdir, copyFile, chmod } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { dirname } from 'node:path';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
@@ -20,7 +21,7 @@ export interface SessionCatalogIdentity {
 export interface SessionCatalogEntry extends SessionCatalogIdentity {
   key: string;
   fingerprintVersion?: number;
-  /** Feishu app that last established this chat binding. Legacy entries omit it. */
+  /** Native tool data source that established this binding. Legacy entries omit it. */
   sourceId?: string;
   botAppId?: string;
   /** Number of recent completed native turns to replay when this chat is first attached. */
@@ -85,8 +86,52 @@ export function sessionCatalogKey(input: SessionCatalogIdentity): string {
   ].join(KEY_SEPARATOR);
 }
 
+/** Current routes are structurally unique by scope. Policy keys identify a
+ * revision, not another live route. History never participates in routing. */
+class CatalogRecords {
+  private current = new Map<string, SessionCatalogEntry>();
+  private history = new Map<string, SessionCatalogEntry>();
+  private historyKey(entry: SessionCatalogEntry): string {
+    return 'history:' + JSON.stringify([entry.key, entry.sourceId, entry.botAppId, entry.threadId ?? entry.sessionId, entry.boundAt ?? entry.updatedAt]);
+  }
+  clear() { this.current.clear(); this.history.clear(); }
+  get(key: string): SessionCatalogEntry | undefined {
+    const current = this.current.get(key.split(KEY_SEPARATOR)[0]!);
+    if (current?.key === key) return current;
+    return [...this.history.values()].filter(row => row.key === key).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  }
+  set(_key: string, entry: SessionCatalogEntry): void {
+    if (entry.status === 'archived') {
+      const current = this.current.get(entry.scopeId);
+      if (current && this.historyKey(current) === this.historyKey(entry)) this.current.delete(entry.scopeId);
+      this.history.set(this.historyKey(entry), entry); return;
+    }
+    const prior = this.current.get(entry.scopeId);
+    if (prior && (prior.key !== entry.key || prior.agentId !== entry.agentId || prior.sourceId !== entry.sourceId ||
+        prior.botAppId !== entry.botAppId || (prior.threadId ?? prior.sessionId) !== (entry.threadId ?? entry.sessionId))) {
+      const archived = { ...prior, status: 'archived' as const };
+      this.history.set(this.historyKey(archived), archived);
+    }
+    this.current.set(entry.scopeId, entry);
+    // A replay marker belongs to one establishment, including after reload.
+    this.history.delete(this.historyKey(entry));
+  }
+  delete(key: string): void {
+    if (this.history.delete(key)) return;
+    const current = this.current.get(key.split(KEY_SEPARATOR)[0]!);
+    if (current?.key === key) this.current.delete(current.scopeId);
+  }
+  *entries(): IterableIterator<[string, SessionCatalogEntry]> {
+    yield* this.history.entries();
+    for (const row of this.current.values()) yield [row.key, row];
+  }
+  *values(): IterableIterator<SessionCatalogEntry> { for (const [, row] of this.entries()) yield row; }
+  [Symbol.iterator]() { return this.entries(); }
+  serialize() { return { version: 2, current: Object.fromEntries(this.current), history: [...this.history.values()] }; }
+}
+
 export class SessionCatalog {
-  private data = new Map<string, SessionCatalogEntry>();
+  private data = new CatalogRecords();
   // Separate from GC'd history: an archive must not expire into a new task.
   private archivedThreads = new Set<string>();
   private archivedScopes = new Map<string, string>();
@@ -110,21 +155,42 @@ export class SessionCatalog {
   }
 
   async load(): Promise<void> {
+    let migrate = false;
     try {
       const raw = JSON.parse(await readFile(this.path, 'utf8')) as unknown;
-      if (!Array.isArray(raw)) {
-        throw new Error('Invalid session catalog');
-      }
       this.data.clear();
-      for (const item of raw) {
-        const entry = normalizeEntry(item);
-        if (!entry) continue;
-        this.data.set(entry.key, entry);
+      if (Array.isArray(raw)) {
+        migrate = true;
+        const entries = raw.map(normalizeEntry).filter((row): row is SessionCatalogEntry => !!row);
+        const toolsByScope = new Map<string, CatalogAgentId>();
+        for (const entry of entries) if (entry.status === 'active') {
+          const tool = toolsByScope.get(entry.scopeId);
+          if (tool && tool !== entry.agentId) throw new Error(`工具身份冲突：${entry.scopeId}`);
+          toolsByScope.set(entry.scopeId, entry.agentId);
+        }
+        // Later establishment wins; system refresh time breaks ties for policy migrations.
+        entries.sort((a, b) => (a.status === 'active' ? 1 : 0) - (b.status === 'active' ? 1 : 0) ||
+          (a.boundAt ?? a.updatedAt) - (b.boundAt ?? b.updatedAt) || a.updatedAt - b.updatedAt);
+        for (const entry of entries) this.data.set(entry.key, entry);
+      } else {
+        const state = raw as { version?: number; current?: Record<string, unknown>; history?: unknown[] };
+        if (state?.version !== 2 || !state.current || typeof state.current !== 'object' || Array.isArray(state.current) || !Array.isArray(state.history)) throw new Error('Invalid session catalog');
+        for (const item of state.history) {
+          const entry = normalizeEntry(item);
+          if (!entry || entry.status !== 'archived') throw new Error('Invalid catalog history');
+          this.data.set(entry.key, entry);
+        }
+        for (const [scope, item] of Object.entries(state.current)) {
+          const entry = normalizeEntry(item);
+          if (!entry || entry.status !== 'active' || entry.scopeId !== scope) throw new Error('Invalid current catalog binding');
+          this.data.set(entry.key, entry);
+        }
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
         log.fail('session-catalog', err, { step: 'load' });
         this.data.clear();
+        throw err;
       }
     }
     try {
@@ -153,6 +219,14 @@ export class SessionCatalog {
     } catch (err) {
       // A damaged archive ledger must fail closed, not silently reopen groups.
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    for (const [key, row] of this.data) if (row.status === 'active' && this.isScopeArchived(row.scopeId)) {
+      this.data.set(key, { ...row, status: 'archived' }); migrate = true;
+    }
+    if (migrate) {
+      try { await copyFile(this.path, `${this.path}.v1-backup`, constants.COPYFILE_EXCL); await chmod(`${this.path}.v1-backup`, 0o600); }
+      catch (err) { if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err; }
+      await this.persist();
     }
   }
 
@@ -281,16 +355,8 @@ export class SessionCatalog {
       ...(input.threadId ? { threadId: input.threadId } : {}),
       ...(input.lastSummary ? { lastSummary: input.lastSummary } : {}),
     };
-    // Retain previous conversations as history, not simultaneous live routes.
-    if (personal) for (const [oldKey, old] of this.data) {
-      if (old.scopeId === input.scopeId && old.status === 'active' &&
-          (old.agentId !== input.agentId || (old.threadId ?? old.sessionId) !== (input.threadId ?? input.sessionId))) {
-        this.data.set(oldKey, { ...old, status: 'archived', updatedAt: entry.updatedAt });
-      }
-    }
-    // Preserve last-establishment order even when timestamps tie and an
-    // existing policy/workspace key is reused. Map.set alone keeps old order.
-    this.data.delete(key);
+    // The scope-keyed current map replaces the route atomically and retains
+    // the old revision in history for personal, shared and topic routes alike.
     this.data.set(key, entry);
     if (personal) this.personalBindingCommitted?.(entry);
     this.schedulePersist();
@@ -312,6 +378,17 @@ export class SessionCatalog {
 
   entries(): SessionCatalogEntry[] {
     return [...this.data.values()].map((entry) => ({ ...entry }));
+  }
+
+  /** Remove local associations without archiving native data or dissolving a group. */
+  unlinkChat(chatId: string, refs: Array<{ agentId: CatalogAgentId; sourceId: string; nativeId: string }> = []): void {
+    this.archivedScopes.set(chatId, 'unlinked');
+    for (const [key, row] of this.data) if (row.scopeId === chatId || row.scopeId.startsWith(`${chatId}:`)) {
+      this.archivedScopes.set(row.scopeId, 'unlinked'); this.data.delete(key);
+    }
+    for (const ref of refs) this.suppressedAutoGroups.add(JSON.stringify([ref.agentId, ref.sourceId, ref.nativeId]));
+    for (const [id, notice] of this.archiveNotifications) if (notice.scopeId.split(':')[0] === chatId) this.archiveNotifications.delete(id);
+    this.schedulePersist();
   }
 
   pendingArchiveNotifications(): SessionArchiveNotification[] {
@@ -364,17 +441,19 @@ export class SessionCatalog {
     }
 
     for (const scopeId of new Set([...this.data.values()].map((entry) => entry.scopeId))) {
-      const scoped = [...this.data.values()]
-        .filter((entry) => entry.scopeId === scopeId)
-        .sort((a, b) => b.updatedAt - a.updatedAt);
-      for (const entry of scoped.slice(maxEntriesPerScope)) {
-        this.data.delete(entry.key);
+      const scoped = [...this.data.entries()]
+        .filter(([, entry]) => entry.scopeId === scopeId)
+        .sort(([, a], [, b]) => Number(b.status === 'active') - Number(a.status === 'active') || b.updatedAt - a.updatedAt);
+      for (const [key, row] of scoped.slice(maxEntriesPerScope)) {
+        if (row.status === 'active') continue;
+        this.data.delete(key);
       }
     }
 
-    const all = [...this.data.values()].sort((a, b) => b.updatedAt - a.updatedAt);
-    for (const entry of all.slice(maxEntriesPerProfile)) {
-      this.data.delete(entry.key);
+    const all = [...this.data.entries()].sort(([, a], [, b]) => Number(b.status === 'active') - Number(a.status === 'active') || b.updatedAt - a.updatedAt);
+    for (const [key, row] of all.slice(maxEntriesPerProfile)) {
+      if (row.status === 'active') continue;
+      this.data.delete(key);
     }
     this.schedulePersist();
   }
@@ -386,7 +465,8 @@ export class SessionCatalog {
 
   async replaceForTest(entries: SessionCatalogEntry[]): Promise<void> {
     await this.saving;
-    this.data = new Map(entries.map((entry) => [entry.key, { ...entry }]));
+    this.data = new CatalogRecords();
+    for (const entry of entries) this.data.set(entry.key, { ...entry });
     await this.persist();
   }
 
@@ -481,7 +561,7 @@ export class SessionCatalog {
       notifications: [...this.archiveNotifications.values()],
     })}\n`);
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
-    const payload = `${JSON.stringify(this.entries(), null, 2)}\n`;
+    const payload = `${JSON.stringify(this.data.serialize(), null, 2)}\n`;
     const fh = await open(tmp, 'w', 0o600);
     try {
       await fh.writeFile(payload, 'utf8');

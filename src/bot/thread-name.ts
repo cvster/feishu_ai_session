@@ -152,9 +152,13 @@ export class SessionNameSync {
     const groupName = (await this.options.channel.getChatInfo(chatId)).name?.trim();
     if (!groupName || !isActive()) return;
 
-    if (!state || (groupName !== state.groupName && groupName !== state.previousGroupName)) {
+    const repairBaseline = state && state.groupName !== state.threadName &&
+      groupName === state.groupName && threadName === state.threadName;
+    if (!state || repairBaseline || (groupName !== state.groupName && groupName !== state.previousGroupName)) {
       // First binding, or a new group rename: group wins this observation.
       // If both sides changed between checks, this is the deterministic tie-break.
+      // Older/failed explicit renames can leave an unequal, unchanged baseline;
+      // repair it from the confirmed group name instead of treating it as synchronized.
       if (threadName !== groupName) await this.options.renameSession!(snapshot.id, groupName);
       await this.save(key, {
         groupName, threadName: groupName,

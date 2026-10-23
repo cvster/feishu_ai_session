@@ -58,7 +58,9 @@ it('persists an archive before notifying its current personal group, then stays 
   h.create.mockImplementation(async params => {
     const state = JSON.parse(await readFile(`${h.path}.archives.json`, 'utf8'));
     expect(state.threads).toContain('native'); expect(state.notifications).toContainEqual(expect.objectContaining({ id: (params as any).data.uuid }));
-    expect(JSON.parse(await readFile(h.path, 'utf8')).find((r: any) => r.scopeId === 'oc_personal').status).toBe('archived');
+    const stored = JSON.parse(await readFile(h.path, 'utf8'));
+    expect(stored.current.oc_personal).toBeUndefined();
+    expect(stored.history.find((r: any) => r.scopeId === 'oc_personal').status).toBe('archived');
     return original(params);
   });
   const first = h.start(); await first.flush();

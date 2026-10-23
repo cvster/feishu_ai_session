@@ -303,7 +303,7 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 | `~/.lark-channel/config.json` | root config，包含 profiles 和 active profile |
 | `~/.lark-channel/active-profile` | 最近选择的 profile |
 | `~/.lark-channel/profiles/<profile>/sessions.json` | 会话状态 |
-| `~/.lark-channel/profiles/<profile>/sessions.json.catalog.json` | agent-aware 会话索引 |
+| `~/.lark-channel/profiles/<profile>/sessions.json.catalog.json` | 会话索引 v2：按群/路由保存唯一当前绑定，历史修订单独保存 |
 | `~/.lark-channel/profiles/<profile>/<tool>-native-turn-sync.json` | 原生消息轮次游标、卡片 ID 和更新序号，自动导入旧状态 |
 | `~/.lark-channel/profiles/<profile>/workers/<tool>/` | worker 原生配置、端点和任务收据 |
 | `~/.lark-channel/profiles/<profile>/workspaces.json` | 当前和命名工作空间绑定 |

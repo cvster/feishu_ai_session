@@ -94,7 +94,8 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
       } });
     return;
   }
-  if (deps.sessionCatalog?.isScopeArchived(scope)) return;
+  // A DM resume candidate is explicitly selected and validated by applyResume.
+  if (deps.sessionCatalog?.isScopeArchived(scope) && !(mode === 'p2p' && payload.cmd === 'resume.use')) return;
 
   if (deps.controls.auxiliary?.isAuxiliary(scope)) {
     const action = typeof payload.cmd === 'string' ? payload.cmd : '';

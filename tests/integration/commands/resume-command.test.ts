@@ -64,13 +64,13 @@ describe('agent-aware resume commands', () => {
 
   it('allows resume use only for the current agent/cwd/policy catalog entry', async () => {
     const h = await createHarness('claude');
-    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1000 });
     h.catalog.upsertActive({
       ...h.identity,
       policyFingerprint: 'stale-fp',
       sessionId: 'sess-stale',
       now: 1000,
     });
+    h.catalog.upsertActive({ ...h.identity, sessionId: 'sess-current', now: 1001 });
 
     await expect(h.run('/resume use sess-stale')).resolves.toBe(true);
     expect(h.sessions.getRaw('chat-1')).toBeUndefined();

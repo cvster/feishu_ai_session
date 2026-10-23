@@ -40,8 +40,9 @@ it('rejects conflicting legacy tools for a group rather than silently routing to
   catalog.upsertActive({ scopeId: 'group', agentId: 'codex', cwdRealpath: root, policyFingerprint: 'c', threadId: 'native' });
   catalog.upsertActive({ scopeId: 'group', agentId: 'claude', cwdRealpath: root, policyFingerprint: 'a', sessionId: 'native' });
   await catalog.flush();
-  const store = new ToolBindingStore(join(root, 'bindings.json'));
-  expect(() => store.migrate(catalog, () => 'home')).toThrow('工具身份冲突');
+  // Reconstruct the pre-migration array, where both revisions claimed to be active.
+  await writeFile(join(root, 'catalog.json'), JSON.stringify(catalog.entries().map(row => ({ ...row, status: 'active' }))));
+  await expect(new SessionCatalog(join(root, 'catalog.json')).load()).rejects.toThrow('工具身份冲突');
 });
 it('fails closed on malformed persisted state', async () => {
   const root = await mkdtemp(join(tmpdir(), 'tools-invalid-')); clean.push(root);

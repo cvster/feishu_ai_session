@@ -117,3 +117,32 @@ retried. A manually dissolved personal AA group is not automatically replaced.
 The native conversation can still be explicitly attached to a new group.
 An owned binding missing from a partial chat list is held until this check,
 rather than creating a replacement group immediately.
+
+
+## Current bindings and historical revisions
+
+The session catalog uses schema version 2: `current` is an object keyed by routing
+scope (a group or topic ID), and `history` is an array of retired revisions.
+Replacing a binding atomically replaces that scope's current entry and moves the
+previous revision into history. Workspace and policy fingerprints identify
+revisions; they cannot create additional current routes. Historical records are
+never used to deliver messages or synchronize names. Native archival tombstones
+remain separate from retired relationship history.
+
+Personal workgroups retain one-to-one native-session ownership through the tool
+binding store's reverse index and shared creation lease. Shared groups are
+additional routes to the same conversation, with one current entry per scope.
+History GC keeps current routes even when the configured record limit is smaller
+than the number of live scopes.
+
+Legacy array catalogs migrate on load, retaining the latest established binding
+per scope and retiring earlier policy revisions. The original file is saved as
+`<catalog-path>.v1-backup`. Conflicting active tools within one legacy scope fail
+closed for manual reconciliation. Do not run an older bridge against schema 2;
+restore the catalog and archive ledger backups together when rolling back.
+
+For offline association cleanup, stop only the bridge writer and run the bundled
+`tools/migrate-session-catalog.ts` maintenance entry point with the profile path
+and optional group IDs. It backs up local state, removes selected group routes
+and name baselines, rejects unsubmitted inbox entries, and saves durable
+suppression markers. It does not archive native conversations or dissolve groups.

@@ -52,7 +52,8 @@ async function fixture(toolId: 'codex' | 'claude' | 'dsh' | 'zcode' | 'kilo' = '
   const startRegistered=async(waitForTick=true)=>{const handle=await startWorkerNameSync({channel,controls,catalog,profileDir:dir,intervalMs:60_000});cleanup.push(()=>handle.stop());if(waitForTick)await handle.tick();return handle;};
   const omitCatalogSource=async()=>{
     await catalog.flush();
-    const rows=JSON.parse(await readFile(join(dir,'catalog.json'),'utf8'));
+    const data=JSON.parse(await readFile(join(dir,'catalog.json'),'utf8'));
+    const rows=Array.isArray(data)?data:[...data.history,...Object.values(data.current)];
     for(const row of rows)delete row.sourceId;
     await writeFile(join(dir,'catalog.json'),JSON.stringify(rows));await catalog.load();
   };
@@ -64,13 +65,14 @@ it.each(['codex','zcode'] as const)('syncs legacy %s catalog rows only after ver
   h.title('AA-桌面改名');await sync.tick();
   expect(h.update).toHaveBeenCalledWith(expect.objectContaining({data:{name:'AA-桌面改名'}}));
 });
-it.each(['codex','claude','zcode','kilo','dsh'] as const)('counts migrated %s catalog rows for the same group as one binding and syncs non-AA titles both ways', async toolId => {
+it.each(['codex','claude','zcode','kilo','dsh'] as const)('stores one current %s route across policy migrations and syncs non-AA titles both ways', async toolId => {
   const h = await fixture(toolId); await h.omitCatalogSource();
   h.title('AA-copy（ZCode）');
   const first = await h.startRegistered();
   const legacy = h.catalog.entries()[0]!;
   h.catalog.upsertActive({ ...legacy, sourceId: 'local', policyFingerprint: 'current-policy', preserveBinding: true });
-  expect(h.catalog.entries().filter(row => row.status === 'active' && row.scopeId === 'oc_group')).toHaveLength(2);
+  expect(h.catalog.entries().filter(row => row.status === 'active' && row.scopeId === 'oc_group')).toHaveLength(1);
+  expect(h.catalog.entries().filter(row => row.status === 'archived' && row.scopeId === 'oc_group')).toHaveLength(1);
   h.title('AF-电机误差检测'); await first.tick();
   expect(h.update).toHaveBeenCalledOnce();
   expect(h.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: { name: 'AF-电机误差检测' } }));
@@ -208,4 +210,17 @@ it('retries a failed Web group rename from the native title and keeps the saved 
   await sync.stop(); const restarted = await h.startRegistered(); await restarted.tick();
   expect(h.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: { name: 'AA-Web' } }));
   expect(h.bindings.get('oc_group')?.name).toBe('AA-Web');
+});
+
+it.each(['codex','claude','zcode','kilo','dsh'] as const)('repairs an unchanged unequal %s baseline from the confirmed group name and resumes both-way sync', async toolId => {
+  const h = await fixture(toolId), first = await h.startRegistered(); await first.stop();
+  h.title('旧会话名'); h.group('当前群名');
+  const file = join(h.dir, `${toolId}-name-sync.json`), ledger = JSON.parse(await readFile(file, 'utf8'));
+  ledger.bindings[0][1] = { groupName: '当前群名', threadName: '旧会话名' };
+  await writeFile(file, JSON.stringify(ledger)); h.rename.mockClear(); h.update.mockClear();
+  const restarted = await h.startRegistered(); await restarted.tick();
+  expect(h.rename).toHaveBeenCalledOnce(); expect(h.rename).toHaveBeenLastCalledWith('session_native', '当前群名');
+  expect(h.update).not.toHaveBeenCalled(); expect(h.bindings.get('oc_group')?.name).toBe('当前群名');
+  h.title('新的工具名'); await restarted.tick();
+  expect(h.update).toHaveBeenCalledOnce(); expect(h.bindings.get('oc_group')?.name).toBe('新的工具名');
 });

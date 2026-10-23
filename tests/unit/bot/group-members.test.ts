@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { createBoundChat, isSoloUserBotChat } from '../../../src/bot/group.js';
 
 describe('solo user + bot group detection', () => {
-  it('makes the first invited human the owner of an app-created group', async () => {
-    const create = vi.fn(async () => ({ code: 0, data: { chat_id: 'oc_created' } }));
+  it('creates a bot-owned group while inviting the requested humans', async () => {
+    const create = vi.fn(async (_params: any) => ({ code: 0, data: { chat_id: 'oc_created' } }));
     const channel = { rawClient: { im: { v1: { chat: { create } } } } };
 
     await expect(createBoundChat({
@@ -14,10 +14,10 @@ describe('solo user + bot group detection', () => {
     expect(create).toHaveBeenCalledWith(expect.objectContaining({
       params: { user_id_type: 'open_id' },
       data: expect.objectContaining({
-        owner_id: 'ou_owner',
         user_id_list: ['ou_owner', 'ou_admin'],
       }),
     }));
+    expect(create.mock.calls[0]![0].data).not.toHaveProperty('owner_id');
   });
 
   it('allows no-mention handling only for exactly one user and this bot', async () => {
