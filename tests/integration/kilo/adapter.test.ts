@@ -40,8 +40,12 @@ it('preserves the native provider and variant when resuming after the default ch
   expect(calls.some(c => c.method === 'POST' && c.path === '/session')).toBe(false);
 });
 it('passes arbitrary native reasoning levels with the explicitly chosen model', async () => {
-  const h = await fixture(); await collect(h, { sessionId: 'ses_source', model: 'other/model', reasoningEffort: 'high' });
+  const h = await fixture(); const events = await collect(h, { sessionId: 'ses_source', model: 'other/model', reasoningEffort: 'high' });
+  expect(events).toContainEqual(expect.objectContaining({ type: 'system', reasoningEffort: 'high' }));
   expect((await h.read()).find(c => c.path.endsWith('/prompt_async')).body).toMatchObject({ model: { providerID: 'other', modelID: 'model' }, variant: 'high' });
+  const reader = new KiloNativeConversationReader(h.options);
+  try { expect((await reader.read('ses_source')).turns.at(-1)?.state.execution).toEqual({ model: 'other/model', reasoningEffort: 'high' }); }
+  finally { await reader.close(); }
 });
 it.each(['busy', 'interaction', 'disconnect', 'rejected'])('reports %s without resubmission or automatic native approval', async kind => {
   const h = await fixture(kind); const events = await collect(h, { sessionId: 'ses_source' });
@@ -132,7 +136,11 @@ it('leaves native implicit default variants to Kilo instead of treating them as 
   const h = await fixture(); await h.update(s => { s.sessions.ses_source.model.variant = 'default'; });
   const events = await collect(h, { sessionId: 'ses_source' });
   expect(events.at(-1)?.type).toBe('done');
+  expect(events).toContainEqual(expect.objectContaining({ type: 'system', reasoningEffort: 'default' }));
   expect((await h.read()).find(c => c.path.endsWith('/prompt_async')).body).not.toHaveProperty('variant');
+  const reader = new KiloNativeConversationReader(h.options);
+  try { expect((await reader.read('ses_source')).turns.at(-1)?.state.execution).toEqual({ model: 'original/model/path', reasoningEffort: 'default' }); }
+  finally { await reader.close(); }
 });
 it('rejects an unavailable explicit variant before sending any input', async () => {
   const h = await fixture(); const events = await collect(h, { sessionId: 'ses_source', reasoningEffort: 'removed-variant' });

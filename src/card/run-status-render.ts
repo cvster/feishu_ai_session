@@ -5,7 +5,7 @@ export function renderRunStatus(state: RunState): string | undefined {
   const context = [
     ...(state.projectName ? [`项目 ${state.projectName}`] : []),
     ...(state.execution
-      ? [`${state.execution.model ?? 'CLI 默认（待确认）'} · ${state.execution.reasoningEffort ?? '未知'}`]
+      ? [`${state.execution.model ?? 'CLI 默认（待确认）'} · ${state.execution.reasoningEffort === 'default' ? '跟随工具默认' : state.execution.reasoningEffort ?? '未知'}`]
       : []),
   ].join(' · ');
   const contextSuffix = context ? ` · ${context}` : '';

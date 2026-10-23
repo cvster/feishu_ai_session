@@ -62,8 +62,8 @@ export async function fixture(kind = 'normal') {
         res.writeHead(204); res.end();
         const model = body.model || { providerID: 'original', modelID: 'model/path' };
         s.sessions[id].model = { providerID: model.providerID, id: model.modelID, variant: body.variant };
-        const user = { id: body.messageID, role: 'user', sessionID: id, model };
-        const info = { id: 'msg_answer', role: 'assistant', sessionID: id, parentID: body.messageID, modelID: model.modelID, providerID: model.providerID, time: { created: 5 } };
+        const user = { id: body.messageID, role: 'user', sessionID: id, model: { ...model, ...(body.variant ? { variant: body.variant } : {}) }, time: { created: 4 } };
+        const info = { id: 'msg_answer', role: 'assistant', sessionID: id, parentID: body.messageID, modelID: model.modelID, providerID: model.providerID, ...(body.variant ? { variant: body.variant } : {}), time: { created: 5 } };
         const part = { id: 'prt_answer', type: 'text', sessionID: id, messageID: info.id, text: 'KILO_READY' };
         s.messages[id] = [...(s.messages[id] || []), { info: user, parts: body.parts }, { info, parts: [part] }]; save(s);
         if (kind === 'disconnect') { for (const r of streams) r.destroy(); return; }

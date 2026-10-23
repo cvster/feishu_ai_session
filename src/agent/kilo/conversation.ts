@@ -37,6 +37,11 @@ export function projectKiloConversation(info: any, rows: any[], busy: boolean): 
     const running = index === users.length - 1 && (busy || !last?.time?.completed);
     let state = startRunRuntime(initialState, user.info.time.created);
     state = { ...state, projectName: projectNameFromCwd(info.directory) };
+    // The turn's saved input is authoritative when assistant metadata omits
+    // its variant. Never borrow the session's mutable current setting.
+    const inputModel = user.info.model;
+    if (inputModel?.providerID && inputModel.modelID) state = reduce(state, { type: 'system',
+      model: `${inputModel.providerID}/${inputModel.modelID}`, reasoningEffort: inputModel.variant ?? 'default' });
     for (const row of assistant) {
       const model = row.info;
       state = reduce(state, { type: 'system', model: `${model.providerID}/${model.modelID}`, ...(model.variant ? { reasoningEffort: model.variant } : {}) });
