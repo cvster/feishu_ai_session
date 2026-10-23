@@ -64,6 +64,25 @@ it.each(['codex','zcode'] as const)('syncs legacy %s catalog rows only after ver
   h.title('AA-桌面改名');await sync.tick();
   expect(h.update).toHaveBeenCalledWith(expect.objectContaining({data:{name:'AA-桌面改名'}}));
 });
+it.each(['codex','claude','zcode','kilo','dsh'] as const)('counts migrated %s catalog rows for the same group as one binding and syncs non-AA titles both ways', async toolId => {
+  const h = await fixture(toolId); await h.omitCatalogSource();
+  h.title('AA-copy（ZCode）');
+  const first = await h.startRegistered();
+  const legacy = h.catalog.entries()[0]!;
+  h.catalog.upsertActive({ ...legacy, sourceId: 'local', policyFingerprint: 'current-policy', preserveBinding: true });
+  expect(h.catalog.entries().filter(row => row.status === 'active' && row.scopeId === 'oc_group')).toHaveLength(2);
+  h.title('AF-电机误差检测'); await first.tick();
+  expect(h.update).toHaveBeenCalledOnce();
+  expect(h.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: { name: 'AF-电机误差检测' } }));
+  expect(h.bindings.get('oc_group')?.name).toBe('AF-电机误差检测');
+  await first.stop();
+  const restored = await h.startRegistered(); await restored.tick();
+  expect(h.update).toHaveBeenCalledOnce(); expect(h.rename).not.toHaveBeenCalled();
+  h.group('AF-群中改名'); await restored.tick();
+  expect(h.rename).toHaveBeenCalledOnce();
+  expect(h.rename).toHaveBeenLastCalledWith('session_native', 'AF-群中改名');
+  expect(h.bindings.get('oc_group')?.name).toBe('AF-群中改名');
+});
 it.each(['wrong-source','wrong-session','wrong-bot','shared'] as const)('rejects legacy catalog rows with %s ownership',async kind=>{
   const h=await fixture('codex');await h.omitCatalogSource();const b=h.bindings.get('oc_group')!;
   if(kind==='wrong-source'){h.bindings.removeChat('oc_group');h.bindings.set('oc_group',{...b,sourceId:'another'});}

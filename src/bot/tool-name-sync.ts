@@ -26,8 +26,10 @@ export async function startToolNameSync(options: {
     // binding has verified this exact worker source and native session.
     .map(row => row.sourceId === undefined ? { ...row, sourceId: tool.sourceId } : row);
   // Two personal groups sharing a native session must not fight over its title.
+  // A scope can have several catalog rows after a policy/source migration;
+  // those rows still represent one group, not competing personal bindings.
   const exclusive = (scope: string, id: string) => active(scope, id) &&
-    ownedEntries().filter(row => (row.sessionId ?? row.threadId) === id).length === 1;
+    new Set(ownedEntries().filter(row => (row.sessionId ?? row.threadId) === id).map(row => row.scopeId)).size === 1;
   const sync = new SessionNameSync({ channel: options.channel, toolId: tool.id, sourceId: tool.sourceId,
     appId: controls.profileConfig.accounts.app.id, statePath: options.statePath,
     // This poller's timer already throttles lookups. A second throttle would
