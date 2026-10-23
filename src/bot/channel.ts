@@ -41,6 +41,7 @@ import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
 import { renderCard, type RunCardRenderOptions } from '../card/run-renderer';
 import { prepareRunControlIcons } from '../card/run-control-icons';
+import { installFeishuCardTransport } from '../card/transport';
 import {
   renderMarkdownContinuation,
   renderMarkdownWindowClosed,
@@ -373,6 +374,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   };
 
   const channel = createLarkChannel(opts);
+  installFeishuCardTransport(channel);
   configureGroupNotifications(channel, {
     appId: cfg.accounts.app.id,
     ownerId: () => controls.ownerRefreshState === 'ok' ? controls.botOwnerId : undefined,
