@@ -99,7 +99,8 @@ describe('personal multi-tool workflows', () => {
     expect(h.groups).toHaveLength(2);
   });
   it('creates a fresh session in the original tool from the second row without forking or copying history automatically', async () => {
-    const h = await harness(); await h.sync(); const source = h.groups[0]!.id;
+    const h = await harness(); h.controls.profileConfig.preferences.reasoningEffort = 'high';
+    await h.sync(); const source = h.groups[0]!.id;
     const fork = vi.fn(async () => { throw Error('must not call native fork'); }); h.registry.get('codex').agent.forkThread = fork;
     const before = h.bindings.get(source);
     await runCommandHandler('fork', '', h.context(source, 'group'));
@@ -107,21 +108,25 @@ describe('personal multi-tool workflows', () => {
     await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group'));
     expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
     expect(h.workspaces.cwdFor(target)).toBe(h.dir);
-    expect(h.bindings.get(target)).toMatchObject({ toolId: 'codex', nativeCreated: false, copiedFrom: { toolId: 'codex', nativeId: 'same-uuid' } });
+    expect(h.bindings.get(target)).toMatchObject({ toolId: 'codex', nativeCreated: false, reasoningEffort: 'high', copiedFrom: { toolId: 'codex', nativeId: 'same-uuid' } });
     expect(h.bindings.get(target)?.nativeId).not.toBe('same-uuid');
     expect(h.bindings.get(source)).toEqual(before); expect(fork).not.toHaveBeenCalled(); expect(h.runs).toEqual([]);
     expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('读取原会话内容');
   });
-  it('creates a fresh cross-tool group with the same cwd, persists provenance, and only imports history on click after restart', async () => {
-    const h = await harness(); await h.sync();
+  it.each(['claude', 'kilo'] as const)('creates a fresh %s cross-tool group with native model defaults and only imports history on click after restart', async targetTool => {
+    const h = await harness(); h.controls.profileConfig.preferences.reasoningEffort = 'high';
+    if (targetTool === 'kilo') h.registry.register({ id: 'kilo', sourceId: 'kilo-home', label: 'Kilo',
+      agent: { ...h.registry.get('claude').agent, id: 'kilo' }, listSessions: async () => [] });
+    await h.sync();
     const source = h.groups[0]!.id; const before = h.bindings.get(source);
     await runCommandHandler('fork', '', h.context(source, 'group'));
-    const value = copyButton(h, 'Claude');
+    const value = copyButton(h, targetTool === 'kilo' ? 'Kilo' : 'Claude');
     await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group'));
     expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
     expect(h.workspaces.cwdFor(target)).toBe(h.dir);
-    expect(h.bindings.get(target)).toMatchObject({ toolId: 'claude', nativeCreated: false, model: 'default',
+    expect(h.bindings.get(target)).toMatchObject({ toolId: targetTool, nativeCreated: false, model: 'default', reasoningEffort: 'default',
       copiedFrom: { toolId: 'codex', sourceId: 'codex-home', nativeId: 'same-uuid', name: 'AA-同名', cwd: h.dir } });
+    expect(controlsForTool(h.controls, targetTool, target).profileConfig.preferences.reasoningEffort).toBe('default');
     expect(h.bindings.get(source)).toEqual(before); expect(h.runs).toEqual([]);
     const provenance = h.bindings.get(target)!.copiedFrom!;
     expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('当前会话从“Codex”复制');

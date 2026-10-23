@@ -991,7 +991,7 @@ async function handleNewChat(
     ctx.controls.toolBindings.set(created.chatId, previousCopy ?? { toolId, sourceId: tool.sourceId, name: created.name, nativeId: tool.reserveSessionId?.(), nativeCreated: false,
       ...(options.copiedFrom ? { copiedFrom: options.copiedFrom } : {}),
       model: toolId === ctx.controls.profileConfig.agentKind ? ctx.controls.profileConfig.preferences.model ?? 'default' : 'default',
-      reasoningEffort: ctx.controls.profileConfig.preferences.reasoningEffort });
+      reasoningEffort: toolId === ctx.controls.profileConfig.agentKind ? ctx.controls.profileConfig.preferences.reasoningEffort : DEFAULT_REASONING });
     await ctx.controls.toolBindings.flush();
   }
   // Inherit cwd from the originating chat so the new group starts in the

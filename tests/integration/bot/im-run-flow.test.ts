@@ -50,7 +50,7 @@ describe('IM run flow', () => {
     expect(h.agent.runOptions).toEqual([]);
   });
 
-  it.each(['claude', 'codex', 'zcode'] as const)('rejects stale %s reasoning levels before spawning, and follows native default when requested', async kind => {
+  it.each(['claude', 'codex', 'zcode', 'kilo'] as const)('rejects stale %s reasoning levels before spawning, and follows native default when requested', async kind => {
     const h = await createHarness({ defaultWorkspace: true });
     h.profileConfig.agentKind = kind; h.profileConfig.preferences.model = 'model';
     h.profileConfig.preferences.reasoningEffort = 'deleted-level';
