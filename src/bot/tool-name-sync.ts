@@ -2,6 +2,7 @@ import type { Controls } from '../commands';
 import type { LarkChannel } from '@larksuite/channel';
 import type { SessionCatalog } from '../session/catalog';
 import type { AgentTool } from '../tools/types';
+import { sessionOperations } from '../tools/session-api';
 import { join } from 'node:path';
 import { DurableAgentAdapter } from '../worker/adapter';
 import { NAME_SYNC_INTERVAL_MS, SessionNameSync } from './thread-name';
@@ -36,7 +37,7 @@ export async function startToolNameSync(options: {
     // skip a poll when worker metadata arrives faster than on the prior tick.
     chatCheckIntervalMs: 0,
     knownChats: () => controls.knownChats ?? [],
-    renameSession: (id, name) => tool.sessions!.rename(id, name),
+    renameSession: (id, name) => sessionOperations(tool).rename(id, name),
     onSynchronized: async (scope, id, name) => {
       if (!exclusive(scope, id)) return;
       const binding = controls.toolBindings!.get(scope)!;

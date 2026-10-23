@@ -39,7 +39,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
     createdAtMs: 10, state: reduce(reduce(initialState, { type: 'text', delta: '原生回答' }), { type: 'done', terminationReason: 'normal' }) }] };
   const copies: typeof native[] = [];
   const provider = { listAuthoritative: authoritative, list: vi.fn(async () => [native, ...copies]), nativeNames: true, conversation: vi.fn(async () => conversation),
-    history: async () => undefined, rename: async (id: string, name: string) => { const session = [native, ...copies].find(row => row.nativeId === id); if (!session) throw Error('missing session'); session.name = name; }, archive: vi.fn(async () => { native.archived = true; }),
+    history: async () => undefined, rename: vi.fn(async (id: string, name: string) => { const session = [native, ...copies].find(row => row.nativeId === id); if (!session) throw Error('missing session'); session.name = name; }), archive: vi.fn(async () => { native.archived = true; }),
     fork: vi.fn(async () => { const copy = { ...native, nativeId: 'native-fork', name: 'AA-web（分叉）' }; copies.push(copy); return copy; }) };
   const h = await fixture(tool, provider);
   h.options.cwd = native.cwd;
@@ -423,7 +423,7 @@ it('refreshes a changed group title after 15 seconds and publishes it through SS
 it('coordinates Web/native/group names without old snapshots reverting an explicit rename', async () => {
   const h = await harness(); await h.login(); const id = (await h.service.list())[0]!.id;
   expect((await h.request('/api/sessions/' + id + '/rename', { name: 'AA-Web改名' })).status).toBe(200);
-  expect(h.native.name).toBe('AA-web');
+  expect(h.native.name).toBe('AA-Web改名');
   await h.names.tick(); await h.names.tick(); expect(h.native.name).toBe('AA-Web改名'); expect(await h.channel.getChatInfo('oc_group')).toMatchObject({ name: 'AA-Web改名' });
   h.group('AA-群改名'); await h.names.tick(); expect(h.native.name).toBe('AA-群改名');
   await h.names.tick(); h.native.name = 'AA-工具改名'; await h.names.tick(); expect(await h.channel.getChatInfo('oc_group')).toMatchObject({ name: 'AA-工具改名' });
@@ -433,6 +433,7 @@ it('coordinates Web/native/group names without old snapshots reverting an explic
 it('accepts a Web rename while the worker is executing and syncs the native title after completion', async () => {
   const h = await harness('kilo'), id = (await h.service.list())[0]!.id;
   const nativeRename = vi.spyOn(h.provider, 'rename');
+  const attempts = vi.spyOn(h.controls.toolRegistry!.get('kilo').sessions!, 'rename');
   const job = await h.client.submit({ requestKey: 'rename-while-running', options: { ...h.options, sessionId: 'native', initialSessionId: undefined } });
   await vi.waitFor(async () => expect((await h.client.list()).find(j => j.id === job.id)?.status).toBe('running'));
   const response = await h.request('/api/sessions/' + id + '/rename', { name: 'AA-Web忙时改名' });
@@ -442,12 +443,14 @@ it('accepts a Web rename while the worker is executing and syncs the native titl
   expect((await h.service.list())[0]?.name).toBe('AA-Web忙时改名');
   expect(h.native.name).toBe('AA-web');
   expect(nativeRename).not.toHaveBeenCalled();
+  expect(attempts).toHaveBeenCalledOnce();
+  expect(attempts).toHaveBeenCalledWith('native', 'AA-Web忙时改名');
   h.finish(); await vi.waitFor(async () => expect((await h.client.list()).find(j => j.id === job.id)?.status).toBe('completed'));
   await h.names.tick(); expect(h.native.name).toBe('AA-Web忙时改名');
   expect((await h.client.list())).toHaveLength(1);
 });
 
-it('renames only the group even when its worker is offline or rejects native title writes', async () => {
+it('renames the group even when its worker is offline', async () => {
   const h = await harness('kilo'), id = (await h.service.list())[0]!.id;
   const nativeRename = vi.spyOn(h.provider, 'rename').mockRejectedValue(Error('native unavailable'));
   h.provider.list.mockClear();
@@ -460,6 +463,24 @@ it('renames only the group even when its worker is offline or rejects native tit
   expect((await h.service.list())[0]?.name).toBe('AA-离线时群改名');
   expect(nativeRename).not.toHaveBeenCalled();
   expect(h.provider.list).not.toHaveBeenCalled();
+});
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('ignores a failed Web %s native rename and leaves its normal sync poll to finish it', async tool => {
+  const h = await harness(tool), id = (await h.service.list())[0]!.id;
+  const nativeRename = h.provider.rename.mockRejectedValueOnce(Error('native unavailable'));
+  const attempts = vi.spyOn(h.controls.toolRegistry!.get(tool).sessions!, 'rename');
+  const response = await h.request('/api/sessions/' + id + '/rename', { name: 'AA-Web改名' });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ name: 'AA-Web改名' });
+  expect(await h.channel.getChatInfo('oc_group')).toMatchObject({ name: 'AA-Web改名' });
+  expect(h.native.name).toBe('AA-web');
+  expect(nativeRename).toHaveBeenCalledOnce();
+  expect(attempts).toHaveBeenCalledOnce();
+  await h.names.tick();
+  expect(h.native.name).toBe('AA-Web改名');
+  expect(attempts).toHaveBeenCalledTimes(2);
+  expect(attempts).toHaveBeenNthCalledWith(1, 'native', 'AA-Web改名');
+  expect(attempts).toHaveBeenNthCalledWith(2, 'native', 'AA-Web改名');
 });
 
 it('reports a rejected group rename without changing the native title or the synchronization baseline', async () => {

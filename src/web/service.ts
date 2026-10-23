@@ -7,6 +7,8 @@ import type { SessionCatalog } from '../session/catalog';
 import { DurableAgentAdapter } from '../worker/adapter';
 import type { WorkerCapabilities } from '../worker/protocol';
 import type { ToolSession } from '../tools/types';
+import { sessionOperations } from '../tools/session-api';
+import { log } from '../core/logger';
 import { initialState, reduce, type RunState } from '../card/run-state';
 import { writeFileAtomic } from '../platform/atomic-write';
 import type { WebControlResult } from './controls';
@@ -200,7 +202,7 @@ export class PersonalSessionService {
     this.owner();
     const entry = this.deps.controls.toolBindings?.activePersonalBindings().find(([scope, b]) => this.identity(scope, b) === id);
     if (!entry) throw new WebError(404, '会话已归档、群已失效或绑定已变化');
-    const [scope] = entry;
+    const [scope, binding] = entry;
     this.assertBinding(id, scope);
     const group = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: scope } });
     if (group.code || !group.data) throw new WebError(503, '群状态未确认，暂不可改名');
@@ -209,6 +211,11 @@ export class PersonalSessionService {
     await renameChat(this.deps.channel, scope, name);
     this.assertBinding(id, scope);
     this.groups.set(scope, { mode: 'group', name, bindingName: this.deps.controls.toolBindings?.get(scope)?.name });
+    const tool = this.deps.controls.toolRegistry?.find(binding.toolId);
+    if (tool?.sourceId === binding.sourceId && binding.nativeId) {
+      try { await sessionOperations(tool).rename(binding.nativeId, name); }
+      catch (err) { log.warn('web', 'native-name-update-failed', { toolId: binding.toolId, err: err instanceof Error ? err.message : String(err) }); }
+    }
     this.listedAt = 0; return { name };
   }
   async control(id: string, action: string, values?: unknown) {
