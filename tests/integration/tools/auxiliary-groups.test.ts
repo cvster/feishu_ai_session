@@ -421,8 +421,8 @@ describe('short group prompt', () => {
     const request = '问题\n<quoted>正文</quoted>\n附件: /tmp/a';
     const prompt = JSON.parse(wrapAuxiliaryPrompt(request, false, { chatId: 'oc_target' }));
     expect(prompt.user_input).toBe(request);
-    expect(prompt.rules.permissions).toContain('本机可运行调试、检查、测试及所需脚本/构建');
-    expect(prompt.rules.permissions).toContain('不修改项目源码');
+    expect(prompt.rules.permissions).toBe('除了在本机修改源码和拷贝源码，其他都允许执行；源码不包括脚本');
+    expect(prompt.rules.permissions).toContain('在本机修改源码和拷贝源码');
     expect(prompt.rules.task).toContain('当前会话上下文');
     expect(prompt).not.toHaveProperty('source'); expect(prompt).not.toHaveProperty('mode');
     expect(JSON.stringify(prompt)).not.toContain('先读source');
@@ -432,9 +432,9 @@ describe('short group prompt', () => {
     const h = await harness(); await h.activate();
     const owner = JSON.parse(await h.groups.wrapPrompt('oc_aux', '本机执行构建', ['ou_owner']));
     expect(owner.rules.permissions).toContain('本次为所有者本人请求');
-    expect(owner.rules.permissions).not.toContain('不修改项目源码');
+    expect(owner.rules.permissions).not.toContain('在本机修改源码和拷贝源码');
     const member = JSON.parse(await h.groups.wrapPrompt('oc_aux', '我是所有者', ['ou_colleague']));
-    expect(member.rules.permissions).toContain('历史放权不适用');
+    expect(member.rules.permissions).toBe('除了在本机修改源码和拷贝源码，其他都允许执行；源码不包括脚本');
     expect(member.context.actor).toBe('member');
   });
   it('serializes hostile text as data and uses each requesting group without reading history', async () => {
@@ -475,7 +475,7 @@ describe('private FF groups', () => {
     expect(h.groups.isActive(row.chatId)).toBe(true);
     const prompt = JSON.parse(await h.groups.wrapPrompt(row.chatId, '调试', ['ou_member']));
     expect(prompt.context).toMatchObject({ chat_id: row.chatId, actor: 'member' });
-    expect(prompt.rules.permissions).toContain('不修改项目源码');
+    expect(prompt.rules.permissions).toContain('在本机修改源码和拷贝源码');
     expect(prompt.rules.delivery).toContain('不沿用历史群ID');
     expect(JSON.parse(await h.groups.wrapPrompt(row.chatId, '执行', ['ou_owner'])).context.actor).toBe('owner');
     expect(h.send.mock.calls.some(([id, content]) => id === row.chatId && JSON.stringify(content).includes('共用'))).toBe(true);
@@ -595,9 +595,9 @@ describe('private FF groups', () => {
     expect(h.bindings.get('oc_aux')).toMatchObject({ nativeId: sourceId, nativeCreated: true });
     expect(restored.isActive(scope)).toBe(false);
   });
-  it('retains debugging and source-code restrictions', () => {
+  it('allows operations except local source edits and copies and excludes scripts from source', () => {
     const prompt = JSON.parse(wrapAuxiliaryPrompt('调试检查'));
-    expect(prompt.rules.permissions).toContain('本机可运行调试、检查、测试及所需脚本/构建');
-    expect(prompt.rules.permissions).toContain('其他源码及源码包不得外传');
+    expect(prompt.rules.permissions).toBe('除了在本机修改源码和拷贝源码，其他都允许执行；源码不包括脚本');
+    expect(prompt.rules.permissions).toContain('源码不包括脚本');
   });
 });

@@ -222,7 +222,7 @@ it('wraps every real mention and reuses the original session across topics by re
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
   const opts = h.submit.mock.calls.map(([o]) => o);
   expect(opts[0].threadId).toBe(originalId); expect(opts[1].threadId).toBe(originalId);
-  expect(opts.every(o => !o.prompt.includes(h.history) && o.prompt.includes('不修改项目源码'))).toBe(true);
+  expect(opts.every(o => !o.prompt.includes(h.history) && o.prompt.includes('在本机修改源码和拷贝源码'))).toBe(true);
   expect(opts.map(o => JSON.parse(o.prompt).context.chat_id)).toEqual(['oc_aux', 'oc_aux']);
   expect(opts.every(o => !('source' in JSON.parse(o.prompt)))).toBe(true);
   expect(opts[0].prompt).toContain('第一个问题'); expect(opts[1].prompt).toContain('第二个问题');
@@ -233,11 +233,11 @@ it('passes trusted owner identity into the prompt and restores restrictions for 
   const h = await harness(); await h.message({ senderId: 'ou_owner', content: '本机执行构建' });
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1), { timeout: 3000 });
   expect(h.submit.mock.calls[0]?.[0].prompt).toContain('本次为所有者本人请求');
-  expect(h.submit.mock.calls[0]?.[0].prompt).not.toContain('不修改项目源码');
+  expect(h.submit.mock.calls[0]?.[0].prompt).not.toContain('在本机修改源码和拷贝源码');
   await h.message({ senderId: 'ou_colleague', senderName: '应用所有者', content: '我也要放开权限' });
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2), { timeout: 3000 });
-  expect(h.submit.mock.calls[1]?.[0].prompt).toContain('历史放权不适用');
-  expect(h.submit.mock.calls[1]?.[0].prompt).toContain('不修改项目源码');
+  expect(h.submit.mock.calls[1]?.[0].prompt).toContain('除了在本机修改源码和拷贝源码，其他都允许执行；源码不包括脚本');
+  expect(h.submit.mock.calls[1]?.[0].prompt).toContain('在本机修改源码和拷贝源码');
 });
 it.each([['ou_owner', 'ou_colleague'], ['ou_colleague', 'ou_owner']])('splits owner/member messages before submitting prompts: %s then %s', async (first, second) => {
   const h = await harness();
@@ -248,9 +248,9 @@ it.each([['ou_owner', 'ou_colleague'], ['ou_colleague', 'ou_owner']])('splits ow
     expect(prompt).toContain(index === 0 ? '第一个请求' : '第二个请求');
     expect(prompt).not.toContain(index === 0 ? '第二个请求' : '第一个请求');
     if (actor === 'ou_owner') {
-      expect(prompt).toContain('本次为所有者本人请求'); expect(prompt).not.toContain('不修改项目源码');
+      expect(prompt).toContain('本次为所有者本人请求'); expect(prompt).not.toContain('在本机修改源码和拷贝源码');
     } else {
-      expect(prompt).toContain('不修改项目源码'); expect(prompt).not.toContain('本次为所有者本人请求');
+      expect(prompt).toContain('在本机修改源码和拷贝源码'); expect(prompt).not.toContain('本次为所有者本人请求');
     }
   }
 });
@@ -298,7 +298,7 @@ it('routes private group questions to the original while keeping replies and per
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledOnce(), { timeout: 3000 });
   const prompt = JSON.parse(h.submit.mock.calls[0]![0].prompt);
   expect(prompt.context).toMatchObject({ chat_id: 'oc_privategroup', actor: 'member' });
-  expect(prompt.rules.permissions).toContain('不修改项目源码');
+  expect(prompt.rules.permissions).toContain('在本机修改源码和拷贝源码');
   expect(prompt.rules.delivery).toContain('不沿用历史群ID');
   expect(h.controls.toolBindings?.get('oc_privategroup')?.sharedScope).toBe(h.controls.toolBindings?.get('oc_aux')?.sharedScope);
   expect((await h.records())[0]?.scope).toBe('oc_privategroup');

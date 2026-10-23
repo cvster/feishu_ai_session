@@ -113,7 +113,7 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs %s in the or
   expect(h.agent.runOptions[0]).toMatchObject(toolId === 'codex' ? { threadId: nativeId } : { sessionId: nativeId });
   const prompt = JSON.parse(h.agent.runOptions[0]!.prompt);
   expect(prompt.context).toMatchObject({ channel: 'a2a', actor: 'member' }); expect(prompt.context.chat_id).toBeUndefined();
-  expect(prompt.rules.delivery).toContain('不通过飞书'); expect(prompt.rules.permissions).toContain('不修改项目源码');
+  expect(prompt.rules.delivery).toContain('不通过飞书'); expect(prompt.rules.permissions).toContain('在本机修改源码和拷贝源码');
   expect(h.send).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
   expect((await stat(h.tasksPath)).mode & 0o777).toBe(0o600);
   expect((await h.request(`/tasks/${id}`, undefined, h.second.token)).status).toBe(404);
