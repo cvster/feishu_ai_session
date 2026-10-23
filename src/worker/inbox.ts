@@ -29,6 +29,11 @@ export class WorkerInbox {
   markQueued(scope: string, message: NormalizedMessage): void { this.queued.add(this.key(scope, message)); }
   releaseQueued(scope: string, messages: NormalizedMessage[]): void { for (const message of messages) this.queued.delete(this.key(scope, message)); }
   receipts(scope: string): InboxEntry[] { return structuredClone(Object.values(this.entries).filter(e => e.scope === scope)); }
+  async rememberSenderName(scope: string, messageId: string, name: string): Promise<void> {
+    const entry = Object.values(this.entries).find(e => e.scope === scope && e.message.messageId === messageId);
+    if (!entry || entry.message.senderName === name) return;
+    entry.message.senderName = name; await this.persist();
+  }
   available(): InboxEntry[] { return Object.entries(this.entries).filter(([key, entry]) => entry.status === 'pending' && !this.queued.has(key) && (this.deferredUntil.get(key) ?? 0) <= Date.now()).map(([, entry]) => entry); }
   defer(scope: string, messages: NormalizedMessage[]): void {
     for (const message of messages) this.deferredUntil.set(this.key(scope, message), Date.now() + 5000);

@@ -120,6 +120,19 @@ it('reuses cached content without another history request and restores each sess
   const connections = h.streams.length; h.choose(0); expect(h.streams).toHaveLength(connections);
 });
 
+it('renders each shared sender name beside its original message as text', async () => {
+  const h = harness(); await h.ready();
+  const conversation = h.conversation(0, '共享回复', 1);
+  Object.assign(conversation.turns[0]!, { input: '问题一\n\n问题二', origin: 'bridge', inputMessages: [
+    { senderName: 'Nick Yang', text: '问题一' }, { senderName: '<img src=x onerror=alert(1)>', text: '问题二' },
+  ] });
+  h.requests[0]!.resolve(conversation); await h.settle();
+  expect(h.node('messages').text).toContain('来自共享群');
+  expect(h.node('messages').querySelectorAll('.user').map(el => el.textContent)).toEqual(['Nick Yang：\n问题一', '<img src=x onerror=alert(1)>：\n问题二']);
+  expect(h.node('messages').querySelectorAll('img')).toHaveLength(0);
+  expect(h.node('messages').text).toContain('共享回复');
+});
+
 it('keeps the reading position on live updates and follows new replies only when already near the bottom', async () => {
   const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
   const box = h.node('messages'); box.scrollTop = 400;

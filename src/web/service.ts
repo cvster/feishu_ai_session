@@ -12,13 +12,14 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import type { WebControlResult } from './controls';
 import { runProgress } from '../card/run-progress';
 import { WebMarkdown, type WebAnswerSection } from './markdown';
+import { sharedPersonalScope, sharedJobPersonalScope, namedSharedMessages, feishuSenderName } from '../worker/shared-history';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
   id: string; scope: string; toolId: string; tool: string; project: string; cwd: string; name: string;
   updatedAtMs: number; favorite: boolean; online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
 }
-export interface WebTurn { id: string; input: string; answer: string; answerSections?: WebAnswerSection[]; requestIds?: string[]; progress?: string[]; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
+export interface WebTurn { id: string; input: string; inputMessages?: { senderName: string; text: string }[]; answer: string; answerSections?: WebAnswerSection[]; requestIds?: string[]; progress?: string[]; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
 export interface WebConversation { session: WebSession; turns: WebTurn[]; notice?: string }
 interface Receipt { fingerprint: string; sessionId: string; owner: string; createdAt: number; messageId?: string; enqueued?: boolean }
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
@@ -62,6 +63,10 @@ export class PersonalSessionService {
   ownerIdentity(): string { return this.owner(); }
   private identity(scope: string, b: { toolId: string; sourceId: string; nativeId?: string }) {
     return hash(JSON.stringify([this.deps.controls.profile, this.deps.controls.profileConfig.accounts.app.id, scope, b.toolId, b.sourceId, b.nativeId]));
+  }
+  private receiptScopes(scope: string): string[] {
+    return [scope, ...(this.deps.controls.toolBindings?.entries() ?? []).flatMap(([source]) =>
+      sharedPersonalScope(this.deps.controls, this.deps.catalog, source) === scope ? [source] : [])];
   }
   private async refresh(force = false) {
     if (this.listing) return this.listing;
@@ -114,7 +119,8 @@ export class PersonalSessionService {
       // Use native activity rather than the catalog's periodically refreshed timestamp.
       // Pending bridge input should also appear immediately, before the worker lists it.
       const activity = [row?.updatedAtMs ?? catalog?.boundAt ?? catalog?.updatedAt ?? 0,
-        ...(this.deps.controls.workerRuntimes?.get(b.toolId)?.inbox.receipts(scope) ?? []).map(r => Number(r.message.createTime)).filter(t => t >= (catalog?.boundAt ?? 0))];
+        ...this.receiptScopes(scope).flatMap(source => this.deps.controls.workerRuntimes?.get(b.toolId)?.inbox.receipts(source) ?? [])
+          .map(r => Number(r.message.createTime)).filter(t => t >= (catalog?.boundAt ?? 0))];
       const updatedAtMs = Math.max(0, ...activity.filter(t => Number.isFinite(t) && t >= 0));
       return [{ id: this.identity(scope, b), scope, toolId: b.toolId, tool: meta?.label ?? b.toolId,
         updatedAtMs,
@@ -217,16 +223,20 @@ export class PersonalSessionService {
       const ids = requests.get(receipt.messageId) ?? []; ids.push(requestId); requests.set(receipt.messageId, ids);
     }
     const runtime = this.deps.controls.workerRuntimes?.get(b.toolId);
-    const receipts = runtime?.inbox.receipts(session.scope) ?? [];
+    const receipts = this.receiptScopes(session.scope).flatMap(scope => runtime?.inbox.receipts(scope) ?? []);
     const turns: WebTurn[] = receipts.filter(r => r.status === 'pending' || r.status === 'rejected').map(r => ({ id: 'receipt:' + r.message.messageId,
       input: r.message.content, answer: '', requestIds: requests.get(r.message.messageId), status: r.status === 'pending' ? 'queued' : 'rejected', createdAtMs: Number(r.message.createTime), origin: 'bridge' }));
+    for (const turn of turns) {
+      const receipt = receipts.find(r => 'receipt:' + r.message.messageId === turn.id)!;
+      if (receipt.scope !== session.scope) turn.inputMessages = [{ senderName: await feishuSenderName(this.deps.channel, receipt.message), text: receipt.message.content }];
+    }
     if (!session.online || !client) return { session, turns: this.conversations.get(id)?.turns ?? turns, notice: 'Worker 离线；恢复后会重新读取会话' };
     try {
       const [native, allJobs] = await Promise.all([session.nativeConversation ? client.conversation(b.nativeId!) : undefined, client.list()]);
       this.assertBinding(id, session.scope);
       if ((native?.id !== undefined && native.id !== b.nativeId) || native?.archived) throw new WebError(404, '会话已归档或身份变化');
-      const jobs = allJobs.filter(j => j.options.delivery?.scope === session.scope && j.options.delivery.sourceId === b.sourceId &&
-        j.options.delivery.botAppId === this.deps.controls.profileConfig.accounts.app.id);
+      const jobs = allJobs.filter(j => (j.options.delivery?.scope === session.scope || sharedJobPersonalScope(this.deps.controls, this.deps.catalog, j) === session.scope) &&
+        j.options.delivery?.sourceId === b.sourceId && j.options.delivery.botAppId === this.deps.controls.profileConfig.accounts.app.id);
       const linkedTurns = new Set<string>(), matchedJobTimes: number[] = [];
       for (const job of jobs) {
         const cacheKey = b.sourceId + ':' + job.id;
@@ -242,7 +252,9 @@ export class PersonalSessionService {
         if ((job.options.threadId ?? job.options.sessionId ?? view.nativeId) !== b.nativeId) continue;
         matchedJobTimes.push(job.createdAt);
         if (view.turnId) linkedTurns.add(view.turnId);
-        const inputs = receipts.filter(r => job.options.delivery?.messageIds?.includes(r.message.messageId));
+        const shared = job.options.delivery!.scope !== session.scope;
+        const inputs = shared ? (await namedSharedMessages(this.deps.controls, this.deps.channel, job)).map(message => ({ message })) :
+          receipts.filter(r => r.scope === session.scope && job.options.delivery?.messageIds?.includes(r.message.messageId));
         const ids = new Set(inputs.map(r => 'receipt:' + r.message.messageId));
         for (let i = turns.length - 1; i >= 0; i--) if (ids.has(turns[i]!.id)) turns.splice(i, 1);
         // Job prompts contain bridge policy/context. Never return them to Web.
@@ -250,10 +262,14 @@ export class PersonalSessionService {
         const status = job.status === 'running' ? (view.state.footer === 'waiting_input' ? 'waiting_input' : 'running') : job.status;
         const nativeTurn = native?.turns.find(t => t.bridgeJobId === job.id || t.id === view!.turnId);
         if (nativeTurn) linkedTurns.add(nativeTurn.id);
-        turns.push({ id: 'job:' + job.id, input: inputs.map(r => r.message.content).join('\n\n'), answer: answer(nativeTurn?.state ?? view.state), status,
-          answerSections: this.markdown.sections(nativeTurn?.state ?? view.state),
+        let state = shared ? view.state : nativeTurn?.state ?? view.state;
+        if (shared && this.deps.controls.auxiliaryApprovals) state = await this.deps.controls.auxiliaryApprovals.review(job.options.delivery!.scope, job.id, job.options.delivery!.replyTo, state);
+        if (shared && sharedJobPersonalScope(this.deps.controls, this.deps.catalog, job) !== session.scope) continue;
+        turns.push({ id: 'job:' + job.id, input: inputs.map(r => r.message.content).join('\n\n'), answer: answer(state), status,
+          ...(shared ? { inputMessages: inputs.map(r => ({ senderName: r.message.senderName!, text: r.message.content })) } : {}),
+          answerSections: this.markdown.sections(state),
           requestIds: inputs.flatMap(r => requests.get(r.message.messageId) ?? []),
-          progress: runProgress({ ...(nativeTurn?.state ?? view.state), terminal: ['running', 'accepted'].includes(job.status) ? 'running' : 'done' }),
+          progress: runProgress({ ...state, terminal: ['running', 'accepted'].includes(job.status) ? 'running' : 'done' }),
           createdAtMs: job.createdAt, origin: 'bridge' });
       }
       const historyBoundary = Math.min(...matchedJobTimes);
@@ -265,6 +281,7 @@ export class PersonalSessionService {
       });
       turns.sort((a, z) => a.createdAtMs - z.createdAtMs || a.id.localeCompare(z.id));
       const result = { session, turns, ...(!session.nativeConversation ? { notice: '此 worker 尚未提供原生对话读取；当前显示桥接消息' } : {}) };
+      this.assertBinding(id, session.scope);
       this.conversations.set(id, result); return result;
     } catch (e) {
       if (e instanceof WebError) throw e;

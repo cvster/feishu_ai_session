@@ -60,7 +60,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   const sessions = new SessionStore(join(h.dir, 'sessions.json')); await sessions.load();
   const workspaces = new WorkspaceStore(join(h.dir, 'workspaces.json')); await workspaces.load();
   let group = 'AA-web';
-  const create = vi.fn(async () => ({ code: 0, data: { message_id: 'om_web' } }));
+  const create = vi.fn(async (_request: unknown) => ({ code: 0, data: { message_id: 'om_web' } }));
   const reply = vi.fn(async () => ({ code: 0, data: { message_id: 'om_reply' } }));
   const send = vi.fn(async () => ({ messageId: 'om_command' }));
   const channel = { send, listChats: async () => [{ id: 'oc_group', name: group }], getChatMode: vi.fn(async () => 'group'), getChatInfo: vi.fn(async () => ({ name: group })), createCard: vi.fn(async () => ({ cardId: 'card' })), updateCardById: vi.fn(async () => {}),
@@ -97,6 +97,145 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   controls.workerRuntimes!.get(tool)!.replies = replies;
   return { ...h, bindings, catalog, controls, sessions, inbox, service, makeService, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
 }
+
+async function sharedInput(h: Awaited<ReturnType<typeof harness>>, options: { name?: string; content?: string } = {}) {
+  const toolId = h.bindings.get('oc_group')!.toolId;
+  const source = { toolId, sourceId: h.client.sourceId, nativeId: 'native' };
+  h.bindings.set('aux_shared', { ...source, linkedSource: source, nativeCreated: true });
+  h.bindings.linkAuxiliary('oc_shared', 'aux_shared');
+  const group = { chatId: 'oc_shared', name: '共享群', ownerId: 'ou_owner', source: structuredClone(source) };
+  const auxiliary = { isAuxiliary: (scope: string): boolean => scope === 'oc_shared', isActive: (scope: string): boolean => scope === 'oc_shared',
+    get: (scope: string) => scope === 'oc_shared' ? group : undefined, trackRun: vi.fn(async () => {}) };
+  h.controls.auxiliary = auxiliary as any;
+  const get = vi.fn(async () => ({ code: 0, data: { items: [{ message_id: 'om_shared', sender: { id: 'ou_nick', sender_name: 'Nick Yang' } }] } }));
+  (h.channel.rawClient.im.v1.message as any).get = get;
+  const message: NormalizedMessage = { messageId: 'om_shared', chatId: 'oc_shared', chatType: 'group', senderId: 'ou_nick', senderName: options.name,
+    content: options.content ?? '共享群成员的问题', createTime: Date.now(), resources: [], mentions: [], mentionAll: false, mentionedBot: true, rawContentType: 'text' };
+  await h.inbox.receive('oc_shared', message);
+  const job = await h.client.submit({ requestKey: 'shared-message-one', options: { ...h.options, prompt: 'PRIVATE-POLICY\n' + message.content,
+    delivery: { ...h.options.delivery!, scope: 'oc_shared', chatId: 'oc_shared', replyTo: message.messageId, messageIds: [message.messageId], operatorOpenId: message.senderId } } });
+  await vi.waitFor(async () => expect((await h.client.snapshot(job.id)).events.length).toBeGreaterThan(1));
+  await h.inbox.reconcile(await h.client.list());
+  return { job, message, group, auxiliary, get };
+}
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('shows shared %s inputs and Feishu names in the personal group and Web even when native history omits them', async tool => {
+  const h = await harness(tool), shared = await sharedInput(h);
+  const id = (await h.service.list())[0]!.id;
+  expect((await h.service.list())[0]!.updatedAtMs).toBe(shared.message.createTime);
+  await h.replies.runNow();
+  expect(h.create).toHaveBeenCalledOnce();
+  expect(h.create.mock.calls[0]![0]).toMatchObject({ data: { receive_id: 'oc_group', msg_type: 'text' } });
+  expect(JSON.parse((h.create.mock.calls[0]![0] as any).data.content).text).toBe('来自共享群\nNick Yang：\n共享群成员的问题');
+  const reply = vi.mocked(h.channel.rawClient.im.v1.message.reply);
+  expect(reply.mock.calls.filter(([r]) => r?.data.msg_type === 'interactive').map(([r]) => r?.path.message_id).sort()).toEqual(['om_shared', 'om_web']);
+  const running = (await h.service.read(id)).turns.find(t => t.id === 'job:' + shared.job.id)!;
+  expect(running).toMatchObject({ input: shared.message.content, inputMessages: [{ senderName: 'Nick Yang', text: shared.message.content }], answer: 'before restart\n', status: 'running' });
+  expect(JSON.stringify(running)).not.toContain('PRIVATE-POLICY');
+  expect(h.inbox.receipts('oc_shared')[0]!.message.senderName).toBe('Nick Yang');
+  // A late, incomplete native projection must not duplicate or replace the journal answer.
+  h.conversation.turns.push({ id: 'native-shared-turn', bridge: true, bridgeJobId: shared.job.id, input: '', createdAtMs: shared.job.createdAt,
+    state: { ...initialState, blocks: [], terminal: 'running' } } as any);
+  h.finish(); await vi.waitFor(async () => expect((await h.client.list())[0]?.status).toBe('completed'));
+  await h.replies.runNow(); await h.replies.runNow();
+  const completed = await h.service.read(id);
+  expect(completed.turns.filter(t => t.id === 'job:' + shared.job.id || t.id === 'native:native-shared-turn')).toHaveLength(1);
+  expect(completed.turns.find(t => t.id === 'job:' + shared.job.id)).toMatchObject({ answer: 'before restart\nafter restart', status: 'completed', inputMessages: running.inputMessages });
+  const mirror = await startNativeTurnSync({ toolId: tool, displayName: 'Generic worker', channel: h.channel, controls: h.controls, catalog: h.catalog,
+    sourceId: h.client.sourceId, statePath: join(h.dir, 'native-mirror.json'), intervalMs: 60_000, reader: { read: sid => h.client.conversation(sid), close: async () => {} } });
+  await mirror.runNow(); await mirror.stop();
+  await h.replies.stop();
+  const count = reply.mock.calls.length;
+  const restarted = await startWorkerReplies({ adapter: h.adapter, channel: h.channel, controls: h.controls, catalog: h.catalog, sessions: h.sessions,
+    activeRuns: h.activeRuns, statePath: join(h.dir, 'replies.json'), intervalMs: 60_000 });
+  try { await restarted.runNow(); expect(h.create).toHaveBeenCalledOnce(); expect(reply).toHaveBeenCalledTimes(count); }
+  finally { await restarted.stop(); }
+  expect(shared.get).toHaveBeenCalledOnce(); expect(h.calls).toHaveLength(1);
+});
+
+it('repairs recent completed shared deliveries independently of the already-finished source without historical mentions', async () => {
+  const h = await harness('codex'); await h.replies.stop();
+  const shared = await sharedInput(h); h.finish();
+  await vi.waitFor(async () => expect((await h.client.list())[0]?.status).toBe('completed'));
+  const path = join(h.dir, 'replies.json'), ledger = JSON.parse(await readFile(path, 'utf8'));
+  ledger.deliveries[shared.job.id] = { mode: 'card', finished: true, controlsVersion: 1, sequence: 1, lastEvent: 99, pushedAt: 1 };
+  await writeFile(path, JSON.stringify(ledger));
+  const replies = await startWorkerReplies({ adapter: h.adapter, channel: h.channel, controls: h.controls, catalog: h.catalog, sessions: h.sessions,
+    activeRuns: h.activeRuns, statePath: path, intervalMs: 60_000 });
+  try {
+    await replies.runNow(); await replies.runNow(); expect(h.create).toHaveBeenCalledOnce();
+    const reply = vi.mocked(h.channel.rawClient.im.v1.message.reply);
+    expect(reply).toHaveBeenCalledOnce(); expect(reply.mock.calls[0]![0]?.data.msg_type).toBe('interactive');
+    expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls)).toContain('after restart');
+  } finally { await replies.stop(); }
+});
+
+it('uses the requesting member name rather than the bot-card sender and follows member pagination', async () => {
+  const h = await harness('codex'), shared = await sharedInput(h);
+  shared.get.mockResolvedValue({ code: 0, data: { items: [{ message_id: 'om_shared', sender: { id: 'cli_bot', sender_name: 'Bot' } }] } });
+  const members = vi.fn(async (request: any) => ({ code: 0, data: request.params.page_token ?
+    { items: [{ member_id: 'ou_nick', name: 'Nick Yang' }], has_more: false } : { items: [{ member_id: 'ou_owner', name: 'Owner' }], has_more: true, page_token: 'page2' } }));
+  (h.channel.rawClient.im.v1 as any).chatMembers = { get: members };
+  const turn = (await h.service.read((await h.service.list())[0]!.id)).turns.find(t => t.id === 'job:' + shared.job.id)!;
+  expect(turn.inputMessages).toEqual([{ senderName: 'Nick Yang', text: shared.message.content }]);
+  await h.replies.runNow(); expect(members).toHaveBeenCalledTimes(2); expect(shared.get).toHaveBeenCalledOnce();
+  expect(JSON.stringify(h.create.mock.calls)).toContain('Nick Yang'); expect(JSON.stringify(h.create.mock.calls)).not.toContain('Bot');
+});
+
+it('keeps the original shared input visible during name lookup outages and preserves each batched sender', async () => {
+  const h = await harness('kilo'), shared = await sharedInput(h);
+  shared.get.mockRejectedValue(new Error('lookup unavailable'));
+  h.finish(); await vi.waitFor(async () => expect((await h.client.list())[0]?.status).toBe('completed'));
+  const first = { ...shared.message, messageId: 'om_shared_batch_first' };
+  const second = { ...shared.message, messageId: 'om_shared_second', senderId: 'ou_other', senderName: '另一位成员', content: '第二条消息' };
+  await h.inbox.receive('oc_shared', first);
+  await h.inbox.receive('oc_shared', second);
+  const job = await h.client.submit({ requestKey: 'shared-batch', options: { ...h.options, prompt: 'PRIVATE-POLICY',
+    delivery: { ...shared.job.options.delivery!, messageIds: [first.messageId, second.messageId] } } });
+  await vi.waitFor(async () => expect((await h.client.snapshot(job.id)).events.length).toBeGreaterThan(1));
+  const turn = (await h.service.read((await h.service.list())[0]!.id)).turns.find(t => t.id === 'job:' + job.id)!;
+  expect(turn.inputMessages).toEqual([{ senderName: 'ou_nick', text: shared.message.content }, { senderName: '另一位成员', text: second.content }]);
+  expect(turn.input).toBe(shared.message.content + '\n\n' + second.content);
+  expect(JSON.stringify(turn)).not.toContain('PRIVATE-POLICY');
+});
+
+it('keeps the persisted repair cutoff after restart and avoids forwarding old completed shared history', async () => {
+  const h = await harness('codex'); await h.replies.stop(); const shared = await sharedInput(h); h.finish();
+  await vi.waitFor(async () => expect((await h.client.list())[0]?.status).toBe('completed'));
+  const path = join(h.dir, 'replies.json'), ledger = JSON.parse(await readFile(path, 'utf8'));
+  ledger.sharedMirrorSince = shared.job.createdAt + 1; await writeFile(path, JSON.stringify(ledger));
+  const replies = await startWorkerReplies({ adapter: h.adapter, channel: h.channel, controls: h.controls, catalog: h.catalog, sessions: h.sessions,
+    activeRuns: h.activeRuns, statePath: path, intervalMs: 60_000 });
+  try { await replies.runNow(); expect(h.create).not.toHaveBeenCalled(); expect(JSON.parse(await readFile(path, 'utf8')).sharedMirrorSince).toBe(ledger.sharedMirrorSince); }
+  finally { await replies.stop(); }
+  expect((await h.service.read((await h.service.list())[0]!.id)).turns.find(t => t.id === 'job:' + shared.job.id)?.inputMessages?.[0]?.senderName).toBe('Nick Yang');
+});
+
+it('retries a lost personal input acknowledgement with the same UUID and stops the shared worker from the personal group', async () => {
+  const h = await harness('kilo'); await sharedInput(h);
+  h.create.mockRejectedValueOnce(new Error('ack lost'));
+  await h.replies.runNow(); expect(h.create).toHaveBeenCalledOnce();
+  await h.replies.runNow(); expect(h.create).toHaveBeenCalledTimes(2);
+  expect((h.create.mock.calls[0]![0] as any).data.uuid).toBe((h.create.mock.calls[1]![0] as any).data.uuid);
+  expect(await h.replies.stopScope('oc_group')).toBe(true);
+  await vi.waitFor(async () => expect((await h.client.list())[0]?.status).toBe('interrupted'));
+  await h.replies.runNow(); expect(h.stop).toHaveBeenCalledOnce(); expect(h.create).toHaveBeenCalledTimes(2);
+});
+
+it.each(['private', 'inactive', 'owner', 'rebound', 'source', 'archived', 'legacy', 'receipt'] as const)('keeps unrelated/shared %s audiences out of personal history and forwarding', async change => {
+  const h = await harness('codex'), shared = await sharedInput(h), id = (await h.service.list())[0]!.id;
+  if (change === 'private') (shared.group as any).privateGroup = { actorId: 'ou_nick' };
+  if (change === 'inactive') shared.auxiliary.isActive = () => false;
+  if (change === 'owner') shared.group.ownerId = 'ou_another';
+  if (change === 'rebound') h.bindings.set('oc_group', { ...h.bindings.get('oc_group')!, nativeId: 'different-native' });
+  if (change === 'source') shared.group.source.sourceId = 'another-worker';
+  if (change === 'archived') h.catalog.archiveScope('oc_shared', 'native');
+  if (change === 'legacy') h.bindings.set('oc_group', { ...h.bindings.get('oc_group')!, auxiliaryWorkgroup: true });
+  if (change === 'receipt') h.controls.workerRuntimes!.get('codex')!.inbox = new WorkerInbox(join(h.dir, 'empty-inbox.json'));
+  await h.replies.runNow(); expect(h.create).not.toHaveBeenCalled();
+  if (change === 'rebound' || change === 'legacy') await expect(h.service.read(id)).rejects.toMatchObject({ status: 404 });
+  else expect((await h.service.read(id)).turns.some(t => t.input === shared.message.content)).toBe(false);
+});
 
 it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('replays %s history once and keeps one reply writer when a task refreshes the binding', async tool => {
   const h = await harness(tool), original = h.catalog.entries()[0]!;
