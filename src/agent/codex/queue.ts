@@ -82,8 +82,6 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
   let activeChild: CodexChild | undefined;
   let selectedTurnId: string | undefined;
   let queuedSubmissionId: string | undefined;
-  let knownTurnIds: Set<string> | undefined;
-  let knownPersistedTurnIds: Set<string> | undefined;
   let sharedEndpointAvailable = false;
   let provisionalInterruptedTurnId: string | undefined;
   let interruptedObservedAtMs: number | undefined;
@@ -113,8 +111,6 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
         return;
       }
       const knownTurns = new Set(baseline.turns.map((turn) => turn.id));
-      knownTurnIds = knownTurns;
-      knownPersistedTurnIds = new Set(await historyReader.persistedTurnIds(baseline));
       // Queue CLI flags configure the client, not the loaded thread. Update
       // the actual writer before adding input; never resume a competing server.
       if (sharedEndpointAvailable) {
@@ -305,25 +301,27 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
     runId: options.runId,
     events,
     async checkLiveness() {
-      // Only the actual writer can prove a queued submission has disappeared.
-      // Never infer this from age, a passive history reader, or a failed RPC.
-      if (!sharedEndpointAvailable || !queuedSubmissionId || !knownTurnIds || selectedTurnId || controller.signal.aborted) return { state: 'unknown' };
+      // The writer's idle state and empty queue can release an inactive
+      // observer even after native turns were executed but not associated.
+      // This is not proof of successful execution: the worker records unknown.
+      if (!sharedEndpointAvailable || !queuedSubmissionId || controller.signal.aborted) return { state: 'unknown' };
       const before = await settingsClient.readThreadStatus(options.threadId);
       if (before?.type !== 'idle') return { state: before?.type === 'active' ? 'busy' : 'unknown' };
       if ((await settingsClient.listQueuedSubmissions(options.threadId)).length) return { state: 'busy' };
       const snapshot = await settingsClient.readThread(options.threadId);
-      if (snapshot.status?.type !== 'idle' || snapshot.turns.some(turn => !knownTurnIds!.has(turn.id))) return { state: 'unknown' };
-      // A stale native projection can hide a real executed turn. Durable
-      // start/completion records are proof that the input did not disappear.
-      const persisted = await settingsClient.persistedTurnIds(snapshot);
-      if ([...persisted].some(id => !knownPersistedTurnIds?.has(id))) return { state: 'unknown' };
+      if (snapshot.id !== options.threadId || snapshot.status?.type !== 'idle') return { state: 'unknown' };
+      const tail = snapshot.turns.at(-1);
+      if (tail && !['completed', 'failed'].includes(tail.status) && !isInterruptedTurnStatus(tail.status) &&
+        !await settingsClient.persistedTurnTerminal(snapshot, tail.id)) return { state: 'unknown' };
+      const persisted = [...await settingsClient.persistedTurnIds(snapshot)].sort();
       // Recheck after history: dequeue/start, a new input, or a blocking prompt
       // must reset the worker's consecutive confirmation count.
       if ((await settingsClient.listQueuedSubmissions(options.threadId)).length) return { state: 'busy' };
       if ((await settingsClient.readThreadStatus(options.threadId))?.type !== 'idle') return { state: 'unknown' };
-      if (selectedTurnId || controller.signal.aborted) return { state: 'unknown' };
-      return { state: 'orphaned', evidence: `${options.threadId}:${queuedSubmissionId}`,
-        message: '原生工具已空闲，已提交的输入不在原生队列中，且没有生成执行轮次。已解除失效任务占用，后续排队消息将继续处理；原指令未自动重新发送，请检查后按需重新提交。' };
+      if (controller.signal.aborted) return { state: 'unknown' };
+      // A newer native turn resets the worker's three-confirmation sequence.
+      return { state: 'orphaned', evidence: JSON.stringify([options.threadId, queuedSubmissionId, tail?.id, tail?.status, persisted]),
+        message: 'Codex 原生会话已空闲，输入队列为空，但 worker 未完整关联任务结束状态。已解除失效占用，任务标记为状态未确认，后续排队消息将继续处理；已提交指令未自动重新发送。' };
     },
     async detach() {
       if (settled) return;

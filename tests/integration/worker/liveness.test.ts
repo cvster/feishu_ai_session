@@ -74,6 +74,17 @@ it('resets confirmations on network errors, unknown state and native work still 
   await vi.waitFor(() => expect(h.detach).toHaveBeenCalledOnce());
 });
 
+it('requires three fresh confirmations when the native history changes while the observer is inactive', async () => {
+  const h = await fixture();
+  const newer = { ...orphan, evidence: 'native:queue-id:new-completed-turn' };
+  await h.proof(0); await h.proof(1); await h.proof(2, newer); await h.proof(3, newer);
+  await vi.waitFor(() => expect(h.checks).toHaveLength(5));
+  expect(h.detach).not.toHaveBeenCalled();
+  h.checks[4]!.resolve(newer);
+  await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('unknown'));
+  expect(h.detach).toHaveBeenCalledOnce(); expect(h.stop).not.toHaveBeenCalled();
+});
+
 it('does not clear tasks waiting for user input and restarts confirmation after the wait is resolved', async () => {
   const h = await fixture(); await h.proof(0);
   await vi.waitFor(() => expect(h.checks).toHaveLength(2));

@@ -112,7 +112,7 @@ describe('CodexAdapter native queue mode', () => {
     expect(await run.waitForExit(0)).toBe(true);
   });
 
-  it.each(['existing', 'fresh'] as const)('only reports a missing %s submission when the shared writer is idle with no queue or new turn', async kind => {
+  it.each(['existing', 'fresh'] as const)('reconciles an inactive %s observer when the writer is idle and its queue is empty, including executed native history', async kind => {
     const fake = await createQueueCodex('missing-queue'); cleanup.push(fake.dir);
     const run = kind === 'fresh' ? new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir, codexHome: fake.dir, appServerRemote: 'unix://' })
       .run({ runId: 'orphan', cwd: fake.dir, prompt: 'lost input', sessionName: 'AA-test' }) : createCodexQueueRun({ runId: 'orphan', binary: fake.path, profileStateDir: fake.dir,
@@ -121,17 +121,23 @@ describe('CodexAdapter native queue mode', () => {
     const seen: AgentEvent[] = [], drain = (async () => { for await (const event of run.events) seen.push(event); })();
     try {
       await vi.waitFor(() => expect(seen.filter(event => event.type === 'system')).toHaveLength(kind === 'fresh' ? 2 : 1));
-      await expect(run.checkLiveness!()).resolves.toMatchObject({ state: 'orphaned', evidence: 'thread-existing:queue-1' });
-      for (const mode of ['active', 'pending', 'newturn']) {
+      const baselineProof = await run.checkLiveness!();
+      expect(baselineProof).toMatchObject({ state: 'orphaned' });
+      for (const mode of ['active', 'pending', 'unfinished', 'pending-after-history', 'active-after-history']) {
         await writeFile(join(fake.dir, 'liveness.json'), JSON.stringify({ mode }));
         expect((await run.checkLiveness!()).state).not.toBe('orphaned');
       }
       await writeFile(join(fake.dir, 'liveness.json'), JSON.stringify({ mode: 'unavailable' }));
       await expect(run.checkLiveness!()).rejects.toThrow('queue unavailable');
+      await writeFile(join(fake.dir, 'liveness.json'), JSON.stringify({ mode: 'newturn' }));
+      const executedProof = await run.checkLiveness!();
+      expect(executedProof).toMatchObject({ state: 'orphaned' });
+      expect(executedProof).not.toEqual(baselineProof); // New native activity resets consecutive confirmations.
       await writeFile(join(fake.dir, 'liveness.json'), JSON.stringify({ mode: 'idle' }));
       await appendFile(join(fake.dir, 'rollout.jsonl'), JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 'hidden-executed-turn' } }) + '\n');
-      // An executed turn hidden by the native index must not be reported lost.
-      await expect(run.checkLiveness!()).resolves.toMatchObject({ state: 'unknown' });
+      // Completed history does not imply success of this particular request,
+      // but must not permanently block releasing an inactive observer either.
+      await expect(run.checkLiveness!()).resolves.toMatchObject({ state: 'orphaned' });
     } finally { await run.detach!(); await drain; }
     const requests = (await readFile(join(fake.dir, 'requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     expect(requests.filter(r => r.method === 'thread/queue/list').every(r => r.transport === 'shared')).toBe(true);
@@ -374,6 +380,7 @@ process.on('exit', () => {
 });
 let queuedReads = 0;
 let terminalWritten = false;
+let lastLivenessMode, livenessQueueReads = 0, livenessStatusReads = 0;
 if (args[0] === 'queue') {
   if (existsSync(creatorLease)) { console.error('thread thread-existing already has an active writer'); process.exit(9); }
   if (existsSync(${JSON.stringify(join(dir, 'started.txt'))}) && !existsSync(${JSON.stringify(join(dir, 'materialized.txt'))})) process.exit(7);
@@ -404,6 +411,7 @@ let loaded = ${JSON.stringify(!startUnloaded)};
 const send = value => socket ? socket.send(JSON.stringify(value)) : console.log(JSON.stringify(value));
 function handle(req) {
   const mode = existsSync(${JSON.stringify(join(dir, 'liveness.json'))}) ? JSON.parse(readFileSync(${JSON.stringify(join(dir, 'liveness.json'))}, 'utf8')).mode : 'idle';
+  if (mode !== lastLivenessMode) { lastLivenessMode = mode; livenessQueueReads = 0; livenessStatusReads = 0; }
   appendFileSync(${JSON.stringify(join(dir, 'requests.jsonl'))}, JSON.stringify({ ...req, argv: args, transport: args[1] === 'proxy' ? 'shared' : 'owned' }) + '\\n');
   if (req.method === 'initialize') {
     send({ id: req.id, result: { userAgent: 'fake' } });
@@ -448,7 +456,8 @@ function handle(req) {
   }
   if (req.method === 'thread/queue/list') {
     if (mode === 'unavailable') { send({ id: req.id, error: { code: -32600, message: 'queue unavailable' } }); return; }
-    send({ id: req.id, result: { data: mode === 'pending' ? [{ id: 'queue-1', input: [] }] : [] } }); return;
+    livenessQueueReads++;
+    send({ id: req.id, result: { data: mode === 'pending' || mode === 'pending-after-history' && livenessQueueReads >= 2 ? [{ id: 'queue-1', input: [] }] : [] } }); return;
   }
   if (req.method === 'thread/queue/add') {
     if (existsSync(creatorLease)) {
@@ -459,6 +468,7 @@ function handle(req) {
       clientUserMessageId: req.params.clientUserMessageId } } }); return;
   }
   if (req.method !== 'thread/read') return;
+  if (!req.params.includeTurns) livenessStatusReads++;
   if (existsSync(${JSON.stringify(join(dir, 'started.txt'))}) && req.params.includeTurns) writeFileSync(${JSON.stringify(join(dir, 'materialized.txt'))}, 'ready');
   const queued = existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : undefined;
   if (queued) queuedReads += 1;
@@ -486,7 +496,7 @@ function handle(req) {
   }
   const includeAgentMessage = configuredStatus !== 'provisional-completed-interrupted' ||
     queuedReads > 1;
-  const turns = configuredStatus === 'missing-queue' || configuredStatus === 'stale-projection' ? (mode === 'newturn' ? [{ id: 'turn-other', status: 'completed', items: [] }] : []) : queued ? [{
+  const turns = configuredStatus === 'missing-queue' || configuredStatus === 'stale-projection' ? (['newturn', 'unfinished'].includes(mode) ? [{ id: 'turn-other', status: mode === 'unfinished' ? 'inProgress' : 'completed', items: [] }] : []) : queued ? [{
     id: 'turn-queued',
     status,
     completedAt: status === 'interrupted' && configuredStatus === 'provisional-interrupted'
@@ -506,7 +516,7 @@ function handle(req) {
     id: req.id,
     result: { thread: {
       id: 'thread-existing', path: rolloutPath, updatedAt: Date.now() / 1000, turns,
-      ...(configuredStatus === 'missing-queue' ? { status: { type: mode === 'active' ? 'active' : 'idle' } } : {})
+      ...(configuredStatus === 'missing-queue' ? { status: { type: mode === 'active' || mode === 'active-after-history' && livenessStatusReads >= 2 ? 'active' : 'idle' } } : {})
     } }
   });
 }

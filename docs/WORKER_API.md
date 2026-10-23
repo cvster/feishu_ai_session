@@ -126,7 +126,7 @@ an idle connection. Blocking native questions pause the worker idle watchdog.
 The shared worker runner also checks stale observers every 15 seconds after two
 minutes without events. Adapters may provide an optional read-only `checkLiveness`
 hook together with `detach`. Three consecutive checks must confirm the same
-orphaned submission before the runner detaches its observer, records an `unknown`
+inactive observer evidence before the runner detaches its observer, records an `unknown`
 terminal event and releases the job/session lease. New events, native blocking
 input, unknown status, failed reads or live native work reset confirmation.
 The bridge's existing job reconciliation then admits subsequent pending messages.
@@ -134,19 +134,22 @@ The original accepted request remains deduplicated and is never automatically
 resubmitted; recovery does not call native interrupt or queue deletion.
 
 Codex queued runs, including the first message of a new session, currently supply
-this evidence: the shared writer must report idle, the native queue must be empty,
-and no turn may have appeared since the pre-submission baseline. Queue and status
-are checked again after reading history. An independent history reader, elapsed
-time alone, a missing queue acknowledgement, or a new/selected native turn cannot
-prove this condition. Other adapters keep their current behavior until they can
-provide equally reliable evidence; no provider branches are added to the bridge.
+this evidence: the corresponding shared-writer session must report idle and its
+native queue must be empty. A projected unfinished tail requires durable terminal
+confirmation. Queue and status are checked again after reading history. The tail
+identity/status and durable execution IDs participate in the proof, so new native
+activity resets the three-check sequence. Executed history does not prevent lease
+release, and idle does not prove successful execution of every accepted request:
+unassociated results remain `unknown`. An independent history reader, elapsed time
+alone or a missing queue acknowledgement cannot prove this condition. Other
+adapters keep their current behavior; no provider branches are added to the bridge.
 
 Codex queue observers read through the same shared writer used for settings.
 Local durable `task_started`/`item_completed`/`task_complete` records recover newer
 turns omitted by a stale native history index. Recovery requires matching native
 thread IDs and recorded user input; existing projected turns are not duplicated.
-New durable execution evidence also prevents an orphan proof when the index is
-behind. This is a read-only fallback: it does not edit native files/databases,
+New durable execution evidence resets inactive-observer confirmation even when
+the index is behind. This is a read-only fallback: it does not edit native files/databases,
 restart the writer, or resubmit accepted input.
 
 Before submission, temporary archive/status lookup failures retain the bridge
