@@ -50,14 +50,14 @@ class Element {
   get text(): string { return this.textContent + this.children.map(child => child.text).join(''); }
 }
 
-function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, string>) {
+function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, string>, updatedAtMs?: number[]) {
   const ids = [...bridgeWebPage.matchAll(/id="([^"]+)"/g)].map(match => match[1]!);
   const elements = new Map(ids.map(id => [id, new Element('div', id)]));
   const node = (id: string) => elements.get(id)!;
   node('app').style.setProperty = ((key: string, value: string) => { node('app').style[key] = value; }) as any;
   node('session-menu').hidden = true; node('session-menu').append(node('session-rename'), node('session-archive'), node('session-copy'));
   for (const action of ['stop', 'refresh']) { const button = new Element('button'); button.setAttribute('data-control', action); node('session-controls').append(button); }
-  const rows = Array.from({ length: count }, (_, i) => String.fromCharCode(97 + i)).map((id, index) => ({ id: id.repeat(64), toolId: index ? 'another' : 'generic', tool: index ? 'Other' : 'Tool', favorite: false, updatedAtMs: index + 1,
+  const rows = Array.from({ length: count }, (_, i) => String.fromCharCode(97 + i)).map((id, index) => ({ id: id.repeat(64), toolId: index ? 'another' : 'generic', tool: index ? 'Other' : 'Tool', favorite: false, updatedAtMs: updatedAtMs?.[index] ?? count - index,
     project: 'project', cwd: '/project', scope: 'oc_' + id, name: '会话' + index, online: true, canSend: true, canRename: true }));
   const conversation = (index: number, answer = '回答', count = 12) => ({ session: rows[index], turns: Array.from({ length: count }, (_, i) => ({
     id: String(i), input: '问题' + i, answer, status: 'completed', origin: 'native', createdAtMs: 1,
@@ -93,6 +93,18 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const snapshot = (index: number, answer?: string, count?: number) => Stream.all.at(-1)!.emit('snapshot', { sessions: rows, conversation: conversation(index, answer, count) });
   return { node, rows, requests, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all, storage, browserWindow };
 }
+
+it.each([true, false])('opens the most recently updated session on entry when recent visibility is %s and preserves later selections', async showRecent => {
+  const h = harness({ showRecent }, 3, undefined, [10, 30, 20]); await h.ready();
+  expect(h.requests[0]!.path).toBe('/api/sessions/' + h.rows[1]!.id);
+  expect(h.node('title').textContent).toBe(h.rows[1]!.name);
+  if (showRecent) expect(h.node('tree').children[1]!.querySelector('.session')?.text).toBe(h.rows[1]!.name);
+  h.requests[0]!.resolve(h.conversation(1)); await h.settle();
+  h.choose(0); h.requests[1]!.resolve(h.conversation(0)); await h.settle();
+  h.rows[2]!.updatedAtMs = 40;
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows });
+  expect(h.node('title').textContent).toBe(h.rows[0]!.name); expect(h.requests).toHaveLength(2);
+});
 
 it('reuses cached content without another history request and restores each session scroll position', async () => {
   const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
@@ -202,7 +214,7 @@ it('renders tool icons and favorites across tools under one project, without loa
   const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
   const root = h.node('tree'), favorite = (name: string) => root.querySelectorAll('.session-favorite').find(b => b.getAttribute('aria-label') === name + '的收藏')!;
   expect(root.children[0]!.querySelector('summary')!.text).toBe('收藏0');
-  expect(root.querySelectorAll('.tool-icon').map(e => e.getAttribute('aria-label'))).toEqual(['Other', 'Tool', 'Tool', 'Other']);
+  expect(root.querySelectorAll('.tool-icon').map(e => e.getAttribute('aria-label'))).toEqual(['Tool', 'Other', 'Tool', 'Other']);
   favorite(h.rows[1]!.name).onclick!({ stopPropagation() {} });
   expect(h.requests[1]).toMatchObject({ path: '/api/sessions/' + h.rows[1]!.id + '/favorite', data: { favorite: true } });
   expect(favorite(h.rows[1]!.name).disabled).toBe(true);
@@ -220,7 +232,7 @@ it('renders tool icons and favorites across tools under one project, without loa
 });
 
 it('limits recent updates before search, groups projects, and follows SSE timestamps without reading history', async () => {
-  const h = harness(undefined, 12); await h.ready();
+  const h = harness(undefined, 12, undefined, Array.from({ length: 12 }, (_, i) => i + 1)); await h.ready();
   const recent = () => h.node('tree').children[1]!;
   expect(recent().querySelector('summary')!.text).toBe('最近更新9');
   expect(recent().querySelectorAll('.session').map(e => e.text)).toEqual(Array.from({ length: 9 }, (_, i) => '会话' + (11 - i)));
