@@ -63,3 +63,15 @@ it('rejects dissolved group intake including unmaterialized topics while preserv
   const states = Object.values(JSON.parse(await readFile(h.path, 'utf8')).entries) as { message: NormalizedMessage; status: string }[];
   expect(states.find(e => e.message.messageId === 'accepted')?.status).toBe('accepted');
 });
+
+it('persists the last rejection cause and only releases retry backoff for unsent, unqueued input', async () => {
+  const h = await inboxFixture(); await h.inbox.receive('group', msg('pending'));
+  h.inbox.defer('group', [msg('pending')]);
+  await h.inbox.recordDiagnostic('group', [msg('pending')], 'archive-check-unavailable', 'worker restarting', true);
+  const restarted = new WorkerInbox(h.path); await restarted.load();
+  expect(restarted.diagnostics()[0]).toMatchObject({ diagnostic: { code: 'archive-check-unavailable', message: 'worker restarting', retryable: true } });
+  expect(h.inbox.available()).toHaveLength(0); expect(h.inbox.retryPending('group', 'pending')).toBe(true); expect(h.inbox.available()).toHaveLength(1);
+  h.inbox.markQueued('group', msg('pending')); expect(h.inbox.retryPending('group', 'pending')).toBe(false);
+  h.inbox.releaseQueued('group', [msg('pending')]); await h.inbox.reconcile([{ options: { delivery: { scope: 'group', messageIds: ['pending'] } } } as WorkerJob]);
+  expect(h.inbox.retryPending('group', 'pending')).toBe(false);
+});

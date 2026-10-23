@@ -4,7 +4,8 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { messageRequestId } from './identity';
 import type { WorkerJob } from './protocol';
 
-interface InboxEntry { scope: string; message: NormalizedMessage; status: 'pending' | 'accepted' | 'rejected'; notified?: boolean }
+interface InboxEntry { scope: string; message: NormalizedMessage; status: 'pending' | 'accepted' | 'rejected'; notified?: boolean;
+  diagnostic?: { at: number; code: string; message: string; retryable: boolean } }
 /** Bridge-only writer; persists input before debounce and keeps receipt identities. */
 export class WorkerInbox {
   private entries: Record<string, InboxEntry> = {};
@@ -29,6 +30,19 @@ export class WorkerInbox {
   markQueued(scope: string, message: NormalizedMessage): void { this.queued.add(this.key(scope, message)); }
   releaseQueued(scope: string, messages: NormalizedMessage[]): void { for (const message of messages) this.queued.delete(this.key(scope, message)); }
   receipts(scope: string): InboxEntry[] { return structuredClone(Object.values(this.entries).filter(e => e.scope === scope)); }
+  diagnostics() { return Object.entries(this.entries).map(([key, entry]) => ({ ...structuredClone(entry), requestId: messageRequestId(entry.message), queued: this.queued.has(key), retryAt: this.deferredUntil.get(key) })); }
+  async recordDiagnostic(scope: string, messages: NormalizedMessage[], code: string, message: string, retryable: boolean) {
+    for (const msg of messages) {
+      const entry = this.entries[this.key(scope, msg)];
+      if (entry?.status === 'pending') entry.diagnostic = { at: Date.now(), code, message, retryable };
+    }
+    await this.persist();
+  }
+  retryPending(scope: string, requestId: string): boolean {
+    const key = JSON.stringify([scope, requestId]), entry = this.entries[key];
+    if (!entry || entry.status !== 'pending' || this.queued.has(key)) return false;
+    this.deferredUntil.delete(key); return true;
+  }
   async rememberSenderName(scope: string, messageId: string, name: string): Promise<void> {
     const entry = Object.values(this.entries).find(e => e.scope === scope && e.message.messageId === messageId);
     if (!entry || entry.message.senderName === name) return;

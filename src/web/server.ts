@@ -3,6 +3,8 @@ import { randomBytes } from 'node:crypto';
 import { loadWebConfig, trustedWebPeer, webListenHosts, webAccessUrls, webHostAllowed, verifyWebCredential, webCredentialSignature, type WebConfig } from './config';
 import { PersonalSessionService, WebError } from './service';
 import { bridgeWebPage } from '../../apps/bridge-web/page';
+import { bridgeConsolePage } from '../../apps/bridge-web/console';
+import type { BridgeConsoleService } from './console';
 import { GROUP_AVATAR_IMAGES } from '../bot/group-avatar-images';
 
 async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -15,7 +17,7 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
 const respond = (res: ServerResponse, status: number, value: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); };
 
 /** Direct trusted peers or cookie auth, same-origin writes and shared snapshots across listeners. */
-export async function startBridgeWeb(options: { configPath: string; service: PersonalSessionService; config?: WebConfig; pollMs?: number }) {
+export async function startBridgeWeb(options: { configPath: string; service: PersonalSessionService; consoleService?: BridgeConsoleService; config?: WebConfig; pollMs?: number }) {
   const initial = options.config ?? await loadWebConfig(options.configPath);
   if (!initial?.enabled) return;
   await options.service.load();
@@ -50,6 +52,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     if (req.method === 'POST' && req.headers.origin !== origin) throw new WebError(403, '请求来源不匹配');
     const url = new URL(req.url ?? '/', origin);
     if (url.pathname === '/' && req.method === 'GET') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(bridgeWebPage); return; }
+    if (['/console', '/console/'].includes(url.pathname) && req.method === 'GET') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(bridgeConsolePage); return; }
     const avatar = /^\/assets\/session-avatars\/([a-z0-9-]+)\.png$/.exec(url.pathname);
     if (avatar && req.method === 'GET') {
       const image = Object.hasOwn(GROUP_AVATAR_IMAGES, avatar[1]!) ? GROUP_AVATAR_IMAGES[avatar[1]! as keyof typeof GROUP_AVATAR_IMAGES] : undefined;
@@ -83,6 +86,20 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     }
     const token = cookie(req), bearer = req.headers.authorization?.match(/^Bearer ([^\s]+)$/i)?.[1];
     await authenticate(token, local, bearer);
+    if (url.pathname.startsWith('/api/console')) {
+      const console = options.consoleService;
+      if (!console) throw new WebError(503, '控制台尚未就绪');
+      if (url.pathname === '/api/console' && req.method === 'GET') { respond(res, 200, await console.snapshot(url.searchParams.get('refresh') === '1')); return; }
+      if (url.pathname === '/api/console/logs' && req.method === 'GET') { respond(res, 200, await console.logs(url.searchParams.get('q') ?? '', url.searchParams.get('level') ?? '')); return; }
+      const item = /^\/api\/console\/items\/([a-f0-9]{64})$/.exec(url.pathname);
+      if (item && req.method === 'GET') { respond(res, 200, await console.detail(item[1]!)); return; }
+      if (url.pathname === '/api/console/action' && req.method === 'POST') {
+        const input = await body(req);
+        if (typeof input.action !== 'string' || input.id !== undefined && (typeof input.id !== 'string' || !/^[a-f0-9]{64}$/.test(input.id))) throw new WebError(400, '操作参数无效');
+        respond(res, 200, await console.action(input.action, input.id as string | undefined)); return;
+      }
+      throw new WebError(404, '控制台接口不存在');
+    }
     if (url.pathname === '/api/logout' && req.method === 'POST') {
       sessions.delete(token!); res.setHeader('Set-Cookie', 'bridge_web=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); respond(res, 200, { ok: true }); return;
     }

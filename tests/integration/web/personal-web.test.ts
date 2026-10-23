@@ -12,6 +12,7 @@ import { SessionStore } from '../../../src/session/store';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import type { Controls } from '../../../src/commands';
 import { PersonalSessionService, type WebConversation } from '../../../src/web/service';
+import { BridgeConsoleService } from '../../../src/web/console';
 import { startBridgeWeb } from '../../../src/web/server';
 import { configureWeb, webPasswordHash } from '../../../src/web/config';
 import { WebSessionControls, type WebControlElement } from '../../../src/web/controls';
@@ -88,14 +89,16 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   const socket = createServer(); await new Promise<void>(r => socket.listen(0, '127.0.0.1', r)); const port = (socket.address() as { port: number }).port; await new Promise<void>(r => socket.close(() => r()));
   const configPath = join(h.dir, 'web.json'), { secret } = await configureWeb(configPath, '127.0.0.1', port);
   if (host !== '127.0.0.1' || Object.keys(access).length) await writeFile(configPath, JSON.stringify({ ...JSON.parse(await readFile(configPath, 'utf8')), host, ...access }));
-  const web = (await startBridgeWeb({ configPath, service, pollMs: 30 }))!; cleanups.push(() => web.close());
+  const consoleLogs: string[] = [];
+  const consoleService = new BridgeConsoleService({ controls, catalog, channel, personal: service, syncNames: async () => { await names.tick(); }, logs: async () => consoleLogs.join('\n') });
+  const web = (await startBridgeWeb({ configPath, service, consoleService, pollMs: 30 }))!; cleanups.push(() => web.close());
   let cookie = '';
   const request = (path: string, value?: unknown, headers = {}) => fetch(web.url + path, { method: value === undefined ? 'GET' : 'POST', headers: {
     Cookie: cookie, Origin: web.url, 'Content-Type': 'application/json', ...headers }, ...(value === undefined ? {} : { body: JSON.stringify(value) }) });
   const login = async () => { const response = await request('/api/login', { secret }); expect(response.status).toBe(200); cookie = response.headers.get('set-cookie')?.split(';')[0] ?? ''; };
   const replies = await startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath: join(h.dir, 'replies.json'), intervalMs: 60_000 }); cleanups.push(() => replies.stop());
   controls.workerRuntimes!.get(tool)!.replies = replies;
-  return { ...h, bindings, catalog, controls, sessions, inbox, service, makeService, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
+  return { ...h, bindings, catalog, controls, sessions, inbox, service, consoleService, consoleLogs, makeService, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
 }
 
 async function sharedInput(h: Awaited<ReturnType<typeof harness>>, options: { name?: string; content?: string } = {}) {
@@ -692,4 +695,89 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('preserves visible
   expect(result.turns[0]!.answerSections![0]!.nodes[0]!.tag).toBe('p');
   expect(result.turns[0]!.answerSections![1]!.nodes.map(n => n.tag)).toEqual(['h2', 'table', 'p']);
   for (const detail of ['private-id', 'private-tool', 'private-command', 'private-output']) expect(JSON.stringify(result)).not.toContain(detail);
+});
+
+it.each(['codex', 'zcode', 'kilo', 'claude', 'dsh'] as const)('console observes %s through common APIs without leaking worker prompts or credentials', async tool => {
+  const h = await harness(tool); await h.replies.stop();
+  const msg = { messageId: 'console-pending', chatId: 'oc_group', senderId: 'ou_nick', senderName: '<Nick>', content: '待发送的消息', createTime: Date.now(), resources: [] } as unknown as NormalizedMessage;
+  await h.inbox.receive('oc_group', msg); h.inbox.defer('oc_group', [msg]);
+  await h.inbox.recordDiagnostic('oc_group', [msg], 'archive-check-unavailable', '归档查询超时 Bearer private-console-token', true);
+  const response = await h.request('/api/console?refresh=1'); expect(response.status).toBe(200);
+  const snapshot = await response.json() as Awaited<ReturnType<BridgeConsoleService['snapshot']>>;
+  expect(snapshot.workers[0]).toMatchObject({ id: tool, online: true, capabilities: { conversation: true } });
+  expect(snapshot.summary.pending).toBe(1);
+  expect(snapshot.bindings[0]).toMatchObject({ kind: '个人 AI 群', groupName: 'AA-web', sessionName: 'AA-web', issues: [] });
+  expect(snapshot.items[0]).toMatchObject({ text: msg.content, status: 'pending', sender: '<Nick>', canRetry: true });
+  expect(JSON.stringify(snapshot)).not.toContain('private-console-token');
+  const page = await h.request('/console'); expect(await page.text()).toContain('诊断日志');
+  h.controls.ownerRefreshState = 'failed'; expect((await h.request('/api/console')).status).toBe(503);
+});
+
+it('console keeps pending retry separate from accepted jobs and reconciles fresh worker receipts before scheduling', async () => {
+  const h = await harness(); await h.replies.stop();
+  const msg = { messageId: 'console-retry', chatId: 'oc_group', content: '消息', createTime: Date.now(), resources: [] } as unknown as NormalizedMessage;
+  await h.inbox.receive('oc_group', msg); h.inbox.defer('oc_group', [msg]);
+  const runNow = vi.fn(async () => {}); h.controls.workerRuntimes!.get('kilo')!.replies = { runNow, stopScope: async () => false };
+  const before = await h.consoleService.snapshot(true), id = before.items[0]!.id;
+  expect((await h.request('/api/console/action', { action: 'retry', id })).status).toBe(200);
+  expect(runNow).toHaveBeenCalledOnce(); expect(h.inbox.available()).toHaveLength(1);
+  const job = await h.client.submit({ requestKey: 'console-accepted', options: { ...h.options, prompt: 'PRIVATE-POLICY-DO-NOT-DISPLAY',
+    delivery: { ...h.options.delivery!, messageIds: [msg.messageId] } } });
+  const after = await h.consoleService.snapshot(true);
+  expect(after.items.find(i => i.id === id)).toMatchObject({ jobId: job.id, canRetry: false });
+  expect(JSON.stringify(after)).not.toContain('PRIVATE-POLICY');
+  expect((await h.request('/api/console/action', { action: 'retry', id })).status).toBe(409);
+  expect(runNow).toHaveBeenCalledOnce();
+  const detail = await (await h.request('/api/console/items/' + id)).json() as Awaited<ReturnType<BridgeConsoleService['detail']>>;
+  expect(detail.timeline.some((r: { title: string }) => r.title.includes('持久回执'))).toBe(true);
+  expect(JSON.stringify(detail)).not.toContain('PRIVATE-POLICY');
+});
+
+it('console reports name mismatches, uses the existing sync path, and filters sanitized diagnostic logs', async () => {
+  const h = await harness(); await h.replies.stop();
+  h.group('网页群改名');
+  expect((await h.consoleService.snapshot(true)).bindings[0]!.issues).toContain('群名与会话名不一致');
+  expect((await h.request('/api/console/action', { action: 'sync-names' })).status).toBe(200);
+  expect(h.native.name).toBe('网页群改名');
+  h.consoleLogs.push(JSON.stringify({ ts: '2026-10-23 22:00:00', level: 'warn', phase: 'run-flow', event: 'rejected', scope: 'oc_group',
+    reason: '归档查询失败 Bearer super-secret-value sk-test-1234567890123456', token: 'NEVER-RETURN-TOKEN', prompt: 'PRIVATE-POLICY' }), '{broken');
+  const logs = await (await h.request('/api/console/logs?q=oc_group&level=warn')).json() as Awaited<ReturnType<BridgeConsoleService['logs']>>; expect(logs).toHaveLength(1);
+  expect(logs[0]).toMatchObject({ phase: 'run-flow', fields: { scope: 'oc_group' } });
+  expect(JSON.stringify(logs)).not.toMatch(/super-secret-value|sk-test|NEVER-RETURN|PRIVATE-POLICY/);
+  expect((await h.request('/api/console/action', { action: 'stop' })).status).toBe(400);
+});
+
+it('console API shares login, token authentication and cross-site protection with conversations', async () => {
+  const h = await harness('kilo', '127.0.0.2', { trustedNetworks: [] });
+  expect((await h.request('/api/console')).status).toBe(401);
+  expect((await h.request('/api/console/logs')).status).toBe(401);
+  expect((await h.request('/api/console', undefined, { Authorization: 'Bearer ' + h.secret })).status).toBe(200);
+  await h.login(); expect((await h.request('/api/console')).status).toBe(200);
+  expect((await h.request('/api/console/action', { action: 'sync-names' }, { Origin: 'http://evil.test' })).status).toBe(403);
+});
+
+it('console marks unreadable native state and disables name sync without treating it as archived', async () => {
+  const h = await harness(); await h.replies.stop();
+  vi.spyOn(h.client, 'listSessions').mockRejectedValue(Error('native list unavailable'));
+  const snapshot = await h.consoleService.snapshot(true), binding = snapshot.bindings[0]!;
+  expect(snapshot.workers[0]).toMatchObject({ online: true, error: '会话读取失败：Error: native list unavailable' });
+  expect(binding.issues).toContain('原生会话状态未确认'); expect(binding.canSync).toBe(false);
+  expect(h.catalog.isScopeArchived('oc_group')).toBe(false);
+  expect((await h.request('/api/console/action', { action: 'sync-names', id: binding.id })).status).toBe(409);
+});
+
+it('console keeps pending messages visible but forbids retry when worker receipts cannot be read or worker is offline', async () => {
+  const h = await harness(); await h.replies.stop();
+  const msg = { messageId: 'pending-unconfirmed', chatId: 'oc_group', content: '待发送', createTime: Date.now(), resources: [] } as unknown as NormalizedMessage;
+  await h.inbox.receive('oc_group', msg);
+  vi.spyOn(h.client, 'list').mockRejectedValue(Error('journal unavailable'));
+  let snapshot = await h.consoleService.snapshot(true);
+  expect(snapshot.workers[0]!.online).toBe(true);
+  expect(snapshot.items[0]).toMatchObject({ status: 'pending', canRetry: false });
+  expect((await h.request('/api/console/action', { action: 'retry', id: snapshot.items[0]!.id })).status).toBe(409);
+  vi.spyOn(h.client, 'health').mockRejectedValue(Error('worker offline'));
+  snapshot = await h.consoleService.snapshot(true);
+  expect(snapshot.bindings[0]!.issues).toContain('Worker 离线');
+  expect(snapshot.items[0]).toMatchObject({ status: 'pending', canRetry: false });
+  expect(h.calls).toHaveLength(0);
 });

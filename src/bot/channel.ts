@@ -10,6 +10,7 @@ import { startBridgeWeb } from '../web/server';
 import { enqueuePersonalInput } from './intake-queue';
 import { PersonalSessionService, WebError } from '../web/service';
 import { WebSessionControls } from '../web/controls';
+import { BridgeConsoleService } from '../web/console';
 import { startA2AServer } from '../a2a/server';
 import { createA2ARunner } from '../a2a/runner';
 import { NativeSessionLocks } from '../tools/locks';
@@ -69,7 +70,7 @@ import {
   getShowToolCalls,
 } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
-import { getLogContext, log, reportMetric, withTrace } from '../core/logger';
+import { getLogContext, log, reportMetric, withTrace, redactDiagnosticText } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
 import {
   toPolicyAttachment,
@@ -824,7 +825,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         await sync.rename(toolId, scope, id, name);
       } });
     try {
-      bridgeWeb = await startBridgeWeb({ configPath: join(deps.appPaths.profileDir, 'web.json'), service });
+      const consoleService = new BridgeConsoleService({ controls, catalog: sessionCatalog, channel, personal: service,
+        syncNames: async toolId => { await Promise.all([...nameSyncs].filter(([id]) => !toolId || id === toolId).map(([, sync]) => sync.tick())); } });
+      bridgeWeb = await startBridgeWeb({ configPath: join(deps.appPaths.profileDir, 'web.json'), service, consoleService });
       if (bridgeWeb) log.info('web', 'listening', { url: bridgeWeb.url });
     } catch { log.warn('web', 'startup-failed', { reason: '请检查 web 配置或端口占用' }); }
   }
@@ -1388,10 +1391,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const flow = await startRunFlow(flowInput);
   if (!flow.ok) {
     if (controls.workerInbox) {
+      await controls.workerInbox.recordDiagnostic(scope, batch, flow.rejectReason.code,
+        redactDiagnosticText(flow.rejectReason.detail ?? flow.rejectReason.userVisible), flow.rejectReason.retryable === true);
       if (flow.rejectReason.retryable) controls.workerInbox.defer(scope, batch);
       else await controls.workerInbox.reject(scope, batch);
     }
-    log.info('run-flow', 'rejected', { scope, code: flow.rejectReason.code });
+    log.info('run-flow', 'rejected', { scope, code: flow.rejectReason.code, reason: flow.rejectReason.detail ?? flow.rejectReason.userVisible });
     log.warn('policy', 'denied', {
       scope,
       source: 'im',
