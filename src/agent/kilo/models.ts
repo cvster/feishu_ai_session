@@ -15,21 +15,29 @@ export async function readKiloModels(client: KiloClient, cwd?: string): Promise<
     client.request('GET', '/config/model-state', undefined, cwd),
   ]);
   if (!Array.isArray(catalog.all) || !Array.isArray(catalog.connected)) throw new Error('Kilo 模型目录格式不兼容');
+  const recent = state.recent?.[0];
+  const selected = typeof config.model === 'string' ? config.model : recent?.providerID && recent?.modelID ? `${recent.providerID}/${recent.modelID}` : undefined;
+  const selectedProvider = selected?.split('/')[0];
+  const configured = new Set(Object.keys(config.provider ?? {}));
   const rows: ModelOption[] = [];
-  const connected = catalog.all.filter(row => catalog.connected.includes(row.id));
+  // Native catalogs put built-in gateways first, often filling several card pages.
+  // Prefer explicitly configured providers without hiding other connected choices.
+  const priority = (id: string) => configured.has(id) ? 0 : id === selectedProvider ? 1 : 2;
+  const connected = catalog.all.filter(row => catalog.connected.includes(row.id)).sort((a, b) =>
+    priority(a.id) - priority(b.id) || Number(b.id === selectedProvider) - Number(a.id === selectedProvider));
   const names = new Map<string, number>();
   for (const p of connected) names.set(p.name || p.id, (names.get(p.name || p.id) ?? 0) + 1);
   for (const provider of connected) {
     const name = provider.name || provider.id;
     const label = names.get(name)! > 1 ? `${name} (${provider.id})` : name;
-    for (const [id, model] of Object.entries(provider.models)) {
+    const models = Object.entries(provider.models).sort(([a], [b]) =>
+      Number(`${provider.id}/${b}` === selected) - Number(`${provider.id}/${a}` === selected));
+    for (const [id, model] of models) {
       const variants = Object.entries(model.variants ?? {}).filter(([, v]) => !(v as { disabled?: boolean })?.disabled).map(([value]) => ({ value, label: value }));
       rows.push({ value: `${provider.id}/${id}`, label: `${label} / ${model.name || id}`,
         ...(variants.length ? { reasoningEfforts: variants } : {}) });
     }
   }
-  const recent = state.recent?.[0];
-  const selected = typeof config.model === 'string' ? config.model : recent?.providerID && recent?.modelID ? `${recent.providerID}/${recent.modelID}` : undefined;
   const found = rows.find(row => row.value === selected);
   // Do not fabricate a default or borrow another provider's reasoning levels.
   return { catalog, selected, variant: selected ? state.variant?.[selected] : undefined,

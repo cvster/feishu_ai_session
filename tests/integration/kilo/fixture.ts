@@ -35,7 +35,7 @@ export async function fixture(kind = 'normal') {
       if (pathname === '/event' || pathname === '/global/event') { res.globalEvent = pathname === '/global/event'; res.writeHead(200, { 'Content-Type':'text/event-stream' }); res.write('data: {"type":"server.connected"}\\n\\n'); streams.push(res); req.on('close', () => streams = streams.filter(r => r !== res)); return; }
       if (pathname === '/provider') return reply(s.providers);
       if (pathname === '/config') return reply(s.config);
-      if (pathname === '/config/model-state') return reply({ recent: [], model: {}, variant: {} });
+      if (pathname === '/config/model-state') return reply(s.modelState || { recent: [], model: {}, variant: {} });
       if (pathname === '/session/status') return reply(kind === 'busy' ? { ses_source: { type: 'busy' } } : {});
       if (pathname === '/experimental/session') return reply(Object.values(s.sessions));
       if (pathname === '/session') {

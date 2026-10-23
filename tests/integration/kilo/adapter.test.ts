@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import { kiloBridgeTextPart, KiloNativeConversationReader } from '../../../src/agent/kilo/conversation';
 import { startWorkerServer } from '../../../src/worker/server';
 import { WorkerClient } from '../../../src/worker/client';
+import { KiloClient } from '../../../src/agent/kilo/client';
+import { readKiloModels } from '../../../src/agent/kilo/models';
 async function collect(h: Awaited<ReturnType<typeof fixture>>, options: Record<string, unknown> = {}) {
   const run = h.agent.run({ runId: 'one', cwd: h.root, prompt: '原样 <tag>\n第二行', ...options });
   const events: AgentEvent[] = []; for await (const e of run.events) events.push(e);
@@ -78,6 +80,43 @@ it('dynamically reloads connected providers and per-model variants without expos
   const second = await h.agent.listModels({ cwd: h.root });
   expect(second.some(m => m.value === 'original/model/path')).toBe(false);
   expect(second.find(m => m.value === 'original/added')?.reasoningEfforts?.[0]?.value).toBe('ultra');
+});
+it('puts configured custom providers on the first model page ahead of a large gateway catalog', async () => {
+  const h = await fixture();
+  await h.update(s => {
+    s.config = { provider: { custom: { options: { apiKey: 'CUSTOM_SECRET' } }, disconnected: {} } };
+    s.providers = { connected: ['gateway', 'custom'], default: {}, all: [
+      { id: 'gateway', name: 'Gateway', models: Object.fromEntries(Array.from({ length: 336 }, (_, i) => [`m${i}`, { id: `m${i}` }])) },
+      { id: 'disconnected', name: 'Disconnected', models: { model: { id: 'model' } } },
+      { id: 'custom', name: 'Custom', models: { first: { id: 'first' }, second: { id: 'second', variants: { high: {}, disabled: { disabled: true } } } } },
+    ] };
+    s.modelState = { recent: [], variant: {} };
+  });
+  const first = await h.agent.listModels({ cwd: h.root });
+  expect(first.slice(1, 3).map(m => m.value)).toEqual(['custom/first', 'custom/second']);
+  expect(first).toHaveLength(339);
+  expect(first.some(m => m.value.startsWith('disconnected/'))).toBe(false);
+  expect(first.find(m => m.value === 'custom/second')?.reasoningEfforts).toEqual([{ value: 'high', label: 'high' }]);
+  expect(JSON.stringify(first)).not.toContain('CUSTOM_SECRET');
+  // Re-read native configuration rather than caching provider priority.
+  await h.update(s => { s.config.provider = { gateway: {} }; });
+  expect((await h.agent.listModels({ cwd: h.root }))[1]?.value).toBe('gateway/m0');
+});
+it.each(['config', 'recent'] as const)('prioritizes the %s model while preserving its selection and reasoning', async source => {
+  const h = await fixture();
+  await h.update(s => {
+    s.config = { provider: { original: {}, other: {} }, ...(source === 'config' ? { model: 'other/chosen' } : {}) };
+    s.providers.all[1].models.chosen = { id: 'chosen', variants: { ultra: {} } };
+    s.modelState = { recent: [{ providerID: source === 'config' ? 'original' : 'other', modelID: source === 'config' ? 'model/path' : 'chosen' }], variant: { 'other/chosen': 'ultra' } };
+  });
+  const client = new KiloClient(h.options, h.root);
+  try {
+    const models = await readKiloModels(client, h.root);
+    expect(models).toMatchObject({ selected: 'other/chosen', variant: 'ultra' });
+    expect(models.options.slice(1, 4).map(m => m.value)).toEqual(['other/chosen', 'other/model', 'original/model/path']);
+    expect(models.options[0]?.reasoningEfforts).toEqual([{ value: 'ultra', label: 'ultra' }]);
+    expect(models.catalog.all.map(p => p.id)).toEqual(['original', 'other']);
+  } finally { await client.close(); }
 });
 it('reads source snapshots, renames, copies, and archives through the native API without prompting the source', async () => {
   const h = await fixture(); const sessions = new KiloSessionProvider(h.options, join(h.root, 'history'));
