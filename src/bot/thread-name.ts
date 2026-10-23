@@ -15,8 +15,6 @@ interface NameState {
   /** Ignore an old snapshot until our own write has been observed. */
   previousGroupName?: string;
   previousThreadName?: string;
-  /** A confirmed Web/group rename still needs its native acknowledgement. */
-  pendingSessionRename?: boolean;
 }
 
 export interface CodexNameSyncOptions {
@@ -59,8 +57,13 @@ export class SessionNameSync {
       for (const [key, state] of data.bindings) {
         if (typeof key !== 'string' || !state || typeof state.groupName !== 'string' ||
           typeof state.threadName !== 'string') throw new Error('Invalid name sync binding');
-        this.states.set(key, state);
+        const restored: NameState = { groupName: state.groupName, threadName: state.threadName,
+          ...(typeof state.previousGroupName === 'string' ? { previousGroupName: state.previousGroupName } : {}),
+          ...(typeof state.previousThreadName === 'string' ? { previousThreadName: state.previousThreadName } : {}) };
+        this.states.set(key, restored);
+        if (JSON.stringify(restored) !== JSON.stringify(state)) this.dirty = true;
       }
+      if (this.dirty) await this.flush();
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
@@ -68,35 +71,6 @@ export class SessionNameSync {
 
   observe<T extends NamedSessionSnapshot>(snapshot: T, entries: SessionCatalogEntry[], isActive: (scope: string) => boolean = () => true): Promise<void> {
     return this.serialize(() => this.observeNow(snapshot, entries, isActive));
-  }
-
-  /** Explicit Web rename and periodic observations share a serialized baseline. */
-  rename(chatId: string, snapshot: NamedSessionSnapshot, name: string, isActive: () => boolean): Promise<{ pendingSync: boolean }> {
-    return this.serialize(async () => {
-      if (!this.options.renameSession || !isActive()) throw new Error('会话绑定已失效');
-      if (await this.options.channel.getChatMode(chatId) !== 'group') throw new Error('仅支持个人 AI 会话群');
-      const oldGroup = (await this.options.channel.getChatInfo(chatId)).name?.trim() ?? '';
-      if (!isActive()) throw new Error('会话绑定已变化');
-      const key = this.stateKey(chatId, snapshot.id);
-      // The group is the durable request, just as when renamed in Feishu.
-      // Do not modify the native title if Feishu rejects the group write.
-      await this.save(key, { groupName: oldGroup, threadName: snapshot.name?.trim() ?? '' });
-      await renameChat(this.options.channel, chatId, name);
-      await this.save(key, { groupName: name, threadName: snapshot.name?.trim() ?? '', previousGroupName: oldGroup, pendingSessionRename: true });
-      let pendingSync = false;
-      try {
-        if (!isActive()) throw new Error('会话绑定已变化');
-        if (snapshot.name?.trim() !== name) await this.options.renameSession(snapshot.id, name);
-        await this.save(key, { groupName: name, threadName: name, previousGroupName: oldGroup, previousThreadName: snapshot.name?.trim() ?? '' });
-      } catch (err) {
-        pendingSync = true;
-        log.warn('session', 'web-name-sync-pending', { chatId, threadId: snapshot.id, err: err instanceof Error ? err.message : String(err) });
-      }
-      if (!isActive()) throw new Error('会话绑定已变化，请检查群与原工具名称');
-      this.updateKnownChat(chatId, name);
-      if (isActive()) await this.options.onSynchronized?.(chatId, snapshot.id, name);
-      return { pendingSync };
-    });
   }
 
   private async observeNow<T extends NamedSessionSnapshot>(snapshot: T, entries: SessionCatalogEntry[], isActive: (scope: string) => boolean): Promise<void> {
@@ -162,13 +136,10 @@ export class SessionNameSync {
     // leave the baseline untouched and retry, never overwrite either side.
     const groupName = (await this.options.channel.getChatInfo(chatId)).name?.trim();
     if (!groupName || !isActive()) return;
-    // A delayed group echo must not cancel a pending explicit request, even
-    // if the native title changed independently while the worker was busy.
-    if (state?.pendingSessionRename && groupName === state.previousGroupName && groupName !== state.groupName) return;
 
     const repairBaseline = state && state.groupName !== state.threadName &&
       groupName === state.groupName && threadName === state.threadName;
-    if (!state || repairBaseline || (state.pendingSessionRename && groupName === state.groupName) || (groupName !== state.groupName && groupName !== state.previousGroupName)) {
+    if (!state || repairBaseline || (groupName !== state.groupName && groupName !== state.previousGroupName)) {
       // First binding, or a new group rename: group wins this observation.
       // If both sides changed between checks, this is the deterministic tie-break.
       // Older/failed explicit renames can leave an unequal, unchanged baseline;

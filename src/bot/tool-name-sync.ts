@@ -63,24 +63,19 @@ export async function startToolNameSync(options: {
   };
   const timer = setInterval(() => { void tick(); }, options.intervalMs ?? NAME_SYNC_INTERVAL_MS); timer.unref();
   void tick();
-  return { tick, async rename(scope: string, id: string, name: string) {
-    if (stopped || !exclusive(scope, id) || !await options.ready()) throw new Error('会话改名暂不可用');
-    const row = (await tool.listSessions()).find(row => row.nativeId === id && !row.archived);
-    if (!row) throw new Error('会话不存在或已归档');
-    return sync.rename(scope, { id, name: row.name }, name, () => !stopped && exclusive(scope, id));
-  }, async stop() { stopped = true; clearInterval(timer); await running; } };
+  return { tick, async stop() { stopped = true; clearInterval(timer); await running; } };
 }
 
 /** Metadata support is advertised by each worker. */
 export async function startWorkerNameSync(options: {
   channel: LarkChannel; controls: Controls; catalog: SessionCatalog; profileDir: string; intervalMs?: number;
 }) {
-  const handles = new Map<string, Awaited<ReturnType<typeof startToolNameSync>>>();
+  const handles: Awaited<ReturnType<typeof startToolNameSync>>[] = [];
   for (const tool of options.controls.toolRegistry?.all() ?? []) {
     if (!tool.sessions || !(tool.agent instanceof DurableAgentAdapter)) continue;
     const agent = tool.agent;
     try {
-      handles.set(tool.id, await startToolNameSync({ ...options, tool,
+      handles.push(await startToolNameSync({ ...options, tool,
         statePath: join(options.profileDir, `${tool.id}-name-sync.json`),
         ready: async () => {
           await agent.prepareRun();
@@ -90,11 +85,7 @@ export async function startWorkerNameSync(options: {
     } catch (error) { log.warn('session', 'name-sync-disabled', { toolId: tool.id, error: String(error) }); }
   }
   return {
-    async rename(toolId: string, scope: string, id: string, name: string) {
-      const handle = handles.get(toolId); if (!handle) throw new Error('Worker 尚未支持名称同步');
-      return handle.rename(scope, id, name);
-    },
-    async tick() { await Promise.all([...handles.values()].map(handle => handle.tick())); },
-    async stop() { await Promise.all([...handles.values()].map(handle => handle.stop())); },
+    async tick() { await Promise.all(handles.map(handle => handle.tick())); },
+    async stop() { await Promise.all(handles.map(handle => handle.stop())); },
   };
 }

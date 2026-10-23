@@ -821,10 +821,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         if (!canUseGroup(scoped.profileConfig, scoped, msg.chatId, msg.senderId).ok) throw new WebError(403, '此群不在允许响应的范围内');
         await enqueuePersonalInput({ agent: tool.agent, controls: scoped, activeRuns, pending, scope: msg.chatId, msg });
       },
-      rename: async (toolId, scope, id, name) => {
-        const sync = nameSyncs.get(toolId); if (!sync) throw new WebError(503, 'Worker 名称同步尚未就绪');
-        return sync.rename(toolId, scope, id, name);
-      } });
+    });
     try {
       const consoleService = new BridgeConsoleService({ controls, catalog: sessionCatalog, channel, personal: service,
         cleanDissolvedGroup: groupCleanupDeps ? async chatId => {

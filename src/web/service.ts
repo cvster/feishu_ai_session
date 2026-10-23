@@ -12,6 +12,7 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import type { WebControlResult } from './controls';
 import { runProgress } from '../card/run-progress';
 import { WebMarkdown, type WebAnswerSection } from './markdown';
+import { renameChat } from '../bot/group';
 import { sharedPersonalScope, sharedJobPersonalScope, namedSharedMessages, feishuSenderName } from '../worker/shared-history';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
@@ -40,7 +41,6 @@ export class PersonalSessionService {
   constructor(private readonly deps: {
     controls: Controls; catalog?: SessionCatalog; channel: LarkChannel; path: string;
     enqueue(msg: NormalizedMessage): Promise<void>;
-    rename(toolId: string, scope: string, id: string, name: string): Promise<{ pendingSync: boolean }>;
     control?(id: string, scope: string, owner: string, action: string, values?: unknown): Promise<WebControlResult>;
   }) {}
   async load() {
@@ -126,7 +126,7 @@ export class PersonalSessionService {
         updatedAtMs,
         favorite: this.favorites[hash(JSON.stringify([owner, this.identity(scope, b)]))] === owner, cwd, project: cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd, name: name ?? row?.name ?? b.nativeId!, online,
         canSend: online && meta?.capabilities?.jobs.submit === true,
-        canRename: online && meta?.capabilities?.sessions.rename === true && meta?.capabilities?.nativeSessionNames === true,
+        canRename: this.groups.get(scope)?.mode === 'group',
         nativeConversation: meta?.capabilities?.conversation === true }];
     });
   }
@@ -197,12 +197,19 @@ export class PersonalSessionService {
   }
   async rename(id: string, name: string) {
     name = name.trim(); if (!name || name.length > 100 || /[\u0000-\u001f]/.test(name)) throw new WebError(400, '名称需为 1–100 字');
-    const { session, b } = await this.resolve(id, true);
-    if (!session.canRename) throw new WebError(409, '此 worker 尚未支持名称同步');
-    this.assertBinding(id, session.scope);
-    const result = await this.deps.rename(b.toolId, session.scope, b.nativeId!, name);
-    this.groups.set(session.scope, { mode: 'group', name, bindingName: this.deps.controls.toolBindings?.get(session.scope)?.name });
-    this.listedAt = 0; return { name, pendingSync: result.pendingSync };
+    this.owner();
+    const entry = this.deps.controls.toolBindings?.activePersonalBindings().find(([scope, b]) => this.identity(scope, b) === id);
+    if (!entry) throw new WebError(404, '会话已归档、群已失效或绑定已变化');
+    const [scope] = entry;
+    this.assertBinding(id, scope);
+    const group = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: scope } });
+    if (group.code || !group.data) throw new WebError(503, '群状态未确认，暂不可改名');
+    if (group.data.chat_mode !== 'group') throw new WebError(409, '仅支持个人 AI 会话群');
+    this.assertBinding(id, scope);
+    await renameChat(this.deps.channel, scope, name);
+    this.assertBinding(id, scope);
+    this.groups.set(scope, { mode: 'group', name, bindingName: this.deps.controls.toolBindings?.get(scope)?.name });
+    this.listedAt = 0; return { name };
   }
   async control(id: string, action: string, values?: unknown) {
     return this.serial('control:' + id, async () => {

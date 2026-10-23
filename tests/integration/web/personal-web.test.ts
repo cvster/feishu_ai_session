@@ -85,7 +85,6 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
       mentionedBot: true, mentionAll: false, rawContentType: 'interactive', createTime: Date.now() } }));
   const servicePath = join(h.dir, 'web-receipts.json');
   const makeService = () => new PersonalSessionService({ controls, catalog, channel, path: servicePath, enqueue,
-    rename: (id, scope, nativeId, name) => names.rename(id, scope, nativeId, name),
     control: (id, scope, owner, action, values) => webControls.execute(id, scope, owner, action, values) });
   const service = makeService(); await service.load();
   const socket = createServer(); await new Promise<void>(r => socket.listen(0, '127.0.0.1', r)); const port = (socket.address() as { port: number }).port; await new Promise<void>(r => socket.close(() => r()));
@@ -424,6 +423,7 @@ it('refreshes a changed group title after 15 seconds and publishes it through SS
 it('coordinates Web/native/group names without old snapshots reverting an explicit rename', async () => {
   const h = await harness(); await h.login(); const id = (await h.service.list())[0]!.id;
   expect((await h.request('/api/sessions/' + id + '/rename', { name: 'AA-Web改名' })).status).toBe(200);
+  expect(h.native.name).toBe('AA-web');
   await h.names.tick(); await h.names.tick(); expect(h.native.name).toBe('AA-Web改名'); expect(await h.channel.getChatInfo('oc_group')).toMatchObject({ name: 'AA-Web改名' });
   h.group('AA-群改名'); await h.names.tick(); expect(h.native.name).toBe('AA-群改名');
   await h.names.tick(); h.native.name = 'AA-工具改名'; await h.names.tick(); expect(await h.channel.getChatInfo('oc_group')).toMatchObject({ name: 'AA-工具改名' });
@@ -432,17 +432,46 @@ it('coordinates Web/native/group names without old snapshots reverting an explic
 
 it('accepts a Web rename while the worker is executing and syncs the native title after completion', async () => {
   const h = await harness('kilo'), id = (await h.service.list())[0]!.id;
+  const nativeRename = vi.spyOn(h.provider, 'rename');
   const job = await h.client.submit({ requestKey: 'rename-while-running', options: { ...h.options, sessionId: 'native', initialSessionId: undefined } });
   await vi.waitFor(async () => expect((await h.client.list()).find(j => j.id === job.id)?.status).toBe('running'));
   const response = await h.request('/api/sessions/' + id + '/rename', { name: 'AA-Web忙时改名' });
   expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({ name: 'AA-Web忙时改名', pendingSync: true });
+  expect(await response.json()).toEqual({ name: 'AA-Web忙时改名' });
   expect(await h.channel.getChatInfo('oc_group')).toMatchObject({ name: 'AA-Web忙时改名' });
   expect((await h.service.list())[0]?.name).toBe('AA-Web忙时改名');
   expect(h.native.name).toBe('AA-web');
+  expect(nativeRename).not.toHaveBeenCalled();
   h.finish(); await vi.waitFor(async () => expect((await h.client.list()).find(j => j.id === job.id)?.status).toBe('completed'));
   await h.names.tick(); expect(h.native.name).toBe('AA-Web忙时改名');
   expect((await h.client.list())).toHaveLength(1);
+});
+
+it('renames only the group even when its worker is offline or rejects native title writes', async () => {
+  const h = await harness('kilo'), id = (await h.service.list())[0]!.id;
+  const nativeRename = vi.spyOn(h.provider, 'rename').mockRejectedValue(Error('native unavailable'));
+  h.provider.list.mockClear();
+  h.controls.toolRegistry!.remove('kilo');
+  expect((await h.service.list())[0]).toMatchObject({ online: false, canRename: true });
+  const response = await h.request('/api/sessions/' + id + '/rename', { name: 'AA-离线时群改名' });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ name: 'AA-离线时群改名' });
+  expect(await h.channel.getChatInfo('oc_group')).toMatchObject({ name: 'AA-离线时群改名' });
+  expect((await h.service.list())[0]?.name).toBe('AA-离线时群改名');
+  expect(nativeRename).not.toHaveBeenCalled();
+  expect(h.provider.list).not.toHaveBeenCalled();
+});
+
+it('reports a rejected group rename without changing the native title or the synchronization baseline', async () => {
+  const h = await harness('kilo'), id = (await h.service.list())[0]!.id;
+  const nativeRename = vi.spyOn(h.provider, 'rename');
+  const ledger = await readFile(join(h.dir, 'kilo-name-sync.json'), 'utf8');
+  vi.mocked(h.channel.rawClient.im.v1.chat.update).mockResolvedValueOnce({ code: 232017 });
+  const response = await h.request('/api/sessions/' + id + '/rename', { name: 'AA-被拒绝的群名' });
+  expect(response.status).toBe(503);
+  expect(await h.channel.getChatInfo('oc_group')).toMatchObject({ name: 'AA-web' });
+  expect(await readFile(join(h.dir, 'kilo-name-sync.json'), 'utf8')).toBe(ledger);
+  expect(nativeRename).not.toHaveBeenCalled();
 });
 
 it('retains offline routes but excludes shared, archived and changed-account routes and fails closed on writes', async () => {
