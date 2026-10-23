@@ -25,6 +25,8 @@ export interface AuxiliaryGroup {
   ownerId: string;
   status: 'pending' | 'active' | 'leaving' | 'archived';
   notified?: boolean;
+  /** This chat has completed its first binding; subsequent bindings are silent, even after rejoining. */
+  hasBound?: boolean;
   source?: LinkedSession;
   cwd?: string;
   requesters?: Record<string, string>;
@@ -79,6 +81,7 @@ export class AuxiliaryGroups {
         const r = row as AuxiliaryGroup;
         if (!r || r.chatId !== chatId || typeof r.generation !== 'string' || typeof r.ownerId !== 'string' ||
           !['pending', 'active', 'leaving', 'archived'].includes(r.status) ||
+          (r.hasBound !== undefined && typeof r.hasBound !== 'boolean') ||
           (r.status === 'active' && (!r.source || !r.cwd))) throw new Error('Invalid auxiliary group');
       }
       this.records = raw.groups;
@@ -112,6 +115,8 @@ export class AuxiliaryGroups {
         this.privateCreations = raw.privateCreations;
       }
       for (const row of Object.values(this.records)) {
+        // Older linked groups already received their activation announcement.
+        row.hasBound ??= !!row.source;
         // Legacy toggles cannot revive the removed ff-dm-v1 transport.
         delete (row as any).allowPrivate; delete (row as any).privateBindingId;
         if (row.privateGroup && ![row.privateGroup.parentChatId, row.privateGroup.parentGeneration, row.privateGroup.actorId, row.privateGroup.sharedScope].every(v => typeof v === 'string' && !!v))
@@ -384,7 +389,7 @@ export class AuxiliaryGroups {
       const info = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: event.chatId } });
       if (info.code) throw new Error(`群信息查询失败：${info.code}`);
       const row: AuxiliaryGroup = { chatId: event.chatId, name: info.data?.name || '未命名群',
-        generation: randomUUID(), ownerId: owner, status: 'pending' };
+        generation: randomUUID(), ownerId: owner, status: 'pending', hasBound: old?.hasBound ?? !!old?.source };
       this.records[event.chatId] = row;
       await this.save();
       await this.notify(row);
@@ -493,6 +498,7 @@ export class AuxiliaryGroups {
     if (!workspace.ok) throw new Error(workspace.userVisible);
     if (!await auxiliaryBotIsMember(this.deps.channel, row.chatId)) throw new Error('机器人已不在目标群内，无法关联。');
     const linkedSource: LinkedSession = { toolId: tool.id, sourceId: tool.sourceId, nativeId: source.nativeId };
+    let announce = false;
     await this.serial(`source:${this.sourceKey(linkedSource)}`, async () => {
       const current = () => this.records[row.chatId] === row && ['pending', 'active'].includes(row.status) && row.generation === generation &&
         row.ownerId === this.deps.ownerId() && !this.deps.catalog?.isChatDissolved(row.chatId) &&
@@ -525,9 +531,11 @@ export class AuxiliaryGroups {
       this.deps.sessions.remove(row.chatId); this.deps.workspaces.setCwd(row.chatId, cwd);
       await Promise.all([this.deps.bindings.flush(), this.deps.sessions.flush(), this.deps.catalog?.flush(), this.deps.workspaces.flush()]);
       if (row.ownerId !== this.deps.ownerId()) throw new Error('所有者已变化，共享群暂未启用。');
-      row.status = 'active'; await this.save();
+      announce = !row.hasBound;
+      row.status = 'active'; row.hasBound = true; await this.save();
     });
     await muteSessionGroup(this.deps.channel, row.chatId);
+    if (!announce) return;
     await this.deps.channel.send(row.ownerId, { text: `已将 ${tool.label} 会话「${source.name || source.nativeId}」共享给「${row.name}」中的AI助手。` });
     await this.deps.channel.send(row.chatId, { text: '会话共享已启用，AI助手已就绪，请 @我提问。需要私聊时，在本群 @我发送“私聊”，我会拉你和所有者创建私聊群。' });
   }

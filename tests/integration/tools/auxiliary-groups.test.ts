@@ -645,3 +645,48 @@ it('keeps a failed route switch inactive and recoverable instead of routing mess
   await h.groups.bindSession(current.chatId, current.ownerId, current.generation, { toolId: 'claude', sourceId: h.home, nativeId: freshId }, async () => {});
   expect(h.groups.isActive('oc_aux')).toBe(true); expect(h.bindings.get('oc_aux')?.nativeId).toBe(freshId);
 });
+
+
+it('announces the first binding once per chat and keeps switches, duplicate selections and rejoining silent across restarts', async () => {
+  const h = await harness(); await h.activate();
+  const announcements = () => h.send.mock.calls.filter(([, content]) => /会话共享已启用|已将 .*共享给/.test(JSON.stringify(content)));
+  expect(announcements()).toHaveLength(2); expect(h.groups.get('oc_aux')?.hasBound).toBe(true);
+  const tool = h.tools.get('claude'), source = { toolId: 'claude' as const, sourceId: h.home, nativeId: sourceId };
+  await h.groups.bindSession('oc_aux', 'ou_owner', h.groups.get('oc_aux')!.generation, source, async () => {});
+  expect(announcements()).toHaveLength(2);
+  vi.mocked(tool.listSessions).mockResolvedValue([{ nativeId: sourceId, name: '原会话', cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 },
+    { nativeId: freshId, name: '其他会话', cwd: h.cwd, createdAtMs: 1, updatedAtMs: 3 }]);
+  const restored = new AuxiliaryGroups(h.deps); await restored.load();
+  await restored.bindSession('oc_aux', 'ou_owner', restored.get('oc_aux')!.generation, { ...source, nativeId: freshId }, async () => {});
+  expect(h.bindings.get('oc_aux')?.nativeId).toBe(freshId); expect(announcements()).toHaveLength(2);
+  await restored.leave('oc_aux', 'ou_owner', async () => {}); await restored.joined(joined);
+  await restored.bindSession('oc_aux', 'ou_owner', restored.get('oc_aux')!.generation, source, async () => {});
+  expect(announcements()).toHaveLength(2); expect(restored.get('oc_aux')?.hasBound).toBe(true);
+  await h.activate('oc_another');
+  expect(h.send.mock.calls.filter(([chat, content]) => chat === 'oc_another' && JSON.stringify(content).includes('会话共享已启用'))).toHaveLength(1);
+});
+
+it('migrates already-bound legacy chats without announcing again', async () => {
+  const h = await harness(); await h.activate();
+  const stored = JSON.parse(await readFile(h.deps.path, 'utf8')); delete stored.groups.oc_aux.hasBound;
+  await writeFile(h.deps.path, JSON.stringify(stored));
+  const restored = new AuxiliaryGroups(h.deps); await restored.load(); expect(restored.get('oc_aux')?.hasBound).toBe(true);
+  h.send.mockClear();
+  await restored.bindSession('oc_aux', 'ou_owner', restored.get('oc_aux')!.generation,
+    { toolId: 'claude', sourceId: h.home, nativeId: sourceId }, async () => {});
+  expect(h.send).not.toHaveBeenCalled();
+});
+
+it('does not consume the first-binding announcement when routing fails, including after restoring the pending intent', async () => {
+  const h = await harness(); await h.groups.joined(joined); h.send.mockClear();
+  const original = h.bindings.linkAuxiliary.bind(h.bindings);
+  const link = vi.spyOn(h.bindings, 'linkAuxiliary').mockImplementationOnce(() => { throw Error('route write failed'); });
+  const source = { toolId: 'claude' as const, sourceId: h.home, nativeId: sourceId };
+  await expect(h.groups.bindSession('oc_aux', 'ou_owner', h.groups.get('oc_aux')!.generation, source, async () => {})).rejects.toThrow('route write failed');
+  expect(h.groups.get('oc_aux')?.hasBound).toBe(false); expect(h.send).not.toHaveBeenCalled();
+  link.mockImplementation(original);
+  const restored = new AuxiliaryGroups(h.deps); await restored.load(); expect(restored.get('oc_aux')?.hasBound).toBe(false);
+  await restored.bindSession('oc_aux', 'ou_owner', restored.get('oc_aux')!.generation, source, async () => {});
+  expect(h.send.mock.calls.filter(([chat]) => chat === 'oc_aux')).toHaveLength(1);
+  expect(restored.get('oc_aux')?.hasBound).toBe(true);
+});

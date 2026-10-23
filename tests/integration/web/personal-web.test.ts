@@ -803,10 +803,13 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('console manages p
   const after = await h.consoleService.snapshot(true);
   expect(after.sharedGroups[0]).toMatchObject({ status: 'active', targetId: target.id, associationId: target.id, sessionName: 'AA-web', canBind: true });
   expect(after.sharedGroups[0]!.sessionId).toBe((await h.service.list())[0]!.id);
+  expect(h.send.mock.calls.filter(([chat, content]: unknown[]) => chat === 'oc_shared' && JSON.stringify(content).includes('会话共享已启用'))).toHaveLength(1);
+  const announcements = h.send.mock.calls.length;
   const other = { ...h.native, nativeId: 'another', name: 'AA-另一个会话' }; h.provider.list.mockResolvedValue([h.native, other]);
   const choices = await h.consoleService.snapshot(true), next = choices.sharedTargets.find(t => t.name === other.name)!;
   expect((await h.request('/api/console/action', { action: 'shared-bind', id: after.sharedGroups[0]!.id, target: next.id })).status).toBe(200);
   expect(h.bindings.get('oc_shared')?.nativeId).toBe('another'); expect(h.bindings.get('oc_group')?.nativeId).toBe('native');
+  expect(h.send).toHaveBeenCalledTimes(announcements);
   expect((await h.request('/api/console/action', { action: 'shared-leave', id: after.sharedGroups[0]!.id })).status).toBe(409);
   const current = (await h.consoleService.snapshot(true)).sharedGroups[0]!;
   const stop = vi.fn(async () => false); h.controls.workerRuntimes!.get(tool)!.replies = { runNow: async () => {}, stopScope: stop };
