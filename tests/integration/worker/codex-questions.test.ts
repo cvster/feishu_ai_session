@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({ snapshot: {} as any, reader: {} as any }));
 vi.mock('../../../src/session/codex-thread-reader', () => ({ CodexThreadReader: class { constructor() { return mocks.reader; } } }));
 vi.mock('../../../src/session/codex-history', () => ({ listCodexThreadHistory: async () => [{ threadId: 'thread', cwd: '/project', createdAtMs: 1, updatedAtMs: 2 }] }));
 const cleanups: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
 beforeEach(() => {
   mocks.snapshot = { id: 'thread', status: { type: 'active' }, turns: [{ id: 'turn', status: 'inProgress', items: [
     { type: 'userMessage', content: [{ type: 'text', text: 'input' }] },
@@ -66,4 +66,25 @@ it('responds to synchronous prompts through their original callback and rejects 
   expect(await h.sessions.answer!('thread', id, { 'sync-q': { answers: ['A'] } })).toBe(true);
   expect(respond).toHaveBeenCalledOnce(); expect(mocks.reader.steerTurn).not.toHaveBeenCalled();
   await expect(h.sessions.answer!('thread', id, { unknown: { answers: ['secret'] } })).rejects.toThrow();
+});
+
+it('automatically continues observed paused conversations without a worker job and stops after observation expires', async () => {
+  vi.useFakeTimers();
+  mocks.snapshot.status.type = 'idle'; mocks.snapshot.turns[0].status = 'interrupted';
+  Object.assign(mocks.reader, {
+    readThreadStatus: vi.fn(async () => mocks.snapshot.status), persistedTurnTerminal: vi.fn(async () => 'interrupted'),
+    listQueuedSubmissions: vi.fn(async () => []), addQueuedSubmission: vi.fn(async () => ({ id: 'queue' })),
+    startQueuedTurn: vi.fn(async () => 'continued'), rpc: vi.fn(async () => ({ goal: null })),
+  });
+  const h = await fixture();
+  await h.sessions.list(); await vi.advanceTimersByTimeAsync(15_000);
+  expect(mocks.reader.startQueuedTurn).not.toHaveBeenCalled();
+  await h.sessions.conversation!('thread'); await vi.advanceTimersByTimeAsync(15_000);
+  await vi.waitFor(() => expect(mocks.reader.startQueuedTurn).toHaveBeenCalledOnce());
+  // A different paused turn is ignored once the bridge stops observing it.
+  await vi.advanceTimersByTimeAsync(60_000); mocks.snapshot.turns[0].id = 'later-pause';
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(mocks.reader.startQueuedTurn).toHaveBeenCalledOnce();
+  await h.sessions.close!(); await vi.advanceTimersByTimeAsync(15_000);
+  expect(mocks.reader.startQueuedTurn).toHaveBeenCalledOnce();
 });

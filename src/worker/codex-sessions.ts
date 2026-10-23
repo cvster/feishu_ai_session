@@ -14,6 +14,7 @@ import { parseCodexAsyncInput, serializeCodexAsyncAnswers, codexAsyncAnsweredIds
 import { codexInputKey, type CodexInputAnswers, type CodexInputPrompt } from '../session/codex-user-input';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { WorkerApiError } from './tool-api';
+import { startCodexAutoContinue } from './codex-auto-continue';
 
 /** Native RPC, history formats and answer compatibility are confined to this provider. */
 export function createCodexWorkerSessions(options: CodexThreadReaderOptions, sourceId: string, agent: AgentAdapter, botAppId = ''): WorkerSessionService {
@@ -43,6 +44,10 @@ export function createCodexWorkerSessions(options: CodexThreadReaderOptions, sou
     },
     onDisconnect() { prompts.clear(); } });
   const metadata = new Map<string, ToolSession>();
+  const observed = new Map<string, number>();
+  const autoContinue = startCodexAutoContinue({ client: reader,
+    targets: () => [...observed].filter(([id, at]) => Date.now() - at < 60_000 && !metadata.get(id)?.archived).map(([id]) => id),
+    statePath: join(options.profileStateDir, 'auto-continue.json') });
   const rosterPath = join(options.profileStateDir, 'native-roster.json');
   let rosterLoaded = false;
   const list = async () => {
@@ -64,6 +69,7 @@ export function createCodexWorkerSessions(options: CodexThreadReaderOptions, sou
     if (!metadata.has(id)) await list();
     const row = metadata.get(id); if (!row) throw new WorkerApiError(404, 'Native session not found', 'not-found');
     const snapshot = await reader.readThread(id), archived = (await reader.listArchivedThreadIds()).includes(id);
+    if (archived) observed.delete(id); else observed.set(id, Date.now());
     const now = Date.now();
     return { id, name: snapshot.name ?? row.name, cwd: row.cwd, archived,
       turns: snapshot.turns.map(turn => ({ id: turn.id, createdAtMs: turn.startedAtMs ?? row.createdAtMs,
@@ -130,6 +136,6 @@ export function createCodexWorkerSessions(options: CodexThreadReaderOptions, sou
       if (question.request.kind !== 'async' || snapshot.status?.type !== 'active') return false;
       await reader.steerTurn(id, turn.id, serializeCodexAsyncAnswers(question.request, answers)); return true;
     },
-    async close() { await reader.stop(); },
+    async close() { await autoContinue.stop(); await reader.stop(); },
   };
 }
