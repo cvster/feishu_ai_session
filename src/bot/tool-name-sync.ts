@@ -67,7 +67,7 @@ export async function startToolNameSync(options: {
     if (stopped || !exclusive(scope, id) || !await options.ready()) throw new Error('会话改名暂不可用');
     const row = (await tool.listSessions()).find(row => row.nativeId === id && !row.archived);
     if (!row) throw new Error('会话不存在或已归档');
-    await sync.rename(scope, { id, name: row.name }, name, () => !stopped && exclusive(scope, id));
+    return sync.rename(scope, { id, name: row.name }, name, () => !stopped && exclusive(scope, id));
   }, async stop() { stopped = true; clearInterval(timer); await running; } };
 }
 
@@ -92,7 +92,7 @@ export async function startWorkerNameSync(options: {
   return {
     async rename(toolId: string, scope: string, id: string, name: string) {
       const handle = handles.get(toolId); if (!handle) throw new Error('Worker 尚未支持名称同步');
-      await handle.rename(scope, id, name);
+      return handle.rename(scope, id, name);
     },
     async tick() { await Promise.all([...handles.values()].map(handle => handle.tick())); },
     async stop() { await Promise.all([...handles.values()].map(handle => handle.stop())); },

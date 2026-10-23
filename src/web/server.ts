@@ -6,6 +6,7 @@ import { bridgeWebPage } from '../../apps/bridge-web/page';
 import { bridgeConsolePage } from '../../apps/bridge-web/console';
 import type { BridgeConsoleService } from './console';
 import { GROUP_AVATAR_IMAGES } from '../bot/group-avatar-images';
+import { log } from '../core/logger';
 
 async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
   if (!req.headers['content-type']?.startsWith('application/json')) throw new WebError(415, '仅接受 JSON');
@@ -124,6 +125,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     throw new WebError(404, '接口不存在');
   })().catch(e => {
     if (res.headersSent) { res.end(); return; }
+    if (!(e instanceof WebError)) log.warn('web', 'request-failed', { method: req.method, path: req.url?.split('?')[0], err: e instanceof Error ? e.message : String(e) });
     respond(res, e instanceof WebError ? e.status : 503, { error: e instanceof WebError ? e.message : '桥接服务暂时不可用，请稍后重试' });
   }); };
   let running: Promise<void> | undefined;

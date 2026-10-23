@@ -430,6 +430,21 @@ it('coordinates Web/native/group names without old snapshots reverting an explic
   expect((await h.service.list())[0]?.name).toBe('AA-工具改名');
 });
 
+it('accepts a Web rename while the worker is executing and syncs the native title after completion', async () => {
+  const h = await harness('kilo'), id = (await h.service.list())[0]!.id;
+  const job = await h.client.submit({ requestKey: 'rename-while-running', options: { ...h.options, sessionId: 'native', initialSessionId: undefined } });
+  await vi.waitFor(async () => expect((await h.client.list()).find(j => j.id === job.id)?.status).toBe('running'));
+  const response = await h.request('/api/sessions/' + id + '/rename', { name: 'AA-Web忙时改名' });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ name: 'AA-Web忙时改名', pendingSync: true });
+  expect(await h.channel.getChatInfo('oc_group')).toMatchObject({ name: 'AA-Web忙时改名' });
+  expect((await h.service.list())[0]?.name).toBe('AA-Web忙时改名');
+  expect(h.native.name).toBe('AA-web');
+  h.finish(); await vi.waitFor(async () => expect((await h.client.list()).find(j => j.id === job.id)?.status).toBe('completed'));
+  await h.names.tick(); expect(h.native.name).toBe('AA-Web忙时改名');
+  expect((await h.client.list())).toHaveLength(1);
+});
+
 it('retains offline routes but excludes shared, archived and changed-account routes and fails closed on writes', async () => {
   const h = await harness(); const id = (await h.service.list())[0]!.id;
   h.bindings.set('oc_shared', { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'shared', linkedSource: { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'shared' } });

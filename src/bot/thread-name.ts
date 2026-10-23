@@ -15,6 +15,8 @@ interface NameState {
   /** Ignore an old snapshot until our own write has been observed. */
   previousGroupName?: string;
   previousThreadName?: string;
+  /** A confirmed Web/group rename still needs its native acknowledgement. */
+  pendingSessionRename?: boolean;
 }
 
 export interface CodexNameSyncOptions {
@@ -69,22 +71,31 @@ export class SessionNameSync {
   }
 
   /** Explicit Web rename and periodic observations share a serialized baseline. */
-  rename(chatId: string, snapshot: NamedSessionSnapshot, name: string, isActive: () => boolean): Promise<void> {
+  rename(chatId: string, snapshot: NamedSessionSnapshot, name: string, isActive: () => boolean): Promise<{ pendingSync: boolean }> {
     return this.serialize(async () => {
       if (!this.options.renameSession || !isActive()) throw new Error('会话绑定已失效');
       if (await this.options.channel.getChatMode(chatId) !== 'group') throw new Error('仅支持个人 AI 会话群');
       const oldGroup = (await this.options.channel.getChatInfo(chatId)).name?.trim() ?? '';
       if (!isActive()) throw new Error('会话绑定已变化');
       const key = this.stateKey(chatId, snapshot.id);
-      // Persist before writing: even a lost native acknowledgement is repaired
-      // from its next observation instead of letting the old group title win.
+      // The group is the durable request, just as when renamed in Feishu.
+      // Do not modify the native title if Feishu rejects the group write.
       await this.save(key, { groupName: oldGroup, threadName: snapshot.name?.trim() ?? '' });
-      await this.options.renameSession(snapshot.id, name);
-      if (!isActive()) throw new Error('会话绑定已变化，请检查原工具名称');
       await renameChat(this.options.channel, chatId, name);
-      await this.save(key, { groupName: name, threadName: name, previousGroupName: oldGroup, previousThreadName: snapshot.name?.trim() ?? '' });
+      await this.save(key, { groupName: name, threadName: snapshot.name?.trim() ?? '', previousGroupName: oldGroup, pendingSessionRename: true });
+      let pendingSync = false;
+      try {
+        if (!isActive()) throw new Error('会话绑定已变化');
+        if (snapshot.name?.trim() !== name) await this.options.renameSession(snapshot.id, name);
+        await this.save(key, { groupName: name, threadName: name, previousGroupName: oldGroup, previousThreadName: snapshot.name?.trim() ?? '' });
+      } catch (err) {
+        pendingSync = true;
+        log.warn('session', 'web-name-sync-pending', { chatId, threadId: snapshot.id, err: err instanceof Error ? err.message : String(err) });
+      }
+      if (!isActive()) throw new Error('会话绑定已变化，请检查群与原工具名称');
       this.updateKnownChat(chatId, name);
       if (isActive()) await this.options.onSynchronized?.(chatId, snapshot.id, name);
+      return { pendingSync };
     });
   }
 
@@ -151,10 +162,13 @@ export class SessionNameSync {
     // leave the baseline untouched and retry, never overwrite either side.
     const groupName = (await this.options.channel.getChatInfo(chatId)).name?.trim();
     if (!groupName || !isActive()) return;
+    // A delayed group echo must not cancel a pending explicit request, even
+    // if the native title changed independently while the worker was busy.
+    if (state?.pendingSessionRename && groupName === state.previousGroupName && groupName !== state.groupName) return;
 
     const repairBaseline = state && state.groupName !== state.threadName &&
       groupName === state.groupName && threadName === state.threadName;
-    if (!state || repairBaseline || (groupName !== state.groupName && groupName !== state.previousGroupName)) {
+    if (!state || repairBaseline || (state.pendingSessionRename && groupName === state.groupName) || (groupName !== state.groupName && groupName !== state.previousGroupName)) {
       // First binding, or a new group rename: group wins this observation.
       // If both sides changed between checks, this is the deterministic tie-break.
       // Older/failed explicit renames can leave an unequal, unchanged baseline;

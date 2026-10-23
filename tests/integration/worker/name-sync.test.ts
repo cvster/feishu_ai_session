@@ -10,7 +10,7 @@ import { SessionCatalog } from '../../../src/session/catalog';
 import { startToolNameSync, startWorkerNameSync } from '../../../src/bot/tool-name-sync';
 import { ToolRegistry, type AgentTool } from '../../../src/tools/types';
 import { DurableAgentAdapter } from '../../../src/worker/adapter';
-import { WorkerClient } from '../../../src/worker/client';
+import { WorkerClient, WorkerRequestError } from '../../../src/worker/client';
 import type { WorkerCapabilities } from '../../../src/worker/protocol';
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.useRealTimers(); vi.restoreAllMocks(); });
@@ -203,13 +203,40 @@ it('stops polling and prevents a late group lookup from renaming after disconnec
   const calls=h.list.mock.calls.length;await first.tick();expect(h.list).toHaveBeenCalledTimes(calls);
 });
 
-it('retries a failed Web group rename from the native title and keeps the saved baseline across restart', async () => {
+it('does not change the native title when Feishu rejects a Web rename, including after restart', async () => {
   const h = await fixture('claude'), sync = await h.startRegistered();
+  const oldName = h.bindings.get('oc_group')?.name;
+  h.rename.mockClear();
   h.update.mockRejectedValueOnce(new Error('group write failed'));
   await expect(sync.rename('claude', 'oc_group', 'session_native', 'AA-Web')).rejects.toThrow('group write failed');
   await sync.stop(); const restarted = await h.startRegistered(); await restarted.tick();
-  expect(h.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: { name: 'AA-Web' } }));
+  expect(h.update).toHaveBeenCalledOnce();
+  expect(h.rename).not.toHaveBeenCalled();
+  expect(h.bindings.get('oc_group')?.name).toBe(oldName);
+});
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('persists a pending Web %s rename and retries it after restart without accepting delayed echoes', async toolId => {
+  const h = await fixture(toolId), sync = await h.startRegistered();
+  const oldName = h.bindings.get('oc_group')!.name!;
+  h.rename.mockClear();
+  h.rename.mockRejectedValueOnce(new WorkerRequestError(429, 'worker busy', true, 'busy'));
+  expect(await sync.rename(toolId, 'oc_group', 'session_native', 'AA-Web')).toEqual({ pendingSync: true });
+  expect(await h.channel.getChatInfo('oc_group')).toMatchObject({ name: 'AA-Web' });
   expect(h.bindings.get('oc_group')?.name).toBe('AA-Web');
+  await sync.stop();
+  // Neither a delayed old group echo nor an independent native title cancels
+  // the confirmed request while its native write is still pending.
+  h.group(oldName); h.title('native-generated-title');
+  const restarted = await h.startRegistered();
+  expect(h.rename).toHaveBeenCalledOnce();
+  expect(h.update).toHaveBeenCalledOnce();
+  h.group('AA-Web'); await restarted.tick();
+  expect(h.rename).toHaveBeenLastCalledWith('session_native', 'AA-Web');
+  expect(h.rename).toHaveBeenCalledTimes(2);
+  await restarted.tick();
+  expect(h.rename).toHaveBeenCalledTimes(2);
+  const state = JSON.parse(await readFile(join(h.dir, `${toolId}-name-sync.json`), 'utf8'));
+  expect(state.bindings[0][1]).not.toHaveProperty('pendingSessionRename');
 });
 
 it.each(['codex','claude','zcode','kilo','dsh'] as const)('repairs an unchanged unequal %s baseline from the confirmed group name and resumes both-way sync', async toolId => {

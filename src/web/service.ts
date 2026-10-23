@@ -40,7 +40,7 @@ export class PersonalSessionService {
   constructor(private readonly deps: {
     controls: Controls; catalog?: SessionCatalog; channel: LarkChannel; path: string;
     enqueue(msg: NormalizedMessage): Promise<void>;
-    rename(toolId: string, scope: string, id: string, name: string): Promise<void>;
+    rename(toolId: string, scope: string, id: string, name: string): Promise<{ pendingSync: boolean }>;
     control?(id: string, scope: string, owner: string, action: string, values?: unknown): Promise<WebControlResult>;
   }) {}
   async load() {
@@ -200,9 +200,9 @@ export class PersonalSessionService {
     const { session, b } = await this.resolve(id, true);
     if (!session.canRename) throw new WebError(409, '此 worker 尚未支持名称同步');
     this.assertBinding(id, session.scope);
-    await this.deps.rename(b.toolId, session.scope, b.nativeId!, name);
+    const result = await this.deps.rename(b.toolId, session.scope, b.nativeId!, name);
     this.groups.set(session.scope, { mode: 'group', name, bindingName: this.deps.controls.toolBindings?.get(session.scope)?.name });
-    this.listedAt = 0; return { name };
+    this.listedAt = 0; return { name, pendingSync: result.pendingSync };
   }
   async control(id: string, action: string, values?: unknown) {
     return this.serial('control:' + id, async () => {

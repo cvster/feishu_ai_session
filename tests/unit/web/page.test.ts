@@ -198,9 +198,11 @@ it('renames the sidebar menu target without loading or editing the displayed con
   h.node('new-name').value = '修改的第二个会话';
   const saving = h.node('rename-form').onsubmit!({ preventDefault() {} });
   expect(h.requests[1]).toMatchObject({ path: '/api/sessions/' + h.rows[1]!.id + '/rename', data: { name: '修改的第二个会话' } });
-  h.requests[1]!.resolve({ name: '修改的第二个会话' }); await saving;
+  h.requests[1]!.resolve({ name: '修改的第二个会话', pendingSync: true }); await saving;
   expect(h.rows[0]!.name).toBe('会话0'); expect(h.rows[1]!.name).toBe('修改的第二个会话');
   expect(h.node('title').textContent).toBe('会话0'); expect(h.node('rename-dialog').open).toBe(false);
+  expect(h.node('notice').hidden).toBe(false);
+  expect(h.node('notice').textContent).toBe('群名已修改，会话名等待工具可用后自动同步');
 });
 
 it.each(['session-archive', 'session-copy'])('keeps %s confirmation callbacks tied to an unselected sidebar target', async button => {
