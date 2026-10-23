@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { BotAddedEvent, CardActionEvent, LarkChannel } from '@larksuite/channel';
+import type { BotAddedEvent, CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { AuxiliaryGroups, wrapAuxiliaryPrompt } from '../../../src/bot/auxiliary-groups';
 import { isRetiredPrivateInput, auxiliaryUserIsMember } from '../../../src/bot/auxiliary-private';
 import { createBoundChat } from '../../../src/bot/group';
@@ -600,4 +600,48 @@ describe('private FF groups', () => {
     expect(prompt.rules.permissions).toBe('除了在本机修改源码和拷贝源码，其他都允许执行；源码不包括脚本');
     expect(prompt.rules.permissions).toContain('源码不包括脚本');
   });
+});
+
+it('switches one shared entrance across tools and rotates its generation without changing originals, peers or native history', async () => {
+  const h = await harness('claude'); await h.activate(); await h.activate('oc_aux_2');
+  const old = h.groups.get('oc_aux')!.generation, original = h.bindings.get('oc_original')!;
+  const input = { messageId: 'late-input' } as NormalizedMessage;
+  await h.groups.noteRequest('oc_aux', input.messageId, 'ou_member', input);
+  expect(h.groups.matchesRequestGeneration('oc_aux', input)).toBe(true);
+  h.tools.register({ id: 'codex', sourceId: 'another-worker', label: 'Codex', agent: new FakeAgentAdapter({ id: 'codex', events: [] }),
+    listSessions: async () => [{ nativeId: freshId, name: 'AA-new', cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 }] });
+  const check = vi.fn(async () => {});
+  await h.groups.bindSession('oc_aux', 'ou_owner', old, { toolId: 'codex', sourceId: 'another-worker', nativeId: freshId }, check);
+  expect(check).toHaveBeenCalledOnce(); expect(h.groups.get('oc_aux')!.generation).not.toBe(old);
+  expect(h.groups.matchesRequestGeneration('oc_aux', input)).toBe(false);
+  expect(h.bindings.get('oc_aux')).toMatchObject({ toolId: 'codex', nativeId: freshId });
+  expect(h.bindings.get('oc_aux_2')).toMatchObject({ toolId: 'claude', nativeId: sourceId });
+  expect(h.groups.isActive('oc_aux_2')).toBe(true); expect(h.bindings.get('oc_original')).toEqual(original);
+  expect(h.archive).not.toHaveBeenCalled(); expect(await readFile(h.history, 'utf8')).toBe('original history\n');
+  await expect(h.groups.bindSession('oc_aux', 'ou_owner', old, { toolId: 'claude', sourceId: h.home, nativeId: sourceId }, check)).rejects.toThrow('已变化');
+  await expect(h.groups.leave('oc_aux', 'ou_owner', async () => {}, old)).rejects.toThrow('已变化');
+  await h.groups.flush(); const restored = new AuxiliaryGroups(h.deps); await restored.load();
+  expect(restored.get('oc_aux')!.source).toMatchObject({ toolId: 'codex', nativeId: freshId }); expect(restored.isActive('oc_aux')).toBe(true);
+});
+
+it('replaces an archived shared source without unarchiving that native conversation', async () => {
+  const h = await harness(); await h.activate(); const row = h.groups.get('oc_aux')!;
+  h.catalog.archiveScope('oc_aux', sourceId); h.bindings.archive('claude', h.home, sourceId);
+  vi.mocked(h.tools.get('claude').listSessions).mockResolvedValue([{ nativeId: freshId, name: '新会话', cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 }]);
+  expect(h.groups.isActive('oc_aux')).toBe(false);
+  await h.groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'claude', sourceId: h.home, nativeId: freshId }, async () => {});
+  expect(h.groups.isActive('oc_aux')).toBe(true); expect(h.catalog.isScopeArchived('oc_aux')).toBe(false);
+  expect(h.bindings.isArchived('claude', h.home, sourceId)).toBe(true); expect(h.archive).not.toHaveBeenCalled();
+});
+
+it('keeps a failed route switch inactive and recoverable instead of routing messages to a half-written binding', async () => {
+  const h = await harness(); await h.activate(); const row = h.groups.get('oc_aux')!;
+  vi.mocked(h.tools.get('claude').listSessions).mockResolvedValue([{ nativeId: freshId, name: '新会话', cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 }]);
+  const flush = vi.spyOn(h.bindings, 'flush').mockRejectedValueOnce(Error('disk unavailable'));
+  await expect(h.groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'claude', sourceId: h.home, nativeId: freshId }, async () => {})).rejects.toThrow('disk unavailable');
+  expect(h.groups.get('oc_aux')?.status).toBe('pending'); expect(h.groups.isActive('oc_aux')).toBe(false);
+  expect(JSON.parse(await readFile(h.deps.path, 'utf8')).groups.oc_aux.status).toBe('pending'); flush.mockRestore();
+  const current = h.groups.get('oc_aux')!;
+  await h.groups.bindSession(current.chatId, current.ownerId, current.generation, { toolId: 'claude', sourceId: h.home, nativeId: freshId }, async () => {});
+  expect(h.groups.isActive('oc_aux')).toBe(true); expect(h.bindings.get('oc_aux')?.nativeId).toBe(freshId);
 });

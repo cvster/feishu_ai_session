@@ -29,6 +29,12 @@ export class BridgeConsoleService {
   constructor(private deps: { controls: Controls; catalog?: SessionCatalog; channel: LarkChannel; personal: PersonalSessionService;
     syncNames?(toolId?: string): Promise<void>; logs?(): Promise<string> }) {}
   private owner() { return this.deps.personal.ownerIdentity(); }
+  private groupId(row: { chatId: string; generation: string; ownerId: string }) {
+    return hash([this.deps.controls.profile, this.deps.controls.profileConfig.accounts.app.id, row.chatId, row.generation, row.ownerId]);
+  }
+  private targetId(toolId: string, sourceId: string, nativeId: string) {
+    return hash([this.deps.controls.profile, this.deps.controls.profileConfig.accounts.app.id, toolId, sourceId, nativeId]);
+  }
   async snapshot(force = false) {
     this.owner();
     if (this.running) return this.running;
@@ -37,7 +43,7 @@ export class BridgeConsoleService {
     return this.running;
   }
   private async collect() {
-    const owner = this.owner(), c = this.deps.controls, entries = c.toolBindings?.entries() ?? [];
+    const owner = this.owner(), c = this.deps.controls, entries = c.toolBindings?.entries() ?? [], sharedRows = c.auxiliary?.groups?.() ?? [];
     const ids = new Set([...c.toolRegistry?.all().map(t => t.id) ?? [], ...entries.map(([, b]) => b.toolId), ...c.workerRuntimes?.keys() ?? []]);
     for (const id of this.observations.keys()) if (!ids.has(id as AgentKind)) this.observations.delete(id);
     await Promise.all([...ids].map(async id => {
@@ -58,8 +64,8 @@ export class BridgeConsoleService {
       } catch (e) { o.error = clean(e instanceof Error ? e.message : e); }
       this.observations.set(id, o);
     }));
-    const chats = new Map<string, { name?: string; mode?: string; error?: string }>();
-    const chatIds = [...new Set(entries.map(([scope]) => scope.split(':')[0]!).filter(id => id.startsWith('oc_')))];
+    const chats = new Map<string, { name?: string; mode?: string; status?: string; error?: string }>();
+    const chatIds = [...new Set([...entries.map(([scope]) => scope.split(':')[0]!), ...sharedRows.map(row => row.chatId)].filter(id => id.startsWith('oc_')))];
     // Limit Feishu fan-out while inspecting many bindings.
     let index = 0;
     await Promise.all(Array.from({ length: Math.min(6, chatIds.length) }, async () => {
@@ -68,7 +74,7 @@ export class BridgeConsoleService {
         try {
           const r = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: id } });
           if (r.code || !r.data) throw new Error(r.msg || '群信息未确认');
-          chats.set(id, { name: r.data.name, mode: r.data.chat_mode });
+          chats.set(id, { name: r.data.name, mode: r.data.chat_mode, status: r.data.chat_status });
         } catch (e) { chats.set(id, { error: clean(e instanceof Error ? e.message : e) }); }
       }
     }));
@@ -78,7 +84,7 @@ export class BridgeConsoleService {
       const native = o?.sourceId === b.sourceId ? o.native.find(r => r.nativeId === ref.nativeId) : undefined;
       const catalog = this.deps.catalog?.entries().find(r => r.scopeId === scope && r.status === 'active' && r.agentId === b.toolId &&
         (!r.sourceId || r.sourceId === b.sourceId) && (r.threadId ?? r.sessionId) === ref.nativeId);
-      const personal = isPersonalWorkgroup(scope, b), archived = this.deps.catalog?.isScopeArchived(scope) ||
+      const personal = !c.auxiliary?.isAuxiliary(scope) && isPersonalWorkgroup(scope, b), archived = this.deps.catalog?.isScopeArchived(scope) ||
         (ref.nativeId && c.toolBindings?.isArchived(ref.toolId, ref.sourceId, ref.nativeId)) || native?.archived;
       const issues = [group?.error ? '群状态未确认' : '', o?.sourceId && o.sourceId !== b.sourceId ? 'Worker 身份不匹配' : '',
         !o?.online ? 'Worker 离线' : '', archived ? '会话已归档' : '',
@@ -93,6 +99,34 @@ export class BridgeConsoleService {
         canSync: !!this.deps.syncNames && personal && !archived && o?.online === true && o.nativeKnown && !!native && o.sourceId === b.sourceId && group?.mode === 'group' && o.health?.capabilities?.nativeSessionNames === true };
     });
     const items = this.items();
+    const sharedTargets = [...this.observations.values()].flatMap(o => o.online && o.nativeKnown && o.sourceId ?
+      o.native.filter(s => c.auxiliary?.shareable?.(o.id, o.sourceId!, s)).map(s => ({ id: this.targetId(o.id, o.sourceId!, s.nativeId),
+        toolId: o.id, tool: o.label, name: s.name || s.nativeId, cwd: s.cwd, updatedAt: s.updatedAtMs })) : [])
+      .sort((a, b) => Number(b.name.trimStart().startsWith('AA')) - Number(a.name.trimStart().startsWith('AA')) || b.updatedAt - a.updatedAt || a.name.localeCompare(b.name));
+    const sharedGroups = sharedRows.map(row => {
+      const group = chats.get(row.chatId), ref = row.source, o = ref && this.observations.get(ref.toolId);
+      const native = o?.sourceId === ref?.sourceId ? o?.native.find(s => s.nativeId === ref?.nativeId) : undefined;
+      const binding = c.toolBindings?.get(row.chatId), connected = ['group', 'topic'].includes(group?.mode ?? '') && (!group?.status || group.status === 'normal');
+      const routeWorker = binding ? this.observations.get(binding.toolId) : undefined;
+      const busy = items.some(i => i.scope === row.chatId && ['pending', 'queued', 'accepted', 'running', 'unknown', 'accepted_unconfirmed'].includes(i.status));
+      const issues = [group?.error && row.status !== 'archived' ? '群状态未确认' : '',
+        row.status === 'active' && this.deps.catalog?.isScopeArchived(row.chatId) ? '本群入口已归档' : '',
+        !connected && !group?.error && row.status !== 'archived' ? '机器人不在群内或群已关闭' : '',
+        ref && row.status !== 'archived' && !o?.online ? 'Worker 离线' : '',
+        ref && o?.online && o.sourceId !== ref.sourceId ? 'Worker 身份不匹配' : '',
+        ref && o?.online && !o.nativeKnown ? '原生会话状态未确认' : '',
+        native?.archived || ref && c.toolBindings?.isArchived(ref.toolId, ref.sourceId, ref.nativeId) ? '会话已归档' : '',
+        ref && o?.nativeKnown && o.health?.capabilities?.sessionListAuthoritative && !native ? '原生会话不存在' : ''].filter(Boolean);
+      return { id: this.groupId(row), chatId: row.chatId, name: group?.name ?? row.name, status: row.status,
+        active: c.auxiliary!.isActive(row.chatId), kind: row.privateGroup ? '私聊群' : '共享群',
+        toolId: ref?.toolId, tool: o?.label ?? ref?.toolId ?? '未选择', sessionName: native?.name ?? (binding?.nativeId === ref?.nativeId ? binding?.name : undefined) ?? ref?.nativeId ?? '尚未关联',
+        targetId: row.status === 'active' && ref ? this.targetId(ref.toolId, ref.sourceId, ref.nativeId) : undefined, cwd: native?.cwd ?? row.cwd ?? '',
+        parentChatId: row.privateGroup?.parentChatId, issues, busy,
+        sessionId: ref ? personalRows.find(s => { const b = c.toolBindings?.get(s.scope); return b?.toolId === ref.toolId && b.sourceId === ref.sourceId && b.nativeId === ref.nativeId; })?.id : undefined,
+        canBind: row.ownerId === owner && !row.privateGroup && ['pending', 'active'].includes(row.status) && connected && !this.deps.catalog?.isChatDissolved(row.chatId) &&
+          !busy && (!binding || routeWorker?.online === true && routeWorker.jobsKnown && binding.sourceId === routeWorker.sourceId),
+        canLeave: row.ownerId === owner && row.status !== 'archived' };
+    });
     const allJobs = [...this.observations.values()].flatMap(o => o.jobs);
     const workers = [...ids].map(id => {
       const o = this.observations.get(id)!;
@@ -105,7 +139,7 @@ export class BridgeConsoleService {
       connection: this.deps.channel.getConnectionStatus?.()?.state ?? 'unknown' },
       summary: { workers: workers.length, online: workers.filter(w => w.online).length, bindings: bindings.length,
         pending: items.filter(i => ['pending', 'queued'].includes(i.status)).length, active: allJobs.filter(j => ['accepted', 'running'].includes(j.status)).length,
-        failed: allJobs.filter(j => ['failed', 'unknown'].includes(j.status)).length }, workers, bindings,
+        failed: allJobs.filter(j => ['failed', 'unknown'].includes(j.status)).length, sharedGroups: sharedGroups.length }, workers, bindings, sharedGroups, sharedTargets,
       items: items.sort((a, b) => Number(['pending', 'queued', 'accepted', 'running'].includes(b.status)) - Number(['pending', 'queued', 'accepted', 'running'].includes(a.status)) || b.createdAt - a.createdAt).slice(0, 300),
       canDiscover: !!c.refreshWorkerDiscovery, canSync: !!this.deps.syncNames };
   }
@@ -163,14 +197,41 @@ export class BridgeConsoleService {
     if (item.reason) timeline.push({ at: item.updatedAt, title: '最近处理原因', detail: item.reason });
     return { item, timeline: timeline.slice(-100), logs: await this.logs(item.scope) };
   }
-  async action(action: string, id?: string) {
-    this.owner(); const key = action + ':' + (id ?? '');
+  async action(action: string, id?: string, target?: string) {
+    this.owner(); const key = action + ':' + (id ?? '') + ':' + (target ?? '');
     if (this.actions.has(key)) return this.actions.get(key);
-    const task = this.perform(action, id).finally(() => { this.actions.delete(key); this.cached = undefined; });
+    const task = this.perform(action, id, target).finally(() => { this.actions.delete(key); this.cached = undefined; });
     this.actions.set(key, task); return task;
   }
-  private async perform(action: string, id?: string) {
+  private async perform(action: string, id?: string, target?: string) {
     const c = this.deps.controls;
+    if (['shared-bind', 'shared-leave'].includes(action) && id && c.auxiliary) {
+      const owner = this.owner(), snapshot = await this.snapshot(true), row = c.auxiliary.groups().find(r => this.groupId(r) === id);
+      if (!row || row.ownerId !== owner || this.owner() !== owner) throw new WebError(409, '共享群关联或所有者已变化，请刷新');
+      try {
+        if (action === 'shared-leave') {
+          if (row.status === 'archived') return { ok: true };
+          await c.auxiliary.leave(row.chatId, owner, async () => {
+            const b = c.toolBindings?.get(row.chatId);
+            if (b) {
+              const replies = c.workerRuntimes?.get(b.toolId)?.replies;
+              if (!replies) throw new WebError(503, 'Worker 暂不可用，退出尚未完成，请稍后重试');
+              await replies.stopScope(row.chatId);
+            }
+          }, row.generation);
+        } else {
+          if (!target || !snapshot.sharedTargets.some(s => s.id === target) || !snapshot.sharedGroups.find(g => g.id === id)?.canBind)
+            throw new WebError(409, '此共享群或目标会话当前不可切换，请刷新');
+          const o = [...this.observations.values()].find(o => o.sourceId && o.native.some(s => this.targetId(o.id, o.sourceId!, s.nativeId) === target))!;
+          const native = o.native.find(s => this.targetId(o.id, o.sourceId!, s.nativeId) === target)!;
+          await c.auxiliary.bindSession(row.chatId, owner, row.generation, { toolId: o.id, sourceId: o.sourceId!, nativeId: native.nativeId }, async () => {
+            if (this.owner() !== owner) throw new WebError(409, '所有者已变化，请刷新');
+            await this.assertSharedIdle(row.chatId);
+          });
+        }
+      } catch (e) { if (e instanceof WebError) throw e; throw new WebError(409, clean(e instanceof Error ? e.message : e)); }
+      log.info('console', action, { scope: row.chatId }); return { ok: true };
+    }
     if (action === 'discover' && c.refreshWorkerDiscovery) { await c.refreshWorkerDiscovery(); log.info('console', 'workers-refreshed'); return { ok: true }; }
     if (action === 'sync-names' && this.deps.syncNames) {
       const snapshot = await this.snapshot(true), b = id ? snapshot.bindings.find(b => b.id === id && b.canSync) : undefined;
@@ -188,5 +249,19 @@ export class BridgeConsoleService {
       await runtime.replies!.runNow(); return { ok: true };
     }
     throw new WebError(400, '操作不支持');
+  }
+  private async assertSharedIdle(scope: string) {
+    const c = this.deps.controls, b = c.toolBindings?.get(scope);
+    for (const runtime of c.workerRuntimes?.values() ?? []) if (runtime.inbox.diagnostics().some(r => r.scope === scope && r.status === 'pending'))
+      throw new WebError(409, '本群还有未处理消息，请处理完成后再切换');
+    if (!b) return;
+    const tool = c.toolRegistry?.find(b.toolId);
+    if (!(tool?.agent instanceof DurableAgentAdapter) || tool.sourceId !== b.sourceId) throw new WebError(409, '无法确认本群任务状态，请稍后重试');
+    const jobs = (await tool.agent.client.list()).filter(j => jobScope(j) === scope && j.options.delivery?.sourceId === b.sourceId && j.options.delivery.botAppId === c.profileConfig.accounts.app.id);
+    for (const runtime of c.workerRuntimes?.values() ?? []) if (runtime.inbox.diagnostics().some(r => r.scope === scope && r.status === 'pending'))
+      throw new WebError(409, '本群还有未处理消息，请处理完成后再切换');
+    if (jobs.some(j => ['accepted', 'running', 'unknown'].includes(j.status)) ||
+        c.workerRuntimes?.get(b.toolId)?.inbox.diagnostics().some(r => r.scope === scope && r.status === 'accepted' && !jobs.some(j => j.options.delivery?.messageIds?.includes(r.requestId))))
+      throw new WebError(409, '本群任务尚未完成或结果未确认，请处理后再切换');
   }
 }

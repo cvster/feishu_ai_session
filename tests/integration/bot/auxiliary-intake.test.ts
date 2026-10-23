@@ -360,3 +360,19 @@ it('acknowledges archived-group dissolution immediately and forwards only its tw
   await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
   expect(h.submit).not.toHaveBeenCalled();
 });
+
+it('rejects input stamped before a shared association changes and still executes fresh messages', async () => {
+  const h = await harness(), auxiliary = h.controls.auxiliary!, original = auxiliary.noteRequest.bind(auxiliary);
+  vi.spyOn(auxiliary, 'noteRequest').mockImplementationOnce(async (chatId, messageId, actorId, message) => {
+    await original(chatId, messageId, actorId, message);
+    auxiliary.get(chatId)!.generation = 'new-association-generation';
+  });
+  await h.message({ content: '旧关联接收中的消息' });
+  await vi.waitFor(() => expect(h.controls.workerRuntimes!.get('codex')!.inbox.receipts('oc_aux')[0]?.status).toBe('rejected'), { timeout: 3000 });
+  expect(h.controls.workerRuntimes!.get('codex')!.inbox.receipts('oc_aux')[0]?.diagnostic?.code).toBe('shared-association-changed');
+  expect(h.submit).not.toHaveBeenCalled(); expect(await h.records()).toEqual([]);
+  await h.message({ content: '新关联的消息' });
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledOnce(), { timeout: 3000 });
+  expect(h.submit.mock.calls[0]![0].prompt).toContain('新关联的消息');
+  expect(h.submit.mock.calls[0]![0].prompt).not.toContain('旧关联接收中的消息');
+});

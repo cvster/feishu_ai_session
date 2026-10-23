@@ -95,8 +95,8 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       if (item && req.method === 'GET') { respond(res, 200, await console.detail(item[1]!)); return; }
       if (url.pathname === '/api/console/action' && req.method === 'POST') {
         const input = await body(req);
-        if (typeof input.action !== 'string' || input.id !== undefined && (typeof input.id !== 'string' || !/^[a-f0-9]{64}$/.test(input.id))) throw new WebError(400, '操作参数无效');
-        respond(res, 200, await console.action(input.action, input.id as string | undefined)); return;
+        if (typeof input.action !== 'string' || [input.id, input.target].some(v => v !== undefined && (typeof v !== 'string' || !/^[a-f0-9]{64}$/.test(v)))) throw new WebError(400, '操作参数无效');
+        respond(res, 200, await console.action(input.action, input.id as string | undefined, input.target as string | undefined)); return;
       }
       throw new WebError(404, '控制台接口不存在');
     }

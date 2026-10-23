@@ -13,6 +13,7 @@ import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import type { Controls } from '../../../src/commands';
 import { PersonalSessionService, type WebConversation } from '../../../src/web/service';
 import { BridgeConsoleService } from '../../../src/web/console';
+import { AuxiliaryGroups } from '../../../src/bot/auxiliary-groups';
 import { startBridgeWeb } from '../../../src/web/server';
 import { configureWeb, webPasswordHash } from '../../../src/web/config';
 import { WebSessionControls, type WebControlElement } from '../../../src/web/controls';
@@ -120,6 +121,18 @@ async function sharedInput(h: Awaited<ReturnType<typeof harness>>, options: { na
   await vi.waitFor(async () => expect((await h.client.snapshot(job.id)).events.length).toBeGreaterThan(1));
   await h.inbox.reconcile(await h.client.list());
   return { job, message, group, auxiliary, get };
+}
+
+async function managedShared(h: Awaited<ReturnType<typeof harness>>) {
+  h.native.cwd = h.dir;
+  (h.channel.rawClient.im.v1 as any).chatMembers = { delete: vi.fn(async () => ({ code: 0 })) };
+  const groups = new AuxiliaryGroups({ path: join(h.dir, 'managed-groups.json'), appId: 'cli_test', channel: h.channel,
+    tools: h.controls.toolRegistry!, bindings: h.bindings, catalog: h.catalog, sessions: h.sessions, workspaces: h.workspaces,
+    ownerId: () => h.controls.botOwnerId, refreshOwner: async () => {}, cancelPending: async scope => { await h.inbox.rejectScope(scope); } });
+  await groups.load(); h.controls.auxiliary = groups;
+  cleanups.push(() => groups.flush());
+  await groups.joined({ chatId: 'oc_shared', operator: { openId: 'ou_owner' } });
+  return groups;
 }
 
 it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('shows shared %s inputs and Feishu names in the personal group and Web even when native history omits them', async tool => {
@@ -780,4 +793,63 @@ it('console keeps pending messages visible but forbids retry when worker receipt
   expect(snapshot.bindings[0]!.issues).toContain('Worker 离线');
   expect(snapshot.items[0]).toMatchObject({ status: 'pending', canRetry: false });
   expect(h.calls).toHaveLength(0);
+});
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('console manages pending and active %s shared groups through owner selection without creating a native session', async tool => {
+  const h = await harness(tool); await h.replies.stop(); const groups = await managedShared(h);
+  const before = await h.consoleService.snapshot(true), group = before.sharedGroups[0]!, target = before.sharedTargets[0]!;
+  expect(group).toMatchObject({ status: 'pending', canBind: true, canLeave: true, sessionName: '尚未关联' });
+  expect(before.bindings.some(b => b.scope === 'oc_shared')).toBe(false);
+  expect((await h.request('/api/console/action', { action: 'shared-bind', id: group.id, target: target.id })).status).toBe(200);
+  expect(groups.isActive('oc_shared')).toBe(true); expect(h.bindings.get('oc_shared')?.nativeId).toBe('native');
+  expect(h.bindings.get('oc_group')?.nativeId).toBe('native'); expect(h.native.archived).toBe(false); expect(h.calls).toHaveLength(0);
+  const after = await h.consoleService.snapshot(true);
+  expect(after.sharedGroups[0]).toMatchObject({ status: 'active', targetId: target.id, sessionName: 'AA-web', canBind: true });
+  expect(after.sharedGroups[0]!.sessionId).toBe((await h.service.list())[0]!.id);
+  const other = { ...h.native, nativeId: 'another', name: 'AA-另一个会话' }; h.provider.list.mockResolvedValue([h.native, other]);
+  const choices = await h.consoleService.snapshot(true), next = choices.sharedTargets.find(t => t.name === other.name)!;
+  expect((await h.request('/api/console/action', { action: 'shared-bind', id: after.sharedGroups[0]!.id, target: next.id })).status).toBe(200);
+  expect(h.bindings.get('oc_shared')?.nativeId).toBe('another'); expect(h.bindings.get('oc_group')?.nativeId).toBe('native');
+  expect((await h.request('/api/console/action', { action: 'shared-leave', id: after.sharedGroups[0]!.id })).status).toBe(409);
+  const current = (await h.consoleService.snapshot(true)).sharedGroups[0]!;
+  const stop = vi.fn(async () => false); h.controls.workerRuntimes!.get(tool)!.replies = { runNow: async () => {}, stopScope: stop };
+  expect((await h.request('/api/console/action', { action: 'shared-leave', id: current.id })).status).toBe(200);
+  expect(stop).toHaveBeenCalledWith('oc_shared'); expect(groups.get('oc_shared')!.status).toBe('archived');
+  expect(vi.mocked(h.channel.rawClient.im.v1.chatMembers.delete)).toHaveBeenCalledWith({ path: { chat_id: 'oc_shared' }, params: { member_id_type: 'app_id' }, data: { id_list: ['cli_test'] } });
+  expect(h.provider.archive).not.toHaveBeenCalled(); expect(h.bindings.get('oc_group')?.nativeId).toBe('native');
+});
+
+it('console refuses shared switches with pending messages, late worker acceptance, unknown targets or changed owner', async () => {
+  const h = await harness(); await h.replies.stop(); const groups = await managedShared(h), row = groups.get('oc_shared')!;
+  await groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'native' }, async () => {});
+  const other = { ...h.native, nativeId: 'another', name: 'another' }; h.provider.list.mockResolvedValue([h.native, other]);
+  let snapshot = await h.consoleService.snapshot(true); const id = snapshot.sharedGroups[0]!.id, target = snapshot.sharedTargets.find(t => t.name === 'another')!.id;
+  const message = { messageId: 'shared-pending-switch', chatId: 'oc_shared', content: '原消息', createTime: Date.now(), resources: [] } as unknown as NormalizedMessage;
+  await h.inbox.receive('oc_shared', message);
+  expect((await h.request('/api/console/action', { action: 'shared-bind', id, target })).status).toBe(409);
+  expect(h.inbox.available()).toHaveLength(1); expect(h.bindings.get('oc_shared')?.nativeId).toBe('native');
+  await h.inbox.rejectScope('oc_shared');
+  const job = await h.client.submit({ requestKey: 'shared-late-acceptance', options: { ...h.options, delivery: { ...h.options.delivery!, scope: 'oc_shared', chatId: 'oc_shared', messageIds: ['late'] } } });
+  const listed = await h.client.list(), active = listed.find(j => j.id === job.id)!;
+  const list = vi.spyOn(h.client, 'list').mockResolvedValueOnce([]).mockResolvedValueOnce([active]);
+  expect((await h.request('/api/console/action', { action: 'shared-bind', id, target })).status).toBe(409); list.mockRestore();
+  expect(h.bindings.get('oc_shared')?.nativeId).toBe('native');
+  expect((await h.request('/api/console/action', { action: 'shared-bind', id, target: '0'.repeat(64) })).status).toBe(409);
+  h.controls.botOwnerId = 'ou_other'; snapshot = await h.consoleService.snapshot(true);
+  expect(snapshot.sharedGroups[0]).toMatchObject({ canBind: false, canLeave: false });
+  expect((await h.request('/api/console/action', { action: 'shared-leave', id })).status).toBe(409);
+});
+
+it('console keeps shared leave failures recoverable and rejects cross-site or unauthenticated management', async () => {
+  const h = await harness('kilo', '127.0.0.2'); await h.replies.stop(); const groups = await managedShared(h), row = groups.get('oc_shared')!;
+  await groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'native' }, async () => {});
+  const id = (await h.consoleService.snapshot(true)).sharedGroups[0]!.id;
+  expect((await h.request('/api/console/action', { action: 'shared-leave', id })).status).toBe(401);
+  await h.login(); expect((await h.request('/api/console/action', { action: 'shared-leave', id }, { Origin: 'http://evil.test' })).status).toBe(403);
+  h.controls.workerRuntimes!.get('kilo')!.replies = { runNow: async () => {}, stopScope: async () => false };
+  vi.mocked(h.channel.rawClient.im.v1.chatMembers.delete).mockResolvedValueOnce({ code: 999 } as any);
+  expect((await h.request('/api/console/action', { action: 'shared-leave', id })).status).toBe(409);
+  expect(groups.get('oc_shared')?.status).toBe('leaving');
+  expect((await h.request('/api/console/action', { action: 'shared-leave', id })).status).toBe(200);
+  expect(groups.get('oc_shared')?.status).toBe('archived'); expect(h.provider.archive).not.toHaveBeenCalled();
 });

@@ -994,7 +994,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
         : '共享群尚未完成关联，或正在退出。请所有者私聊发送 /aux。' }, { replyTo: msg.messageId });
       return;
     }
-    await auxiliary!.noteRequest(msg.chatId, msg.messageId, msg.senderId);
+    await auxiliary!.noteRequest(msg.chatId, msg.messageId, msg.senderId, msg);
   }
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
@@ -1190,6 +1190,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     scope,
     mode,
   } = deps;
+  const currentInputs = inputBatch.filter(message => rootControls.auxiliary?.matchesRequestGeneration?.(scope, message) !== false);
+  const staleInputs = inputBatch.filter(message => !currentInputs.includes(message));
+  if (staleInputs.length) {
+    await Promise.all([...rootControls.workerRuntimes?.values() ?? []].map(async runtime => {
+      if (!runtime.inbox.receipts(scope).some(r => r.status === 'pending' && staleInputs.some(m => m.messageId === r.message.messageId))) return;
+      await runtime.inbox.recordDiagnostic(scope, staleInputs, 'shared-association-changed', '共享群关联已变化，未将旧消息提交到新会话。', false);
+      await runtime.inbox.reject(scope, staleInputs);
+    }));
+    log.info('auxiliary', 'stale-input-rejected', { scope, count: staleInputs.length });
+  }
   const toolId = toolForScope(rootControls, scope);
   const controls = controlsForTool(rootControls, toolId, scope);
   const tool = rootControls.toolRegistry?.all().find(tool => tool.id === toolId);
@@ -1197,7 +1207,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   if (binding && tool && binding.sourceId !== tool.sourceId) throw new Error('会话数据来源已变化，不能恢复到其他账户/目录');
   const agent = tool?.agent ?? primaryAgent;
   const executor = tool ? rootControls.executorForTool?.(toolId) ?? primaryExecutor : primaryExecutor;
-  const batch = agent instanceof DurableAgentAdapter ? [...new Map(inputBatch.map(message => [messageRequestId(message), message])).values()] : inputBatch;
+  const batch = agent instanceof DurableAgentAdapter ? [...new Map(currentInputs.map(message => [messageRequestId(message), message])).values()] : currentInputs;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
   const lastMsg = batch[batch.length - 1];

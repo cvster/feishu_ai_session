@@ -256,6 +256,12 @@ export class SessionCatalog {
   }
 
   isScopeArchived(scopeId: string): boolean { return this.archivedScopes.has(scopeId) || this.dissolvedChats.has(scopeId.split(':')[0]!); }
+
+  /** Explicit route re-selection clears only this entrance's archival marker. */
+  reopenScope(scopeId: string): void {
+    if (this.isChatDissolved(scopeId.split(':')[0]!)) throw new Error('飞书群已解散，不能重新绑定。');
+    if (this.archivedScopes.delete(scopeId)) this.schedulePersist();
+  }
   isThreadArchived(threadId: string): boolean { return this.archivedThreads.has(threadId); }
   isChatDissolved(chatId: string): boolean { return this.dissolvedChats.has(chatId); }
   dissolvedChatIds(): string[] { return [...this.dissolvedChats]; }
