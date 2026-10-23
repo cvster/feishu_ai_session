@@ -66,6 +66,7 @@ export function createCodexQueuedFreshRun(options: FreshQueueOptions): AgentRun 
     runId: options.runId, events,
     stop: () => close(true),
     detach: () => close(false),
+    checkLiveness: () => task?.checkLiveness?.() ?? Promise.resolve({ state: 'unknown' }),
     waitForExit(timeoutMs) {
       if (settled) return Promise.resolve(true);
       return Promise.race([completed.then(() => true),

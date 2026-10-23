@@ -112,6 +112,29 @@ describe('CodexAdapter native queue mode', () => {
     expect(await run.waitForExit(0)).toBe(true);
   });
 
+  it.each(['existing', 'fresh'] as const)('only reports a missing %s submission when the shared writer is idle with no queue or new turn', async kind => {
+    const fake = await createQueueCodex('missing-queue'); cleanup.push(fake.dir);
+    const run = kind === 'fresh' ? new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir, codexHome: fake.dir, appServerRemote: 'unix://' })
+      .run({ runId: 'orphan', cwd: fake.dir, prompt: 'lost input', sessionName: 'AA-test' }) : createCodexQueueRun({ runId: 'orphan', binary: fake.path, profileStateDir: fake.dir,
+      codexHome: fake.dir, inheritCodexHome: false, remote: 'unix://', cwd: fake.dir,
+      sandbox: 'workspace-write', prompt: 'lost input', threadId: 'thread-existing', clientUserMessageId: 'orphan-test' });
+    const seen: AgentEvent[] = [], drain = (async () => { for await (const event of run.events) seen.push(event); })();
+    try {
+      await vi.waitFor(() => expect(seen.filter(event => event.type === 'system')).toHaveLength(kind === 'fresh' ? 2 : 1));
+      await expect(run.checkLiveness!()).resolves.toMatchObject({ state: 'orphaned', evidence: 'thread-existing:queue-1' });
+      for (const mode of ['active', 'pending', 'newturn']) {
+        await writeFile(join(fake.dir, 'liveness.json'), JSON.stringify({ mode }));
+        expect((await run.checkLiveness!()).state).not.toBe('orphaned');
+      }
+      await writeFile(join(fake.dir, 'liveness.json'), JSON.stringify({ mode: 'unavailable' }));
+      await expect(run.checkLiveness!()).rejects.toThrow('queue unavailable');
+    } finally { await run.detach!(); await drain; }
+    const requests = (await readFile(join(fake.dir, 'requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(requests.filter(r => r.method === 'thread/queue/list').every(r => r.transport === 'shared')).toBe(true);
+    for (const method of ['turn/start', 'thread/queue/add', 'thread/queue/delete', 'turn/interrupt']) expect(requests.some(r => r.method === method)).toBe(false);
+    expect(seen.some(e => e.type === 'done' || e.type === 'error')).toBe(false);
+  });
+
   it('explicit stop still interrupts through the shared writer, not the history reader', async () => {
     const fake = await createQueueCodex('inProgress'); cleanup.push(fake.dir);
     const run = createCodexQueueRun({ runId: 'stop', binary: fake.path, profileStateDir: fake.dir,
@@ -283,7 +306,7 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
 
 async function createQueueCodex(
   turnStatus: 'completed' | 'interrupted' | 'provisional-interrupted' |
-    'provisional-completed-interrupted' | 'inProgress' = 'completed',
+    'provisional-completed-interrupted' | 'inProgress' | 'missing-queue' = 'completed',
   startUnloaded = false,
 ): Promise<{ dir: string; path: string }> {
   const dir = await mkdtemp(join(tmpdir(), 'codex-queue-test-'));
@@ -333,6 +356,7 @@ let socket;
 let loaded = ${JSON.stringify(!startUnloaded)};
 const send = value => socket ? socket.send(JSON.stringify(value)) : console.log(JSON.stringify(value));
 function handle(req) {
+  const mode = existsSync(${JSON.stringify(join(dir, 'liveness.json'))}) ? JSON.parse(readFileSync(${JSON.stringify(join(dir, 'liveness.json'))}, 'utf8')).mode : 'idle';
   appendFileSync(${JSON.stringify(join(dir, 'requests.jsonl'))}, JSON.stringify({ ...req, argv: args, transport: args[1] === 'proxy' ? 'shared' : 'owned' }) + '\\n');
   if (req.method === 'initialize') {
     send({ id: req.id, result: { userAgent: 'fake' } });
@@ -375,7 +399,10 @@ function handle(req) {
     send({ id: req.id, result: {} });
     return;
   }
-  if (req.method === 'thread/queue/list') { send({ id: req.id, result: { data: [] } }); return; }
+  if (req.method === 'thread/queue/list') {
+    if (mode === 'unavailable') { send({ id: req.id, error: { code: -32600, message: 'queue unavailable' } }); return; }
+    send({ id: req.id, result: { data: mode === 'pending' ? [{ id: 'queue-1', input: [] }] : [] } }); return;
+  }
   if (req.method === 'thread/queue/add') {
     if (existsSync(creatorLease)) {
       send({ id: req.id, error: { code: -32600, message: 'thread thread-existing already has an active writer' } }); return;
@@ -412,7 +439,7 @@ function handle(req) {
   }
   const includeAgentMessage = configuredStatus !== 'provisional-completed-interrupted' ||
     queuedReads > 1;
-  const turns = queued ? [{
+  const turns = configuredStatus === 'missing-queue' ? (mode === 'newturn' ? [{ id: 'turn-other', status: 'completed', items: [] }] : []) : queued ? [{
     id: 'turn-queued',
     status,
     completedAt: status === 'interrupted' && configuredStatus === 'provisional-interrupted'
@@ -429,7 +456,8 @@ function handle(req) {
   send({
     id: req.id,
     result: { thread: {
-      id: 'thread-existing', path: rolloutPath, updatedAt: Date.now() / 1000, turns
+      id: 'thread-existing', path: rolloutPath, updatedAt: Date.now() / 1000, turns,
+      ...(configuredStatus === 'missing-queue' ? { status: { type: mode === 'active' ? 'active' : 'idle' } } : {})
     } }
   });
 }

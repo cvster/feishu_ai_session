@@ -76,11 +76,14 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
     inheritCodexHome: options.inheritCodexHome,
     env: options.env,
     sharedServer: true,
+    passive: true,
     remote,
   });
   let activeChild: CodexChild | undefined;
   let selectedTurnId: string | undefined;
   let queuedSubmissionId: string | undefined;
+  let knownTurnIds: Set<string> | undefined;
+  let sharedEndpointAvailable = false;
   let provisionalInterruptedTurnId: string | undefined;
   let interruptedObservedAtMs: number | undefined;
   let persistedTerminalSeen: string | undefined;
@@ -103,11 +106,12 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
         return;
       }
       const knownTurns = new Set(baseline.turns.map((turn) => turn.id));
+      knownTurnIds = knownTurns;
       // Queue CLI flags configure the client, not the loaded thread. Update
       // the actual writer before adding input; never resume a competing server.
       const codexHome = options.codexHome ?? options.env?.CODEX_HOME ?? process.env.CODEX_HOME ??
         (options.inheritCodexHome ? join(homedir(), '.codex') : join(options.profileStateDir, 'codex-home'));
-      const sharedEndpointAvailable = Boolean(await resolveSharedCodexEndpoint({ remote, codexHome }));
+      sharedEndpointAvailable = Boolean(await resolveSharedCodexEndpoint({ remote, codexHome }));
       if (sharedEndpointAvailable) {
         await settingsClient.updateThreadSettings(options.threadId, {
           model: options.model,
@@ -295,6 +299,23 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
   return {
     runId: options.runId,
     events,
+    async checkLiveness() {
+      // Only the actual writer can prove a queued submission has disappeared.
+      // Never infer this from age, a passive history reader, or a failed RPC.
+      if (!sharedEndpointAvailable || !queuedSubmissionId || !knownTurnIds || selectedTurnId || controller.signal.aborted) return { state: 'unknown' };
+      const before = await settingsClient.readThreadStatus(options.threadId);
+      if (before?.type !== 'idle') return { state: before?.type === 'active' ? 'busy' : 'unknown' };
+      if ((await settingsClient.listQueuedSubmissions(options.threadId)).length) return { state: 'busy' };
+      const snapshot = await settingsClient.readThread(options.threadId);
+      if (snapshot.status?.type !== 'idle' || snapshot.turns.some(turn => !knownTurnIds!.has(turn.id))) return { state: 'unknown' };
+      // Recheck after history: dequeue/start, a new input, or a blocking prompt
+      // must reset the worker's consecutive confirmation count.
+      if ((await settingsClient.listQueuedSubmissions(options.threadId)).length) return { state: 'busy' };
+      if ((await settingsClient.readThreadStatus(options.threadId))?.type !== 'idle') return { state: 'unknown' };
+      if (selectedTurnId || controller.signal.aborted) return { state: 'unknown' };
+      return { state: 'orphaned', evidence: `${options.threadId}:${queuedSubmissionId}`,
+        message: '原生工具已空闲，已提交的输入不在原生队列中，且没有生成执行轮次。已解除失效任务占用，后续排队消息将继续处理；原指令未自动重新发送，请检查后按需重新提交。' };
+    },
     async detach() {
       if (settled) return;
       detached = true;

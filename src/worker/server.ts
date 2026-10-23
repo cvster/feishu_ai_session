@@ -3,7 +3,8 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as lockfile from 'proper-lockfile';
-import type { AgentAdapter, AgentRun } from '../agent/types';
+import type { AgentAdapter, AgentRun, AgentEvent } from '../agent/types';
+import { log } from '../core/logger';
 import { JobStore, jobIdFor, submissionFingerprint } from './store';
 import { isJobActive, type WorkerJob, type WorkerSubmission, type WorkerSessionService, type WorkerManifest } from './protocol';
 import { handleWorkerToolRequest, workerCapabilities, readWorkerBody, WorkerApiError, type WorkerToolApi } from './tool-api';
@@ -17,6 +18,9 @@ export interface WorkerServerOptions {
   maxConcurrent?: number;
   sessions?: WorkerSessionService;
   manifest?: WorkerManifest;
+  /** Diagnostic/test overrides; production probes stale observers conservatively. */
+  livenessIntervalMs?: number;
+  livenessGraceMs?: number;
 }
 class HttpError extends WorkerApiError {
   constructor(status: number, message: string, retryable = status === 429 || status === 503) {
@@ -98,6 +102,12 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     let timer: ReturnType<typeof setInterval> | undefined;
     let timeout = false;
     let waitingForInput = false;
+    let activityVersion = 0;
+    let recoveryEvent: AgentEvent | undefined;
+    let livenessTimer: ReturnType<typeof setInterval> | undefined;
+    let checkingLiveness = false;
+    let orphanEvidence = '';
+    let orphanConfirmations = 0;
     try {
       if (stopped.has(job.id)) { status = 'interrupted'; return; }
       await options.agent.prepareRun?.(job.options);
@@ -105,6 +115,36 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       await persistStatus(job, 'running');
       options.agent.setBotIdentity?.(job.botIdentity ?? { openId: '' });
       run = options.agent.run({ ...job.options, runId: job.id }); runs.set(job.id, run);
+      if (run.checkLiveness && run.detach) {
+        const check = async () => {
+          if (checkingLiveness || runs.get(job.id) !== run || terminal || recoveryEvent || closing || stopped.has(job.id) || timeout) return;
+          if (waitingForInput || options.sessions?.waitingForInput?.(observedNative ?? '') || Date.now() - lastActivityAt < (options.livenessGraceMs ?? 120_000)) {
+            orphanEvidence = ''; orphanConfirmations = 0; return;
+          }
+          checkingLiveness = true;
+          const version = activityVersion;
+          try {
+            const proof = await run!.checkLiveness!();
+            if (runs.get(job.id) !== run || terminal || closing || stopped.has(job.id) || timeout || waitingForInput || options.sessions?.waitingForInput?.(observedNative ?? '') || version !== activityVersion) {
+              orphanEvidence = ''; orphanConfirmations = 0; return;
+            }
+            if (proof.state !== 'orphaned' || !proof.evidence) { orphanEvidence = ''; orphanConfirmations = 0; return; }
+            orphanConfirmations = orphanEvidence === proof.evidence ? orphanConfirmations + 1 : 1;
+            orphanEvidence = proof.evidence;
+            if (orphanConfirmations < 3) return;
+            // End only our observer. Never stop the native task or resend input.
+            recoveryEvent = { type: 'error', terminationReason: 'failed', submissionStatus: 'unknown', message: proof.message };
+            await run!.detach!();
+            log.warn('worker', 'orphaned-run-recovered', { jobId: job.id, toolId: options.agent.id });
+          } catch (error) {
+            if (!terminal) recoveryEvent = undefined;
+            orphanEvidence = ''; orphanConfirmations = 0;
+            log.warn('worker', 'liveness-check-unavailable', { jobId: job.id, message: error instanceof Error ? error.message : String(error) });
+          } finally { checkingLiveness = false; }
+        };
+        livenessTimer = setInterval(() => { void check(); }, options.livenessIntervalMs ?? 15_000);
+        livenessTimer.unref();
+      }
       if (job.options.idleTimeoutMs) {
         timer = setInterval(() => {
           const promptWaiting = !!observedNative && options.sessions?.waitingForInput?.(observedNative);
@@ -115,6 +155,7 @@ export async function startWorkerServer(options: WorkerServerOptions) {
         }, Math.min(1000, job.options.idleTimeoutMs));
       }
       for await (const event of run.events) {
+        activityVersion++; orphanEvidence = ''; orphanConfirmations = 0;
         lastActivityAt = Date.now();
         if (event.type === 'system') {
           observedNative = event.threadId ?? event.sessionId ?? observedNative;
@@ -137,6 +178,9 @@ export async function startWorkerServer(options: WorkerServerOptions) {
           if (timer) { clearInterval(timer); timer = undefined; }
         }
       }
+      if (!terminal && recoveryEvent) {
+        await store.append(job.id, recoveryEvent); terminal = true; status = 'unknown';
+      }
       if (!await run.waitForExit(5000)) await run.stop();
       if (!terminal && (stopped.has(job.id) || timeout)) status = 'interrupted';
     } catch (error) {
@@ -145,6 +189,7 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       await store.append(job.id, { type: 'error', terminationReason: timeout ? 'timeout' : stopped.has(job.id) ? 'interrupted' : 'failed', message: error instanceof Error ? error.message : String(error) });
       if (run) await run.stop().catch(() => {});
     } finally {
+      if (livenessTimer) clearInterval(livenessTimer);
       if (timer) clearInterval(timer);
       if (!terminal) await store.append(job.id, status === 'interrupted' || stopped.has(job.id) || timeout
         ? { type: 'done', terminationReason: timeout ? 'timeout' : 'interrupted' }

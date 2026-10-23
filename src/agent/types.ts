@@ -66,6 +66,8 @@ export interface AgentRun {
   stop(): Promise<void>;
   /** Release this observer on bridge shutdown, without cancelling the task. */
   detach?(): Promise<void>;
+  /** Read-only native evidence. Unknown/unsupported states must never cancel work. */
+  checkLiveness?(): Promise<RunLiveness>;
   /**
    * Wait up to `timeoutMs` for the agent process to exit on its own.
    * Resolves true if it exited within the window, false if the timer
@@ -79,6 +81,10 @@ export interface AgentRun {
    */
   waitForExit(timeoutMs: number): Promise<boolean>;
 }
+
+export type RunLiveness =
+  | { state: 'busy' | 'unknown' }
+  | { state: 'orphaned'; evidence: string; message: string };
 
 /**
  * The bridge bot's own IM identity, resolved by the channel after the WS
