@@ -17,7 +17,7 @@ async function fixture(intervalMs = 60_000) {
     readThread: vi.fn(async () => structuredClone(snapshot)),
     persistedTurnTerminal: vi.fn(async () => 'interrupted' as const),
     listArchivedThreadIds: vi.fn(async () => [] as string[]),
-    listQueuedSubmissions: vi.fn(async () => [] as any[]),
+    listQueuedSubmissions: vi.fn(async () => [{ id: 'existing', input: [] }] as any[]),
     addQueuedSubmission: vi.fn(async (..._args: any[]) => ({ id: 'new-queue', input: [] })),
     startQueuedTurn: vi.fn(async (..._args: any[]) => 'continued-turn'),
     rpc: vi.fn(async (method: string, _params: unknown) => method === 'thread/goal/set' ? { goal: { ...goal, status: 'active' } } : { goal }),
@@ -27,20 +27,34 @@ async function fixture(intervalMs = 60_000) {
   return { handle, client, snapshot, statePath, start, goal(value: any) { goal = value; }, targets(value: string[]) { targets = value; } };
 }
 
-it('periodically continues a paused empty queue once, with a stable receipt across polling and restart', async () => {
+it('periodically starts the existing queue once, with a stable receipt across polling and restart', async () => {
   const h = await fixture(20);
   await vi.waitFor(() => expect(h.client.startQueuedTurn).toHaveBeenCalledOnce());
   await h.handle.runNow(); await h.handle.stop();
   const restarted = h.start(); await restarted.runNow();
-  expect(h.client.addQueuedSubmission).toHaveBeenCalledOnce();
-  expect(h.client.addQueuedSubmission).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread', prompt: '继续',
-    clientUserMessageId: expect.stringMatching(/^codex-auto-continue:/) }));
-  expect(h.client.startQueuedTurn).toHaveBeenCalledWith('thread', 'new-queue');
+  expect(h.client.addQueuedSubmission).not.toHaveBeenCalled();
+  expect(h.client.rpc).not.toHaveBeenCalled();
+  expect(h.client.startQueuedTurn).toHaveBeenCalledWith('thread', 'existing');
   expect(JSON.parse(await readFile(h.statePath, 'utf8')).attempts).toEqual({
-    '["thread","turn","paused"]': expect.objectContaining({ confirmed: true, turnId: 'continued-turn' }),
+    '["thread","queue","existing"]': expect.objectContaining({ confirmed: true, turnId: 'continued-turn' }),
   });
-  h.snapshot.turns[0]!.id = 'paused-again'; await restarted.runNow();
-  expect(h.client.addQueuedSubmission).toHaveBeenCalledTimes(2); // A new deliberate stop is also resumed.
+  // New queue input after the same pause is eligible even without a new turn.
+  h.client.listQueuedSubmissions.mockResolvedValue([{ id: 'later-input', input: [] }]);
+  await restarted.runNow();
+  expect(h.client.startQueuedTurn).toHaveBeenCalledTimes(2);
+  expect(h.client.startQueuedTurn).toHaveBeenLastCalledWith('thread', 'later-input');
+});
+
+it('never synthesizes input for an empty queue, and resumes real input arriving later under the same pause', async () => {
+  const h = await fixture(); h.client.listQueuedSubmissions.mockResolvedValue([]);
+  h.goal({ status: 'paused', createdAt: 1, updatedAt: 2 });
+  await h.handle.runNow(); await h.handle.runNow();
+  expect(h.client.addQueuedSubmission).not.toHaveBeenCalled();
+  expect(h.client.startQueuedTurn).not.toHaveBeenCalled();
+  expect(h.client.rpc).not.toHaveBeenCalled();
+  h.client.listQueuedSubmissions.mockResolvedValue([{ id: 'arrived-later', input: [] }]);
+  await h.handle.runNow();
+  expect(h.client.startQueuedTurn).toHaveBeenCalledWith('thread', 'arrived-later');
 });
 
 it('starts the existing queue head without adding or replacing any input', async () => {
@@ -51,11 +65,10 @@ it('starts the existing queue head without adding or replacing any input', async
   expect(h.client.addQueuedSubmission).not.toHaveBeenCalled();
 });
 
-it('resumes an explicitly paused goal even without queued input', async () => {
+it('does not reactivate a paused goal on a normally completed conversation', async () => {
   const h = await fixture(); h.snapshot.turns[0]!.status = 'completed'; h.goal({ status: 'paused', createdAt: 1, updatedAt: 2 });
-  await h.handle.runNow(); await h.handle.runNow();
-  expect(h.client.rpc).toHaveBeenCalledWith('thread/goal/set', { threadId: 'thread', status: 'active' });
-  expect(h.client.rpc.mock.calls.filter(([method]) => method === 'thread/goal/set')).toHaveLength(1);
+  await h.handle.runNow();
+  expect(h.client.rpc).not.toHaveBeenCalled();
   expect(h.client.addQueuedSubmission).not.toHaveBeenCalled(); expect(h.client.startQueuedTurn).not.toHaveBeenCalled();
 });
 
@@ -78,28 +91,22 @@ it('preserves uncertain start receipts across restart instead of duplicating the
   const h = await fixture(); h.client.startQueuedTurn.mockRejectedValueOnce(Error('lost receipt'));
   await h.handle.runNow(); await h.handle.runNow(); await h.handle.stop();
   const restarted = h.start(); await restarted.runNow();
-  expect(h.client.startQueuedTurn).toHaveBeenCalledOnce(); expect(h.client.addQueuedSubmission).toHaveBeenCalledOnce();
-  expect(Object.values(JSON.parse(await readFile(h.statePath, 'utf8')).attempts)[0]).toMatchObject({ queueId: 'new-queue' });
+  expect(h.client.startQueuedTurn).toHaveBeenCalledOnce(); expect(h.client.addQueuedSubmission).not.toHaveBeenCalled();
+  expect(Object.values(JSON.parse(await readFile(h.statePath, 'utf8')).attempts)[0]).toMatchObject({ queueId: 'existing' });
 });
 
-it('retries explicit native rejection using the already accepted queue input', async () => {
+it('retries an explicit native rejection with the same existing queue input', async () => {
   const h = await fixture();
-  h.client.addQueuedSubmission.mockImplementation(async () => {
-    h.client.listQueuedSubmissions.mockResolvedValue([{ id: 'new-queue', input: [] }]);
-    return { id: 'new-queue', input: [] };
-  });
   h.client.startQueuedTurn.mockRejectedValueOnce(Object.assign(Error('temporarily unavailable'), { name: 'CodexRpcError' }));
   await h.handle.runNow(); await h.handle.runNow();
-  expect(h.client.addQueuedSubmission).toHaveBeenCalledOnce();
+  expect(h.client.addQueuedSubmission).not.toHaveBeenCalled();
   expect(h.client.startQueuedTurn).toHaveBeenCalledTimes(2);
-  expect(h.client.startQueuedTurn).toHaveBeenLastCalledWith('thread', 'new-queue');
+  expect(h.client.startQueuedTurn).toHaveBeenLastCalledWith('thread', 'existing');
 });
 
-it('retries a rejected enqueue and serializes overlapping polls', async () => {
+it('serializes overlapping polls without starting a queue item twice', async () => {
   const h = await fixture();
-  h.client.addQueuedSubmission.mockRejectedValueOnce(Object.assign(Error('temporarily unavailable'), { name: 'CodexRpcError' }));
-  await h.handle.runNow();
   await Promise.all([h.handle.runNow(), h.handle.runNow(), h.handle.runNow()]);
-  expect(h.client.addQueuedSubmission).toHaveBeenCalledTimes(2);
   expect(h.client.startQueuedTurn).toHaveBeenCalledOnce();
+  expect(h.client.addQueuedSubmission).not.toHaveBeenCalled();
 });

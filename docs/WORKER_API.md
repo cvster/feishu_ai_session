@@ -134,15 +134,15 @@ The original accepted request remains deduplicated and is never automatically
 resubmitted; recovery does not call native interrupt or queue deletion.
 
 Codex additionally checks bridge-observed native conversations every 15 seconds,
-independently of worker job activity. A paused goal is set back to active. For an
-idle interrupted conversation confirmed by durable interruption records, it starts
-the existing native queue head, or submits and starts one `继续` input when the
-queue is empty. Completed, active, archived and no-longer-observed conversations
-are not resumed. Each pause revision/turn has a persisted continuation receipt;
-uncertain writes are not replayed on later polls or worker restart. This provider
-retries explicit native RPC rejections after fresh state checks, preserving any
-already-accepted queue input. Maintenance is confined to the Codex worker; bridge
-APIs and other workers retain their current behavior.
+independently of worker job activity. For an idle interrupted conversation confirmed
+by durable interruption records, it uses `thread/queue/start` on the existing queue
+head, matching the Codex desktop Resume button. Empty queues do not start a turn;
+maintenance never adds user input or changes goal state. Each native queue item has
+a persisted start receipt, so later input under the same interrupted turn remains
+eligible. Uncertain writes are not replayed on later polls or worker restart;
+explicit RPC rejections can retry after fresh state checks. Completed, active,
+archived and no-longer-observed conversations are not resumed. Maintenance remains
+confined to the Codex worker; bridge APIs and other workers retain their behavior.
 
 Codex queued runs, including the first message of a new session, currently supply
 this evidence: the corresponding shared-writer session must report idle and its

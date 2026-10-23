@@ -4,17 +4,20 @@ import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 
 const bundle = readFileSync(new URL('../dist/cli.js', import.meta.url), 'utf8');
-function section(start, end) {
-  const from = bundle.indexOf(start);
-  const to = bundle.indexOf(end, from);
-  assert.ok(from >= 0 && to > from, `Missing section ${start}`);
-  return bundle.slice(from, to);
+function section(path) {
+  const marker = `// ${path}\n`;
+  const from = bundle.indexOf(marker);
+  assert.ok(from >= 0, `Missing section ${path}`);
+  const to = bundle.indexOf('\n// ', from + marker.length);
+  return bundle.slice(from, to < 0 ? undefined : to);
 }
 const projectHelper = bundle.match(/^function projectNameFromCwd\(cwd\) \{[\s\S]*?^\}/m)?.[0];
 assert.ok(projectHelper, 'Missing project-name helper');
 const api = runInNewContext([
-  section('// src/agent/models.ts', '// src/agent/prompt.ts'),
-  section('// src/card/run-status-render.ts', '// src/card/codex-turn-state.ts'),
+  section('src/agent/models.ts'),
+  section('src/card/run-progress.ts'),
+  section('src/card/run-status-render.ts'),
+  section('src/card/run-renderer.ts'),
   projectHelper,
   '({renderCard, renderRunStatus, renderColoredRunStatus, modelLabel, projectNameFromCwd})',
 ].join('\n'));
@@ -30,15 +33,16 @@ test('deployed controls use five icons and preserve their callbacks', () => {
   for (const terminal of ['running', 'done']) {
     const controls = buttons(api.renderCard({ ...initial, terminal }));
     assert.deepEqual(Array.from(controls, (button) => button.icon?.token ?? button.text?.content),
-      ['stop_outlined', 'setting_outlined', 'refresh_outlined', 'mindmap-down_outlined', 'archive_outlined']);
+      [terminal === 'done' ? 'done_outlined' : 'stop_outlined', 'setting_outlined', 'refresh_outlined', 'mindmap-down_outlined', 'archive_outlined']);
     for (const button of controls) {
       assert.equal(button.icon.tag, 'standard_icon');
       assert.equal(button.text, undefined);
       assert.ok(button.hover_tips.content);
     }
-    for (const button of [controls[0], controls[4]]) {
-      assert.equal(button.icon.color, 'red');
-      assert.equal(button.border_color, 'red');
+    for (const [index, button] of [[0, controls[0]], [4, controls[4]]]) {
+      const color = index === 0 && terminal === 'done' ? 'green' : 'red';
+      assert.equal(button.icon.color, color);
+      assert.equal(button.border_color, color);
       assert.equal(button.text, undefined);
       assert.ok(button.hover_tips.content);
     }

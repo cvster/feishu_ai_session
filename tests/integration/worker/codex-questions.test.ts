@@ -73,7 +73,7 @@ it('automatically continues observed paused conversations without a worker job a
   mocks.snapshot.status.type = 'idle'; mocks.snapshot.turns[0].status = 'interrupted';
   Object.assign(mocks.reader, {
     readThreadStatus: vi.fn(async () => mocks.snapshot.status), persistedTurnTerminal: vi.fn(async () => 'interrupted'),
-    listQueuedSubmissions: vi.fn(async () => []), addQueuedSubmission: vi.fn(async () => ({ id: 'queue' })),
+    listQueuedSubmissions: vi.fn(async () => [{ id: 'existing' }]), addQueuedSubmission: vi.fn(async () => ({ id: 'queue' })),
     startQueuedTurn: vi.fn(async () => 'continued'), rpc: vi.fn(async () => ({ goal: null })),
   });
   const h = await fixture();

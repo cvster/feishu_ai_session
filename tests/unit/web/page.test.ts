@@ -120,6 +120,24 @@ it('reuses cached content without another history request and restores each sess
   const connections = h.streams.length; h.choose(0); expect(h.streams).toHaveLength(connections);
 });
 
+it('changes stop into a disabled completion check and restores it when new input or running work appears', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  const stop = h.node('session-controls').querySelectorAll('button')[0]!;
+  expect(stop.textContent).toBe('✓ 已完成'); expect(stop.disabled).toBe(true);
+  const requests = h.requests.length; stop.onclick!(); expect(h.requests).toHaveLength(requests);
+  for (const status of ['running', 'interrupted', 'error', 'waiting_input', 'queued', 'unknown']) {
+    const c = h.conversation(0, '回答', 1); c.turns[0]!.status = status;
+    h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: c });
+    expect(stop.textContent).toBe('■ 停止'); expect(stop.disabled).toBe(false);
+  }
+  h.snapshot(0, '完成', 1); expect(stop.disabled).toBe(true);
+  h.node('input').value = '新消息';
+  const sending = h.node('composer').onsubmit!({ preventDefault() {} });
+  expect(stop.textContent).toBe('■ 停止'); expect(stop.disabled).toBe(false);
+  h.requests.at(-1)!.resolve({ status: 'queued' }); await sending;
+  expect(stop.textContent).toBe('■ 停止'); expect(stop.disabled).toBe(false);
+});
+
 it('renders each shared sender name beside its original message as text', async () => {
   const h = harness(); await h.ready();
   const conversation = h.conversation(0, '共享回复', 1);

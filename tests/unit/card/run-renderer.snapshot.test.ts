@@ -105,7 +105,7 @@ describe('run card renderer snapshots', () => {
   it('renders run controls in one horizontal row', () => {
     for (const [state, labels] of [
       [initialState, ['stop_outlined', 'setting_outlined', 'refresh_outlined', 'mindmap-down_outlined', 'archive_outlined']],
-      [stateFrom([{ type: 'done', terminationReason: 'normal' }]), ['stop_outlined', 'setting_outlined', 'refresh_outlined', 'mindmap-down_outlined', 'archive_outlined']],
+      [stateFrom([{ type: 'done', terminationReason: 'normal' }]), ['done_outlined', 'setting_outlined', 'refresh_outlined', 'mindmap-down_outlined', 'archive_outlined']],
     ] as const) {
       const card = renderCard(state) as {
         body?: { elements?: CardElement[] };
@@ -126,9 +126,10 @@ describe('run card renderer snapshots', () => {
       expect(buttons.map((button) => button.icon?.token ?? button.text?.content)).toEqual(labels);
       expect(buttons.map((button) => button.behaviors?.[0]?.value?.cmd))
         .toEqual(['stop', 'config', 'refresh', 'fork', 'finish']);
-      for (const button of [buttons[0], buttons[4]]) {
+      for (const [index, button] of [[0, buttons[0]], [4, buttons[4]]] as const) {
+        const color = index === 0 && state.terminal === 'done' ? 'green' : 'red';
         expect(button).toMatchObject({
-          icon: { tag: 'standard_icon', color: 'red' }, border_color: 'red',
+          icon: { tag: 'standard_icon', color }, border_color: color,
           hover_tips: { tag: 'plain_text', content: expect.any(String) },
         });
         expect(button?.text).toBeUndefined();
@@ -162,6 +163,21 @@ describe('run card renderer snapshots', () => {
     };
     expect(card.body?.elements?.flatMap(buttonsIn).map((button) => button.icon?.token ?? button.text?.content))
       .toEqual(['setting_outlined', 'refresh_outlined', 'mindmap-down_outlined', 'archive_outlined']);
+  });
+
+  it('uses a disabled green completion check even with uploaded stop imagery and no native stop capability', () => {
+    const done = stateFrom([{ type: 'done', terminationReason: 'normal' }]);
+    for (const auxiliary of [false, true]) {
+      const card = renderCard(done, { auxiliary, showStopButton: false, buttonImageKeys: { stop: 'img_stop' }, signCallback: () => 'unused' });
+      const text = JSON.stringify(card);
+      expect(text).toContain('done_outlined');
+      expect(text).toContain('"disabled":true');
+      expect(text).toContain('本次任务已完成');
+      expect(text).not.toContain('img_stop');
+      expect(text).not.toContain('unused');
+    }
+    for (const terminal of ['running', 'error', 'interrupted', 'idle_timeout'] as const)
+      expect(JSON.stringify(renderCard({ ...initialState, terminal }))).not.toContain('done_outlined');
   });
 
   it('uses the app-scoped custom Git fork image without changing callbacks', () => {

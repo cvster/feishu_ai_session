@@ -1,17 +1,17 @@
 import { readFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
 import type { CodexThreadReader } from '../session/codex-thread-reader';
 import { isInterruptedTurnStatus } from '../session/codex-turn-status';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { log } from '../core/logger';
 
 type Client = Pick<CodexThreadReader, 'readThreadStatus' | 'readThread' | 'listQueuedSubmissions' |
-  'addQueuedSubmission' | 'startQueuedTurn' | 'persistedTurnTerminal' | 'listArchivedThreadIds' | 'rpc'>;
+  'startQueuedTurn' | 'persistedTurnTerminal' | 'listArchivedThreadIds'>;
 interface Attempt { at: number; turnId?: string; queueId?: string; confirmed?: boolean }
 
 /** Provider-owned maintenance of conversations currently observed by the bridge.
- * It resumes existing input, or adds one explicit continuation for an empty queue.
- * Persist before mutations: an uncertain receipt cannot duplicate continuation.
+ * Like the desktop Resume button, it starts only existing queued input.
+ * Empty queues need no action. Never inject a continuation prompt or alter goals.
+ * Persist per queue item before starting: uncertain receipts cannot replay it.
  */
 export function startCodexAutoContinue(deps: {
   client: Client; targets(): string[]; statePath: string; intervalMs?: number;
@@ -35,42 +35,24 @@ export function startCodexAutoContinue(deps: {
         if ((await deps.client.readThreadStatus(id))?.type !== 'idle') continue;
         const snapshot = await deps.client.readThread(id), tail = snapshot.turns.at(-1);
         if (snapshot.id !== id || snapshot.status?.type !== 'idle') continue;
-        const goal = (await deps.client.rpc('thread/goal/get', { threadId: id })).goal as
-          { status?: string; createdAt?: number; updatedAt?: number } | null | undefined;
-        const pausedGoal = goal?.status === 'paused';
-        if (!pausedGoal && (!tail || !isInterruptedTurnStatus(tail.status) ||
-          await deps.client.persistedTurnTerminal(snapshot, tail.id) !== 'interrupted')) continue;
-        const key = JSON.stringify(pausedGoal ? [id, 'goal', goal.createdAt, goal.updatedAt] : [id, 'turn', tail!.id]);
-        if (attempts[key]) continue;
+        if (!tail || !isInterruptedTurnStatus(tail.status) ||
+          await deps.client.persistedTurnTerminal(snapshot, tail.id) !== 'interrupted') continue;
         if ((await deps.client.listArchivedThreadIds()).includes(id)) continue;
         const queued = await deps.client.listQueuedSubmissions(id);
+        const next = queued[0];
+        if (!next) continue;
+        const key = JSON.stringify([id, 'queue', next.id]);
+        if (attempts[key]) continue;
         const current = await deps.client.readThread(id);
         if (stopped || !deps.targets().includes(id) || current.id !== id || current.status?.type !== 'idle' ||
           current.turns.at(-1)?.id !== tail?.id || current.turns.at(-1)?.status !== tail?.status) continue;
-        if (pausedGoal) {
-          const currentGoal = (await deps.client.rpc('thread/goal/get', { threadId: id })).goal as typeof goal;
-          if (currentGoal?.status !== 'paused' || currentGoal.updatedAt !== goal.updatedAt) continue;
-        }
-        const attempt = attempts[key] = { at: Date.now() } as Attempt;
+        const attempt = attempts[key] = { at: Date.now(), queueId: next.id } as Attempt;
         await save();
         claimedKey = key;
         if (stopped) return;
-        if (pausedGoal) {
-          const result = await deps.client.rpc('thread/goal/set', { threadId: id, status: 'active' });
-          if ((result.goal as { status?: string } | undefined)?.status !== 'active') throw new Error('Goal continuation was not confirmed');
-        } else {
-          let next = queued[0];
-          if (!next) {
-            const identity = `codex-auto-continue:${createHash('sha256').update(key).digest('hex')}`;
-            next = await deps.client.addQueuedSubmission({ submissionId: identity, clientUserMessageId: identity,
-              threadId: id, prompt: '继续' });
-          }
-          attempt.queueId = next.id; await save();
-          if (stopped) return;
-          attempt.turnId = await deps.client.startQueuedTurn(id, next.id);
-        }
+        attempt.turnId = await deps.client.startQueuedTurn(id, next.id);
         attempt.confirmed = true; await save();
-        log.info('codex-auto-continue', 'resumed', { threadId: id, pausedGoal, queued: queued.length, turnId: attempt.turnId });
+        log.info('codex-auto-continue', 'resumed', { threadId: id, queued: queued.length, turnId: attempt.turnId });
       } catch (error) {
         // A native RPC rejection proves the mutation was not accepted. Fresh
         // reads may retry it; already-accepted queue input remains in place.

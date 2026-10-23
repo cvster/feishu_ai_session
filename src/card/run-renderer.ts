@@ -32,16 +32,10 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   }
 
   const footerStart = elements.length;
-  if (state.terminal === 'running') {
-    const status = renderColoredRunStatus(state);
-    if (status) elements.push(noteMd(status));
-    else if (state.footer && !(state.footer === 'thinking' || state.footer === 'tool_running' && state.blocks.some(block => block.kind === 'tool'))) elements.push(footerStatus(state.footer));
-    elements.push(controlButtonRow(options));
-  } else {
-    const status = renderColoredRunStatus(state);
-    if (status) elements.push(noteMd(status));
-    elements.push(controlButtonRow(options.auxiliary ? { ...options, showStopButton: false } : options));
-  }
+  const status = renderColoredRunStatus(state);
+  if (status) elements.push(noteMd(status));
+  else if (state.terminal === 'running' && state.footer && !(state.footer === 'thinking' || state.footer === 'tool_running' && state.blocks.some(block => block.kind === 'tool'))) elements.push(footerStatus(state.footer));
+  elements.push(controlButtonRow(options.auxiliary && state.terminal !== 'running' ? { ...options, showStopButton: false } : options, state.terminal === 'done'));
   if (options.auxiliary && state.terminal !== 'running') {
     const footer = elements.splice(footerStart);
     const details = elements.find(element => (element as { tag?: string }).tag === 'collapsible_panel') as
@@ -120,25 +114,27 @@ interface RunControl {
   color: string;
   hover_tips: { tag: 'plain_text'; content: string };
   behaviors: [{ type: 'callback'; value: Record<string, unknown> }];
+  disabled?: boolean;
 }
 
-function stopButton(options: RunCardRenderOptions): RunControl {
+function stopButton(options: RunCardRenderOptions, completed: boolean): RunControl {
   const value: Record<string, unknown> = { cmd: 'stop', ...(options.nativeMirror ? { nativeMirror: true } : {}), ...(options.auxiliary ? { auxiliaryRunId: options.auxiliaryRunId ?? '' } : {}) };
-  if (options.signCallback) {
+  if (options.signCallback && !completed) {
     value.__bridge_cb = true;
     value.bridge_token = options.signCallback('stop');
   }
   return {
-    icon: { tag: 'standard_icon', token: 'stop_outlined', color: 'red' },
-    color: 'red',
-    hover_tips: { tag: 'plain_text', content: options.auxiliary && options.showStopButton === false ? '本次任务已结束' : '停止当前回复' },
+    icon: { tag: 'standard_icon', token: completed ? 'done_outlined' : 'stop_outlined', color: completed ? 'green' : 'red' },
+    color: completed ? 'green' : 'red',
+    hover_tips: { tag: 'plain_text', content: completed ? '本次任务已完成' : options.auxiliary && options.showStopButton === false ? '本次任务已结束' : '停止当前回复' },
     behaviors: [{ type: 'callback', value }],
+    ...(completed ? { disabled: true } : {}),
   };
 }
 
-function controlButtonRow(options: RunCardRenderOptions): object {
+function controlButtonRow(options: RunCardRenderOptions, completed: boolean): object {
   const buttons = [
-    ...(options.auxiliary || options.showStopButton !== false ? [stopButton(options)] : []),
+    ...(completed || options.auxiliary || options.showStopButton !== false ? [stopButton(options, completed)] : []),
     ...(!options.auxiliary ? [iconButton('setting_outlined', 'config', '模型与推理设置')] : []),
     iconButton('refresh_outlined', 'refresh', '刷新会话状态', 'green'),
     ...(!options.auxiliary ? [...(options.supportsFork === false ? [] : [forkButton(options)]), archiveButton()] : []),
@@ -150,7 +146,8 @@ function controlButtonRow(options: RunCardRenderOptions): object {
     columns: buttons.map((button) => {
       if (options.auxiliaryScope) button.behaviors[0].value.auxiliaryScope = options.auxiliaryScope;
       const action = button.behaviors[0].value.cmd as RunButtonAction;
-      const imageKey = options.buttonImageKeys?.[action];
+      // A completed control uses the built-in check, never the cached stop PNG.
+      const imageKey = button.disabled ? undefined : options.buttonImageKeys?.[action];
       return {
       tag: 'column',
       // Icon-only controls have no labels to truncate. Equal weighted columns
@@ -168,6 +165,7 @@ function controlButtonRow(options: RunCardRenderOptions): object {
         horizontal_align: 'center', vertical_align: 'center',
         hover_tips: button.hover_tips,
         behaviors: button.behaviors,
+        ...(button.disabled ? { disabled: true, disabled_tips: button.hover_tips } : {}),
         elements: imageKey ? [{
           tag: 'img', img_key: imageKey,
           size: '32px 32px', scale_type: 'crop_center',

@@ -365,8 +365,13 @@ exports[`run card renderer snapshots > omits consecutive tools while preserving 
                     },
                   },
                 ],
-                "border_color": "red",
+                "border_color": "green",
                 "corner_radius": "3px",
+                "disabled": true,
+                "disabled_tips": {
+                  "content": "本次任务已完成",
+                  "tag": "plain_text",
+                },
                 "elements": [
                   {
                     "columns": [
@@ -375,9 +380,9 @@ exports[`run card renderer snapshots > omits consecutive tools while preserving 
                           {
                             "content": "",
                             "icon": {
-                              "color": "red",
+                              "color": "green",
                               "tag": "standard_icon",
-                              "token": "stop_outlined",
+                              "token": "done_outlined",
                             },
                             "margin": "0px",
                             "tag": "markdown",
@@ -402,7 +407,7 @@ exports[`run card renderer snapshots > omits consecutive tools while preserving 
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "停止当前回复",
+                  "content": "本次任务已完成",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -1045,8 +1050,13 @@ exports[`run card renderer snapshots > renders active and completed thinking 2`]
                     },
                   },
                 ],
-                "border_color": "red",
+                "border_color": "green",
                 "corner_radius": "3px",
+                "disabled": true,
+                "disabled_tips": {
+                  "content": "本次任务已完成",
+                  "tag": "plain_text",
+                },
                 "elements": [
                   {
                     "columns": [
@@ -1055,9 +1065,9 @@ exports[`run card renderer snapshots > renders active and completed thinking 2`]
                           {
                             "content": "",
                             "icon": {
-                              "color": "red",
+                              "color": "green",
                               "tag": "standard_icon",
-                              "token": "stop_outlined",
+                              "token": "done_outlined",
                             },
                             "margin": "0px",
                             "tag": "markdown",
@@ -1082,7 +1092,7 @@ exports[`run card renderer snapshots > renders active and completed thinking 2`]
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "停止当前回复",
+                  "content": "本次任务已完成",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -1383,8 +1393,13 @@ exports[`run card renderer snapshots > renders done, error, interrupted, and idl
                     },
                   },
                 ],
-                "border_color": "red",
+                "border_color": "green",
                 "corner_radius": "3px",
+                "disabled": true,
+                "disabled_tips": {
+                  "content": "本次任务已完成",
+                  "tag": "plain_text",
+                },
                 "elements": [
                   {
                     "columns": [
@@ -1393,9 +1408,9 @@ exports[`run card renderer snapshots > renders done, error, interrupted, and idl
                           {
                             "content": "",
                             "icon": {
-                              "color": "red",
+                              "color": "green",
                               "tag": "standard_icon",
-                              "token": "stop_outlined",
+                              "token": "done_outlined",
                             },
                             "margin": "0px",
                             "tag": "markdown",
@@ -1420,7 +1435,7 @@ exports[`run card renderer snapshots > renders done, error, interrupted, and idl
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "停止当前回复",
+                  "content": "本次任务已完成",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -3462,8 +3477,13 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
                     },
                   },
                 ],
-                "border_color": "red",
+                "border_color": "green",
                 "corner_radius": "3px",
+                "disabled": true,
+                "disabled_tips": {
+                  "content": "本次任务已完成",
+                  "tag": "plain_text",
+                },
                 "elements": [
                   {
                     "columns": [
@@ -3472,9 +3492,9 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
                           {
                             "content": "",
                             "icon": {
-                              "color": "red",
+                              "color": "green",
                               "tag": "standard_icon",
-                              "token": "stop_outlined",
+                              "token": "done_outlined",
                             },
                             "margin": "0px",
                             "tag": "markdown",
@@ -3499,7 +3519,7 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "停止当前回复",
+                  "content": "本次任务已完成",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
@@ -3805,8 +3825,13 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
                     },
                   },
                 ],
-                "border_color": "red",
+                "border_color": "green",
                 "corner_radius": "3px",
+                "disabled": true,
+                "disabled_tips": {
+                  "content": "本次任务已完成",
+                  "tag": "plain_text",
+                },
                 "elements": [
                   {
                     "columns": [
@@ -3815,9 +3840,9 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
                           {
                             "content": "",
                             "icon": {
-                              "color": "red",
+                              "color": "green",
                               "tag": "standard_icon",
-                              "token": "stop_outlined",
+                              "token": "done_outlined",
                             },
                             "margin": "0px",
                             "tag": "markdown",
@@ -3842,7 +3867,7 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
                 "height": "32px",
                 "horizontal_align": "center",
                 "hover_tips": {
-                  "content": "停止当前回复",
+                  "content": "本次任务已完成",
                   "tag": "plain_text",
                 },
                 "padding": "0px",
