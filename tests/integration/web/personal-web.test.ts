@@ -853,3 +853,23 @@ it('console keeps shared leave failures recoverable and rejects cross-site or un
   expect((await h.request('/api/console/action', { action: 'shared-leave', id })).status).toBe(200);
   expect(groups.get('oc_shared')?.status).toBe('archived'); expect(h.provider.archive).not.toHaveBeenCalled();
 });
+
+it('console preserves historical missing or unknown receipts without counting them as active work or replaying them during a switch', async () => {
+  const h = await harness(); await h.replies.stop(); const groups = await managedShared(h), row = groups.get('oc_shared')!;
+  await groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'native' }, async () => {});
+  const message = { messageId: 'historic-accepted', chatId: 'oc_shared', content: '历史消息', createTime: 1, resources: [] } as unknown as NormalizedMessage;
+  await h.inbox.receive('oc_shared', message);
+  const historic = { id: 'historic-job', version: 1, requestKey: 'historic', fingerprint: 'historic', status: 'completed', createdAt: 1, updatedAt: 2,
+    options: { ...h.options, delivery: { ...h.options.delivery!, scope: 'oc_shared', messageIds: [message.messageId] } } } as import('../../../src/worker/protocol').WorkerJob;
+  await h.inbox.reconcile([historic]);
+  const other = { ...h.native, nativeId: 'another', name: 'AA-new' }; h.provider.list.mockResolvedValue([h.native, other]);
+  let snapshot = await h.consoleService.snapshot(true);
+  expect(snapshot.items.find(i => i.scope === 'oc_shared')?.status).toBe('accepted_unconfirmed');
+  expect(snapshot.sharedGroups[0]).toMatchObject({ busy: false, canBind: true });
+  vi.spyOn(h.client, 'list').mockResolvedValue([{ ...historic, status: 'unknown' }]);
+  snapshot = await h.consoleService.snapshot(true);
+  expect(snapshot.items.find(i => i.scope === 'oc_shared')?.status).toBe('unknown');
+  expect(snapshot.sharedGroups[0]).toMatchObject({ busy: false, canBind: true });
+  expect((await h.request('/api/console/action', { action: 'shared-bind', id: snapshot.sharedGroups[0]!.id, target: snapshot.sharedTargets.find(t => t.name === 'AA-new')!.id })).status).toBe(200);
+  expect(h.bindings.get('oc_shared')?.nativeId).toBe('another'); expect(h.inbox.receipts('oc_shared')[0]?.status).toBe('accepted'); expect(h.calls).toHaveLength(0);
+});

@@ -6,7 +6,7 @@ import type { AgentKind } from '../config/profile-schema';
 import type { ToolSession } from '../tools/types';
 import { isPersonalWorkgroup } from '../tools/bindings';
 import { DurableAgentAdapter } from '../worker/adapter';
-import type { WorkerJob } from '../worker/protocol';
+import { isJobActive, type WorkerJob } from '../worker/protocol';
 import type { HealthDetails } from '../worker/client';
 import { log, readRecentLogs, redactDiagnosticText } from '../core/logger';
 import { PersonalSessionService, WebError } from './service';
@@ -108,7 +108,7 @@ export class BridgeConsoleService {
       const native = o?.sourceId === ref?.sourceId ? o?.native.find(s => s.nativeId === ref?.nativeId) : undefined;
       const binding = c.toolBindings?.get(row.chatId), connected = ['group', 'topic'].includes(group?.mode ?? '') && (!group?.status || group.status === 'normal');
       const routeWorker = binding ? this.observations.get(binding.toolId) : undefined;
-      const busy = items.some(i => i.scope === row.chatId && ['pending', 'queued', 'accepted', 'running', 'unknown', 'accepted_unconfirmed'].includes(i.status));
+      const busy = items.some(i => i.scope === row.chatId && ['pending', 'queued', 'accepted', 'running'].includes(i.status));
       const issues = [group?.error && row.status !== 'archived' ? '群状态未确认' : '',
         row.status === 'active' && this.deps.catalog?.isScopeArchived(row.chatId) ? '本群入口已归档' : '',
         !connected && !group?.error && row.status !== 'archived' ? '机器人不在群内或群已关闭' : '',
@@ -260,8 +260,6 @@ export class BridgeConsoleService {
     const jobs = (await tool.agent.client.list()).filter(j => jobScope(j) === scope && j.options.delivery?.sourceId === b.sourceId && j.options.delivery.botAppId === c.profileConfig.accounts.app.id);
     for (const runtime of c.workerRuntimes?.values() ?? []) if (runtime.inbox.diagnostics().some(r => r.scope === scope && r.status === 'pending'))
       throw new WebError(409, '本群还有未处理消息，请处理完成后再切换');
-    if (jobs.some(j => ['accepted', 'running', 'unknown'].includes(j.status)) ||
-        c.workerRuntimes?.get(b.toolId)?.inbox.diagnostics().some(r => r.scope === scope && r.status === 'accepted' && !jobs.some(j => j.options.delivery?.messageIds?.includes(r.requestId))))
-      throw new WebError(409, '本群任务尚未完成或结果未确认，请处理后再切换');
+    if (jobs.some(isJobActive)) throw new WebError(409, '本群任务尚未完成，请处理后再切换');
   }
 }
