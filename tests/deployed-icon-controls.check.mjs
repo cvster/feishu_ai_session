@@ -109,6 +109,7 @@ test('deployed status includes the project and model for running and completed t
       runtime: { startedAtMs: 1000, lastActivityAtMs: 1000, checkedAtMs: 2000, processRunning: true },
     };
     assert.ok(api.renderRunStatus(state).includes('项目 tmini_platform · gpt-6.1-sol · high'));
+    assert.ok(api.renderColoredRunStatus(state).includes(`<font color='${terminal === 'running' ? 'blue' : 'green'}'>`));
     assert.ok(JSON.stringify(api.renderCard(state)).includes('项目 tmini_platform'));
   }
   assert.equal(api.projectNameFromCwd('C:\\code\\project\\'), 'project');

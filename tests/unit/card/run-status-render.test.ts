@@ -59,7 +59,7 @@ describe('run status rendering', () => {
       `运行中 · 正在调用工具 · 已运行 1分15秒 · 最近活动 1分15秒前 · 最近更新 ${formatClockTime(76_000)}`,
     );
     expect(JSON.stringify(renderCard(state))).toContain('运行中 · 正在调用工具');
-    expect(renderColoredRunStatus(state)).toContain("<font color='green'>");
+    expect(renderColoredRunStatus(state)).toContain("<font color='blue'>");
     expect(renderText(state)).toContain('已运行 1分15秒');
   });
 

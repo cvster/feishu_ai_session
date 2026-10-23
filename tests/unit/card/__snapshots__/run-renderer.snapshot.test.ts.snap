@@ -3083,7 +3083,7 @@ Done
 
 🧰 1 个工具调用（已完成）
 
-_✍️ 正在输出…_"
+<font color='blue'>_✍️ 正在输出…_</font>"
 `;
 
 exports[`run card renderer snapshots > renders markdown text mode without card-only controls 2`] = `

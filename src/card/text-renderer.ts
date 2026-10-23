@@ -31,7 +31,7 @@ export function renderText(state: RunState): string {
   if (status) {
     parts.push(status);
   } else if (state.terminal === 'running' && state.footer && !(state.footer === 'thinking' || state.footer === 'tool_running' && state.blocks.some(block => block.kind === 'tool'))) {
-    parts.push(footerLine(state.footer));
+    parts.push(`<font color='blue'>${footerLine(state.footer)}</font>`);
   }
 
   return parts.join('\n\n');

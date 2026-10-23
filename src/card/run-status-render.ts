@@ -40,11 +40,11 @@ export function renderColoredRunStatus(state: RunState): string | undefined {
   return `<font color='${runStatusColor(state)}'>${escaped}</font>`;
 }
 
-export function runStatusColor(state: RunState): 'green' | 'red' {
+export function runStatusColor(state: RunState): 'blue' | 'green' | 'red' {
   if (state.terminal === 'error' || state.terminal === 'idle_timeout') return 'red';
   if (state.terminal === 'interrupted') return 'red';
   if (state.terminal === 'running' && state.runtime?.processRunning === false) return 'red';
-  return 'green';
+  return state.terminal === 'running' ? 'blue' : 'green';
 }
 
 function terminalLabel(state: RunState): string {

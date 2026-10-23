@@ -224,7 +224,7 @@ function footerStatus(status: Exclude<FooterStatus, null>): object {
       : status === 'tool_running'
         ? '🧰 正在调用工具'
         : '✍️ 正在输出';
-  return noteMd(text);
+  return noteMd(`<font color='blue'>${text}</font>`);
 }
 
 function summaryText(state: RunState): string {
