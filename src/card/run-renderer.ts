@@ -124,8 +124,8 @@ function stopButton(options: RunCardRenderOptions, completed: boolean): RunContr
     value.bridge_token = options.signCallback('stop');
   }
   return {
-    icon: { tag: 'standard_icon', token: completed ? 'done_outlined' : 'stop_outlined', color: completed ? 'green' : 'red' },
-    color: completed ? 'green' : 'red',
+    icon: { tag: 'standard_icon', token: 'stop_outlined', color: completed ? 'grey' : 'red' },
+    color: completed ? 'grey' : 'red',
     hover_tips: { tag: 'plain_text', content: completed ? '本次任务已完成' : options.auxiliary && options.showStopButton === false ? '本次任务已结束' : '停止当前回复' },
     behaviors: [{ type: 'callback', value }],
     ...(completed ? { disabled: true } : {}),
@@ -146,7 +146,7 @@ function controlButtonRow(options: RunCardRenderOptions, completed: boolean): ob
     columns: buttons.map((button) => {
       if (options.auxiliaryScope) button.behaviors[0].value.auxiliaryScope = options.auxiliaryScope;
       const action = button.behaviors[0].value.cmd as RunButtonAction;
-      // A completed control uses the built-in check, never the cached stop PNG.
+      // Keep the stop glyph grey on completion instead of using the red stop PNG.
       const imageKey = button.disabled ? undefined : options.buttonImageKeys?.[action];
       return {
       tag: 'column',

@@ -33,14 +33,14 @@ test('deployed controls use five icons and preserve their callbacks', () => {
   for (const terminal of ['running', 'done']) {
     const controls = buttons(api.renderCard({ ...initial, terminal }));
     assert.deepEqual(Array.from(controls, (button) => button.icon?.token ?? button.text?.content),
-      [terminal === 'done' ? 'done_outlined' : 'stop_outlined', 'setting_outlined', 'refresh_outlined', 'mindmap-down_outlined', 'archive_outlined']);
+      ['stop_outlined', 'setting_outlined', 'refresh_outlined', 'mindmap-down_outlined', 'archive_outlined']);
     for (const button of controls) {
       assert.equal(button.icon.tag, 'standard_icon');
       assert.equal(button.text, undefined);
       assert.ok(button.hover_tips.content);
     }
     for (const [index, button] of [[0, controls[0]], [4, controls[4]]]) {
-      const color = index === 0 && terminal === 'done' ? 'green' : 'red';
+      const color = index === 0 && terminal === 'done' ? 'grey' : 'red';
       assert.equal(button.icon.color, color);
       assert.equal(button.border_color, color);
       assert.equal(button.text, undefined);

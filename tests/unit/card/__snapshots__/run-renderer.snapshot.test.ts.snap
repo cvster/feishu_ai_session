@@ -365,7 +365,7 @@ exports[`run card renderer snapshots > omits consecutive tools while preserving 
                     },
                   },
                 ],
-                "border_color": "green",
+                "border_color": "grey",
                 "corner_radius": "3px",
                 "disabled": true,
                 "disabled_tips": {
@@ -380,9 +380,9 @@ exports[`run card renderer snapshots > omits consecutive tools while preserving 
                           {
                             "content": "",
                             "icon": {
-                              "color": "green",
+                              "color": "grey",
                               "tag": "standard_icon",
-                              "token": "done_outlined",
+                              "token": "stop_outlined",
                             },
                             "margin": "0px",
                             "tag": "markdown",
@@ -1050,7 +1050,7 @@ exports[`run card renderer snapshots > renders active and completed thinking 2`]
                     },
                   },
                 ],
-                "border_color": "green",
+                "border_color": "grey",
                 "corner_radius": "3px",
                 "disabled": true,
                 "disabled_tips": {
@@ -1065,9 +1065,9 @@ exports[`run card renderer snapshots > renders active and completed thinking 2`]
                           {
                             "content": "",
                             "icon": {
-                              "color": "green",
+                              "color": "grey",
                               "tag": "standard_icon",
-                              "token": "done_outlined",
+                              "token": "stop_outlined",
                             },
                             "margin": "0px",
                             "tag": "markdown",
@@ -1393,7 +1393,7 @@ exports[`run card renderer snapshots > renders done, error, interrupted, and idl
                     },
                   },
                 ],
-                "border_color": "green",
+                "border_color": "grey",
                 "corner_radius": "3px",
                 "disabled": true,
                 "disabled_tips": {
@@ -1408,9 +1408,9 @@ exports[`run card renderer snapshots > renders done, error, interrupted, and idl
                           {
                             "content": "",
                             "icon": {
-                              "color": "green",
+                              "color": "grey",
                               "tag": "standard_icon",
-                              "token": "done_outlined",
+                              "token": "stop_outlined",
                             },
                             "margin": "0px",
                             "tag": "markdown",
@@ -3477,7 +3477,7 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
                     },
                   },
                 ],
-                "border_color": "green",
+                "border_color": "grey",
                 "corner_radius": "3px",
                 "disabled": true,
                 "disabled_tips": {
@@ -3492,9 +3492,9 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
                           {
                             "content": "",
                             "icon": {
-                              "color": "green",
+                              "color": "grey",
                               "tag": "standard_icon",
-                              "token": "done_outlined",
+                              "token": "stop_outlined",
                             },
                             "margin": "0px",
                             "tag": "markdown",
@@ -3825,7 +3825,7 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
                     },
                   },
                 ],
-                "border_color": "green",
+                "border_color": "grey",
                 "corner_radius": "3px",
                 "disabled": true,
                 "disabled_tips": {
@@ -3840,9 +3840,9 @@ exports[`run card renderer snapshots > renders tool running, done, and error sta
                           {
                             "content": "",
                             "icon": {
-                              "color": "green",
+                              "color": "grey",
                               "tag": "standard_icon",
-                              "token": "done_outlined",
+                              "token": "stop_outlined",
                             },
                             "margin": "0px",
                             "tag": "markdown",
