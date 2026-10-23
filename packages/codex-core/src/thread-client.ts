@@ -219,6 +219,7 @@ export class CodexThreadReader {
         sortKey: 'updated_at',
         sortDirection: 'desc',
         archived: false,
+        modelProviders: [],
         useStateDbOnly: true,
         sourceKinds: ['cli', 'vscode', 'exec', 'appServer', 'unknown'],
       });
@@ -247,6 +248,7 @@ export class CodexThreadReader {
     let cursor: string | undefined;
     do {
       const result = await this.rpc('thread/list', { archived: true, useStateDbOnly: true,
+        modelProviders: [],
         sourceKinds: ['cli', 'vscode', 'exec', 'appServer', 'unknown'],
         limit: 100, ...(cursor ? { cursor } : {}) });
       if (!Array.isArray(result.data)) throw new Error('thread/list returned malformed archive data');
@@ -370,7 +372,7 @@ export class CodexThreadReader {
         let cursor: string | undefined;
         do {
           const listed = await this.request('thread/list', {
-            limit: 100, searchTerm: base, archived, ...(cursor ? { cursor } : {}),
+            limit: 100, searchTerm: base, archived, modelProviders: [], ...(cursor ? { cursor } : {}),
           });
           const page = recordValue(listed.result);
           if (!Array.isArray(page?.data)) throw new Error('thread/list returned malformed data for fork naming');

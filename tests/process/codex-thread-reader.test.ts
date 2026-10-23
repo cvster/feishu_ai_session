@@ -146,6 +146,12 @@ rl.on('line', (line) => {
     return;
   }
   if (request.method === 'thread/list') {
+    // Native servers may default to the current account's provider. Existing
+    // sessions and archive/name checks must explicitly include all providers.
+    if (!Array.isArray(request.params.modelProviders) || request.params.modelProviders.length) {
+      send({ id: request.id, result: { data: [] } });
+      return;
+    }
     if (!request.params.archived && request.params.limit === 1) {
       send({ id: request.id, error: { code: -32000, message: 'thread list rejected' } });
       return;

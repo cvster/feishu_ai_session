@@ -223,6 +223,8 @@ function listRequest(
       sortKey: 'updated_at',
       sortDirection: 'desc',
       archived: false,
+      // Account/provider switches must not hide existing bound sessions.
+      modelProviders: [],
       ...(options.cwd ? { cwd: options.cwd } : {}),
       ...(cursor ? { cursor } : {}),
       useStateDbOnly: options.useStateDbOnly ?? true,

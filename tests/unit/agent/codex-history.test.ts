@@ -85,6 +85,7 @@ describe('Codex thread history provider', () => {
           cwd: '/repo',
           limit: 2,
           archived: false,
+          modelProviders: [],
           sortKey: 'updated_at',
           sortDirection: 'desc',
           useStateDbOnly: true,
