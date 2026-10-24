@@ -67,7 +67,20 @@ export function createCodexWorkerSessions(options: CodexThreadReaderOptions, sou
   const conversation = async (id: string) => {
     await legacyLoaded;
     if (!metadata.has(id)) await list();
-    const row = metadata.get(id); if (!row) throw new WorkerApiError(404, 'Native session not found', 'not-found');
+    let row = metadata.get(id);
+    if (!row) {
+      // Newly forked threads can be readable before Codex includes them in thread/list.
+      // Resolve the exact native identity rather than inferring deletion from the roster.
+      const result = await reader.rpc('thread/read', { threadId: id, includeTurns: false });
+      const thread = result.thread as { id?: unknown; cwd?: unknown; name?: unknown; createdAt?: unknown; updatedAt?: unknown } | undefined;
+      if (!thread) throw new WorkerApiError(404, 'Native session not found', 'not-found');
+      if (thread.id !== id || typeof thread.cwd !== 'string' || !thread.cwd.trim())
+        throw new WorkerApiError(502, 'Native session metadata identity mismatch', 'internal-error', true);
+      row = { nativeId: id, name: typeof thread.name === 'string' ? thread.name : undefined, cwd: thread.cwd,
+        createdAtMs: typeof thread.createdAt === 'number' ? thread.createdAt * 1000 : 0,
+        updatedAtMs: typeof thread.updatedAt === 'number' ? thread.updatedAt * 1000 : 0 };
+      metadata.set(id, row);
+    }
     const snapshot = await reader.readThread(id), archived = (await reader.listArchivedThreadIds()).includes(id);
     if (archived) observed.delete(id); else observed.set(id, Date.now());
     const now = Date.now();

@@ -4,12 +4,14 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createCodexWorkerSessions } from '../../../src/worker/codex-sessions';
 import { codexInputKey, type CodexInputAnswers } from '../../../src/session/codex-user-input';
-const mocks = vi.hoisted(() => ({ snapshot: {} as any, reader: {} as any }));
+const mocks = vi.hoisted(() => ({ snapshot: {} as any, reader: {} as any,
+  rows: [] as Array<{ threadId: string; cwd: string; createdAtMs: number; updatedAtMs: number }> }));
 vi.mock('../../../src/session/codex-thread-reader', () => ({ CodexThreadReader: class { constructor() { return mocks.reader; } } }));
-vi.mock('../../../src/session/codex-history', () => ({ listCodexThreadHistory: async () => [{ threadId: 'thread', cwd: '/project', createdAtMs: 1, updatedAtMs: 2 }] }));
+vi.mock('../../../src/session/codex-history', () => ({ listCodexThreadHistory: async () => mocks.rows }));
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
 beforeEach(() => {
+  mocks.rows = [{ threadId: 'thread', cwd: '/project', createdAtMs: 1, updatedAtMs: 2 }];
   mocks.snapshot = { id: 'thread', status: { type: 'active' }, turns: [{ id: 'turn', status: 'inProgress', items: [
     { type: 'userMessage', content: [{ type: 'text', text: 'input' }] },
     { type: 'agentMessage', id: 'question', questions: [{ title: 'Choose', options: ['A', 'B'] }, { title: 'Other?' }] },
@@ -23,6 +25,29 @@ async function fixture() {
   const create = () => createCodexWorkerSessions({ binary: '/missing', profileStateDir: stateDir }, 'source', agent, 'app');
   const sessions = create(); cleanups.push(() => sessions.close!()); return { sessions, create, stateDir };
 }
+it('reads an existing new fork by exact ID when the native list omits it, without invoking inference', async () => {
+  mocks.rows = [];
+  mocks.reader.rpc = vi.fn(async () => ({ thread: { id: 'thread', cwd: '/project', name: 'AA-copy-2', createdAt: 1, updatedAt: 2 } }));
+  const h = await fixture();
+  expect(await h.sessions.conversation!('thread')).toMatchObject({ id: 'thread', name: 'AA-copy-2', cwd: '/project', archived: false });
+  expect(mocks.reader.rpc).toHaveBeenCalledWith('thread/read', { threadId: 'thread', includeTurns: false });
+  await h.sessions.conversation!('thread');
+  expect(mocks.reader.rpc).toHaveBeenCalledOnce();
+});
+it('still reports archived status for a readable thread omitted from the active list', async () => {
+  mocks.rows = [];
+  mocks.reader.rpc = vi.fn(async () => ({ thread: { id: 'thread', cwd: '/project' } }));
+  mocks.reader.listArchivedThreadIds.mockResolvedValue(['thread']);
+  const h = await fixture();
+  expect((await h.sessions.conversation!('thread')).archived).toBe(true);
+});
+it.each([undefined, { id: 'other', cwd: '/project' }, { id: 'thread', cwd: '' }])('rejects missing or mismatched exact native metadata (%j)', async thread => {
+  mocks.rows = [];
+  mocks.reader.rpc = vi.fn(async () => ({ thread }));
+  const h = await fixture();
+  await expect(h.sessions.conversation!('thread')).rejects.toThrow(/Native session/);
+  expect(mocks.reader.readThread).not.toHaveBeenCalled();
+});
 it('exposes only current in-flight native questions and never invokes inference', async () => {
   const h = await fixture(), questions = await h.sessions.questions!('thread');
   expect(questions).toHaveLength(1); expect(questions[0]).toMatchObject({ available: true, origin: 'native', request: { kind: 'async', turnId: 'turn' } });
