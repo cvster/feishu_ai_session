@@ -165,3 +165,5 @@ Codex、Claude、ZCode 均使用各自专用头像；手动创建、AA 自动建
 原生改名前会先通过桌面远控的 `resumeSession` 加载指定的已保存会话，验证会话 ID，
 再提交改名命令并读取标题确认。会话出现在列表中并不表示桌面运行时已经加载它；
 这一步不发送提示词，不创建新会话，也不修改模型或供应商配置。
+
+桌面配对模式的模型列表读取原生 `model-selection.getView` 完整目录，以“供应商 / 模型”展示，并从模型的 `optionSpecs.reasoningLevel.values` 读取档位供 worker 映射。不要使用 `session/read` 的 `settings.model.available` 作为完整目录：该字段可能只返回当前会话的模型。查询目录不创建或归档临时会话，也不修改或注入供应商配置。

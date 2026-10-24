@@ -225,6 +225,7 @@ export class ZcodeRemoteClient {
     switch (method) {
       // Credentials and provider registries stay in the desktop. Never transmit them over relay.
       case 'workspace/updateProviderRegistry': result = {}; break;
+      case 'models/list': result = await this.call('getView', [], 'model-selection'); break;
       case 'workspace/readPresentation': result = await this.call('readWorkspacePresentation', [target]); break;
       case 'session/resume': result = await this.call('resumeSession', [target]); break;
       case 'session/read': result = await this.call('readSession', [target]); break;
@@ -351,22 +352,26 @@ export class ZcodeRemoteClient {
 /** Run only in the owning worker while idle, so model discovery cannot kick a live turn. */
 export async function listZcodeRemoteModels(pairingFile: string, cwd: string, credentialFile?: string, testRelay?: string): Promise<ModelOption[]> {
   const client = new ZcodeRemoteClient(pairingFile, cwd, testRelay, credentialFile);
-  let temporary: string | undefined;
   try {
-    const listed = await client.request('session/list', {});
-    const existing = listed.sessions?.find((s: any) => s.workspace?.workspacePath === cwd || s.workspacePath === cwd);
-    const snapshot = existing ? await client.request('session/read', { sessionId: existing.sessionId }) : await client.request('session/create', { mode: 'plan' });
-    if (!existing) temporary = snapshot.session?.sessionId;
-    const rows = snapshot.settings?.model?.available;
-    if (!Array.isArray(rows)) throw new Error('ZCode 桌面模型列表格式不兼容');
-    const current = snapshot.settings?.model?.current;
-    return normalizeNativeModels(rows.filter((row: any) => typeof row.ref?.providerId === 'string' && typeof row.ref?.modelId === 'string' && !row.disabledReason).map((row: any) => ({
-      value: `${row.ref.providerId}/${row.ref.modelId}`, label: `${row.providerLabel ?? row.ref.providerId} / ${row.label ?? row.ref.modelId}`,
-      isDefault: current?.providerId === row.ref.providerId && current?.modelId === row.ref.modelId,
-      ...(row.reasoning?.enabled ? { reasoningEfforts: row.reasoning.levels, defaultReasoningEffort: row.reasoning.defaultLevel } : {}),
-    })));
-  } finally {
-    try { if (temporary) await client.request('session/archive', { sessionId: temporary }); }
-    finally { await client.close(); }
-  }
+    // Session snapshots can contain only the current model. The desktop selection
+    // service owns the complete live provider catalog and projects credential-free metadata.
+    const view = await client.request('models/list', {});
+    if (!Array.isArray(view.providers)) throw new Error('ZCode 桌面供应商模型列表格式不兼容');
+    const rows: ModelOption[] = [];
+    for (const provider of view.providers) {
+      if (typeof provider.providerId !== 'string' || !Array.isArray(provider.models)) throw new Error('ZCode 桌面供应商模型列表格式不兼容');
+      if (provider.config?.enabled === false || provider.config?.visibility === 'hidden') continue;
+      for (const model of provider.models) {
+        if (typeof model.modelId !== 'string') throw new Error('ZCode 桌面供应商模型列表格式不兼容');
+        if (model.config?.enabled === false || model.disabledReason) continue;
+        const levels = model.config?.optionSpecs?.reasoningLevel?.values;
+        rows.push({ value: `${provider.providerId}/${model.modelId}`,
+          label: `${provider.providerName ?? provider.providerId} / ${model.modelId}`,
+          isDefault: view.preferredSelection?.providerId === provider.providerId && view.preferredSelection?.modelId === model.modelId,
+          ...(Array.isArray(levels) ? { reasoningEfforts: levels.map((value: string) => ({ value, label: value })) } : {}),
+        });
+      }
+    }
+    return normalizeNativeModels(rows);
+  } finally { await client.close(); }
 }

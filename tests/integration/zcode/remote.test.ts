@@ -39,6 +39,16 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
   const address = http.address(); if (!address || typeof address === 'string') throw new Error('invalid fixture');
   const calls: Array<{ method: string; args: any }> = [], wire: string[] = [];
   let nativeTitle = '新会话', taskArchived = false;
+  const modelView = { preferredSelection: { providerId: 'account:native', modelId: 'native-model' }, providers: [
+    { providerId: 'account:native', providerName: 'Native', config: {}, models: [
+      { modelId: 'native-model', config: { optionSpecs: { reasoningLevel: { values: ['low', 'high', 'max'] } } } },
+      { modelId: 'second-model', config: {} },
+    ] },
+    { providerId: 'custom', providerName: 'Custom', config: { apiKey: 'DO_NOT_EXPORT' }, models: [
+      { modelId: 'native-model', config: {} }, { modelId: 'custom-second', config: {} }, { modelId: 'disabled', config: { enabled: false } },
+    ] },
+    { providerId: 'hidden', providerName: 'Hidden', config: { visibility: 'hidden' }, models: [{ modelId: 'hidden', config: {} }] },
+  ] };
   let nativeReads = 0, loadedForRename = false;
   let emit!: (value: any) => void, connection: WebSocket | undefined, subscribeId: number | undefined;
   server.on('connection', (socket,request) => {
@@ -76,10 +86,11 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
       if (p.zcode_type === 'rpc-frame' || p.zcode_type === 'rpc-frame-ack') {
         const result = frames.accept(p); if (result.ack) payload(result.ack); if (!result.bytes) return;
         const { header: [kind, id, channel, method], body } = decodeRpc(result.bytes);
-        expect(['zcode-agent','zcode-task']).toContain(channel);
+        expect(['zcode-agent','zcode-task','model-selection']).toContain(channel);
         calls.push({ method, args: body });
         if (kind === 102) { subscribeId = id; emit({ type: 'snapshot', snapshot: { session: { sessionId: body.sessionId } } }); return; }
         let response: any = {};
+        if (method === 'getView') { expect(channel).toBe('model-selection'); response = modelView; }
         if (method === 'helloConversationV4') response = { kind: 'hello', protocolVersion: 2, clientMode: 'web-remote-replayable' };
         if (method === 'resumeSession') loadedForRename = true;
         if (method === 'readSession' && options.coldRename && !loadedForRename) { rpc([202, id], { message: 'session.notLoaded' }); return; }
@@ -119,7 +130,7 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
   harness.relay = `ws://127.0.0.1:${address.port}`;
   const client = new ZcodeRemoteClient(file, dir, harness.relay, credentialFile);
   cleanup.push(() => client.close());
-  return { client, calls, wire, file, dir, httpCalls, credentialFile, relay:harness.relay, emit: (value: any) => emit(value), disconnect: () => connection?.terminate() };
+  return { client, calls, wire, file, dir, modelView, httpCalls, credentialFile, relay:harness.relay, emit: (value: any) => emit(value), disconnect: () => connection?.terminate() };
 }
 describe('ZCode desktop remote attachment', () => {
   it('verifies desktop archive state from the native task index even when session metadata stays active', async () => {
@@ -194,10 +205,23 @@ describe('ZCode desktop remote attachment', () => {
     await expect(f.client.request('session/rename', { sessionId: 'sess_original', title: 'AA-新名字' })).rejects.toThrow('不匹配');
     expect(f.calls.some(c => c.method === 'sendConversationCommandV4')).toBe(false);
   });
-  it('discovers native desktop models and reasoning without injecting a CLI registry or creating a new session',async()=>{
-    const f=await fixture({v2:true});await f.client.request('workspace/updateProviderRegistry',{});await f.client.close();
-    expect(await listZcodeRemoteModels(f.file,f.dir,f.credentialFile,f.relay)).toEqual([{value:'account:native/native-model',label:'account:native / Native Model',isDefault:true,reasoningEfforts:[{value:'native-level',label:'Native Level'}],defaultReasoningEffort:'native-level'}]);
-    expect(f.calls.some(c=>['createSession','sendPrompt'].includes(c.method))).toBe(false);
+  it('reads the full live provider catalog instead of the session-only model list, without creating sessions or exposing keys', async () => {
+    const f = await fixture({ v2: true }); await f.client.request('workspace/updateProviderRegistry', {}); await f.client.close();
+    const read = () => listZcodeRemoteModels(f.file, f.dir, f.credentialFile, f.relay);
+    const models = await read();
+    expect(models).toEqual([
+      { value: 'account:native/native-model', label: 'Native / native-model', isDefault: true,
+        reasoningEfforts: ['low', 'high', 'max'].map(value => ({ value, label: value })) },
+      { value: 'account:native/second-model', label: 'Native / second-model' },
+      { value: 'custom/native-model', label: 'Custom / native-model' },
+      { value: 'custom/custom-second', label: 'Custom / custom-second' },
+    ]);
+    expect(JSON.stringify(models)).not.toContain('DO_NOT_EXPORT');
+    f.modelView.providers[1]!.models = [{ modelId: 'new-model', config: {} }];
+    expect((await read()).map(row => row.value)).toEqual(['account:native/native-model', 'account:native/second-model', 'custom/new-model']);
+    expect(f.calls.some(c => ['listSessions', 'readSession', 'createSession', 'archiveTask', 'sendPrompt', 'setModel'].includes(c.method))).toBe(false);
+    (f.modelView as any).providers = undefined;
+    await expect(read()).rejects.toThrow('供应商模型列表格式不兼容');
   });
   it('creates using the desktop default model, without requiring or overriding it from a local CLI registry',async()=>{
     const f=await fixture({v2:true,complete:true,autoHeaders:true});
