@@ -167,3 +167,5 @@ Codex、Claude、ZCode 均使用各自专用头像；手动创建、AA 自动建
 这一步不发送提示词，不创建新会话，也不修改模型或供应商配置。
 
 桌面配对模式的模型列表读取原生 `model-selection.getView` 完整目录，以“供应商 / 模型”展示，并从模型的 `optionSpecs.reasoningLevel.values` 读取档位供 worker 映射。不要使用 `session/read` 的 `settings.model.available` 作为完整目录：该字段可能只返回当前会话的模型。查询目录不创建或归档临时会话，也不修改或注入供应商配置。
+
+配对执行时，显式选定模型的推理档位必须随 `model.options.reasoningLevel` 一起提交到创建或切换模型的请求，并在发送输入时保留。部分原生模型要求这两个字段同时存在；先切换模型再单独设置档位会被桌面拒绝。RPC 错误仅附带操作名，不公开上游错误载荷。

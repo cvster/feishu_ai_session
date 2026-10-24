@@ -188,7 +188,7 @@ export class ZcodeRemoteClient {
     const id = ++this.rpcNext, response = this.deferred(this.rpc, id);
     try { this.writeRpc([100, id, channel, method], args); }
     catch (error) { this.settle(this.rpc, id, undefined, error as Error); }
-    return response;
+    return response.catch(error => { throw new Error(`${error instanceof Error ? error.message : 'ZCode 桌面请求失败'}（操作：${method}）`); });
   }
   onNotification(listener: (method: string, params: any) => void) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   /** Submit the official remote UI's native V4 input command with durable origin.

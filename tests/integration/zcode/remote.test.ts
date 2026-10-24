@@ -19,7 +19,7 @@ vi.mock('../../../src/agent/zcode/remote-client', async importOriginal => {
 
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-async function fixture(options: { error?: boolean; workspace?: string; closeOnSend?: boolean; complete?: boolean; wait?: boolean; v2?: boolean; foreignDevice?: boolean; autoHeaders?: boolean; staleDegraded?: boolean; ownDegraded?: boolean; renameFailure?: boolean; coldRename?: boolean; wrongResumeIdentity?: boolean; nativeStop?: boolean; missingExecution?: boolean; wrongMessage?: boolean; changedTurn?: boolean; rejectStop?: boolean; idle?: boolean } = {}) {
+async function fixture(options: { error?: boolean; workspace?: string; closeOnSend?: boolean; complete?: boolean; wait?: boolean; v2?: boolean; foreignDevice?: boolean; autoHeaders?: boolean; staleDegraded?: boolean; ownDegraded?: boolean; renameFailure?: boolean; coldRename?: boolean; wrongResumeIdentity?: boolean; nativeStop?: boolean; missingExecution?: boolean; wrongMessage?: boolean; changedTurn?: boolean; rejectStop?: boolean; idle?: boolean; requireReasoning?: boolean; rejectModel?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'zcode-remote-')); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const file = join(dir, 'pair.link');
   await writeFile(file, options.v2 ? 'https://zcode.z.ai/remote/v4?sid=device-1&app_version=3.16.2' : 'https://zcode.z.ai/remote/v4?sid=device-1&hash=dGVzdF9oYXNo&t=123&app_version=3.10.2', { mode: 0o600 });
@@ -90,6 +90,9 @@ async function fixture(options: { error?: boolean; workspace?: string; closeOnSe
         calls.push({ method, args: body });
         if (kind === 102) { subscribeId = id; emit({ type: 'snapshot', snapshot: { session: { sessionId: body.sessionId } } }); return; }
         let response: any = {};
+        if (['createSession', 'setModel'].includes(method) && (options.rejectModel || options.requireReasoning && !body[0].model?.options?.reasoningLevel)) {
+          rpc([202, id], { message: 'Reasoning level is required; PRIVATE_NATIVE_PAYLOAD' }); return;
+        }
         if (method === 'getView') { expect(channel).toBe('model-selection'); response = modelView; }
         if (method === 'helloConversationV4') response = { kind: 'hello', protocolVersion: 2, clientMode: 'web-remote-replayable' };
         if (method === 'resumeSession') loadedForRename = true;
@@ -235,6 +238,29 @@ describe('ZCode desktop remote attachment', () => {
     expect(creation?.args[0]).not.toHaveProperty('model');
     expect(creation?.args[0]).toHaveProperty('persistence','immediate');
     expect(f.calls.filter(c=>c.method==='sendPrompt')).toHaveLength(1);
+  });
+  it.each([undefined, 'sess_original'])('submits model and reasoning atomically for required-level desktop models (session=%s)', async sessionId => {
+    const f = await fixture({ v2: true, complete: true, requireReasoning: true });
+    await f.client.request('workspace/updateProviderRegistry', {}); await f.client.close();
+    const adapter = new ZcodeAdapter({ binary: '/must-not-spawn', modelConfigPath: f.dir, remoteControlFile: f.file });
+    const run = adapter.run({ runId: 'required-level', sessionId, cwd: f.dir, prompt: 'hello', model: 'custom/native-model', reasoningEffort: 'high' });
+    const events: AgentEvent[] = []; for await (const event of run.events) events.push(event);
+    expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'normal' });
+    const model = { providerId: 'custom', modelId: 'native-model', options: { reasoningLevel: 'high' } };
+    expect(f.calls.find(c => c.method === (sessionId ? 'setModel' : 'createSession'))?.args[0].model).toEqual(model);
+    expect(f.calls.find(c => c.method === 'sendPrompt')?.args[0].modelSelection).toEqual(model);
+    expect(f.calls.some(c => c.method === 'setThoughtLevel')).toBe(false);
+    expect(f.calls.filter(c => c.method === 'sendPrompt')).toHaveLength(1);
+  });
+  it('identifies rejected model operations without exposing upstream payloads or submitting a prompt', async () => {
+    const f = await fixture({ v2: true, rejectModel: true });
+    await f.client.request('workspace/updateProviderRegistry', {}); await f.client.close();
+    const adapter = new ZcodeAdapter({ binary: '/must-not-spawn', modelConfigPath: f.dir, remoteControlFile: f.file });
+    const run = adapter.run({ runId: 'rejected-model', sessionId: 'sess_original', cwd: f.dir, prompt: 'hello', model: 'custom/native-model', reasoningEffort: 'high' });
+    const events: AgentEvent[] = []; for await (const event of run.events) events.push(event);
+    expect(events.at(-1)).toMatchObject({ type: 'error', submissionStatus: 'rejected', message: expect.stringContaining('操作：setModel') });
+    expect(JSON.stringify(events)).not.toContain('PRIVATE_NATIVE_PAYLOAD');
+    expect(f.calls.some(c => c.method === 'sendPrompt')).toBe(false);
   });
   it('uses current account authorization for V2 links, scopes the device and keeps the login JWT off the relay', async () => {
     const f=await fixture({v2:true});

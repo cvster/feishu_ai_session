@@ -99,10 +99,11 @@ export class ZcodeAdapter implements AgentAdapter {
         // A missing override means follow this conversation, not the first provider's default.
         const separator = opts.model?.indexOf('/') ?? -1;
         if (this.options.remoteControlFile && opts.model && separator < 1) throw new Error('ZCode 桌面模型标识无效，请重新打开 /config 选择');
-        const runtimeModel = this.options.remoteControlFile
-          ? opts.model ? { model: { providerId: opts.model.slice(0, separator), modelId: opts.model.slice(separator + 1) } } : undefined
-          : opts.model || !opts.sessionId ? await loadZcodeRuntimeModel(this.options, opts.model) : undefined;
         const effort = resolveReasoningEffort(opts.reasoningEffort);
+        const runtimeModel = this.options.remoteControlFile
+          ? opts.model ? { model: { providerId: opts.model.slice(0, separator), modelId: opts.model.slice(separator + 1),
+            ...(effort ? { options: { reasoningLevel: effort } } : {}) }, ...(effort ? { thoughtLevel: effort } : {}) } : undefined
+          : opts.model || !opts.sessionId ? await loadZcodeRuntimeModel(this.options, opts.model) : undefined;
         const modelParams = runtimeModel ? { runtimeModel } : {};
         const snapshot = opts.sessionId
           ? await client.request('session/resume', { sessionId: opts.sessionId, workspace })
@@ -115,7 +116,9 @@ export class ZcodeAdapter implements AgentAdapter {
         const selected = runtimeModel?.model ?? snapshot.settings?.model?.current ?? snapshot.session?.model;
         push({ type: 'system', sessionId, cwd: opts.cwd, ...(selected?.providerId && selected?.modelId ? { model: `${selected.providerId}/${selected.modelId}` } : {}) });
         await client.request('session/setMode', { sessionId, mode });
-        if (effort) {
+        // Desktop models can require reasoningLevel in the model selection itself.
+        // Sending setThoughtLevel later cannot repair a rejected create/setModel.
+        if (effort && !(this.options.remoteControlFile && runtimeModel)) {
           await client.request('session/setThoughtLevel', { sessionId, thoughtLevel: effort });
           if (runtimeModel) Object.assign(runtimeModel, { thoughtLevel: effort });
         }
