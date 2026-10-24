@@ -217,7 +217,7 @@ describe('profile-aware account and config commands', () => {
     vi.useFakeTimers();
     const h = await createHarness();
     h.nativeModels.push({ value: 'brand-new-native-alias', label: 'Brand new model' });
-    await h.command('/config models 0');
+    await h.command('/config models 0', undefined, { fromCardAction: false });
     expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('Brand new model');
     h.nativeModels.splice(h.nativeModels.findIndex(row => row.value === 'brand-new-native-alias'), 1);
     await h.command('/config submit', { model: 'brand-new-native-alias', show_tool_calls: 'hide' });
@@ -226,6 +226,33 @@ describe('profile-aware account and config commands', () => {
     const root = JSON.parse(await readFile(join(h.rootDir, 'config.json'), 'utf8')) as RootConfig;
     expect(root.profiles.claude?.preferences.model).toBeUndefined();
     expect(root.profiles.claude?.preferences.showToolCalls).not.toBe(false);
+  });
+
+  it.each(['p2p', 'group', 'topic'] as const)('refreshes and pages models in the same settings card in %s', async chatMode => {
+    const h = await createHarness();
+    const send = vi.spyOn(h.channel, 'send');
+    const create = vi.spyOn(h.channel, 'createCard');
+    const update = vi.spyOn(h.channel, 'updateCardById');
+    await h.command('/config', undefined, { chatMode });
+    const form = await send.mock.results[0]!.value;
+    const cardId = (send.mock.calls[0]![1] as { cardId: string }).cardId;
+    for (let index = 0; index < 90; index++) h.nativeModels.push({ value: `new-${index}`, label: `New model ${index}` });
+    const draft = { model: 'new-85', reasoning_effort: 'ultra', message_reply: 'text', max_concurrent_runs: '8' };
+    await h.command('/config models 1', draft, { chatMode, messageId: form.messageId });
+    const refreshed = JSON.stringify(update.mock.calls[0]?.[1]);
+    expect(refreshed).toContain('New model 85');
+    expect(refreshed).toContain('config.models.0');
+    expect(refreshed).toContain('"initial_option":"new-85"');
+    expect(refreshed).toContain('"initial_option":"ultra"');
+    expect(refreshed).toContain('"initial_option":"text"');
+    expect(refreshed).toContain('"default_value":"8"');
+    await h.command('/config models 0', draft, { chatMode, messageId: form.messageId });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(update.mock.calls.map(call => [call[0], call[2]])).toEqual([[cardId, 1], [cardId, 2]]);
+    expect(isManaged(form.messageId)).toBe(true);
+    const root = JSON.parse(await readFile(join(h.rootDir, 'config.json'), 'utf8')) as RootConfig;
+    expect(root.profiles.claude?.preferences.model).toBeUndefined();
   });
 
   it('rejects a forged reasoning level before saving any preferences', async () => {

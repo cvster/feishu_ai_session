@@ -2715,12 +2715,12 @@ async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
     case '':
       return showConfigForm(ctx);
     case 'models':
-      return showConfigForm(ctx, Number(args.trim().split(/\s+/)[1]) || 0);
+      return showConfigForm(ctx, { modelPage: Number(args.trim().split(/\s+/)[1]) || 0, updateForm: true });
     case 'preview':
-      if (ctx.fromWeb) return showConfigForm(ctx, 0, true);
+      if (ctx.fromWeb) return showConfigForm(ctx, { preview: true, updateForm: true });
       void (async () => {
         await new Promise(resolve => setTimeout(resolve, FORM_SETTLE_MS));
-        await showConfigForm(ctx, 0, true);
+        await showConfigForm(ctx, { preview: true, updateForm: true });
       })().catch(error => log.warn('command', 'config-preview-failed', { err: String(error) }));
       return;
     case 'submit':
@@ -2732,7 +2732,9 @@ async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
   }
 }
 
-async function showConfigForm(ctx: CommandContext, modelPage = 0, preview = false): Promise<void> {
+async function showConfigForm(ctx: CommandContext,
+  { modelPage = 0, preview = false, updateForm = false }: { modelPage?: number; preview?: boolean; updateForm?: boolean } = {},
+): Promise<void> {
   await Promise.all([
     ctx.controls.refreshOwner(ctx.channel).catch(() => {}),
     fetchKnownChats(ctx.channel)
@@ -2744,7 +2746,7 @@ async function showConfigForm(ctx: CommandContext, modelPage = 0, preview = fals
 
   const ms = getRunIdleTimeoutMs(ctx.controls.cfg);
   const access = ctx.controls.profileConfig.access;
-  const draft = preview ? ctx.formValue ?? {} : {};
+  const draft = preview || updateForm ? ctx.formValue ?? {} : {};
   const selectedModel = normalizeModelSelection(ctx.controls.profileConfig.agentKind, String(draft.model ?? ctx.controls.cfg.preferences?.model ?? DEFAULT_MODEL));
   const modelChoices = await loadModelChoices(ctx.agent, effectiveWorkspaceCwd(ctx), selectedModel);
   let selectedEffort = normalizeReasoningEffort(ctx.controls.profileConfig.agentKind,
@@ -2782,7 +2784,7 @@ async function showConfigForm(ctx: CommandContext, modelPage = 0, preview = fals
     admins: access.admins,
     knownChats: ctx.controls.knownChats ?? [],
   });
-  if (preview && ctx.fromCardAction) {
+  if (updateForm && ctx.fromCardAction) {
     await updateManagedCard(ctx.channel, ctx.msg.messageId, card);
     return;
   }
