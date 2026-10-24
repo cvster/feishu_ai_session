@@ -1,3 +1,5 @@
+import type { NativeConversationSnapshot, NativeConversationTurn } from '../agent/native-conversation';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { LarkChannel } from '@larksuite/channel';
 import type { Controls } from '../commands';
@@ -32,6 +34,7 @@ interface ReplyDelivery extends CompletionDelivery {
   inputMessageId?: string;
   inputSendingSince?: number;
   completionEligible?: boolean;
+  nativeRecovery?: { turnId: string; signature?: string; finished?: boolean };
 }
 export interface WorkerRepliesDeps {
   adapter: DurableAgentAdapter;
@@ -60,11 +63,41 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
   const save = () => writeFileAtomic(deps.statePath, `${JSON.stringify({ version: 1, deliveries, sharedMirrorSince })}\n`, { mode: 0o600 });
   await save();
   const recovered = new Map<string, { handle: RunHandle; scope: string }>();
+  // Only repair existing, recent deliveries; old history is not replayed on upgrade.
+  const nativeCache = new Map<string, { at: number; value: Promise<NativeConversationSnapshot | undefined> }>();
+  const refreshKeys = new Set<string>();
+  const deliveryScopes = new Map<string, string>();
+  async function nativeConversation(nativeId: string, force = false) {
+    const cached = nativeCache.get(nativeId);
+    if (!force && cached && Date.now() - cached.at < 15_000) return cached.value;
+    const value = (async () => {
+      if (!(await deps.adapter.client.health()).capabilities?.conversation) return undefined;
+      return deps.adapter.client.conversation(nativeId);
+    })().catch(() => undefined);
+    nativeCache.set(nativeId, { at: Date.now(), value });
+    return value;
+  }
+  async function recoveryTurn(job: WorkerJob, delivery: ReplyDelivery | undefined, nativeId: string): Promise<NativeConversationTurn | undefined> {
+    if (!delivery?.messageId || (delivery.nativeRecovery?.finished && !refreshKeys.has(job.id) && delivery.controlsVersion === 1) || isJobActive(job) ||
+      (!delivery.nativeRecovery && (job.createdAt < Date.now() - 24 * 60 * 60_000 || !['interrupted', 'unknown'].includes(job.status)))) return;
+    const snapshot = await nativeConversation(nativeId, refreshKeys.has(job.id));
+    if (!snapshot || snapshot.archived || snapshot.id !== nativeId || snapshot.cwd !== job.options.cwd) return;
+    const turn = snapshot.turns.find(turn => turn.bridgeJobId === job.id &&
+      (!delivery.nativeRecovery || turn.id === delivery.nativeRecovery.turnId));
+    if (!turn || (!delivery.nativeRecovery && !['running', 'done', 'error'].includes(turn.state.terminal))) return;
+    if (!delivery.nativeRecovery) {
+      delivery.nativeRecovery = { turnId: turn.id };
+      // Persist the association even if publishing fails; reconnect keeps the same writer.
+      await save();
+    }
+    return turn;
+  }
   let stopped = false;
   let running: Promise<void> | undefined;
   let lastWarning = 0;
   async function sync(): Promise<void> {
     const jobs = await deps.adapter.client.list();
+    for (const [id, cached] of nativeCache) if (Date.now() - cached.at > 60_000) nativeCache.delete(id);
     for (const job of jobs) {
       if (stopped || !job.options.delivery) continue;
       try { await publish(job); } catch (error) { log.warn('worker-replies', 'publish-failed', { toolId: deps.adapter.id, jobId: job.id, error: error instanceof Error ? error.message : String(error) }); }
@@ -110,7 +143,12 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     }
     const previousDelivery = deliveries[ledgerKey];
     const repairControls = previousDelivery?.mode === 'card' && previousDelivery.controlsVersion !== 1;
-    if (previousDelivery?.skipped || (previousDelivery?.finished && !repairControls)) return;
+    if (previousDelivery?.skipped) return;
+    deliveryScopes.set(ledgerKey, target.scope);
+    const nativeTurn = binding.nativeId ? await recoveryTurn(job, previousDelivery, binding.nativeId) : undefined;
+    const forceRefresh = refreshKeys.has(ledgerKey);
+    if (previousDelivery?.nativeRecovery && !nativeTurn) return;
+    if (previousDelivery?.finished && !repairControls && !nativeTurn && !forceRefresh) return;
     const snapshot = await deps.adapter.client.snapshot(job.id);
     const init = snapshot.events.find(row => row.event.type === 'system' && (row.event.sessionId || row.event.threadId))?.event;
     if (mirror && init?.type === 'system' && (init.sessionId ?? init.threadId) !== binding.nativeId) return;
@@ -124,11 +162,13 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     }
     let state = startRunRuntime(initialState, job.createdAt);
     for (const row of snapshot.events) state = reduce(state, row.event);
-    state = updateRunRuntime(state, { nowMs: Date.now(), processRunning: isJobActive(snapshot.job) });
+    if (nativeTurn) state = nativeTurn.state;
+    state = updateRunRuntime(state, { nowMs: Date.now(), processRunning: nativeTurn ? nativeTurn.state.terminal === 'running' : isJobActive(snapshot.job) });
     if (!getShowToolCalls(deps.controls.cfg)) state = { ...state, blocks: state.blocks.filter(block => block.kind !== 'tool') };
     if (deps.controls.auxiliaryApprovals) state = await deps.controls.auxiliaryApprovals.review(source.scope, job.id, source.replyTo, state);
     const lastEvent = snapshot.events.at(-1)?.seq ?? 0;
-    const finished = !isJobActive(snapshot.job);
+    const finished = nativeTurn ? nativeTurn.state.terminal !== 'running' : !isJobActive(snapshot.job);
+    const nativeSignature = nativeTurn ? createHash('sha256').update(JSON.stringify(nativeTurn.state)).digest('hex') : undefined;
     let delivery = deliveries[ledgerKey];
     if (!delivery) {
       delivery = { mode: deps.controls.auxiliary?.isAuxiliary(target.scope) ? 'card' : getMessageReplyMode(deps.controls.cfg), sequence: 0, lastEvent: -1, pushedAt: 0 };
@@ -153,17 +193,18 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       target.replyTo = delivery.inputMessageId;
     }
     if (delivery.mode === 'text' && !finished) return;
-    if (delivery.lastEvent === lastEvent && !finished && Date.now() - delivery.pushedAt < 15_000) return;
+    if (!forceRefresh && delivery.lastEvent === lastEvent && (!nativeTurn || delivery.nativeRecovery?.signature === nativeSignature) &&
+      delivery.finished === finished && Date.now() - delivery.pushedAt < 15_000) return;
     if (deps.controls.auxiliary?.isAuxiliary(target.scope)) await deps.controls.auxiliary.trackRun(target.scope, job.id, target.replyTo, !finished, target.operatorOpenId);
     const options = deps.renderOptions?.(mirror ? { ...job, options: { ...job.options, delivery: target } } : job);
     // Completed personal cards retain the same group controls as Codex. Active stops stay bound to their job token.
-    const card = renderCard(state, { ...options, showStopButton: true, ...(finished || mirror ? { signCallback: undefined } : {}) });
+    const card = renderCard(state, { ...options, showStopButton: true, ...(finished || mirror || nativeTurn ? { signCallback: undefined } : {}) });
     // CardKit updates own the stream window across reconnects; avoid its 10-minute streaming timeout.
     (card as { config: { streaming_mode: boolean } }).config.streaming_mode = false;
     const text = renderText(state);
     const content = delivery.mode === 'card' ? undefined : JSON.stringify({ zh_cn: { title: '', content: [[{ tag: 'md', text: text || '正在执行…' }]] } });
     if (delivery.mode === 'card') {
-      await publishCards({ channel: deps.channel, target, card, delivery, key: messageKey, save, active, force: repairControls });
+      await publishCards({ channel: deps.channel, target, card, delivery, key: messageKey, save, active, force: repairControls || forceRefresh });
     } else {
       if (!active()) return;
       if (!delivery.messageId) {
@@ -186,6 +227,8 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     if (finished && !previousDelivery?.finished && (!mirror || delivery.completionEligible)) await notifyCompletion({ channel: deps.channel,
       target: { ...target, replyTo: delivery.parts?.filter(part => part.messageId).at(-1)?.messageId ?? delivery.messageId },
       ownerId: deps.controls.botOwnerId, key: messageKey, delivery, save, active });
+    if (nativeTurn) delivery.nativeRecovery = { turnId: nativeTurn.id, signature: nativeSignature, finished };
+    refreshKeys.delete(ledgerKey);
     delivery.lastEvent = lastEvent; delivery.pushedAt = Date.now(); delivery.finished = finished; delivery.controlsVersion = 1; await save();
   }
   const runNow = (): Promise<void> => {
@@ -198,6 +241,34 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
   void runNow();
   return {
     runNow,
+    ownsRecoveredMessage(scope: string, messageId: string): boolean {
+      return Object.entries(deliveries).some(([key, delivery]) => deliveryScopes.get(key) === scope && delivery.nativeRecovery &&
+        (delivery.messageId === messageId || delivery.parts?.some(part => part.messageId === messageId))) &&
+        deps.controls.toolBindings?.get(scope)?.toolId === deps.adapter.id;
+    },
+    async refreshMessage(scope: string, messageId: string): Promise<boolean> {
+      const jobs = await deps.adapter.client.list();
+      const job = jobs.find(job => job.options.delivery?.scope === scope &&
+        (deliveries[job.id]?.messageId === messageId || deliveries[job.id]?.parts?.some(part => part.messageId === messageId)));
+      if (!job) return false;
+      // Serialize with the sole publisher, including a sync already in progress.
+      await running;
+      refreshKeys.add(job.id); nativeCache.delete(deps.controls.toolBindings?.get(scope)?.nativeId ?? '');
+      await runNow(); return true;
+    },
+    async stopMessage(scope: string, messageId: string): Promise<boolean> {
+      const jobs = await deps.adapter.client.list();
+      const job = jobs.find(job => job.options.delivery?.scope === scope && deliveries[job.id]?.nativeRecovery &&
+        (deliveries[job.id]?.messageId === messageId || deliveries[job.id]?.parts?.some(part => part.messageId === messageId)));
+      const binding = deps.controls.toolBindings?.get(scope);
+      if (!job || !binding?.nativeId || binding.sourceId !== job.options.delivery?.sourceId || binding.nativeId !== (job.options.threadId ?? job.options.sessionId ?? job.options.initialSessionId) || binding.toolId !== deps.adapter.id || deps.catalog.isScopeArchived(scope)) return false;
+      const snapshot = await nativeConversation(binding.nativeId, true);
+      const turn = snapshot?.turns.find(turn => turn.bridgeJobId === job.id && turn.id === deliveries[job.id]?.nativeRecovery?.turnId);
+      if (!snapshot || snapshot.archived || snapshot.id !== binding.nativeId || snapshot.cwd !== job.options.cwd || turn?.state.terminal !== 'running' ||
+        !(await deps.adapter.client.health()).capabilities?.nativeTurnStop) return false;
+      const result = await deps.adapter.client.stopNativeTurn(binding.nativeId, turn.id, snapshot.cwd);
+      nativeCache.delete(binding.nativeId); await runNow(); return result;
+    },
     async stopScope(scope: string): Promise<boolean> {
       const jobs = (await deps.adapter.client.list()).filter(job => isJobActive(job) &&
         (job.options.delivery?.scope === scope || sharedJobPersonalScope(deps.controls, deps.catalog, job) === scope));

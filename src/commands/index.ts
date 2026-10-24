@@ -112,6 +112,14 @@ import { cleanDissolvedChat } from '../bot/group-cleanup';
 import { fetchKnownChats, type KnownChat } from '../bot/lark-info';
 import { applyLarkCliIdentityPolicy, hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
 
+export interface WorkerReplySync {
+  runNow(): Promise<void>;
+  stopScope(scope: string): Promise<boolean>;
+  ownsRecoveredMessage?(scope: string, messageId: string): boolean;
+  stopMessage?(scope: string, messageId: string): Promise<boolean>;
+  refreshMessage?(scope: string, messageId: string): Promise<boolean>;
+}
+
 export interface Controls {
   /** Reuse normal intake, authorization, durable queue and reply delivery for user-requested card messages. */
   refreshWorkerDiscovery?(): Promise<void>;
@@ -122,9 +130,9 @@ export interface Controls {
   toolBindings?: ToolBindingStore;
   defaultToolId?: import('../config/profile-schema').AgentKind;
   executorForTool?(id: import('../config/profile-schema').AgentKind): RunExecutor;
-  workerRuntimes?: Map<ToolId, { inbox: import('../worker/inbox').WorkerInbox; replies?: { runNow(): Promise<void>; stopScope(scope: string): Promise<boolean> } }>;
-  workerReplySync?: { runNow(): Promise<void>; stopScope(scope: string): Promise<boolean> };
-  claudeReplySync?: { runNow(): Promise<void>; stopScope(scope: string): Promise<boolean> };
+  workerRuntimes?: Map<ToolId, { inbox: import('../worker/inbox').WorkerInbox; replies?: WorkerReplySync }>;
+  workerReplySync?: WorkerReplySync;
+  claudeReplySync?: WorkerReplySync;
   workerQuestions?: { handleAction(scope: string, messageId: string, token: string, form?: Record<string, unknown>): Promise<void> };
   workerInbox?: import('../worker/inbox').WorkerInbox;
   codexSubmissions?: import('../session/codex-submissions').CodexSubmissionStore;
@@ -1677,6 +1685,10 @@ async function handleStop(args: string, ctx: CommandContext, strict = false): Pr
     const stopped = await ctx.controls.nativeReplySync?.stopScope(scope, ctx.msg.messageId) ?? false;
     log.info('command', 'native-stop', { scope, messageId: ctx.msg.messageId, interrupted: stopped });
     if (!stopped) await reply(ctx, '该条桌面回复已结束或当前轮次已变化，未停止其他任务。');
+    return;
+  }
+  if (ctx.fromCardAction && ctx.controls.workerReplySync?.ownsRecoveredMessage?.(scope, ctx.msg.messageId)) {
+    await ctx.controls.workerReplySync.stopMessage?.(scope, ctx.msg.messageId);
     return;
   }
   const handle = strict ? ctx.activeRuns.get(scope) : undefined;

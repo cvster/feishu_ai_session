@@ -681,7 +681,11 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     ownsMessage: (scope, messageId) => nativeSyncForScope(scope, messageId)?.ownsMessage(scope, messageId) ?? false,
     stopScope: async (scope, messageId) => await nativeSyncForScope(scope, messageId)?.stopScope(scope, messageId) ?? false,
   };
-  controls.refreshMirroredRunCard = async (scope, messageId) => await nativeSyncForScope(scope, messageId)?.refreshMessage(scope, messageId) ?? false;
+  controls.refreshMirroredRunCard = async (scope, messageId) => {
+    const replies = controls.workerRuntimes?.get(toolForScope(controls, scope))?.replies;
+    if (await replies?.refreshMessage?.(scope, messageId)) return true;
+    return await nativeSyncForScope(scope, messageId)?.refreshMessage(scope, messageId) ?? false;
+  };
   controls.workerQuestions = { handleAction: async (scope, messageId, token, form) => {
     for (const handle of questionSyncs.values()) if (handle.ownsToken(token)) { await handle.handleAction(scope, messageId, token, form); return; }
     throw new Error('问题已失效或对应 worker 尚未连接，请在工具界面回答');

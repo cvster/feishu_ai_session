@@ -37,6 +37,18 @@ describe('signed card callback dispatch', () => {
     expect(JSON.stringify(h.channel.sent)).toContain('未停止其他任务');
   });
 
+  it.each([true, false])('routes a recovered worker card stop without touching a later queued run (native stop=%s)', async result => {
+    const h = await createHarness();
+    const later = h.agent.run({ runId: 'later-worker', prompt: 'running' }) as FakeAgentRun;
+    h.activeRuns.register('oc_group', later);
+    const stopMessage = vi.fn(async () => result), stopScope = vi.fn(async () => true);
+    h.controls.workerReplySync = { runNow: async () => {}, stopScope,
+      ownsRecoveredMessage: (scope, messageId) => scope === 'oc_group' && messageId === 'om_card', stopMessage };
+    await h.dispatch({ cmd: 'stop' });
+    expect(stopMessage).toHaveBeenCalledWith('oc_group', 'om_card');
+    expect(stopScope).not.toHaveBeenCalled(); expect(later.stopped).toBe(false);
+  });
+
   it('routes legacy form answers through the common worker handler to the live request without queueing or launching a run', async () => {
     const h = await createHarness();
     const handleAction = vi.fn(async () => {});
@@ -158,10 +170,10 @@ describe('signed card callback dispatch', () => {
     const card = (h.channel.sent.at(-1)?.content as any).card;
     const buttons = card.body.elements.find((element: any) => element.tag === 'column_set').columns.map((column: any) => column.elements[0]);
     const next = buttons.find((button: any) => button.name === 'models_next');
-    await h.dispatch(next.behaviors[0].value);
-    const page = JSON.stringify(h.channel.sent.at(-1)?.content);
+    await h.dispatch(next.behaviors[0].value, undefined, 'om_fake_1');
+    const page = JSON.stringify(h.channel.rawClient.requests.filter(request => request.method === 'cardkit.v1.card.update').at(-1)?.params);
     expect(page).toContain('native-159'); expect(page).not.toContain('"value":"native-0"');
-    expect(h.channel.sent).toHaveLength(2); expect(h.agent.runs).toHaveLength(0);
+    expect(h.channel.sent).toHaveLength(1); expect(h.agent.runs).toHaveLength(0);
   });
 
   it('redirects private-chat card actions to group creation', async () => {
@@ -184,7 +196,7 @@ type Harness = {
   controls: Controls;
   pending: PendingQueue;
   auth: CallbackAuth;
-  dispatch(value: Record<string, unknown>, formValue?: Record<string, unknown>): Promise<void>;
+  dispatch(value: Record<string, unknown>, formValue?: Record<string, unknown>, messageId?: string): Promise<void>;
   token(
     action: string,
     overrides?: { operatorOpenId?: string; nonce?: string; scope?: string },
@@ -260,10 +272,10 @@ async function createHarness(
         ttlMs: 60_000,
       });
     },
-    dispatch: (value, formValue) =>
+    dispatch: (value, formValue, messageId) =>
       handleCardAction({
         channel: channel as unknown as Parameters<typeof handleCardAction>[0]['channel'],
-        evt: cardEvent(value, formValue),
+        evt: { ...cardEvent(value, formValue), ...(messageId ? { messageId } : {}) },
         sessions,
         workspaces,
         activeRuns,

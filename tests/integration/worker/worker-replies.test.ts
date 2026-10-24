@@ -160,3 +160,91 @@ it('delivers a private Claude FF result only as a reply to its private request, 
     finally { await recovered.stop(); }
   } finally { await first.stop(); await h.catalog.flush(); await h.sessions.flush(); }
 });
+
+it('reattaches an interrupted observer to its exact live native turn, keeping the card across restart', async () => {
+  const h = await repliesFixture(); h.controls.botOwnerId = 'ou_owner';
+  const publisher = await h.start(); await publisher.runNow();
+  await h.client.stop(h.job.id);
+  await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('interrupted'));
+  await publisher.runNow(); await publisher.stop();
+  const notificationCount = h.reply.mock.calls.length;
+  const { initialState, reduce } = await import('../../../src/card/run-state');
+  let state = reduce(initialState, { type: 'text', delta: 'native resumed output' });
+  const health = await h.adapter.client.health();
+  vi.spyOn(h.adapter.client, 'health').mockResolvedValue({ ...health, capabilities: { ...health.capabilities!, conversation: true, nativeTurnStop: true } });
+  const conversation = vi.spyOn(h.adapter.client, 'conversation').mockImplementation(async () => ({
+    id: 'native', cwd: h.dir, archived: false,
+    turns: [{ id: 'original-turn', bridge: true, bridgeJobId: h.job.id, input: '', createdAtMs: h.job.createdAt, state },
+      { id: 'new-queued-turn', bridge: true, bridgeJobId: 'another-job', input: '', createdAtMs: Date.now(), state: initialState }],
+  }));
+  const second = await h.start();
+  try {
+    await second.runNow();
+    expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1])).toContain('native resumed output');
+    expect(h.channel.createCard).toHaveBeenCalledOnce(); expect(h.reply).toHaveBeenCalledTimes(notificationCount);
+    expect(h.calls).toHaveLength(1);
+    expect(second.ownsRecoveredMessage('oc_other', 'om_reply')).toBe(false);
+    expect(second.ownsRecoveredMessage('oc_group', 'om_reply')).toBe(true);
+    await second.runNow(); expect(conversation).toHaveBeenCalledOnce();
+    await second.stop();
+    const third = await h.start();
+    try {
+      await third.runNow();
+      const stopTurn = vi.spyOn(h.adapter.client, 'stopNativeTurn').mockResolvedValue(true);
+      await third.stopMessage('oc_group', 'om_reply');
+      expect(stopTurn).toHaveBeenCalledWith('native', 'original-turn', h.dir);
+      state = reduce(state, { type: 'done', terminationReason: 'normal' });
+      await third.refreshMessage('oc_group', 'om_reply');
+      const ledger = JSON.parse(await readFile(h.statePath, 'utf8'));
+      expect(ledger.deliveries[h.job.id].nativeRecovery.finished).toBe(true);
+      expect(h.reply).toHaveBeenCalledTimes(notificationCount); expect(h.calls).toHaveLength(1);
+      await third.refreshMessage('oc_group', 'om_reply');
+      expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1])).toContain('native resumed output');
+      expect(h.channel.createCard).toHaveBeenCalledOnce();
+      const updates = vi.mocked(h.channel.updateCardById).mock.calls.length;
+      conversation.mockRejectedValueOnce(new Error('native API offline'));
+      await third.refreshMessage('oc_group', 'om_reply');
+      expect(h.channel.updateCardById).toHaveBeenCalledTimes(updates);
+    } finally { await third.stop(); }
+  } finally { await second.stop(); await h.catalog.flush(); await h.sessions.flush(); }
+});
+
+it.each(['different-job', 'wrong-cwd', 'archived', 'interrupted'] as const)('does not reattach an interrupted card to %s native history', async mismatch => {
+  const h = await repliesFixture(); const first = await h.start(); await first.runNow();
+  await h.client.stop(h.job.id);
+  await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('interrupted'));
+  await first.runNow(); await first.stop();
+  const health = await h.adapter.client.health();
+  vi.spyOn(h.adapter.client, 'health').mockResolvedValue({ ...health, capabilities: { ...health.capabilities!, conversation: true } });
+  const { initialState, reduce } = await import('../../../src/card/run-state');
+  vi.spyOn(h.adapter.client, 'conversation').mockResolvedValue({ id: 'native', cwd: mismatch === 'wrong-cwd' ? '/other-project' : h.dir,
+    archived: mismatch === 'archived', turns: [{ id: 'other-turn', bridge: true, input: '', createdAtMs: Date.now(),
+      bridgeJobId: mismatch === 'different-job' ? 'another-job' : h.job.id,
+      state: mismatch === 'interrupted' ? reduce(initialState, { type: 'done', terminationReason: 'interrupted' }) : initialState }] });
+  const count = vi.mocked(h.channel.updateCardById).mock.calls.length;
+  const second = await h.start();
+  try { await second.runNow(); expect(h.channel.updateCardById).toHaveBeenCalledTimes(count); expect(h.calls).toHaveLength(1); }
+  finally { await second.stop(); await h.catalog.flush(); await h.sessions.flush(); }
+});
+
+
+it('repairs the original card when the native turn finished while its worker observer was interrupted', async () => {
+  const h = await repliesFixture(); const first = await h.start(); await first.runNow();
+  await h.client.stop(h.job.id);
+  await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('interrupted'));
+  await first.runNow(); await first.stop();
+  const health = await h.adapter.client.health();
+  vi.spyOn(h.adapter.client, 'health').mockResolvedValue({ ...health, capabilities: { ...health.capabilities!, conversation: true } });
+  const { initialState, reduce } = await import('../../../src/card/run-state');
+  const state = reduce(reduce(initialState, { type: 'text', delta: 'final native answer' }), { type: 'done', terminationReason: 'normal' });
+  vi.spyOn(h.adapter.client, 'conversation').mockResolvedValue({ id: 'native', cwd: h.dir, archived: false,
+    turns: [{ id: 'original-turn', bridge: true, bridgeJobId: h.job.id, input: '', createdAtMs: h.job.createdAt, state }] });
+  const second = await h.start();
+  try {
+    await second.runNow();
+    expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1])).toContain('final native answer');
+    expect(h.channel.createCard).toHaveBeenCalledOnce(); expect(h.calls).toHaveLength(1);
+    const count = vi.mocked(h.channel.updateCardById).mock.calls.length;
+    await second.runNow(); expect(h.channel.updateCardById).toHaveBeenCalledTimes(count);
+  } finally { await second.stop(); await h.catalog.flush(); await h.sessions.flush(); }
+});
