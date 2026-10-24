@@ -15,6 +15,7 @@ import { fixture, cleanups } from '../../helpers/worker-fixture';
 
 it('persists and forwards CC effort, rejecting a changed effort under the same request key', async () => {
   const h = await fixture();
+  Object.assign(h.raw, { listModels: async () => [{ value: 'default', label: 'Default', reasoningEfforts: [{ value: 'xhigh', label: 'xhigh' }] }] });
   const options = { ...h.options, reasoningEffort: 'xhigh' as const };
   const run = h.adapter.run(options);
   const events = run.events[Symbol.asyncIterator]();

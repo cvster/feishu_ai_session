@@ -72,7 +72,10 @@ export function projectZcodeConversation(snapshot: any): NativeConversationSnaps
     return { id, createdAtMs, bridge: !isZcodeNativeInput(user.info), ...(bridgeJobId ? { bridgeJobId } : {}),
       input: user.parts.filter((part: any) => part.type === 'text' && typeof part.text === 'string' && visiblePart(part)).map((part: any) => part.text).join('\n'), state };
   });
-  return { id: session.sessionId, name: session.title, cwd: session.workspace.workspacePath, archived: !!session.archivedAt, turns };
+  const selected = snapshot.settings?.model?.current ?? session.model;
+  return { id: session.sessionId, name: session.title, cwd: session.workspace.workspacePath, archived: !!session.archivedAt, turns,
+    ...(selected?.providerId && selected.modelId ? { settings: { model: `${selected.providerId}/${selected.modelId}`,
+      reasoningEffort: selected.options?.reasoningLevel ?? snapshot.settings?.model?.thoughtLevel ?? snapshot.settings?.thoughtLevel } } : {}) };
 }
 
 /** Owns an independent local CLI reader, not the desktop's remote terminal.

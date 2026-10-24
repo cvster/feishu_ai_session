@@ -22,7 +22,7 @@ export function validWorkerHealth(value: unknown, botAppId: string): value is Wo
     !!c.jobs && ['submit', 'read', 'stop', 'eventCursor'].every(key => c.jobs[key as keyof typeof c.jobs] === true) &&
     typeof c.models === 'boolean' && typeof c.nativeTurnStop === 'boolean' && !!c.sessions &&
     ['list', 'history', 'rename', 'archive', 'fork'].every(key => typeof c.sessions[key as keyof typeof c.sessions] === 'boolean') &&
-    ['conversation', 'questions', 'nativeSessionNames', 'sessionListAuthoritative'].every(key => c[key as 'conversation'] === undefined || typeof c[key as 'conversation'] === 'boolean') &&
+    ['conversation', 'questions', 'nativeSessionNames', 'sessionListAuthoritative', 'reasoningMapping'].every(key => c[key as 'conversation'] === undefined || typeof c[key as 'conversation'] === 'boolean') &&
     !!m && typeof m.label === 'string' && !!m.label.trim() && m.label.length <= 100 && !/[\u0000-\u001f]/.test(m.label) &&
     ['threadId', 'sessionId'].includes(m.nativeField) && typeof m.sessionKind === 'string' && !!m.sessionKind.trim() && m.sessionKind.length <= 100 &&
     ['json', 'jsonl'].includes(m.historyFormat) && typeof m.nativeHistory === 'boolean';
@@ -118,6 +118,10 @@ export class WorkerClient {
     const health = await this.health();
     if (health.capabilities && !health.capabilities.models) this.unsupported();
     return this.request(`/models?cwd=${encodeURIComponent(cwd ?? '')}`, undefined, 60_000);
+  }
+  async readReasoning(nativeId: string, cwd?: string): Promise<import('./reasoning').ReasoningSelection> {
+    if (!(await this.capabilities())?.reasoningMapping) throw new WorkerRequestError(501, 'worker 尚未升级统一推理档位', false, 'unsupported-operation');
+    return this.request(`/sessions/${encodeURIComponent(nativeId)}/reasoning?cwd=${encodeURIComponent(cwd ?? '')}`, undefined, 60_000);
   }
   async submit(input: WorkerSubmission): Promise<WorkerJob> { await this.health(); return this.request('/jobs', input); }
   async snapshot(id: string, after = 0): Promise<JobSnapshot> { return this.request(`/jobs/${id}?after=${after}`); }

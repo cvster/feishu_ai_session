@@ -18,7 +18,7 @@ import { renderText } from '../../../src/card/text-renderer.js';
 describe('run status rendering', () => {
   it('distinguishes known native default reasoning from missing execution metadata', () => {
     const known = reduce(initialState, { type: 'system', model: 'p/m', reasoningEffort: 'default' });
-    expect(renderRunStatus(known)).toBe('p/m · 跟随工具默认');
+    expect(renderRunStatus(known)).toBe('p/m · 原生默认档位');
     expect(renderRunStatus(reduce(initialState, { type: 'system', model: 'p/m' }))).toBe('p/m · 未知');
   });
   it('derives the project name from Windows and POSIX working directories', () => {

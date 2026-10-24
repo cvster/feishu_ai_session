@@ -99,7 +99,7 @@ export class RunExecutor {
     const effort = resolveReasoningEffort(options.reasoningEffort);
     if (options.reasoningEffort && options.reasoningEffort !== 'default' && !effort) throw new RunRejected('model-unavailable', '推理档位格式无效，请通过 /config 重新选择。');
     options.reasoningEffort = effort;
-    if ((!options.model && !effort) || !this.agent.listModels) return;
+    if (this.agent.mapsReasoningEffort || (!options.model && !effort) || !this.agent.listModels) return;
     let models;
     try { models = await this.agent.listModels({ cwd: options.cwd }); }
     catch { throw new RunRejected('model-unavailable', '暂时无法确认工具模型列表，本次未执行。请重新打开 /config 刷新后重试。'); }

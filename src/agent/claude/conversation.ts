@@ -1,4 +1,5 @@
 import { readFile, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { findNativeHistory } from '../../tools/session-operations';
 import { initialState, reduce } from '../../card/run-state';
 import type { NativeConversationReader, NativeConversationSnapshot, NativeConversationTurn } from '../native-conversation';
@@ -20,6 +21,7 @@ export function projectClaudeConversation(id: string, rows: any[], cwd: string, 
     }
     const turn = turns.at(-1);
     if (!turn || row.type !== 'assistant' || !Array.isArray(blocks)) continue;
+    if (typeof row.message?.model === 'string') turn.state = reduce(turn.state, { type: 'system', model: row.message.model });
     for (const block of blocks) if (block.type === 'text' && typeof block.text === 'string') turn.state = reduce(turn.state, { type: 'text', delta: block.text });
     if (['end_turn', 'stop_sequence'].includes(row.message?.stop_reason)) turn.state = reduce(turn.state, { type: 'done', terminationReason: 'normal' });
     if (row.message?.stop_reason === 'refusal') turn.state = reduce(turn.state, { type: 'error', terminationReason: 'failed', message: 'Claude 未完成本次任务，请查看原工具' });
@@ -42,7 +44,18 @@ export class ClaudeNativeConversationReader implements NativeConversationReader 
     const cwd = [...main].reverse().find(r => typeof r.cwd === 'string')?.cwd;
     const name = [...main].reverse().find(r => r.type === 'custom-title' && typeof r.customTitle === 'string')?.customTitle;
     if (!cwd || !main.some(r => ['user', 'assistant'].includes(r.type))) throw new Error('Claude 会话元数据不可用');
-    return projectClaudeConversation(id, rows, cwd, name);
+    const snapshot = projectClaudeConversation(id, rows, cwd, name);
+    let settings: any = {};
+    for (const path of [join(this.configDir, 'settings.json'), join(cwd, '.claude', 'settings.json'), join(cwd, '.claude', 'settings.local.json')]) {
+      try {
+        const value = JSON.parse(await readFile(path, 'utf8'));
+        settings = { ...settings, ...value, modelSettings: { ...settings.modelSettings, ...value.modelSettings }, env: { ...settings.env, ...value.env } };
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
+    const model = snapshot.turns.at(-1)?.state.execution?.model ?? settings.model;
+    const effort = settings.env?.CLAUDE_CODE_EFFORT_LEVEL ?? settings.modelSettings?.[model]?.effortLevel ?? settings.effortLevel;
+    return { ...snapshot, settings: { ...(typeof model === 'string' ? { model } : {}),
+      ...(typeof effort === 'string' ? { reasoningEffort: effort } : {}) } };
   }
   async close() { this.paths.clear(); }
 }

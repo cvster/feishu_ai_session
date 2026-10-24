@@ -9,6 +9,7 @@ import { JobStore, jobIdFor, submissionFingerprint } from './store';
 import { isJobActive, type WorkerJob, type WorkerSubmission, type WorkerSessionService, type WorkerManifest } from './protocol';
 import { handleWorkerToolRequest, workerCapabilities, readWorkerBody, WorkerApiError, type WorkerToolApi } from './tool-api';
 import { writeFileAtomic } from '../platform/atomic-write';
+import { resolveRunReasoning } from './reasoning';
 
 export interface WorkerServerOptions {
   stateDir: string;
@@ -111,10 +112,13 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     try {
       if (stopped.has(job.id)) { status = 'interrupted'; return; }
       await options.agent.prepareRun?.(job.options);
+      const reasoning = await resolveRunReasoning(options.agent, options.sessions, job.options);
       if (stopped.has(job.id) || closing) { status = 'interrupted'; return; }
       await persistStatus(job, 'running');
       options.agent.setBotIdentity?.(job.botIdentity ?? { openId: '' });
-      run = options.agent.run({ ...job.options, runId: job.id }); runs.set(job.id, run);
+      run = options.agent.run({ ...job.options, runId: job.id, reasoningEffort: reasoning.nativeEffort }); runs.set(job.id, run);
+      await store.append(job.id, { type: 'system', requestedReasoningEffort: reasoning.requested,
+        reasoningEffort: reasoning.nativeEffort ?? 'unavailable', ...(reasoning.model ? { model: reasoning.model } : {}) });
       if (run.checkLiveness && run.detach) {
         const check = async () => {
           if (checkingLiveness || runs.get(job.id) !== run || terminal || recoveryEvent || closing || stopped.has(job.id) || timeout) return;
@@ -170,7 +174,9 @@ export async function startWorkerServer(options: WorkerServerOptions) {
           } });
         }
         if (event.type === 'user_input_resolved') { waitingForInput = false; lastActivityAt = Date.now(); }
-        await store.append(job.id, event.type === 'done' && timeout ? { ...event, terminationReason: 'timeout' } : event);
+        await store.append(job.id, event.type === 'done' && timeout ? { ...event, terminationReason: 'timeout' } :
+          event.type === 'system' && !reasoning.nativeEffort && (!event.reasoningEffort || event.reasoningEffort === 'default')
+            ? { ...event, reasoningEffort: 'unavailable' } : event);
         if (event.type === 'done' || event.type === 'error') {
           terminal = true;
           status = event.type === 'error' && event.submissionStatus === 'unknown' ? 'unknown' : event.type === 'done' && event.terminationReason === 'normal' ? 'completed' :

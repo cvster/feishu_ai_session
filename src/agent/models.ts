@@ -3,6 +3,8 @@ import type { AgentAdapter } from './types';
 
 export const DEFAULT_MODEL = 'default';
 export const DEFAULT_REASONING = 'default';
+export const INITIAL_REASONING = 'high';
+export const UNIFIED_REASONING = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 export interface ReasoningOption { value: string; label: string }
 export interface ModelOption {
   value: string; label: string; unavailable?: boolean;
@@ -69,11 +71,14 @@ export function supportedReasoningEfforts(_agentKind: AgentKind, model?: ModelOp
   return model?.reasoningEfforts?.map(option => option.value) ?? [];
 }
 export function normalizeReasoningEffort(_agentKind: AgentKind, value: string | undefined): string {
-  return validEffort(value) ? value : DEFAULT_REASONING;
+  if (UNIFIED_REASONING.includes(value as typeof UNIFIED_REASONING[number])) return value!;
+  if (['off', 'none', 'minimal', 'instant'].includes(value ?? '')) return 'low';
+  return INITIAL_REASONING;
 }
 export function resolveReasoningEffort(value: string | undefined): string | undefined {
   return validEffort(value) && value !== DEFAULT_REASONING ? value : undefined;
 }
-export function reasoningOptions(model?: ModelOption): ReasoningOption[] {
-  return [{ value: DEFAULT_REASONING, label: '跟随工具默认' }, ...(model?.reasoningEfforts ?? [])];
+export function reasoningOptions(_model?: ModelOption): ReasoningOption[] {
+  const labels = ['低', '中', '高', '很高', '最高', '极限'];
+  return UNIFIED_REASONING.map((value, index) => ({ value, label: labels[index]! }));
 }

@@ -8,6 +8,7 @@ export interface WorkerCapabilities {
   apiVersion: 2;
   jobs: { submit: true; read: true; stop: true; eventCursor: true };
   models: boolean;
+  reasoningMapping?: boolean;
   sessions: { list: boolean; history: boolean; rename: boolean; archive: boolean; fork: boolean };
   nativeTurnStop: boolean;
   conversation?: boolean;

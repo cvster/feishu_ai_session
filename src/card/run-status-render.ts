@@ -5,7 +5,7 @@ export function renderRunStatus(state: RunState): string | undefined {
   const context = [
     ...(state.projectName ? [`项目 ${state.projectName}`] : []),
     ...(state.execution
-      ? [`${state.execution.model ?? 'CLI 默认（待确认）'} · ${state.execution.reasoningEffort === 'default' ? '跟随工具默认' : state.execution.reasoningEffort ?? '未知'}`]
+      ? [`${state.execution.model ?? 'CLI 默认（待确认）'} · ${executionReasoning(state.execution)}`]
       : []),
   ].join(' · ');
   const contextSuffix = context ? ` · ${context}` : '';
@@ -30,6 +30,14 @@ export function renderRunStatus(state: RunState): string | undefined {
   const inactiveMs = Math.max(0, runtime.checkedAtMs - runtime.lastActivityAtMs);
   const activity = inactiveMs >= 10_000 ? ` · 最近活动 ${formatDuration(inactiveMs)}前` : '';
   return `运行中 · ${phase} · 已运行 ${elapsed}${activity} · 最近更新 ${updatedAt}${contextSuffix}`;
+}
+
+function executionReasoning(execution: NonNullable<RunState['execution']>): string {
+  const actual = execution.reasoningEffort;
+  if (actual === 'unavailable') return '工具未提供可调档位';
+  const label = actual === 'default' ? '原生默认档位' : actual ?? '未知';
+  return execution.requestedReasoningEffort && actual && execution.requestedReasoningEffort !== actual
+    ? `${execution.requestedReasoningEffort} → ${label}` : label;
 }
 
 /** Feishu CardKit markdown supports semantic font colors. */

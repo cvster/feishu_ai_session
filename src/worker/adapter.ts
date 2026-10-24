@@ -6,6 +6,8 @@ import { jobIdFor } from './store';
 
 /** Execution belongs to the worker; this object owns only a detachable observer. */
 export class DurableAgentAdapter implements AgentAdapter {
+  readonly mapsReasoningEffort = true;
+  readReasoning(nativeId: string, cwd?: string) { return this.client.readReasoning(nativeId, cwd); }
   get id(): string { return this.client.toolId; }
   get displayName(): string { return this.cli?.displayName ?? this.id; }
   private identity?: AgentBotIdentity;
@@ -18,6 +20,8 @@ export class DurableAgentAdapter implements AgentAdapter {
       const health = await this.client.health();
       if (!health.capabilities?.jobs.submit || !health.capabilities.jobs.eventCursor)
         throw new Error('Worker API incompatible');
+      if (_options?.reasoningEffort && !health.capabilities.reasoningMapping)
+        throw new Error('Worker reasoning mapping unavailable');
     } catch { throw new RunRejected('execution-worker-unavailable', `${this.displayName} 执行服务不可用或版本不兼容，请启动或升级对应 worker。`); }
   }
   async renameSession(id: string, name: string, cwd: string) { await this.client.renameSession(id, name, cwd); }

@@ -28,7 +28,7 @@ it.each(['claude', 'kilo', 'zcode', 'dsh'] as const)('uses the same model/sessio
   Object.assign(h.raw, { listModels, stopNativeTurn });
   const caps = await h.client.capabilities();
   expect(caps).toEqual({ apiVersion: 2, jobs: { submit: true, read: true, stop: true, eventCursor: true },
-    models: true, sessions: { list: true, history: true, rename: true, archive: true, fork: true }, nativeTurnStop: true, conversation: false, questions: false, nativeSessionNames: true });
+    models: true, reasoningMapping: true, sessions: { list: true, history: true, rename: true, archive: true, fork: true }, nativeTurnStop: true, conversation: false, questions: false, nativeSessionNames: true });
   const e = await endpoint(h.stateDir);
   expect(await (await fetch(`${e.url}/capabilities`, { headers: e.headers })).json()).toEqual(caps);
   expect(await h.adapter.listModels({ cwd: h.dir })).toEqual([{ value: 'native:model', label: 'Native' }]);

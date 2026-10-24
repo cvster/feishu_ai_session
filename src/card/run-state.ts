@@ -39,7 +39,7 @@ export interface RunState {
   /** Periodically refreshed process/runtime status shown in the chat output. */
   runtime?: RunRuntimeStatus;
   /** Snapshot of this turn's execution, never the mutable global preferences. */
-  execution?: { model?: string; reasoningEffort?: string };
+  execution?: { model?: string; reasoningEffort?: string; requestedReasoningEffort?: string };
 }
 
 export const initialState: RunState = {
@@ -97,6 +97,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
           ...state.execution,
           ...(evt.model ? { model: evt.model } : {}),
           ...(evt.reasoningEffort ? { reasoningEffort: evt.reasoningEffort } : {}),
+          ...(evt.requestedReasoningEffort ? { requestedReasoningEffort: evt.requestedReasoningEffort } : {}),
         },
       };
     case 'text': {

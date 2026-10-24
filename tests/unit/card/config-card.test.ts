@@ -22,7 +22,7 @@ describe('compact settings card', () => {
       .toEqual(['model', 'reasoning_effort']);
     const effort = form.elements!.find(element => element.name === 'reasoning_effort')!;
     expect(effort.initial_option).toBe('high');
-    expect(effort.options!.map(option => option.value)).toEqual(['default', 'high', 'native-new']);
+    expect(effort.options!.map(option => option.value)).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
     const more = form.elements!.find(element => element.tag === 'collapsible_panel')!;
     expect(more.expanded).toBe(false);
     expect(more.elements).toEqual(expect.arrayContaining([
@@ -55,10 +55,10 @@ it('pages large native catalogs while retaining the current selection as a valid
   expect(JSON.stringify(card)).toContain('config.models.2');
 });
 
-it('offers only native default for models without capability metadata, never guessed levels', () => {
+it('offers the fixed unified list without a default or per-model read button', () => {
   const card = configFormCard({ ...defaults, model: 'claude-opus-5-5' }) as { body: { elements: Element[] } };
   const picker = card.body.elements.find(e => e.tag === 'form')!.elements!.find(e => e.name === 'reasoning_effort')!;
-  expect(picker.initial_option).toBe('default');
-  expect(picker.options!.map(option => option.value)).toEqual(['default']);
-  expect(JSON.stringify(card)).toContain('config.preview');
+  expect(picker.initial_option).toBe('high');
+  expect(picker.options!.map(option => option.value)).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  expect(JSON.stringify(card)).not.toContain('config.preview');
 });

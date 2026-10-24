@@ -8,7 +8,7 @@ export type { ClaudePermissionMode } from '../config/permissions';
 export type AgentEvent =
   | { type: 'user_input'; prompt: CodexInputPrompt }
   | { type: 'user_input_resolved'; threadId: string; requestId: CodexRequestId }
-  | { type: 'system'; sessionId?: string; threadId?: string; turnId?: string; cwd?: string; model?: string; reasoningEffort?: string }
+  | { type: 'system'; sessionId?: string; threadId?: string; turnId?: string; cwd?: string; model?: string; reasoningEffort?: string; requestedReasoningEffort?: string }
   | { type: 'text'; delta: string }
   | { type: 'thinking'; delta: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
@@ -99,6 +99,9 @@ export interface AgentBotIdentity {
 export interface AgentAdapter {
   readonly id: string;
   readonly displayName: string;
+  /** The owning worker maps the unified choice to native model capabilities. */
+  readonly mapsReasoningEffort?: boolean;
+  readReasoning?(nativeId: string, cwd?: string): Promise<import('../worker/reasoning').ReasoningSelection>;
   isAvailable(): Promise<boolean>;
   checkAvailability?(): Promise<AgentAvailability>;
   /** Read the tool's current catalog without sending user input or running inference. */

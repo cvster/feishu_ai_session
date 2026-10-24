@@ -1,4 +1,4 @@
-import { DEFAULT_REASONING, modelLabel, normalizeReasoningEffort, reasoningOptions, supportedModels, type ModelOption } from '../agent/models';
+import { modelLabel, normalizeReasoningEffort, reasoningOptions, supportedModels, type ModelOption } from '../agent/models';
 import type { KnownChat } from '../bot/lark-info';
 import type { AgentKind, LarkCliIdentityPreset } from '../config/profile-schema';
 import type { CotMessagesMode, MessageReplyMode } from '../config/schema';
@@ -12,6 +12,7 @@ export interface ConfigFormOpts {
   modelOptions?: ModelOption[];
   modelPage?: number;
   reasoningEffort: string;
+  reasoningNotice?: string;
   messageReply: MessageReplyMode;
   cotMessages: CotMessagesMode;
   maxConcurrentRuns: number;
@@ -83,10 +84,9 @@ export function configFormCard(opts: ConfigFormOpts): object {
           tag: 'form', name: 'config_form', elements: [
             label('模型'),
             select('model', opts.model, modelOptions),
-            button('model_preview', '读取所选模型的推理档位', 'config.preview', true),
             label('推理强度'),
-            select('reasoning_effort', effortOptions.some(option => option.value === effort) ? effort : DEFAULT_REASONING, effortOptions),
-            { tag: 'markdown', content: effortOptions.length > 1 ? '切换模型后，先读取该模型的档位；此操作不保存设置。' : '工具未提供该模型的可选档位，使用工具默认。切换模型后可点击上方按钮读取。' },
+            select('reasoning_effort', effort, effortOptions),
+            { tag: 'markdown', content: opts.reasoningNotice ?? '按所选模型自动适配档位，回复显示实际执行档位。新会话默认高。' },
             collapsedPanel('更多设置', [
               label('回复方式'),
               select('message_reply', opts.messageReply, [
@@ -121,7 +121,7 @@ export function configSavedCard(opts: ConfigFormOpts): object {
   return {
     schema: '2.0', config: { summary: { content: '偏好已保存' } },
     body: { elements: [
-      { tag: 'markdown', content: `✅ **偏好已保存**\n${modelLabel(opts.agentKind, opts.model, opts.modelOptions)} · ${opts.reasoningEffort && opts.reasoningEffort !== DEFAULT_REASONING ? opts.reasoningEffort : '跟随工具默认'}\n下次请求生效。` },
+      { tag: 'markdown', content: `✅ **偏好已保存**\n${modelLabel(opts.agentKind, opts.model, opts.modelOptions)} · ${normalizeReasoningEffort(opts.agentKind, opts.reasoningEffort)}\n下次请求生效。` },
       { tag: 'button', text: { tag: 'plain_text', content: '返回控制台' },
         behaviors: [{ type: 'callback', value: { cmd: 'panel' } }] },
     ] },

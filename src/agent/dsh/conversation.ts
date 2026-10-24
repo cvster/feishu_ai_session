@@ -27,7 +27,9 @@ export function projectDshConversation(snapshot: any, row: any, archived: boolea
   }
   const latest = turns.at(-1);
   if (latest?.state.terminal === 'done' && row.running !== false) latest.state = { ...latest.state, terminal: 'running', footer: 'streaming' };
-  return { id: row.sessionId, cwd: row.cwd, name: row.projections?.values?.title, archived, turns };
+  const selected = row.projections?.values?.modelSelection?.next;
+  return { id: row.sessionId, cwd: row.cwd, name: row.projections?.values?.title, archived, turns,
+    ...(selected?.provider && selected.model ? { settings: { model: `${selected.provider}/${selected.model}`, reasoningEffort: selected.reasoningEffort } } : {}) };
 }
 export class DshNativeConversationReader implements NativeConversationReader {
   private client?: DshClient;

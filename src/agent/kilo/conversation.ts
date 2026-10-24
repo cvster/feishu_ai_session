@@ -63,7 +63,13 @@ export function projectKiloConversation(info: any, rows: any[], busy: boolean): 
     return { id, createdAtMs: user.info.time.created, bridge: isKiloBridgeInput(user),
       input: (user.parts ?? []).filter((p: any) => p.type === 'text' && !p.synthetic && typeof p.text === 'string').map((p: any) => p.text).join('\n'), state };
   });
-  return { id: info.id, name: typeof info.title === 'string' ? info.title : undefined, cwd: info.directory, archived: !!info.time?.archived, turns };
+  const saved = info.model;
+  const inputModel = users.at(-1)?.info.model;
+  const settings = saved?.providerID && (saved.id || saved.modelID)
+    ? { model: `${saved.providerID}/${saved.id ?? saved.modelID}`, reasoningEffort: saved.variant }
+    : inputModel?.providerID && inputModel.modelID ? { model: `${inputModel.providerID}/${inputModel.modelID}`, reasoningEffort: inputModel.variant } : undefined;
+  return { id: info.id, name: typeof info.title === 'string' ? info.title : undefined, cwd: info.directory, archived: !!info.time?.archived, turns,
+    ...(settings ? { settings } : {}) };
 }
 
 /** Read bound native sessions only. Cached clients detach without stopping UI processes. */

@@ -20,23 +20,17 @@
 
 进行中的任务沿用本轮已经确定的模型；配置变化在后续新请求生效。仅保存其他偏好而未提交模型字段时，不改写原模型设置。
 
-## 按模型读取推理档位
+## 统一推理档位
 
-每个模型的档位来自工具当前的原生元数据，不根据模型名称或桥接内置列表推测：
+设置页面固定显示 `low`（低）、`medium`（中）、`high`（高）、`xhigh`（很高）、`max`（最高）、`ultra`（极限），不再显示“跟随工具默认”或“读取所选模型的推理档位”按钮。
 
-| 工具 | 推理档位来源 | 执行方式 |
-| --- | --- | --- |
-| Codex | `model/list` 的 `supportedReasoningEfforts`、`defaultReasoningEffort` | 原生 effort 设置 |
-| Claude Code | SDK `initialize` 的 `supportsEffort`、`supportedEffortLevels` | CLI `--effort` |
-| ZCode | 当前 Agent CLI 对供应商模型配置解析后的 `reasoning.levels/defaultLevel` | 原生 `session/setThoughtLevel` 与本轮 `runtimeModel.thoughtLevel` |
+已有会话首次打开设置时，由 worker 读取当前原生设置；工具未提供当前设置时使用最近一次执行元数据。新会话初始档位为 `high`。读取失败或原工具未上报实际档位时，页面明确说明初始选择为高，不声称已读取到实际档位。
 
-在 `/config` 选择模型后，点击“读取所选模型的推理档位”，再选择档位并保存。读取按钮原地更新卡片，保留其余可编辑的草稿设置，不保存偏好；档位重置为“跟随工具默认”。此选项始终存在，实际执行不传 effort 参数。工具没有提供档位元数据的模型只显示该默认项，不猜测支持 `high` 或其他档位。
+worker 在执行时根据实际供应商/模型的能力映射：优先使用同名档位；缺档时选择最接近的正向档位，同距优先较低档；原生只有 `instant/thinking` 时映射为 `thinking`。不将正向请求映射到 `none/off`。没有可调档位时不发送不受支持的参数，并显示“工具未提供可调档位”。不同工具的同名档位不保证推理预算相同。
 
-原生默认模型提供能力元数据时，默认模型选项也可选择相应档位。保存与提交任务前重新校验模型和档位；已移除或不支持的显式档位会阻止本次执行，提示刷新配置，不静默改档。原来已保存的显式档位保留；新配置不再自动填 `high`。
+收据和请求指纹保留用户选择，归一事件分别记录 `requestedReasoningEffort` 与实际 `reasoningEffort`。回复显示实际值，发生映射时显示例如 `ultra → max`，不会通过重试再次执行任务。
 
-Kilo 回复状态中的推理档位按本轮执行和消息记录读取。原生回答省略 `variant` 时保留本轮用户消息的模型档位；未选择显式变体时显示“跟随工具默认”，不推测具体强度，也不借用会话后来改选的档位。
-
-ZCode 能力读取使用临时目录和独立的短生命周期 Agent CLI，仅向其临时供应商注册表传入不含密钥、请求头和执行选项的模型元数据。不创建用户会话、不提交推理、不改写桌面或独立 CLI 配置；结束后关闭该进程并删除临时目录。执行仍由长期运行的独立 ZCode worker 负责。
+映射在 worker 公共层完成，桥接、网页、共享群和 API 使用同一套选择。需要升级各个 worker 才能启用该能力；`capabilities.reasoningMapping` 标识支持情况。原生模型列表和能力仍通过 `/models` 动态读取，不硬编码模型名单。
 
 ## ZCode 配置来源
 
@@ -55,6 +49,6 @@ ZCode 能力读取使用临时目录和独立的短生命周期 Agent CLI，仅�
 
 ## 扩展工具
 
-`AgentAdapter.listModels({ cwd })` 是统一的动态发现接口，独立 worker 代理委托给对应原生 CLI。渲染层接收一次发现的安全投影，执行层在新任务提交前校验选择。模型选项携带各模型的推理档位安全投影；不要在卡片、会话共享、A2A 或公共运行流程中新增模型或档位白名单。
+`AgentAdapter.listModels({ cwd })` 是统一的动态发现接口，独立 worker 代理委托给对应原生 CLI。渲染层接收一次发现的安全投影，执行层在新任务提交前校验选择。模型选项携带各模型的推理档位安全投影；具体模型与原生档位名单属于工具；交互层仅使用上述固定的统一档位。
 
 原生接口参考：[Codex model/list](https://developers.openai.com/codex/app-server/#list-models-modellist)、[Claude Agent SDK 初始化实现](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/query.py)、[ZCode 供应商规则](https://github.com/zai-org/ZCode/blob/main/packages/provider/src/config/rule-data-schema.ts)。兼容性以部署的工具版本实际返回值为准。

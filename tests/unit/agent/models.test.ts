@@ -27,8 +27,8 @@ it('refreshes the native catalog and distinguishes deletion from discovery failu
   expect(listModels).toHaveBeenCalledWith({ cwd: '/workspace' });
 });
 it('preserves native tokens without guessing levels from tool or model names', () => {
-  expect(normalizeReasoningEffort('claude', 'native-new')).toBe('native-new');
-  expect(normalizeReasoningEffort('zcode', undefined)).toBe('default');
+  expect(normalizeReasoningEffort('claude', 'native-new')).toBe('high');
+  expect(normalizeReasoningEffort('zcode', undefined)).toBe('high');
   expect(resolveReasoningEffort('default')).toBeUndefined();
   expect(resolveReasoningEffort('bad\nvalue')).toBeUndefined();
   expect(normalizeReasoningEffort('codex', 'ultra')).toBe('ultra');
@@ -39,7 +39,7 @@ it('retains safe per-model metadata and resolves default capability from the nat
   const agent = Object.assign(new FakeAgentAdapter(), { listModels: async () => [metadata] });
   const choices = await loadModelChoices(agent);
   expect(choices.options).toHaveLength(1);
-  expect(reasoningOptions(choices.options[0]).map(option => option.value)).toEqual(['default', 'future']);
+  expect(reasoningOptions(choices.options[0]).map(option => option.value)).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
   expect(JSON.stringify(choices)).not.toContain('private');
   const fromDefault = await loadModelChoices(Object.assign(new FakeAgentAdapter(), { listModels: async () => [{ ...metadata, value: 'native-model', isDefault: true }] }));
   expect(fromDefault.options[0]?.defaultReasoningEffort).toBe('future');

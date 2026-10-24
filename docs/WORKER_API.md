@@ -61,6 +61,7 @@ every 10 seconds and when opening the session panel. It can start with no worker
 | POST | `/jobs/:id/stop` | `{}` → `{ "ok": true }` |
 | GET | `/sessions` | Native IDs, titles, cwd, timestamps and archive state |
 | GET | `/sessions/:id/history` | `{ "nativeId": "...", "format": "jsonl", "content": "..." }` |
+| GET | `/sessions/:id/reasoning?cwd=...` | `{effort, nativeEffort?, model?, source, notice?}`; initialized unified selection |
 | GET | `/sessions/:id/conversation` | Normalized snapshot described below |
 | GET | `/sessions/:id/questions` | Available questions with origin and delivery scope |
 | POST | `/sessions/:id/answer` | `{ "questionId": "...", "answers": { "q": { "answers": ["A"] } } }` → `{ "accepted": true/false }` |
@@ -75,7 +76,7 @@ local native fallback. `/session-name` and `/native-turn-stop` remain wire alias
 History exports retain native formats, are bounded to 32 MiB, and accept no file
 path. Codex/Claude use JSONL; other built-in workers use JSON snapshots.
 
-Conversation snapshots contain `{id, name?, cwd, archived, turns}`; each turn has
+Conversation snapshots contain `{id, name?, cwd, archived, settings?, turns}`; each turn has
 `{id, createdAtMs, bridge, input, state}`. `state` is the common run-card state.
 Bridge-owned turns are delivered by the job journal, while native external turns
 are mirrored only to the personal owner group. Shared groups receive replies to
@@ -190,3 +191,5 @@ missing bindings in Web and skips their native message synchronization, without 
 bindings, archiving native history, or dissolving groups. Failed lists do not imply archive;
 Web retains the last confirmed roster. Workers without this flag retain existing offline
 binding behavior. Kilo advertises it for the exclusive configured client mode.
+
+Unified reasoning choices are `low/medium/high/xhigh/max/ultra`. New sessions start at `high`; existing sessions initialize from native settings or confirmed execution metadata. `capabilities.reasoningMapping` advertises worker-side mapping. Journals retain the original request; system events carry both `requestedReasoningEffort` and the effective native `reasoningEffort`. Missing native capability is shown as `unavailable`, never advertised as an applied `high`.

@@ -627,6 +627,20 @@ it('closes previously opened listeners when a later listener cannot bind', async
 
 function flatten(elements: WebControlElement[]): WebControlElement[] { return elements.flatMap(e => e.kind === 'section' ? flatten(e.elements) : [e]); }
 
+it('initializes settings from the existing native effort and preserves the saved unified choice on reopening', async () => {
+  const h = await harness('kilo'), id=(await h.service.list())[0]!.id;
+  h.workspaces.setCwd('oc_group', '/project');
+  Object.assign(h.conversation,{settings:{model:'p/model',reasoningEffort:'medium'}});
+  const response=await h.request('/api/sessions/'+id+'/control',{action:'config'});
+  expect(response.status).toBe(200);
+  const elements=flatten(((await response.json()) as {elements:WebControlElement[]}).elements);
+  expect(elements.find(e=>e.kind==='select'&&e.name==='reasoning_effort')).toMatchObject({value:'medium'});
+  expect(h.bindings.get('oc_group')?.reasoningEffort).toBe('medium');
+  Object.assign(h.conversation,{settings:{model:'p/model',reasoningEffort:'max'}});
+  const again=await h.request('/api/sessions/'+id+'/control',{action:'config'});
+  expect(flatten(((await again.json()) as {elements:WebControlElement[]}).elements).find(e=>e.kind==='select'&&e.name==='reasoning_effort')).toMatchObject({value:'medium'});
+});
+
 it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs Web controls through existing %s handlers: stop, settings save/preview, refresh, copy menu and confirmed archive', async tool => {
   const h = await harness(tool), id = (await h.service.list())[0]!.id;
   const act = async (action: string, values?: Record<string, string>) => { const r = await h.request('/api/sessions/' + id + '/control', { action, values }); expect(r.status).toBe(200); return r.json() as Promise<{ elements: WebControlElement[]; conversation: { session: { id: string } } }>; };
@@ -637,9 +651,9 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs Web controls
   expect((await act('refresh')).conversation).toMatchObject({ turns: (refreshed.conversation as any).turns, notice: '会话读取失败，稍后自动重试' });
   const settings = flatten((await act('config')).elements);
   const form = Object.fromEntries(settings.flatMap(e => e.kind === 'select' || e.kind === 'input' ? [[e.name, e.value]] : []));
-  const preview = settings.find(e => e.kind === 'button' && e.text.includes('推理档位'))!;
-  expect(preview.kind).toBe('button'); if (preview.kind !== 'button') throw Error('preview');
-  expect(flatten((await act(preview.action, form)).elements).some(e => e.kind === 'select' && e.name === 'reasoning_effort')).toBe(true);
+  expect(settings.some(e => e.kind === 'button' && e.text.includes('推理档位'))).toBe(false);
+  const effort = settings.find(e => e.kind === 'select' && e.name === 'reasoning_effort');
+  expect(effort).toMatchObject({value:'high',options:expect.arrayContaining(['low','medium','high','xhigh','max','ultra'].map(value=>expect.objectContaining({value})))});
   const save = settings.find(e => e.kind === 'button' && e.text === '保存')!; if (save.kind !== 'button') throw Error('save');
   const result = await act(save.action, { ...form, max_concurrent_runs: '7' });
   expect(JSON.stringify(result)).toContain('偏好已保存'); expect(h.bindings.get('oc_group')?.model).toBe('default');

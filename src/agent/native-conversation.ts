@@ -16,6 +16,8 @@ export interface NativeConversationSnapshot {
   name?: string;
   cwd: string;
   archived: boolean;
+  /** Native current settings, when the tool provides them separately from history. */
+  settings?: { model?: string; reasoningEffort?: string };
   turns: NativeConversationTurn[];
 }
 export interface NativeConversationReader {

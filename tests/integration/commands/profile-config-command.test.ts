@@ -231,15 +231,15 @@ describe('profile-aware account and config commands', () => {
   it('rejects a forged reasoning level before saving any preferences', async () => {
     vi.useFakeTimers();
     const h = await createHarness({ preferences: { reasoningEffort: 'medium' } });
-    await h.command('/config submit', { reasoning_effort: 'ultra', max_concurrent_runs: '8' });
+    await h.command('/config submit', { reasoning_effort: 'forged-level', max_concurrent_runs: '8' });
     await vi.advanceTimersByTimeAsync(2000);
     const root = JSON.parse(await readFile(join(h.rootDir, 'config.json'), 'utf8')) as RootConfig;
     expect(root.profiles.claude?.preferences.reasoningEffort).toBe('medium');
     expect(root.profiles.claude?.preferences.maxConcurrentRuns).not.toBe(8);
-    expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('未提供所选推理档位');
+    expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('请选择统一推理档位');
   });
 
-  it('previews per-model levels in place while preserving the draft, then saves a newly added native level', async () => {
+  it('keeps draft settings and stores unified effort even when the model has no native levels', async () => {
     vi.useFakeTimers();
     const h = await createHarness();
     h.nativeModels.push({ value: 'future-model', label: 'Future', reasoningEfforts: [{ value: 'future-level', label: 'Future level' }] });
@@ -250,21 +250,21 @@ describe('profile-aware account and config commands', () => {
     await h.command('/config preview', { model: 'future-model', reasoning_effort: 'high', message_reply: 'text', max_concurrent_runs: '8' }, { messageId });
     await vi.advanceTimersByTimeAsync(2000);
     const preview = JSON.stringify(update.mock.calls.at(-1)?.[1]);
-    expect(preview).toContain('future-level'); expect(preview).toContain('"initial_option":"text"');
+    expect(preview).not.toContain('future-level'); expect(preview).toContain('"initial_option":"text"');
     expect(preview).toContain('"default_value":"8"');
     const before = JSON.parse(await readFile(join(h.rootDir, 'config.json'), 'utf8')) as RootConfig;
     expect(before.profiles.claude?.preferences.model).toBeUndefined();
-    await h.command('/config submit', { model: 'future-model', reasoning_effort: 'future-level', message_reply: 'text' }, { messageId });
+    await h.command('/config submit', { model: 'future-model', reasoning_effort: 'ultra', message_reply: 'text' }, { messageId });
     const saved = await waitForRoot(h.rootDir, root => root.profiles.claude?.preferences.model === 'future-model');
-    expect(saved.profiles.claude?.preferences.reasoningEffort).toBe('future-level');
+    expect(saved.profiles.claude?.preferences.reasoningEffort).toBe('ultra');
     await vi.advanceTimersByTimeAsync(2000);
     h.nativeModels.at(-1)!.reasoningEfforts = [];
-    await h.command('/config submit', { model: 'future-model', reasoning_effort: 'future-level', max_concurrent_runs: '9' });
+    await h.command('/config submit', { model: 'future-model', reasoning_effort: 'ultra', max_concurrent_runs: '10' });
     await vi.advanceTimersByTimeAsync(2000);
-    expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('未提供所选推理档位');
+    expect(JSON.stringify(h.channel.sent.at(-1)?.content)).not.toContain('未提供所选推理档位');
     await h.command('/config submit', { model: 'future-model', reasoning_effort: 'default', max_concurrent_runs: '9' });
     const cleared = await waitForRoot(h.rootDir, root => root.profiles.claude?.preferences.maxConcurrentRuns === 9);
-    expect(cleared.profiles.claude?.preferences.reasoningEffort).toBe('default');
+    expect(cleared.profiles.claude?.preferences.reasoningEffort).toBe('high');
     await vi.advanceTimersByTimeAsync(2000);
   });
 

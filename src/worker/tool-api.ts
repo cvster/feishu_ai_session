@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AgentAdapter } from '../agent/types';
 import type { WorkerCapabilities, WorkerErrorCode, WorkerSessionService } from './protocol';
+import { readReasoningSelection } from './reasoning';
 
 export class WorkerApiError extends Error {
   constructor(readonly status: number, message: string, readonly code: WorkerErrorCode,
@@ -16,7 +17,7 @@ export interface WorkerToolApi {
 }
 export function workerCapabilities(api: Pick<WorkerToolApi, 'agent' | 'sessions'>): WorkerCapabilities {
   return { apiVersion: 2, jobs: { submit: true, read: true, stop: true, eventCursor: true },
-    models: typeof api.agent.listModels === 'function',
+    models: typeof api.agent.listModels === 'function', reasoningMapping: true,
     sessions: { list: !!api.sessions, history: !!api.sessions,
       rename: !!api.sessions?.rename || typeof api.agent.renameSession === 'function',
       archive: !!api.sessions?.archive, fork: !!api.sessions?.fork },
@@ -70,19 +71,27 @@ export async function handleWorkerToolRequest(req: IncomingMessage, res: ServerR
     const sessions = await api.exclusive(() => api.sessions!.list());
     reply(res, sessions); return true;
   }
-  const match = /^\/sessions\/([^/]+)\/(history|conversation|questions|answer|rename|archive|fork|turn-stop)$/.exec(url.pathname);
+  const match = /^\/sessions\/([^/]+)\/(history|conversation|questions|answer|rename|archive|fork|turn-stop|reasoning)$/.exec(url.pathname);
   const legacyRename = url.pathname === '/session-name';
   const legacyStop = url.pathname === '/native-turn-stop';
   if (!match && !legacyRename && !legacyStop) return false;
   const action = legacyRename ? 'rename' : legacyStop ? 'turn-stop' : match![2]!;
-  if (req.method !== (['history', 'conversation', 'questions'].includes(action) ? 'GET' : 'POST'))
+  if (req.method !== (['history', 'conversation', 'questions', 'reasoning'].includes(action) ? 'GET' : 'POST'))
     throw new WorkerApiError(405, 'Method not allowed', 'invalid-request');
   let nativeId: string;
   try { nativeId = match ? required(decodeURIComponent(match[1]!), 'session ID', 256) : ''; }
   catch { throw new WorkerApiError(400, 'Invalid session ID', 'invalid-request'); }
-  const value = ['history', 'conversation', 'questions'].includes(action) ? {} : await readWorkerBody(req, action === 'answer' ? 128 * 1024 : 16384);
+  const value = ['history', 'conversation', 'questions', 'reasoning'].includes(action) ? {} : await readWorkerBody(req, action === 'answer' ? 128 * 1024 : 16384);
   if (!match) nativeId = required(value.id, 'session ID', 256);
   const capabilities = workerCapabilities(api);
+  if (action === 'reasoning') {
+    const cwd = url.searchParams.get('cwd');
+    if (cwd) required(cwd, 'workspace', 4096);
+    reply(res, await api.exclusive(async () => {
+      if (api.connectionExclusive) api.assertIdle();
+      return readReasoningSelection(api.agent, api.sessions, nativeId, cwd || undefined);
+    })); return true;
+  }
   if (action === 'conversation') {
     if (!api.sessions?.conversation) unsupported();
     reply(res, await api.exclusive(() => api.sessions!.conversation!(nativeId))); return true;
