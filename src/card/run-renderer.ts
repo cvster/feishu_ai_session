@@ -1,3 +1,5 @@
+import { queueFooter } from './queue-footer';
+import type { QueuedMessage } from '../bot/message-queue';
 import type { FooterStatus, RunState } from './run-state';
 import { renderColoredRunStatus } from './run-status-render';
 import type { RunControlIcons } from './run-control-icons';
@@ -5,6 +7,7 @@ import type { RunButtonAction } from './run-button-images';
 import { runProgress } from './run-progress';
 
 export interface RunCardRenderOptions extends RunControlIcons {
+  queuedMessages?: QueuedMessage[];
   signCallback?: (action: string) => string;
   /** External Codex turns have no bridge-owned RunHandle to interrupt. */
   showStopButton?: boolean;
@@ -36,6 +39,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   if (status) elements.push(noteMd(status));
   else if (state.terminal === 'running' && state.footer && !(state.footer === 'thinking' || state.footer === 'tool_running' && state.blocks.some(block => block.kind === 'tool'))) elements.push(footerStatus(state.footer));
   elements.push(controlButtonRow(options.auxiliary && state.terminal !== 'running' ? { ...options, showStopButton: false } : options, state.terminal === 'done'));
+  if (!options.auxiliary) elements.push(...queueFooter(options.queuedMessages ?? []));
   if (options.auxiliary && state.terminal !== 'running') {
     const footer = elements.splice(footerStart);
     const details = elements.find(element => (element as { tag?: string }).tag === 'collapsible_panel') as

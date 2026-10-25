@@ -1076,3 +1076,30 @@ it('shows queued messages and cancels one through the authenticated session API 
   expect((await h.service.read(session.id)).turns.some(t => t.status === 'cancelled')).toBe(true);
   expect(h.calls).toHaveLength(0);
 });
+
+it('updates native reply queue rows after the controls without sending a separate queue card', async () => {
+  const h = await harness('claude'); let clock = Date.now() + 1000;
+  h.pending.block('oc_group');
+  const mirror = await startNativeTurnSync({ toolId: 'claude', displayName: 'Claude', channel: h.channel, controls: h.controls,
+    catalog: h.catalog, sourceId: h.client.sourceId, statePath: join(h.dir, 'inline-native-queue.json'), intervalMs: 60_000, now: () => clock,
+    reader: { read: id => h.client.conversation(id), close: async () => {}, stopTurn: async () => true } });
+  try {
+    h.conversation.turns.push({ id: 'live-native', input: 'native task', bridge: false, createdAtMs: clock + 1,
+      state: reduce(initialState, { type: 'text', delta: 'native response in progress' }) });
+    clock += 2; await mirror.runNow();
+    const sends = h.create.mock.calls.length, cards = vi.mocked(h.channel.createCard).mock.calls.length;
+    const session = (await h.service.list())[0]!;
+    await h.service.send(session.id, 'native-queue-request-123', 'pending native followup');
+    const afterSend = h.create.mock.calls.length; expect(afterSend).toBe(sends + 1); // The Web input, not a queue card.
+    await mirror.runNow();
+    expect(h.create).toHaveBeenCalledTimes(afterSend); expect(h.channel.createCard).toHaveBeenCalledTimes(cards);
+    const card = vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1] as any;
+    expect(card.body.elements.at(-3).columns).toHaveLength(5);
+    expect(card.body.elements.at(-2).content).toContain('排队消息（1）');
+    expect(card.body.elements.at(-1).columns[0].elements[0].text.content).toBe('pending native followup');
+    const queued = (await h.service.read(session.id)).queuedMessages![0]!;
+    await h.service.removeQueuedMessage(session.id, queued.id); await mirror.runNow();
+    expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1])).not.toContain('排队消息');
+    expect(h.create).toHaveBeenCalledTimes(afterSend); expect(h.stop).not.toHaveBeenCalled();
+  } finally { await mirror.stop(); }
+});

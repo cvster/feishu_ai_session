@@ -107,7 +107,8 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
     // Those clocks are replaced below; hashing them would rewrite every old
     // card each poll and delay delivery of new native messages.
     const { runtime: _observedRuntime, ...content } = view;
-    const hash = digest(JSON.stringify(content));
+    const queuedMessages = deps.controls.messageQueue?.forReply?.(scope, `native:${toolId}:${scope}:${turn.id}`) ?? [];
+    const hash = digest(JSON.stringify(queuedMessages.length ? [content, queuedMessages] : content));
     const first = !delivery.hash;
     // Existing completed ledgers/replayed history must not produce a burst of
     // mentions when a render preference or bridge version changes.
@@ -123,12 +124,12 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
     const mode = getMessageReplyMode(deps.controls.cfg);
     if (mode === 'text' && view.terminal === 'running') return false;
     if (mode === 'card' || delivery.cardId) {
-      const card = renderCard(view, { ...deps.controls.runControlIcons, supportsFork: true, nativeMirror: true, showStopButton: !!deps.reader.stopTurn });
+      const card = renderCard(view, { ...deps.controls.runControlIcons, queuedMessages, supportsFork: true, nativeMirror: true, showStopButton: !!deps.reader.stopTurn });
       (card as { config: { streaming_mode: boolean } }).config.streaming_mode = false;
       delivery.sendingSince ??= delivery.sendingAt; // Preserve the legacy ambiguous-send window.
       await publishCards({ channel: deps.channel, target: { chatId: scope }, card, delivery,
         key: `${toolId}-native:${deps.sourceId}:${scope}:${id}:${turn.id}:answer`, save,
-        active: () => active(scope, id) && !stopped, now: now(), force });
+        active: () => active(scope, id) && !stopped, now: now(), force, tailCount: queuedMessages.length ? queuedMessages.length + 2 : undefined });
     } else {
       const content = JSON.stringify({ zh_cn: { title: '', content: [[{ tag: 'md', text: renderText(view) || '正在执行…' }]] } });
       if (!delivery.messageId) delivery.messageId = await send(scope, id, turn, delivery, false, 'post', content);
@@ -209,6 +210,11 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
           }
           if (changed) await save();
           if (entry.recentTurnReplayCount && deps.catalog.clearRecentTurnReplay(scope, id, toolId, deps.sourceId)) await deps.catalog.flush();
+          for (const turn of snapshot.turns) {
+            const delivery = binding.turns[turn.id];
+            deps.controls.messageQueue?.observeReply?.(scope, `native:${toolId}:${scope}:${turn.id}`, turn.createdAtMs,
+              !!delivery && !delivery.skipped && !turn.bridge && turn.state.terminal === 'running');
+          }
           for (const turn of snapshot.turns) {
             const delivery = binding.turns[turn.id];
             if (!delivery) continue;

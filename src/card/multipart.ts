@@ -12,9 +12,21 @@ type Element = { tag?: string; content?: string; elements?: Element[]; [key: str
 type Card = { body: { elements: Element[]; [key: string]: unknown }; [key: string]: unknown };
 
 /** Split rendered cards, including Markdown inside collapsed detail panels. */
-export function splitCard(input: object): object[] {
+export function splitCard(input: object, tailCount = 0): object[] {
   if (cardBytes(input) <= CARD_BUDGET_BYTES) return [input];
   const card = input as Card;
+  if (tailCount > 0 && card.body?.elements && tailCount <= card.body.elements.length) {
+    const tail = card.body.elements.slice(-tailCount);
+    const withElements = (elements: Element[]) => ({ ...card, body: { ...card.body, elements } });
+    if (cardBytes(withElements(tail)) <= CARD_BUDGET_BYTES) {
+      const parts = splitCard(withElements(card.body.elements.slice(0, -tailCount))) as Card[];
+      const last = parts.at(-1)!;
+      const combined = { ...last, body: { ...last.body, elements: [...last.body.elements, ...tail] } };
+      if (cardBytes(combined) <= CARD_BUDGET_BYTES) parts[parts.length - 1] = combined;
+      else parts.push(withElements(tail));
+      return parts;
+    }
+  }
   if (!card.body?.elements) throw new Error('超长卡片缺少可拆分的正文');
   const withElements = (elements: Element[]): Card => ({ ...card, body: { ...card.body, elements } });
   const fits = (element: Element) => cardBytes(withElements([element])) <= CARD_BUDGET_BYTES;
@@ -116,12 +128,13 @@ export async function publishCards(input: {
   channel: LarkChannel; target: CardTarget; card: object; delivery: MultipartDelivery;
   key: string; save(): Promise<void>; active(): boolean; now?: number;
   cards?: object[];
+  tailCount?: number;
   force?: boolean;
 }): Promise<void> {
   const { channel, target, delivery, save } = input;
   const check = () => { if (!input.active()) throw new Error('会话已归档或已重新绑定'); };
   check();
-  const cards = input.cards ?? splitCard(input.card);
+  const cards = input.cards ?? splitCard(input.card, input.tailCount);
   delivery.parts ??= delivery.cardId ? [{ cardId: delivery.cardId, messageId: delivery.messageId, sequence: delivery.sequence, sendingSince: delivery.sendingSince }] : [];
   const now = input.now ?? Date.now();
   for (let index = 0; index < Math.max(cards.length, delivery.parts.length); index++) {

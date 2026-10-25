@@ -7,7 +7,7 @@ import { AuxiliaryApprovals } from './auxiliary-approvals';
 import { AuxiliaryGroups } from './auxiliary-groups';
 import { isRetiredPrivateInput } from './auxiliary-private';
 import { startBridgeWeb } from '../web/server';
-import { createMessageQueue, startQueueCards } from './message-queue';
+import { createMessageQueue, retireQueueCards } from './message-queue';
 import { enqueuePersonalInput } from './intake-queue';
 import { PersonalSessionService, WebError } from '../web/service';
 import { WebSessionControls } from '../web/controls';
@@ -660,8 +660,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   controls.sessionArchiveNotifications = archiveNotifications;
   await controls.auxiliary?.recover().catch(error => log.warn('auxiliary', 'recovery-failed', { error: String(error) }));
   controls.messageQueue = createMessageQueue(controls, pending, sessionCatalog);
-  const queueCards = deps.appPaths?.profileDir ? await startQueueCards({ controls, channel, queue: controls.messageQueue,
-    path: join(deps.appPaths.profileDir, 'queue-cards.json') }) : undefined;
+  if (deps.appPaths?.profileDir) await retireQueueCards({ controls, channel, path: join(deps.appPaths.profileDir, 'queue-cards.json') });
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
   const aaSessionGroupSync =
     sessionCatalog && deps.appPaths?.profileDir
@@ -866,7 +865,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       controls.refreshWorkerDiscovery = undefined;
       await groupCleanup?.stop();
       activeRuns.pauseNewRuns('bridge-disconnect');
-      await queueCards?.stop(); controls.messageQueue = undefined;
+      controls.messageQueue = undefined;
       await bridgeWeb?.close();
       await a2a?.close();
       pending.cancelAll();

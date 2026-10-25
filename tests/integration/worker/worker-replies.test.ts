@@ -248,3 +248,49 @@ it('repairs the original card when the native turn finished while its worker obs
     await second.runNow(); expect(h.channel.updateCardById).toHaveBeenCalledTimes(count);
   } finally { await second.stop(); await h.catalog.flush(); await h.sessions.flush(); }
 });
+
+
+it('keeps queue rows after the five controls on the same live card, including idle updates and restart', async () => {
+  const h = await repliesFixture();
+  let items = [{ id: 'one', text: 'long queued message '.repeat(80), senderName: 'Nick', createdAtMs: 1 }];
+  h.controls.messageQueue = { list: () => items, remove: async () => true, observeReply: () => {}, forReply: () => items };
+  const first = await h.start();
+  try {
+    await first.runNow();
+    const card = vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1] as any;
+    const controls = card.body.elements.findIndex((e: any) => e.tag === 'column_set' && e.columns.length === 5);
+    expect(card.body.elements[controls + 1].content).toContain('排队消息（1）');
+    expect(card.body.elements[controls + 2].columns[0].elements[0].text.lines).toBe(1);
+    expect(card.body.elements[controls + 2].columns[0].elements[0].text.content).toContain('…');
+    items = [...items, { id: 'two', text: 'second queued message', senderName: 'Nick', createdAtMs: 2 }];
+    await first.runNow();
+    expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1])).toContain('second queued message');
+    expect(h.reply).toHaveBeenCalledOnce(); expect(h.channel.createCard).toHaveBeenCalledOnce();
+    await first.stop(); const second = await h.start();
+    try {
+      await second.runNow(); items = []; await second.runNow();
+      expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1])).not.toContain('排队消息');
+      expect(h.reply).toHaveBeenCalledOnce(); expect(h.channel.createCard).toHaveBeenCalledOnce();
+    } finally { await second.stop(); }
+  } finally { await first.stop(); await h.catalog.flush(); await h.sessions.flush(); }
+});
+it('keeps controls and queue together on the last part of an oversized reply', async () => {
+  const h = await repliesFixture();
+  const snapshot = h.adapter.client.snapshot.bind(h.adapter.client);
+  vi.spyOn(h.adapter.client, 'snapshot').mockImplementation(async id => {
+    const result = await snapshot(id); const event = result.events.find(row => row.event.type === 'text')!.event;
+    if (event.type === 'text') event.delta = 'long answer line '.repeat(4000);
+    return result;
+  });
+  h.controls.messageQueue = { list: () => [], remove: async () => true, observeReply: () => {},
+    forReply: () => [{ id: 'waiting', text: 'next task', senderName: 'Nick', createdAtMs: 1 }] };
+  const publisher = await h.start();
+  try {
+    await publisher.runNow(); const calls = vi.mocked(h.channel.updateCardById).mock.calls;
+    const last = calls.at(-1)![1] as any;
+    expect(last.body.elements.at(-3).columns).toHaveLength(5);
+    expect(last.body.elements.at(-2).content).toContain('排队消息（1）');
+    expect(last.body.elements.at(-1).columns[1].elements[0].behaviors[0].value).toEqual({ cmd: 'queue.remove', arg: 'waiting' });
+    expect(calls.every(([, card]) => Buffer.byteLength(JSON.stringify({ data: JSON.stringify(card) })) <= 26_000)).toBe(true);
+  } finally { await publisher.stop(); await h.catalog.flush(); await h.sessions.flush(); }
+});

@@ -6,7 +6,7 @@ import type { PendingQueue } from './pending-queue';
 import { isPersonalWorkgroup } from '../tools/bindings';
 import { DurableAgentAdapter } from '../worker/adapter';
 import { messageRequestId } from '../worker/identity';
-import { deliveryUuid, publishCards, type CardPart } from '../card/multipart';
+import { deliveryUuid, type CardPart } from '../card/multipart';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { log } from '../core/logger';
 
@@ -14,13 +14,13 @@ export interface QueuedMessage { id: string; text: string; senderName: string; c
 export interface MessageQueue {
   list(scope: string): QueuedMessage[];
   remove(scope: string, id: string, actor: string): Promise<boolean>;
-}
-export function queuePreview(text: string, limit = 80): string {
-  const chars = Array.from(text.replace(/\s+/g, ' ').trim());
-  return chars.slice(0, limit).join('') + (chars.length > limit ? '…' : '');
+  observeReply?(scope: string, id: string, createdAtMs: number, running: boolean): void;
+  forReply?(scope: string, id: string): QueuedMessage[];
 }
 /** Only waiting input is cancellable. A flushed batch belongs to its executor. */
 export function createMessageQueue(controls: Controls, pending: PendingQueue, catalog?: SessionCatalog): MessageQueue {
+  const replies = new Map<string, { scope: string; createdAtMs: number; checkedAtMs: number; binding: string }>();
+  const bindingKey = (scope: string) => { const b = controls.toolBindings?.get(scope); return JSON.stringify([b?.toolId, b?.sourceId, b?.nativeId]); };
   function entries(scope: string) {
     const binding = controls.toolBindings?.get(scope), tool = binding && controls.toolRegistry?.find(binding.toolId);
     if (!binding || !isPersonalWorkgroup(scope, binding) || controls.auxiliary?.isAuxiliary(scope) ||
@@ -32,6 +32,15 @@ export function createMessageQueue(controls: Controls, pending: PendingQueue, ca
         id: deliveryUuid(JSON.stringify([controls.profileConfig.accounts.app.id, scope, binding.toolId, binding.sourceId, binding.nativeId, e.requestId])) }));
   }
   return {
+    observeReply(scope, id, createdAtMs, running) {
+      if (running) replies.set(id, { scope, createdAtMs, checkedAtMs: Date.now(), binding: bindingKey(scope) });
+      else replies.delete(id);
+    },
+    forReply(scope, id) {
+      const candidates = [...replies.entries()].filter(([, r]) => r.scope === scope && r.binding === bindingKey(scope) && Date.now() - r.checkedAtMs < 60_000)
+        .sort((a, b) => b[1].createdAtMs - a[1].createdAtMs || b[0].localeCompare(a[0]));
+      return candidates[0]?.[0] === id ? this.list(scope) : [];
+    },
     list: scope => entries(scope).map(e => ({ id: e.id, text: e.message.content || '[附件消息]', senderName: e.message.senderName ?? '用户', createdAtMs: Number(e.message.createTime) })),
     async remove(scope, id, actor) {
       let entry = entries(scope).find(e => e.id === id);
@@ -58,36 +67,21 @@ export function createMessageQueue(controls: Controls, pending: PendingQueue, ca
   };
 }
 interface QueueDelivery { cardId?: string; messageId?: string; sequence: number; parts?: CardPart[]; sendingSince?: number; empty?: boolean; signature?: string }
-export async function startQueueCards(deps: { controls: Controls; channel: LarkChannel; queue: MessageQueue; path: string }) {
-  let deliveries: Record<string, QueueDelivery> = {};
-  try { const raw = JSON.parse(await readFile(deps.path, 'utf8')); if (raw.version !== 1 || !raw.deliveries) throw new Error('Invalid queue card ledger'); deliveries = raw.deliveries; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  const save = () => writeFileAtomic(deps.path, JSON.stringify({ version: 1, deliveries }) + '\n', { mode: 0o600 });
-  let running: Promise<void> | undefined, stopped = false;
-  async function sync() {
-    for (const [scope, binding] of deps.controls.toolBindings?.entries() ?? []) {
-      if (stopped || !isPersonalWorkgroup(scope, binding)) continue;
-      const items = deps.queue.list(scope);
-      const key = JSON.stringify([deps.controls.profileConfig.accounts.app.id, scope, binding.toolId, binding.sourceId]);
-      if (!items.length && (!deliveries[key] || deliveries[key]!.empty)) continue;
-      const delivery = deliveries[key] ??= { sequence: 0 };
-      const escape = (text: string) => text.replace(/([\\*_`\[\]<>~])/g, '\\$1');
-      const card = { schema: '2.0', config: { streaming_mode: false }, header: { title: { tag: 'plain_text', content: `排队消息（${items.length}）` } },
-        body: { elements: items.length ? items.map(item => ({ tag: 'column_set', flex_mode: 'none', columns: [
-          { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [{ tag: 'markdown', content: escape(queuePreview(item.text)) }] },
-          { tag: 'column', width: 'auto', vertical_align: 'center', elements: [{ tag: 'button', text: { tag: 'plain_text', content: '删除' }, type: 'danger',
-            behaviors: [{ type: 'callback', value: { cmd: 'queue.remove', arg: item.id } }] }] },
-        ] })) : [{ tag: 'markdown', content: '排队消息已处理或移除。' }] } };
-      const signature = deliveryUuid(JSON.stringify(card));
-      if (delivery.signature === signature) continue;
-      try {
-        await publishCards({ channel: deps.channel, target: { chatId: scope }, card, delivery, key: `queue:${key}`, save,
-          active: () => { const current = deps.controls.toolBindings?.get(scope); return !stopped && current?.toolId === binding.toolId && current.sourceId === binding.sourceId && current.nativeId === binding.nativeId; } });
-        delivery.empty = !items.length; delivery.signature = signature; await save();
-      } catch (error) { log.warn('queue', 'card-update-failed', { scope, error: error instanceof Error ? error.message : String(error) }); }
-    }
+/** Retire existing standalone queue cards in place; never send a replacement. */
+export async function retireQueueCards(deps: { controls: Controls; channel: LarkChannel; path: string }) {
+  let raw: { version: number; deliveries: Record<string, QueueDelivery & { retired?: boolean }> };
+  try { raw = JSON.parse(await readFile(deps.path, 'utf8')); if (raw.version !== 1 || !raw.deliveries) throw new Error('Invalid queue card ledger'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  const save = () => writeFileAtomic(deps.path, JSON.stringify(raw) + '\n', { mode: 0o600 });
+  for (const [key, delivery] of Object.entries(raw.deliveries)) {
+    if (delivery.retired || JSON.parse(key)[0] !== deps.controls.profileConfig.accounts.app.id) continue;
+    try {
+      const parts = delivery.parts ?? (delivery.cardId && delivery.messageId ? [{ cardId: delivery.cardId, messageId: delivery.messageId, sequence: delivery.sequence }] : []);
+      for (const part of parts) if (part.cardId && part.messageId) {
+        part.sequence++; delivery.parts = parts; await save();
+        await deps.channel.updateCardById(part.cardId, { schema: '2.0', body: { elements: [{ tag: 'markdown', content: '排队消息已移到最新回复卡片末尾。' }] } }, part.sequence);
+      }
+      delivery.retired = true; await save();
+    } catch (error) { log.warn('queue', 'legacy-card-retire-failed', { error: error instanceof Error ? error.message : String(error) }); }
   }
-  const runNow = () => running ??= sync().finally(() => { running = undefined; });
-  const timer = setInterval(() => { if (!stopped) void runNow().catch(error => log.warn('queue', 'sync-failed', { error: String(error) })); }, 1000); timer.unref();
-  return { runNow, async stop() { stopped = true; clearInterval(timer); await running; } };
 }

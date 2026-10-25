@@ -6,7 +6,8 @@ import { WorkerInbox } from '../../../src/worker/inbox';
 import { ToolBindingStore } from '../../../src/tools/bindings';
 import { ToolRegistry } from '../../../src/tools/types';
 import { PendingQueue } from '../../../src/bot/pending-queue';
-import { createMessageQueue, queuePreview, startQueueCards } from '../../../src/bot/message-queue';
+import { createMessageQueue, retireQueueCards } from '../../../src/bot/message-queue';
+import { queuePreview } from '../../../src/card/queue-footer';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import type { Controls } from '../../../src/commands';
 async function setup() {
@@ -60,25 +61,31 @@ it('never cancels a handed-off message or a worker-accepted message whose receip
     expect(h.inbox.receipts('oc_group').find(e => e.message.messageId === 'racing')!.status).toBe('pending');
   } finally { h.pending.cancelAll(); await h.bindings.flush(); }
 });
-it('updates one persistent queue card, clips previews and removes only its chosen row', async () => {
-  const h = await setup(); await h.push('one'); await h.push('two');
-  const create = vi.fn(async () => ({ code: 0, data: { message_id: 'queue-message' } }));
-  const channel = { createCard: vi.fn(async () => ({ cardId: 'queue-card' })), updateCardById: vi.fn(async () => {}), rawClient: { im: { v1: { message: { create } } } } } as unknown as LarkChannel;
-  const deps = { controls: h.controls, channel, queue: h.queue, path: join(h.dir, 'queue-cards.json') };
-  const first = await startQueueCards(deps);
+it('assigns the queue only to the newest updating reply and moves ownership when it ends', async () => {
+  const h = await setup(); await h.push('one');
   try {
-    await first.runNow(); expect(create).toHaveBeenCalledOnce();
-    const card = vi.mocked(channel.updateCardById).mock.calls.at(-1)![1] as any;
-    expect(card.body.elements).toHaveLength(2); expect(JSON.stringify(card)).toContain('…');
-    const token = card.body.elements[0].columns[1].elements[0].behaviors[0].value.arg;
-    await h.queue.remove('oc_group', token, 'owner'); await first.runNow();
-    expect((vi.mocked(channel.updateCardById).mock.calls.at(-1)![1] as any).body.elements).toHaveLength(1);
-    await first.stop(); const second = await startQueueCards(deps);
-    try { await second.runNow(); expect(create).toHaveBeenCalledOnce();
-      await h.queue.remove('oc_group', h.queue.list('oc_group')[0]!.id, 'owner'); await second.runNow();
-      expect(JSON.stringify(vi.mocked(channel.updateCardById).mock.calls.at(-1)![1])).toContain('已处理或移除');
-      expect(create).toHaveBeenCalledOnce();
-    } finally { await second.stop(); }
-    expect(Array.from(queuePreview('a\n😀'.repeat(100)))).toHaveLength(81); // 80 code points, with surrogate pairs and ellipsis.
-  } finally { await first.stop(); h.pending.cancelAll(); await h.bindings.flush(); }
+    h.queue.observeReply!('oc_group', 'worker:old', 1, true);
+    h.queue.observeReply!('oc_group', 'native:new', 2, true);
+    expect(h.queue.forReply!('oc_group', 'worker:old')).toEqual([]);
+    expect(h.queue.forReply!('oc_group', 'native:new')).toHaveLength(1);
+    h.queue.observeReply!('oc_group', 'native:new', 2, false);
+    expect(h.queue.forReply!('oc_group', 'worker:old')).toHaveLength(1);
+    h.bindings.set('oc_group', { ...h.bindings.get('oc_group')!, nativeId: 'another-session' });
+    expect(h.queue.forReply!('oc_group', 'worker:old')).toEqual([]);
+  } finally { h.pending.cancelAll(); await h.bindings.flush(); }
+});
+it('retires old standalone queue cards once without creating or sending new messages', async () => {
+  const h = await setup(); const { writeFile } = await import('node:fs/promises');
+  const path = join(h.dir, 'queue-cards.json');
+  await writeFile(path, JSON.stringify({ version: 1, deliveries: { [JSON.stringify(['cli_test', 'oc_group', 'claude', h.client.sourceId])]: {
+    cardId: 'old-card', messageId: 'old-message', sequence: 4,
+  } } }));
+  const channel = { updateCardById: vi.fn(async () => {}), createCard: vi.fn(), send: vi.fn() } as unknown as LarkChannel;
+  try {
+    await retireQueueCards({ controls: h.controls, channel, path }); await retireQueueCards({ controls: h.controls, channel, path });
+    expect(channel.updateCardById).toHaveBeenCalledOnce();
+    expect(vi.mocked(channel.updateCardById).mock.calls[0]![2]).toBe(5);
+    expect(channel.createCard).not.toHaveBeenCalled(); expect(channel.send).not.toHaveBeenCalled();
+    expect(Array.from(queuePreview('a\n😀'.repeat(100)))).toHaveLength(81);
+  } finally { h.pending.cancelAll(); await h.bindings.flush(); }
 });

@@ -34,6 +34,7 @@ interface ReplyDelivery extends CompletionDelivery {
   inputMessageId?: string;
   inputSendingSince?: number;
   completionEligible?: boolean;
+  queueSignature?: string;
   nativeRecovery?: { turnId: string; signature?: string; finished?: boolean };
 }
 export interface WorkerRepliesDeps {
@@ -99,6 +100,14 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     const jobs = await deps.adapter.client.list();
     for (const [id, cached] of nativeCache) if (Date.now() - cached.at > 60_000) nativeCache.delete(id);
     for (const job of jobs) {
+      const scope = job.options.delivery?.scope;
+      const binding = scope && deps.controls.toolBindings?.get(scope);
+      const nativeId = job.options.threadId ?? job.options.sessionId ?? job.options.initialSessionId;
+      if (scope) deps.controls.messageQueue?.observeReply?.(scope, `worker:${scope}:${job.id}`, job.createdAt,
+        !!binding && binding.toolId === deps.adapter.id && binding.sourceId === job.options.delivery?.sourceId &&
+        (!nativeId || nativeId === binding.nativeId) && (isJobActive(job) || !!(deliveries[job.id]?.nativeRecovery && !deliveries[job.id]!.nativeRecovery!.finished)));
+    }
+    for (const job of jobs) {
       if (stopped || !job.options.delivery) continue;
       try { await publish(job); } catch (error) { log.warn('worker-replies', 'publish-failed', { toolId: deps.adapter.id, jobId: job.id, error: error instanceof Error ? error.message : String(error) }); }
       try {
@@ -146,7 +155,12 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     if (previousDelivery?.skipped) return;
     deliveryScopes.set(ledgerKey, target.scope);
     const nativeTurn = binding.nativeId ? await recoveryTurn(job, previousDelivery, binding.nativeId) : undefined;
-    const forceRefresh = refreshKeys.has(ledgerKey);
+    deps.controls.messageQueue?.observeReply?.(target.scope, `worker:${target.scope}:${job.id}`, job.createdAt,
+      nativeTurn ? nativeTurn.state.terminal === 'running' : isJobActive(job));
+    const queuedMessages = deps.controls.messageQueue?.forReply?.(target.scope, `worker:${target.scope}:${job.id}`) ?? [];
+    const queueSignature = deliveryUuid(JSON.stringify(queuedMessages));
+    const queueChanged = previousDelivery?.queueSignature !== queueSignature && (!!queuedMessages.length || previousDelivery?.queueSignature !== undefined);
+    const forceRefresh = refreshKeys.has(ledgerKey) || queueChanged;
     if (previousDelivery?.nativeRecovery && !nativeTurn) return;
     if (previousDelivery?.finished && !repairControls && !nativeTurn && !forceRefresh) return;
     const snapshot = await deps.adapter.client.snapshot(job.id);
@@ -198,13 +212,13 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     if (deps.controls.auxiliary?.isAuxiliary(target.scope)) await deps.controls.auxiliary.trackRun(target.scope, job.id, target.replyTo, !finished, target.operatorOpenId);
     const options = deps.renderOptions?.(mirror ? { ...job, options: { ...job.options, delivery: target } } : job);
     // Completed personal cards retain the same group controls as Codex. Active stops stay bound to their job token.
-    const card = renderCard(state, { ...options, showStopButton: true, ...(finished || mirror || nativeTurn ? { signCallback: undefined } : {}) });
+    const card = renderCard(state, { ...options, queuedMessages, showStopButton: true, ...(finished || mirror || nativeTurn ? { signCallback: undefined } : {}) });
     // CardKit updates own the stream window across reconnects; avoid its 10-minute streaming timeout.
     (card as { config: { streaming_mode: boolean } }).config.streaming_mode = false;
     const text = renderText(state);
     const content = delivery.mode === 'card' ? undefined : JSON.stringify({ zh_cn: { title: '', content: [[{ tag: 'md', text: text || '正在执行…' }]] } });
     if (delivery.mode === 'card') {
-      await publishCards({ channel: deps.channel, target, card, delivery, key: messageKey, save, active, force: repairControls || forceRefresh });
+      await publishCards({ channel: deps.channel, target, card, delivery, key: messageKey, save, active, tailCount: queuedMessages.length ? queuedMessages.length + 2 : undefined, force: repairControls || forceRefresh });
     } else {
       if (!active()) return;
       if (!delivery.messageId) {
@@ -228,6 +242,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       target: { ...target, replyTo: delivery.parts?.filter(part => part.messageId).at(-1)?.messageId ?? delivery.messageId },
       ownerId: deps.controls.botOwnerId, key: messageKey, delivery, save, active });
     if (nativeTurn) delivery.nativeRecovery = { turnId: nativeTurn.id, signature: nativeSignature, finished };
+    delivery.queueSignature = queueSignature;
     refreshKeys.delete(ledgerKey);
     delivery.lastEvent = lastEvent; delivery.pushedAt = Date.now(); delivery.finished = finished; delivery.controlsVersion = 1; await save();
   }
