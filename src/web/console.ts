@@ -173,7 +173,7 @@ export class BridgeConsoleService {
       for (const r of receipts) {
         const b = c.toolBindings?.get(r.scope), jobs = o?.jobs ?? [];
         const job = jobs.find(j => jobScope(j) === r.scope && j.options.delivery?.messageIds?.includes(r.requestId));
-        const status = job?.status ?? (r.status === 'pending' ? r.queued ? 'queued' : 'pending' : r.status === 'accepted' ? 'accepted_unconfirmed' : 'rejected');
+        const status = job?.status ?? (r.status === 'pending' ? r.queued ? 'queued' : 'pending' : r.status === 'accepted' ? 'accepted_unconfirmed' : r.status);
         result.push({ id: hash([c.profile, id, r.scope, r.requestId]), toolId: id, tool: o?.label ?? id, scope: r.scope,
           name: b?.name ?? r.scope, sender: r.message.senderName ?? r.message.senderId ?? '', text: r.message.content.slice(0, 2000),
           status, createdAt: Number(r.message.createTime) || 0, updatedAt: job?.updatedAt ?? r.diagnostic?.at ?? (Number(r.message.createTime) || 0),

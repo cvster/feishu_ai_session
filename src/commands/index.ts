@@ -124,6 +124,7 @@ export interface Controls {
   /** Reuse normal intake, authorization, durable queue and reply delivery for user-requested card messages. */
   refreshWorkerDiscovery?(): Promise<void>;
   submitMessage?(message: NormalizedMessage): Promise<void>;
+  messageQueue?: import('../bot/message-queue').MessageQueue;
   auxiliary?: import('../bot/auxiliary-groups').AuxiliaryGroups;
   auxiliaryApprovals?: import('../bot/auxiliary-approvals').AuxiliaryApprovals;
   toolRegistry?: ToolRegistry;
@@ -275,6 +276,7 @@ const handlers: Record<string, Handler> = {
   '/resume': handleResume,
   '/status': handleStatus,
   '/refresh': handleRefresh,
+  '/queue': handleQueue,
   '/fork': handleFork,
   '/help': handleHelp,
   '/account': handleAccount,
@@ -1637,6 +1639,15 @@ async function handleNativeFork(ctx: CommandContext, name?: string): Promise<boo
   } finally {
     pendingForks.delete(key);
   }
+}
+
+async function handleQueue(args: string, ctx: CommandContext): Promise<void> {
+  const [action, id] = args.trim().split(/\s+/);
+  if (!ctx.fromCardAction || action !== 'remove' || !id || !ctx.controls.messageQueue) return;
+  try {
+    if (!await ctx.controls.messageQueue.remove(ctx.scope, id, ctx.msg.senderId))
+      await reply(ctx, '该消息已开始处理或已移除，未停止当前任务。');
+  } catch (error) { await reply(ctx, `⚠️ ${errorText(error)}`); }
 }
 
 async function handleRefresh(_args: string, ctx: CommandContext): Promise<void> {

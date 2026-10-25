@@ -17,7 +17,7 @@ export async function enqueuePersonalInput({ agent, controls, activeRuns, pendin
       if ((await agent.client.list()).some(job => job.options.delivery?.scope === scope && job.options.delivery.messageIds?.includes(id))) return;
     } catch { /* Submission will fail closed if the worker remains unavailable. */ }
     if (controls.workerInbox && !await controls.workerInbox.receive(scope, msg)) return;
-    controls.workerInbox?.markQueued(scope, msg);
+    if (controls.workerInbox && !controls.workerInbox.markQueued(scope, msg)) return;
     if (activeRuns.get(scope)) pending.block(scope);
   }
 

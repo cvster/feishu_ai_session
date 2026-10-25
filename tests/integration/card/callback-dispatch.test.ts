@@ -49,6 +49,17 @@ describe('signed card callback dispatch', () => {
     expect(stopScope).not.toHaveBeenCalled(); expect(later.stopped).toBe(false);
   });
 
+  it('routes queue deletion to the exact message without dispatching input or stopping a run', async () => {
+    const h = await createHarness();
+    const later = h.agent.run({ runId: 'active-task', prompt: 'running' }) as FakeAgentRun;
+    h.activeRuns.register('oc_group', later);
+    const remove = vi.fn(async () => true);
+    h.controls.messageQueue = { list: () => [], remove };
+    await h.dispatch({ cmd: 'queue.remove', arg: 'queue-token' });
+    expect(remove).toHaveBeenCalledWith('oc_group', 'queue-token', 'ou_operator');
+    expect(later.stopped).toBe(false); expect(h.pending.snapshot()).toEqual([]);
+  });
+
   it('routes legacy form answers through the common worker handler to the live request without queueing or launching a run', async () => {
     const h = await createHarness();
     const handleAction = vi.fn(async () => {});

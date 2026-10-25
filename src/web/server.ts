@@ -112,10 +112,11 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       res.write('retry: 1500\n\n'); streams.set(res, { token, bearer, local, id });
       res.on('close', () => streams.delete(res)); void poll(); return;
     }
-    const match = /^\/api\/sessions\/([a-f0-9]{64})(?:\/(send|rename|control|favorite))?$/.exec(url.pathname);
+    const match = /^\/api\/sessions\/([a-f0-9]{64})(?:\/(send|rename|control|favorite|queue))?$/.exec(url.pathname);
     if (match && req.method === 'GET' && !match[2]) { respond(res, 200, await options.service.read(match[1]!)); return; }
     if (match && req.method === 'POST') {
       const input = await body(req);
+      if (match[2] === 'queue' && typeof input.id === 'string') { respond(res, 200, await options.service.removeQueuedMessage(match[1]!, input.id)); return; }
       if (match[2] === 'send' && typeof input.requestId === 'string' && typeof input.text === 'string') { respond(res, 202, await options.service.send(match[1]!, input.requestId, input.text)); return; }
       if (match[2] === 'favorite' && typeof input.favorite === 'boolean') { respond(res, 200, await options.service.favorite(match[1]!, input.favorite)); return; }
       if (match[2] === 'rename' && typeof input.name === 'string') { respond(res, 200, await options.service.rename(match[1]!, input.name)); return; }

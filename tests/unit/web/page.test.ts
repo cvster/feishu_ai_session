@@ -445,3 +445,20 @@ it('renders rich Markdown and separates answer messages without losing streaming
   h.choose(1); h.requests[1]!.resolve(h.conversation(1)); await h.settle(); h.choose(0);
   expect(box.children[0]).toBe(content); expect(h.requests).toHaveLength(2);
 });
+
+it('shows the live queue above the composer and deletes one message without adding a chat message', async () => {
+  const h = harness(); await h.ready();
+  const items = [{ id: '1'.repeat(48), text: 'first long message '.repeat(80) }, { id: '2'.repeat(48), text: 'second queued message' }];
+  h.requests[0]!.resolve({ ...h.conversation(0), queuedMessages: items }); await h.settle();
+  const queue = h.node('queued-messages'); expect(queue.hidden).toBe(false);
+  expect(queue.children[0]!.text).toBe('排队消息（2）');
+  const button = queue.children[1]!.querySelector('button')!;
+  const clicked = button.onclick!(); await h.settle();
+  expect(button.disabled).toBe(true);
+  expect(h.requests[1]!.path).toBe('/api/sessions/' + h.rows[0]!.id + '/queue');
+  expect(h.requests[1]!.data).toEqual({ id: items[0]!.id });
+  h.requests[1]!.resolve({ removed: true, queuedMessages: [items[1]] }); await clicked;
+  expect(queue.children[0]!.text).toBe('排队消息（1）'); expect(queue.text).not.toContain('first long');
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...h.conversation(0), queuedMessages: [] } });
+  expect(queue.hidden).toBe(true);
+});

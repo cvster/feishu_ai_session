@@ -22,6 +22,7 @@ import { WorkspaceStore } from '../../../src/workspace/store';
 import { createRootConfig, saveRootConfig, runtimeProfileConfig } from '../../../src/config/profile-store';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import { PendingQueue } from '../../../src/bot/pending-queue';
+import { createMessageQueue } from '../../../src/bot/message-queue';
 import { enqueuePersonalInput } from '../../../src/bot/intake-queue';
 import { initialState, reduce } from '../../../src/card/run-state';
 import { startWorkerReplies } from '../../../src/worker/replies';
@@ -78,6 +79,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
     })();
   }); cleanups.push(async () => { pending.cancelAll(); await queued; });
   const names = await startWorkerNameSync({ channel, controls, catalog, profileDir: h.dir, intervalMs: 60_000 }); await names.tick(); cleanups.push(async () => { await names.stop(); await catalog.flush(); await bindings.flush(); await inbox.flush(); });
+  controls.messageQueue = createMessageQueue(controls, pending, catalog);
   const enqueue = vi.fn((msg: NormalizedMessage) => enqueuePersonalInput({ agent: h.adapter, controls, activeRuns, pending, scope: msg.chatId, msg }));
   const webControls = new WebSessionControls(async (scope, owner) => ({ channel, scope, chatMode: 'group', sessions, sessionCatalog: catalog,
     workspaces, activeRuns, pending, agent: h.adapter, controls,
@@ -98,7 +100,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   const login = async () => { const response = await request('/api/login', { secret }); expect(response.status).toBe(200); cookie = response.headers.get('set-cookie')?.split(';')[0] ?? ''; };
   const replies = await startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath: join(h.dir, 'replies.json'), intervalMs: 60_000 }); cleanups.push(() => replies.stop());
   controls.workerRuntimes!.get(tool)!.replies = replies;
-  return { ...h, bindings, catalog, controls, sessions, inbox, service, consoleService, makeService, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
+  return { ...h, bindings, catalog, controls, sessions, pending, inbox, service, consoleService, makeService, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
 }
 
 async function sharedInput(h: Awaited<ReturnType<typeof harness>>, options: { name?: string; content?: string } = {}) {
@@ -1059,4 +1061,18 @@ it('archives a proven dissolved chat before scanning without enqueueing a notifi
   expect((await h.request('/api/console/action', { action: 'personal-archive', id: row.id })).status).toBe(200);
   expect(h.catalog.pendingArchiveNotifications()).toHaveLength(0); expect(h.catalog.isChatDissolved('oc_group')).toBe(true);
   expect(h.catalog.dissolvedPersonalGroups()).toHaveLength(1); expect(h.bindings.get('oc_group')).toBeUndefined();
+});
+
+
+it('shows queued messages and cancels one through the authenticated session API without running it', async () => {
+  const h = await harness(); h.pending.block('oc_group');
+  await h.login(); const session = (await h.service.list())[0]!;
+  await h.service.send(session.id, 'queued-request-123456', '删除这个待处理消息');
+  const conversation = await h.service.read(session.id);
+  expect(conversation.queuedMessages).toHaveLength(1);
+  const response = await h.request('/api/sessions/' + session.id + '/queue', { id: conversation.queuedMessages![0]!.id });
+  expect(response.status).toBe(200); expect((await response.json() as any).queuedMessages).toEqual([]);
+  expect(h.inbox.receipts('oc_group')[0]!.status).toBe('cancelled');
+  expect((await h.service.read(session.id)).turns.some(t => t.status === 'cancelled')).toBe(true);
+  expect(h.calls).toHaveLength(0);
 });

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { normalize } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
+import type { QueuedMessage } from '../bot/message-queue';
 import type { Controls } from '../commands';
 import type { SessionCatalog } from '../session/catalog';
 import { DurableAgentAdapter } from '../worker/adapter';
@@ -23,7 +24,7 @@ export interface WebSession {
   updatedAtMs: number; favorite: boolean; online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
 }
 export interface WebTurn { id: string; input: string; inputMessages?: { senderName: string; text: string }[]; answer: string; answerSections?: WebAnswerSection[]; requestIds?: string[]; progress?: string[]; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
-export interface WebConversation { session: WebSession; turns: WebTurn[]; notice?: string }
+export interface WebConversation { session: WebSession; turns: WebTurn[]; queuedMessages?: QueuedMessage[]; notice?: string }
 interface Receipt { fingerprint: string; sessionId: string; owner: string; createdAt: number; messageId?: string; enqueued?: boolean }
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
 const answer = (s: RunState) => s.blocks.flatMap(b => b.kind === 'text' ? [b.content] : []).join('\n\n');
@@ -197,6 +198,16 @@ export class PersonalSessionService {
       return { requestId, status: 'queued' };
     });
   }
+  async removeQueuedMessage(id: string, messageId: string) {
+    if (!/^[a-f0-9]{48}$/.test(messageId)) throw new WebError(400, '排队消息 ID 无效');
+    const owner = this.owner(), { session } = await this.resolve(id);
+    this.assertBinding(id, session.scope);
+    if (this.owner() !== owner) throw new WebError(409, '所有者已变化');
+    const queue = this.deps.controls.messageQueue;
+    if (!queue || !await queue.remove(session.scope, messageId, owner))
+      throw new WebError(409, '消息已开始处理或已移除，未停止当前任务');
+    return { removed: true, queuedMessages: queue.list(session.scope) };
+  }
   async rename(id: string, name: string) {
     name = name.trim(); if (!name || name.length > 100 || /[\u0000-\u001f]/.test(name)) throw new WebError(400, '名称需为 1–100 字');
     this.owner();
@@ -232,19 +243,20 @@ export class PersonalSessionService {
   }
   async read(id: string): Promise<WebConversation> {
     const { session, b, client } = await this.resolve(id);
+    const queuedMessages = this.deps.controls.messageQueue?.list(session.scope) ?? [];
     const owner = this.owner(), requests = new Map<string, string[]>();
     for (const [requestId, receipt] of Object.entries(this.receipts)) if (receipt.sessionId === id && receipt.owner === owner && receipt.messageId) {
       const ids = requests.get(receipt.messageId) ?? []; ids.push(requestId); requests.set(receipt.messageId, ids);
     }
     const runtime = this.deps.controls.workerRuntimes?.get(b.toolId);
     const receipts = this.receiptScopes(session.scope).flatMap(scope => runtime?.inbox.receipts(scope) ?? []);
-    const turns: WebTurn[] = receipts.filter(r => r.status === 'pending' || r.status === 'rejected').map(r => ({ id: 'receipt:' + r.message.messageId,
-      input: r.message.content, answer: '', requestIds: requests.get(r.message.messageId), status: r.status === 'pending' ? 'queued' : 'rejected', createdAtMs: Number(r.message.createTime), origin: 'bridge' }));
+    const turns: WebTurn[] = receipts.filter(r => r.status === 'pending' || r.status === 'rejected' || r.status === 'cancelled').map(r => ({ id: 'receipt:' + r.message.messageId,
+      input: r.message.content, answer: '', requestIds: requests.get(r.message.messageId), status: r.status === 'pending' ? 'queued' : r.status, createdAtMs: Number(r.message.createTime), origin: 'bridge' }));
     for (const turn of turns) {
       const receipt = receipts.find(r => 'receipt:' + r.message.messageId === turn.id)!;
       if (receipt.scope !== session.scope) turn.inputMessages = [{ senderName: await feishuSenderName(this.deps.channel, receipt.message), text: receipt.message.content }];
     }
-    if (!session.online || !client) return { session, turns: this.conversations.get(id)?.turns ?? turns, notice: 'Worker 离线；恢复后会重新读取会话' };
+    if (!session.online || !client) return { session, queuedMessages, turns: this.conversations.get(id)?.turns ?? turns, notice: 'Worker 离线；恢复后会重新读取会话' };
     try {
       const [native, allJobs] = await Promise.all([session.nativeConversation ? client.conversation(b.nativeId!) : undefined, client.list()]);
       this.assertBinding(id, session.scope);
@@ -294,12 +306,12 @@ export class PersonalSessionService {
         createdAtMs: turn.createdAtMs, origin: turn.bridge ? 'bridge' : 'native',
       });
       turns.sort((a, z) => a.createdAtMs - z.createdAtMs || a.id.localeCompare(z.id));
-      const result = { session, turns, ...(!session.nativeConversation ? { notice: '此 worker 尚未提供原生对话读取；当前显示桥接消息' } : {}) };
+      const result = { session, turns, queuedMessages, ...(!session.nativeConversation ? { notice: '此 worker 尚未提供原生对话读取；当前显示桥接消息' } : {}) };
       this.assertBinding(id, session.scope);
       this.conversations.set(id, result); return result;
     } catch (e) {
       if (e instanceof WebError) throw e;
-      return { session: { ...session, online: false, canSend: false, canRename: false }, turns: this.conversations.get(id)?.turns ?? turns, notice: '会话读取失败，稍后自动重试' };
+      return { session: { ...session, online: false, canSend: false, canRename: false }, queuedMessages, turns: this.conversations.get(id)?.turns ?? turns, notice: '会话读取失败，稍后自动重试' };
     }
   }
 }

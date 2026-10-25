@@ -4,7 +4,7 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { messageRequestId } from './identity';
 import type { WorkerJob } from './protocol';
 
-interface InboxEntry { scope: string; message: NormalizedMessage; status: 'pending' | 'accepted' | 'rejected'; notified?: boolean;
+interface InboxEntry { scope: string; message: NormalizedMessage; status: 'pending' | 'accepted' | 'rejected' | 'cancelled'; notified?: boolean;
   diagnostic?: { at: number; code: string; message: string; retryable: boolean } }
 /** Bridge-only writer; persists input before debounce and keeps receipt identities. */
 export class WorkerInbox {
@@ -17,7 +17,7 @@ export class WorkerInbox {
     try {
       const raw = JSON.parse(await readFile(this.path, 'utf8'));
       if (raw.version !== 1 || !raw.entries || Array.isArray(raw.entries)) throw new Error('Invalid worker inbox');
-      for (const value of Object.values(raw.entries) as InboxEntry[]) if (!value.message?.messageId || !value.scope || !['pending', 'accepted', 'rejected'].includes(value.status)) throw new Error('Invalid worker inbox receipt');
+      for (const value of Object.values(raw.entries) as InboxEntry[]) if (!value.message?.messageId || !value.scope || !['pending', 'accepted', 'rejected', 'cancelled'].includes(value.status)) throw new Error('Invalid worker inbox receipt');
       this.entries = raw.entries;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
@@ -27,9 +27,23 @@ export class WorkerInbox {
     if (this.entries[key]) return false;
     this.entries[key] = { scope, message, status: 'pending' }; await this.persist(); return true;
   }
-  markQueued(scope: string, message: NormalizedMessage): void { this.queued.add(this.key(scope, message)); }
+  markQueued(scope: string, message: NormalizedMessage): boolean {
+    const key = this.key(scope, message);
+    if (this.entries[key]?.status !== 'pending') return false;
+    this.queued.add(key); return true;
+  }
+  async cancelPending(scope: string, requestId: string): Promise<boolean> {
+    const key = JSON.stringify([scope, requestId]), entry = this.entries[key];
+    if (!entry || entry.status !== 'pending') return false;
+    entry.status = 'cancelled'; this.queued.delete(key); this.deferredUntil.delete(key);
+    await this.persist(); return true;
+  }
   releaseQueued(scope: string, messages: NormalizedMessage[]): void { for (const message of messages) this.queued.delete(this.key(scope, message)); }
   receipts(scope: string): InboxEntry[] { return structuredClone(Object.values(this.entries).filter(e => e.scope === scope)); }
+  pendingReceipts(scope: string) {
+    return Object.entries(this.entries).filter(([, entry]) => entry.scope === scope && entry.status === 'pending')
+      .map(([key, entry]) => ({ ...structuredClone(entry), requestId: messageRequestId(entry.message), queued: this.queued.has(key) }));
+  }
   diagnostics() { return Object.entries(this.entries).map(([key, entry]) => ({ ...structuredClone(entry), requestId: messageRequestId(entry.message), queued: this.queued.has(key), retryAt: this.deferredUntil.get(key) })); }
   async recordDiagnostic(scope: string, messages: NormalizedMessage[], code: string, message: string, retryable: boolean) {
     for (const msg of messages) {

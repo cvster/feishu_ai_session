@@ -1,4 +1,5 @@
 import type { NormalizedMessage } from '@larksuite/channel';
+import { messageRequestId } from '../worker/identity';
 import { log } from '../core/logger';
 
 interface PendingEntry {
@@ -44,6 +45,16 @@ export class PendingQueue {
       timer: this.blocked.has(scope) ? undefined : this.armTimer(scope),
     });
     return 1;
+  }
+
+  remove(scope: string, requestId: string): boolean {
+    const entry = this.map.get(scope);
+    if (!entry) return false;
+    const kept = entry.messages.filter(m => messageRequestId(m) !== requestId);
+    if (kept.length === entry.messages.length) return false;
+    if (!kept.length) this.cancel(scope);
+    else entry.messages = kept;
+    return true;
   }
 
   cancel(scope: string): NormalizedMessage[] {

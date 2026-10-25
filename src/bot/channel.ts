@@ -7,6 +7,7 @@ import { AuxiliaryApprovals } from './auxiliary-approvals';
 import { AuxiliaryGroups } from './auxiliary-groups';
 import { isRetiredPrivateInput } from './auxiliary-private';
 import { startBridgeWeb } from '../web/server';
+import { createMessageQueue, startQueueCards } from './message-queue';
 import { enqueuePersonalInput } from './intake-queue';
 import { PersonalSessionService, WebError } from '../web/service';
 import { WebSessionControls } from '../web/controls';
@@ -485,7 +486,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         if (controls.workerRuntimes?.has(id)) {
           const inbox = controls.workerRuntimes.get(id)!.inbox;
           if (!await inbox.receive(approval.scope, msg)) return;
-          inbox.markQueued(approval.scope, msg);
+          if (!inbox.markQueued(approval.scope, msg)) return;
         }
         await controls.auxiliary!.noteRequest(approval.scope, msg.messageId, msg.senderId);
         pending.push(approval.scope, msg);
@@ -658,6 +659,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const archiveNotifications = sessionCatalog ? startSessionArchiveNotifications({ channel, controls, catalog: sessionCatalog }) : undefined;
   controls.sessionArchiveNotifications = archiveNotifications;
   await controls.auxiliary?.recover().catch(error => log.warn('auxiliary', 'recovery-failed', { error: String(error) }));
+  controls.messageQueue = createMessageQueue(controls, pending, sessionCatalog);
+  const queueCards = deps.appPaths?.profileDir ? await startQueueCards({ controls, channel, queue: controls.messageQueue,
+    path: join(deps.appPaths.profileDir, 'queue-cards.json') }) : undefined;
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
   const aaSessionGroupSync =
     sessionCatalog && deps.appPaths?.profileDir
@@ -711,7 +715,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             await runtime.inbox?.reject(entry.scope, [entry.message]); continue;
           }
           if (busy.has(entry.scope) || activeRuns.get(entry.scope)) continue;
-          runtime.inbox!.markQueued(entry.scope, entry.message); pending.push(entry.scope, entry.message);
+          if (runtime.inbox!.markQueued(entry.scope, entry.message)) pending.push(entry.scope, entry.message);
         }
       },
       renderOptions: job => ({ ...controls.runControlIcons, supportsFork: true,
@@ -862,6 +866,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       controls.refreshWorkerDiscovery = undefined;
       await groupCleanup?.stop();
       activeRuns.pauseNewRuns('bridge-disconnect');
+      await queueCards?.stop(); controls.messageQueue = undefined;
       await bridgeWeb?.close();
       await a2a?.close();
       pending.cancelAll();
