@@ -337,8 +337,10 @@ it('shows a sending bubble and clears the composer before HTTP completes, then r
   expect(h.node('messages').querySelector('.sending')!.text).toBe('发送中…');
   expect(h.node('messages').scrollTop).toBe(h.node('messages').scrollHeight - h.node('messages').clientHeight);
   const requestId = h.requests[1]!.data.requestId;
-  h.requests[1]!.resolve({ requestId, status: 'queued' }); await submit;
-  expect(h.node('messages').querySelector('.queued')!.text).toContain('已排队');
+  h.requests[1]!.resolve({ requestId, status: 'queued', queuedMessages: [{ id: 'a'.repeat(48), text: '立即显示的消息' }] }); await submit;
+  expect(h.node('queued-messages').text).toContain('立即显示的消息');
+  expect(h.node('messages').querySelectorAll('.queued')).toHaveLength(0);
+  expect(h.node('messages').text).not.toContain('立即显示的消息');
   expect(h.node('send').disabled).toBe(false); expect(h.node('send').textContent).toBe('发送');
   const view = h.conversation(0);
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...view, turns: [...view.turns, {
@@ -356,7 +358,7 @@ it('deduplicates by request identity for identical inputs and when a batch confi
   const firstId = h.requests[1]!.data.requestId; h.requests[1]!.resolve({ status: 'queued' }); await first;
   h.node('input').value = 'same'; const second = h.node('composer').onsubmit!({ preventDefault() {} });
   const secondId = h.requests[2]!.data.requestId;
-  expect(firstId).not.toBe(secondId); expect(h.node('messages').querySelectorAll('.user')).toHaveLength(3);
+  expect(firstId).not.toBe(secondId); expect(h.node('messages').querySelectorAll('.user')).toHaveLength(2);
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...history, turns: [...history.turns, {
     id: 'job:batch', input: 'same\n\nsame', answer: '', requestIds: [firstId, secondId], status: 'running', origin: 'bridge', createdAtMs: Date.now(),
   }] } });
@@ -380,7 +382,7 @@ it('keeps a failed send across reload and reuses its request ID and bubble on re
   expect(restored.requests[1]!.data).toEqual(data);
   expect(restored.node('messages').querySelectorAll('.user')).toHaveLength(1);
   restored.requests[1]!.resolve({ status: 'queued' }); await retry;
-  expect(restored.node('messages').querySelectorAll('.user')).toHaveLength(1);
+  expect(restored.node('messages').querySelectorAll('.user')).toHaveLength(0);
   expect(restored.storage.has('bridge-web-draft:' + restored.rows[0]!.id)).toBe(false);
 });
 
@@ -391,7 +393,7 @@ it('accepts SSE confirmation before a lost HTTP acknowledgement without revertin
     id: 'receipt:known', input: '已确认消息', answer: '', requestIds: [h.requests[1]!.data.requestId], status: 'queued', origin: 'bridge', createdAtMs: Date.now(),
   }] } });
   h.requests[1]!.reject(new Error('lost acknowledgement')); await submit;
-  expect(h.node('messages').querySelectorAll('.user')).toHaveLength(1);
+  expect(h.node('messages').querySelectorAll('.user')).toHaveLength(0);
   expect(h.node('messages').querySelectorAll('.send_unknown')).toHaveLength(0);
   expect(h.node('message-error').textContent).toBe(''); expect(h.node('send').textContent).toBe('发送');
 });
@@ -449,7 +451,9 @@ it('renders rich Markdown and separates answer messages without losing streaming
 it('shows the live queue above the composer and deletes one message without adding a chat message', async () => {
   const h = harness(); await h.ready();
   const items = [{ id: '1'.repeat(48), text: 'first long message '.repeat(80) }, { id: '2'.repeat(48), text: 'second queued message' }];
-  h.requests[0]!.resolve({ ...h.conversation(0), queuedMessages: items }); await h.settle();
+  const view = h.conversation(0);
+  h.requests[0]!.resolve({ ...view, turns: [...view.turns, { id: 'receipt:pending', input: items[0]!.text, answer: '', status: 'queued', createdAtMs: Date.now() }], queuedMessages: items }); await h.settle();
+  expect(h.node('messages').text).not.toContain('first long');
   const queue = h.node('queued-messages'); expect(queue.hidden).toBe(false);
   expect(queue.children[0]!.text).toBe('排队消息（2）');
   const button = queue.children[1]!.querySelector('button')!;
@@ -461,4 +465,7 @@ it('shows the live queue above the composer and deletes one message without addi
   expect(queue.children[0]!.text).toBe('排队消息（1）'); expect(queue.text).not.toContain('first long');
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...h.conversation(0), queuedMessages: [] } });
   expect(queue.hidden).toBe(true);
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...view, turns: [...view.turns, { id: 'receipt:pending', input: items[0]!.text, answer: '', status: 'cancelled', createdAtMs: Date.now() }, { id: 'job:next', input: items[1]!.text, answer: '', status: 'running', createdAtMs: Date.now() }], queuedMessages: [] } });
+  expect(h.node('messages').text).not.toContain('first long');
+  expect(h.node('messages').querySelectorAll('.user').filter(e => e.text === items[1]!.text)).toHaveLength(1);
 });

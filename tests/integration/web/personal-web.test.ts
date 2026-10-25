@@ -1067,7 +1067,8 @@ it('archives a proven dissolved chat before scanning without enqueueing a notifi
 it('shows queued messages and cancels one through the authenticated session API without running it', async () => {
   const h = await harness(); h.pending.block('oc_group');
   await h.login(); const session = (await h.service.list())[0]!;
-  await h.service.send(session.id, 'queued-request-123456', '删除这个待处理消息');
+  const acknowledgement = await h.service.send(session.id, 'queued-request-123456', '删除这个待处理消息');
+  expect(acknowledgement.queuedMessages).toHaveLength(1);
   const conversation = await h.service.read(session.id);
   expect(conversation.queuedMessages).toHaveLength(1);
   const response = await h.request('/api/sessions/' + session.id + '/queue', { id: conversation.queuedMessages![0]!.id });

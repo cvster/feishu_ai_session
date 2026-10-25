@@ -175,13 +175,13 @@ export class PersonalSessionService {
       if (old && old.fingerprint !== fingerprint) throw new WebError(409, '同一请求 ID 的内容或会话已变化');
       if (old?.enqueued) {
         const { session } = await this.resolve(id); this.assertBinding(id, session.scope);
-        return { requestId, status: 'queued' };
+        return { requestId, status: 'queued', queuedMessages: this.deps.controls.messageQueue?.list(session.scope) ?? [] };
       }
       const { session } = await this.resolve(id, true);
       if (!session.canSend) throw new WebError(503, '此会话不可发送');
       if (await this.deps.channel.getChatMode(session.scope) !== 'group') throw new WebError(409, '群已转为话题模式');
       const receipt = this.receipts[requestId] ??= { fingerprint, sessionId: id, owner, createdAt: Date.now() };
-      if (receipt.enqueued) return { requestId, status: 'queued' };
+      if (receipt.enqueued) return { requestId, status: 'queued', queuedMessages: this.deps.controls.messageQueue?.list(session.scope) ?? [] };
       await this.save(); this.assertBinding(id, session.scope);
       if (!receipt.messageId) {
         if (Date.now() - receipt.createdAt > 55 * 60_000) throw new WebError(409, '发送结果未确认且已超过去重窗口，请检查群消息');
@@ -195,7 +195,7 @@ export class PersonalSessionService {
       await this.deps.enqueue({ messageId: receipt.messageId, chatId: session.scope, chatType: 'group', senderId: owner,
         createTime: receipt.createdAt, content: text, resources: [], mentions: [], mentionAll: false, mentionedBot: true, rawContentType: 'text' });
       receipt.enqueued = true; await this.save();
-      return { requestId, status: 'queued' };
+      return { requestId, status: 'queued', queuedMessages: this.deps.controls.messageQueue?.list(session.scope) ?? [] };
     });
   }
   async removeQueuedMessage(id: string, messageId: string) {
