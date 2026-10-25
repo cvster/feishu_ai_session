@@ -176,13 +176,46 @@ describe('personal multi-tool workflows', () => {
       content: `读取codex '${h.dir.split('/').at(-1)}/AA-同名' 的内容\n会话记录：${history}`, raw: { bridgeCallbackId: `copy-read-${provenance.copyId}` } }));
     await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group')); expect(h.groups).toHaveLength(3);
   });
-  it('offers same-tool creation with a read button when the original tool has no native fork', async () => {
+  it('automatically reads source history in the new group when same-tool copy has no native fork', async () => {
     const h = await harness(); await h.sync(); const group = h.groups[1]!.id;
+    const history = join(h.dir, 'claude-history.jsonl'); await writeFile(history, 'source history');
+    const historyPath = vi.fn(async () => history);
+    h.registry.get('claude').sessions = { historyPath, rename: async () => {}, archive: async () => {} };
+    const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
+    await runCommandHandler('fork', '', h.context(group, 'group'));
+    const value = copyButton(h, 'Claude', 'fork.same');
+    const ctx = h.context(group, 'group'); ctx.msg.threadId = 'old-topic';
+    await runCommandHandler('fork', `same ${value.arg}`, ctx);
+    expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
+    expect(h.bindings.get(target)).toMatchObject({ toolId: 'claude', nativeCreated: false, copiedFrom: { toolId: 'claude' } });
+    expect(h.groups[2]!.name).toBe('AA-同名（Claude）-2');
+    expect(historyPath).toHaveBeenCalledWith('same-uuid');
+    expect(submit).toHaveBeenCalledOnce();
+    const input = submit.mock.calls[0]![0];
+    expect(input).toMatchObject({ chatId: target, chatType: 'group', senderId: 'ou_owner', threadId: undefined,
+      content: `读取claude '${h.dir.split('/').at(-1)}/AA-同名（Claude）' 的内容\n会话记录：${history}` });
+    expect(h.channel.send).toHaveBeenCalledWith(target, { text: input.content }, { replyTo: input.messageId });
+    await runCommandHandler('fork', `same ${value.arg}`, ctx);
+    expect(submit).toHaveBeenCalledOnce(); expect(h.groups).toHaveLength(3);
+  });
+  it('keeps the created copy and offers a read retry when automatic history read fails', async () => {
+    const h = await harness(); await h.sync(); const group = h.groups[1]!.id;
+    const historyPath = vi.fn(async (): Promise<string | undefined> => undefined);
+    h.registry.get('claude').sessions = { historyPath, rename: async () => {}, archive: async () => {} };
+    const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
     await runCommandHandler('fork', '', h.context(group, 'group'));
     const value = copyButton(h, 'Claude', 'fork.same');
     await runCommandHandler('fork', `same ${value.arg}`, h.context(group, 'group'));
-    expect(h.groups).toHaveLength(3); expect(h.bindings.get(h.groups[2]!.id)).toMatchObject({ toolId: 'claude', nativeCreated: false, copiedFrom: { toolId: 'claude' } });
-    expect(h.groups[2]!.name).toBe('AA-同名（Claude）-2');
+    expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
+    expect(h.channel.send).toHaveBeenCalledWith(target, { text: expect.stringContaining('自动读取原会话失败') });
+    expect(submit).not.toHaveBeenCalled();
+    await runCommandHandler('fork', `same ${value.arg}`, h.context(group, 'group'));
+    expect(h.groups).toHaveLength(3);
+    const history = join(h.dir, 'restored-history.jsonl'); await writeFile(history, 'restored source history');
+    historyPath.mockResolvedValue(history);
+    const ctx = h.context(target, 'group'); ctx.fromCardAction = true;
+    await runCommandHandler('fork', `read ${h.bindings.get(target)!.copiedFrom!.copyId}`, ctx);
+    expect(submit).toHaveBeenCalledOnce(); expect(submit.mock.calls[0]![0].chatId).toBe(target);
   });
   it.each(['', '   ', 'x'.repeat(101), 'name\ninvalid', 42])('rejects invalid new names before native copy or fresh creation: %s', async name => {
     const h = await harness(); await h.sync(); const group = h.groups[0]!.id;
