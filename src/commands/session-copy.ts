@@ -94,9 +94,11 @@ export async function readCopiedSession(ctx: CommandContext, copyId: string): Pr
   if (!historyPath) throw new Error('原会话记录暂不可读，请稍后重试。');
   await access(historyPath);
   if (!ctx.controls.submitMessage) throw new Error('消息入口暂不可用，请稍后重试。');
-  const label = tool.label;
-  await ctx.controls.submitMessage({ ...ctx.msg, content:
-    `读取${label} '${basename(source.cwd)}/${source.name}' 的内容\n会话记录：${historyPath}`,
+  const content = `读取${tool.label} '${basename(source.cwd)}/${source.name}' 的内容\n会话记录：${historyPath}`;
+  await ctx.channel.send(ctx.msg.chatId, { text: content }, {
+    replyTo: ctx.msg.messageId, ...(ctx.chatMode === 'topic' ? { replyInThread: true } : {}),
+  });
+  await ctx.controls.submitMessage({ ...ctx.msg, content,
     chatType: ctx.chatMode === 'p2p' ? 'p2p' : 'group', rawContentType: 'card_action', raw: { bridgeCallbackId: `copy-read-${copyId}` },
     mentionedBot: true, mentionAll: false, resources: [], mentions: [], createTime: Date.now() });
 }

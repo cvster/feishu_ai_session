@@ -142,7 +142,7 @@ describe('personal multi-tool workflows', () => {
     await runCommandHandler('fork', '', h.context(source, 'group'));
     expect(copyElements(h).find(row => row.tag === 'input')?.default_value).toBe('AA-同名-4');
   });
-  it.each(['claude', 'kilo'] as const)('creates a fresh %s cross-tool group with native model defaults and only imports history on click after restart', async targetTool => {
+  it.each(['claude', 'kilo'] as const)('creates a fresh %s cross-tool group with default model and high reasoning and only imports history on click after restart', async targetTool => {
     const h = await harness(); h.controls.profileConfig.preferences.reasoningEffort = 'high';
     if (targetTool === 'kilo') h.registry.register({ id: 'kilo', sourceId: 'kilo-home', label: 'Kilo',
       agent: { ...h.registry.get('claude').agent, id: 'kilo' }, listSessions: async () => [] });
@@ -155,9 +155,9 @@ describe('personal multi-tool workflows', () => {
     expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
     expect(h.groups[2]!.name).toBe('AA-自定义会话');
     expect(h.workspaces.cwdFor(target)).toBe(h.dir);
-    expect(h.bindings.get(target)).toMatchObject({ toolId: targetTool, name: 'AA-自定义会话', nativeCreated: false, model: 'default', reasoningEffort: 'default',
+    expect(h.bindings.get(target)).toMatchObject({ toolId: targetTool, name: 'AA-自定义会话', nativeCreated: false, model: 'default', reasoningEffort: 'high',
       copiedFrom: { toolId: 'codex', sourceId: 'codex-home', nativeId: 'same-uuid', name: 'AA-同名', cwd: h.dir } });
-    expect(controlsForTool(h.controls, targetTool, target).profileConfig.preferences.reasoningEffort).toBe('default');
+    expect(controlsForTool(h.controls, targetTool, target).profileConfig.preferences.reasoningEffort).toBe('high');
     expect(h.bindings.get(source)).toEqual(before); expect(h.runs).toEqual([]);
     const provenance = h.bindings.get(target)!.copiedFrom!;
     expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('当前会话从“Codex”复制');
@@ -166,10 +166,12 @@ describe('personal multi-tool workflows', () => {
     const history = join(h.dir, 'latest-history.json'); await writeFile(history, 'latest source content');
     const historyPath = vi.fn(async () => history);
     h.registry.get('codex').sessions = { historyPath, rename: async () => {}, archive: async () => {} };
-    const submit = vi.fn(async () => {}); h.controls.submitMessage = submit;
+    const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
     const ctx = h.context(target, 'group'); ctx.fromCardAction = true;
     await runCommandHandler('fork', `read ${provenance.copyId}`, ctx);
     expect(historyPath).toHaveBeenCalledWith('same-uuid');
+    expect(h.channel.send).toHaveBeenLastCalledWith(target, { text: submit.mock.calls[0]![0].content }, { replyTo: 'msg' });
+    expect(vi.mocked(h.channel.send).mock.invocationCallOrder.at(-1)).toBeLessThan(submit.mock.invocationCallOrder[0]!);
     expect(submit).toHaveBeenCalledWith(expect.objectContaining({ chatId: target, messageId: 'msg', chatType: 'group', senderId: 'ou_owner', mentionedBot: true,
       content: `读取codex '${h.dir.split('/').at(-1)}/AA-同名' 的内容\n会话记录：${history}`, raw: { bridgeCallbackId: `copy-read-${provenance.copyId}` } }));
     await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group')); expect(h.groups).toHaveLength(3);
@@ -231,7 +233,7 @@ describe('personal multi-tool workflows', () => {
     await runCommandHandler('fork', '', h.context(group, 'group')); const value = copyButton(h, 'Claude');
     await runCommandHandler('fork', `to ${value.arg}`, h.context(group, 'group'));
     const target = h.groups[2]!.id; const source = h.bindings.get(target)!.copiedFrom!;
-    const submit = vi.fn(async () => {}); h.controls.submitMessage = submit;
+    const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
     const ctx = h.context(target, 'group'); ctx.fromCardAction = true;
     h.registry.get('codex').sourceId = 'another-account';
     await runCommandHandler('fork', `read ${source.copyId}`, ctx); expect(submit).not.toHaveBeenCalled();
