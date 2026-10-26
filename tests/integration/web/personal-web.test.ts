@@ -32,6 +32,7 @@ import { startWorkerNameSync } from '../../../src/bot/tool-name-sync';
 import { recordRunSessionEvent } from '../../../src/bot/run-flow';
 import { capabilityForTool } from '../../../src/agent/capability';
 import type { RunPolicyAllow } from '../../../src/policy/run-policy';
+import { WorkerApiError } from '../../../src/worker/tool-api';
 import type { WebConfig } from '../../../src/web/config';
 
 async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}, authoritative = false) {
@@ -93,7 +94,8 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   const socket = createServer(); await new Promise<void>(r => socket.listen(0, '127.0.0.1', r)); const port = (socket.address() as { port: number }).port; await new Promise<void>(r => socket.close(() => r()));
   const configPath = join(h.dir, 'web.json'), { secret } = await configureWeb(configPath, '127.0.0.1', port);
   if (host !== '127.0.0.1' || Object.keys(access).length) await writeFile(configPath, JSON.stringify({ ...JSON.parse(await readFile(configPath, 'utf8')), host, ...access }));
-  const consoleService = new BridgeConsoleService({ controls, catalog, channel, personal: service, syncNames: async () => { await names.tick(); }, cleanDissolvedGroup: chatId => cleanDissolvedChat({ channel, controls, catalog, sessions, workspaces, cancelPending: scope => inbox.rejectChat(scope).then(() => {}) }, chatId) });
+  const makeConsole = () => new BridgeConsoleService({ controls, catalog, channel, personal: service, statePath: join(h.dir, 'management-state.json'), syncNames: async () => { await names.tick(); }, cleanDissolvedGroup: chatId => cleanDissolvedChat({ channel, controls, catalog, sessions, workspaces, cancelPending: scope => inbox.rejectChat(scope).then(() => {}) }, chatId) });
+  const consoleService = makeConsole();
   const web = (await startBridgeWeb({ configPath, service, consoleService, pollMs: 30 }))!; cleanups.push(() => web.close());
   let cookie = '';
   const request = (path: string, value?: unknown, headers = {}) => fetch(web.url + path, { method: value === undefined ? 'GET' : 'POST', headers: {
@@ -101,7 +103,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
   const login = async () => { const response = await request('/api/login', { secret }); expect(response.status).toBe(200); cookie = response.headers.get('set-cookie')?.split(';')[0] ?? ''; };
   const replies = await startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath: join(h.dir, 'replies.json'), intervalMs: 60_000 }); cleanups.push(() => replies.stop());
   controls.workerRuntimes!.get(tool)!.replies = replies;
-  return { ...h, bindings, catalog, controls, sessions, pending, inbox, service, consoleService, makeService, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
+  return { ...h, bindings, catalog, controls, sessions, pending, inbox, service, consoleService, makeService, makeConsole, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
 }
 
 async function sharedInput(h: Awaited<ReturnType<typeof harness>>, options: { name?: string; content?: string } = {}) {
@@ -1154,9 +1156,9 @@ it.each([true, false])('reads omitted native sessions by exact identity and hide
 it('preserves uncertain native sessions when exact reads fail or return a different identity', async () => {
   const h = await harness('codex'); await h.replies.stop(); h.provider.list.mockResolvedValue([]);
   h.provider.conversation.mockRejectedValue(Error('unavailable'));
-  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: 'unknown', canDissolve: false, issues: ['原生会话读取失败：unavailable'] });
+  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: undefined, canDissolve: false, issues: ['原生会话读取失败：unavailable'] });
   h.provider.conversation.mockResolvedValue({ ...h.conversation, id: 'other', archived: true });
-  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: 'unknown', canDissolve: false });
+  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: undefined, canDissolve: false });
 });
 
 it('caches omitted-session observations during polling but refreshes them before management actions', async () => {
@@ -1168,4 +1170,54 @@ it('caches omitted-session observations during polling but refreshes them before
   h.conversation.archived = true;
   expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: 'archived', canDissolve: true });
   expect(h.provider.conversation).toHaveBeenCalledWith('native');
+});
+
+it('retains confirmed session and group states across failures and bridge restarts without enabling destructive actions', async () => {
+  const h = await harness('codex'); await h.replies.stop();
+  const first = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(first).toMatchObject({ sessionState: 'active', sessionInspection: { result: 'ok' }, groupState: 'active' });
+  const confirmedAt = first.sessionInspection.checkedAt;
+  const health = vi.spyOn(h.client, 'health').mockRejectedValue(Error('offline'));
+  let row = (await h.makeConsole().snapshot(true)).bindings[0]!;
+  expect(row).toMatchObject({ sessionState: 'active', sessionInspection: { result: 'offline', checkedAt: confirmedAt }, canArchive: false, canDissolve: false });
+  vi.spyOn(h.channel.rawClient.im.v1.chat, 'get').mockRejectedValue(Error('network'));
+  row = (await h.makeConsole().snapshot(true)).bindings[0]!;
+  expect(row).toMatchObject({ groupState: 'active', groupInspection: { result: 'failed' }, sessionState: 'active', canArchive: false, canDissolve: false });
+  health.mockRestore();
+  const binding = h.bindings.get('oc_group')!;
+  h.bindings.set('oc_group', { ...binding, nativeId: 'replacement' });
+  row = (await h.makeConsole().snapshot(true)).bindings[0]!;
+  expect(row.sessionState).toBeUndefined(); expect(row.sessionInspection.result).toBe('failed');
+});
+
+it.each(['missing', 'unsupported', 'legacy-mode'] as const)('records explicit %s responses as entity states independently of inspection failure', async kind => {
+  const h = await harness('codex'); await h.replies.stop();
+  await h.consoleService.snapshot(true); h.provider.list.mockResolvedValue([]);
+  const error = kind === 'missing' ? new WorkerApiError(404, 'deleted', 'not-found') : kind === 'unsupported' ?
+    new WorkerApiError(501, 'session mode not supported', 'unsupported-operation') : Error('当前配置仅支持 A 会话，不处理 B 会话');
+  h.provider.conversation.mockRejectedValue(error);
+  const row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(row).toMatchObject({ sessionState: kind === 'missing' ? 'missing' : 'unsupported', sessionInspection: { result: 'ok' }, canArchive: false, canDissolve: false });
+  expect(row.issues).toContain(kind === 'missing' ? '会话不存在' : '工具不支持');
+  vi.spyOn(h.client, 'health').mockRejectedValue(Error('offline'));
+  expect((await h.makeConsole().snapshot(true)).bindings[0]).toMatchObject({ sessionState: row.sessionState, sessionInspection: { result: 'offline' } });
+});
+
+it('does not reinterpret a transient 404 as a missing session without an explicit not-found response', async () => {
+  const h = await harness('codex'); await h.replies.stop(); h.provider.list.mockResolvedValue([]);
+  h.provider.conversation.mockRejectedValue(new WorkerApiError(404, 'service unavailable', 'unavailable'));
+  const row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(row.sessionState).toBeUndefined(); expect(row.sessionInspection.result).toBe('failed');
+  expect(row.canDissolve).toBe(false); expect(row.canArchive).toBe(false);
+});
+
+it('retains an archived label but rejects dissolution when the fresh native check fails', async () => {
+  const h = await harness('codex'); await h.replies.stop(); h.native.archived = true;
+  const first = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(first.canDissolve).toBe(true);
+  h.provider.list.mockRejectedValue(Error('cannot read roster'));
+  const row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(row).toMatchObject({ sessionState: 'archived', sessionInspection: { result: 'failed', checkedAt: first.sessionInspection.checkedAt }, canDissolve: false });
+  expect((await h.request('/api/console/action', { action: 'personal-dissolve', id: first.id })).status).toBe(409);
+  expect(vi.mocked(h.channel.rawClient.im.v1.chat.delete)).not.toHaveBeenCalled();
 });

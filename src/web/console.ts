@@ -11,6 +11,7 @@ import { isJobActive, type WorkerJob } from '../worker/protocol';
 import type { HealthDetails } from '../worker/client';
 import { log, redactDiagnosticText } from '../core/logger';
 import { PersonalSessionService, WebError } from './service';
+import { ManagementStateStore, type SessionState, type GroupState, type StateInspection } from './management-state';
 import { describeChatDeletionError, dissolveChat } from '../bot/group';
 
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -24,13 +25,14 @@ export interface ConsoleItem {
 
 /** Read-only observations and existing maintenance paths; no provider protocols or new job writer. */
 export class BridgeConsoleService {
-  private sessionChecks = new Map<string, { at: number; session?: ToolSession; issue?: string }>();
+  private readonly states: ManagementStateStore;
+  private sessionChecks = new Map<string, { at: number; session?: ToolSession; issue?: string; state?: 'missing' | 'unsupported' }>();
   private observations = new Map<string, Observation>();
   private cached?: { at: number; value: Awaited<ReturnType<BridgeConsoleService['collect']>> };
   private running?: Promise<Awaited<ReturnType<BridgeConsoleService['collect']>>>;
   private actions = new Map<string, Promise<unknown>>();
-  constructor(private deps: { controls: Controls; catalog?: SessionCatalog; channel: LarkChannel; personal: PersonalSessionService;
-    syncNames?(toolId?: string): Promise<void>; cleanDissolvedGroup?(chatId: string): Promise<void> }) {}
+  constructor(private deps: { controls: Controls; catalog?: SessionCatalog; channel: LarkChannel; personal: PersonalSessionService; statePath?: string;
+    syncNames?(toolId?: string): Promise<void>; cleanDissolvedGroup?(chatId: string): Promise<void> }) { this.states = new ManagementStateStore(deps.statePath); }
   private owner() { return this.deps.personal.ownerIdentity(); }
   private groupId(row: { chatId: string; generation: string; ownerId: string }) {
     return hash([this.deps.controls.profile, this.deps.controls.profileConfig.accounts.app.id, row.chatId, row.generation, row.ownerId]);
@@ -46,6 +48,7 @@ export class BridgeConsoleService {
     return this.running;
   }
   private async collect(force = false) {
+    await this.states.load();
     const owner = this.owner(), c = this.deps.controls, entries = c.toolBindings?.entries() ?? [], sharedRows = c.auxiliary?.groups?.() ?? [];
     const dissolved = (this.deps.catalog?.dissolvedPersonalGroups() ?? []).filter(r => !c.auxiliary?.isAuxiliary(r.chatId) &&
       (!r.botAppId || r.botAppId === c.profileConfig.accounts.app.id));
@@ -101,7 +104,8 @@ export class BridgeConsoleService {
       nativeId: r.nativeId, nativeCreated: true, name: r.name, cwd: r.cwd, revision: hash(r) });
     // Roster omission is not archival. Query exact missing identities through
     // the common read-only conversation endpoint (also works with older workers).
-    const checkKey = (b: typeof refs[number]) => hash([c.profileConfig.accounts.app.id, b.toolId, b.sourceId, b.nativeId]);
+    const checkKey = (b: typeof refs[number]) => hash(['session', c.profileConfig.accounts.app.id, b.toolId, b.sourceId, b.nativeId ?? b.scope]);
+    const groupKey = (scope: string) => hash(['group', c.profileConfig.accounts.app.id, scope]);
     const checksInUse = new Set(refs.map(checkKey));
     for (const key of this.sessionChecks.keys()) if (!checksInUse.has(key)) this.sessionChecks.delete(key);
     let refIndex = 0;
@@ -125,37 +129,55 @@ export class BridgeConsoleService {
             archived: snapshot.archived, createdAtMs: 0, updatedAtMs: 0 };
           o.native.push(session); this.sessionChecks.set(key, { at: Date.now(), session });
         } catch (error) {
-          // Keep unknown; a missing/unreadable record cannot prove archival.
-          this.sessionChecks.set(key, { at: Date.now(), issue: error instanceof WorkerRequestError && error.status === 404 ?
-            '会话不存在或不属于当前工具模式' : error instanceof WorkerRequestError ?
-              '原生会话读取失败：' + clean(error.message).slice(0, 200) : '原生会话读取超时或连接失败，请刷新或检查 Worker' });
+          // Only explicit not-found/unsupported responses establish those states; other failures preserve evidence.
+          const state = error instanceof WorkerRequestError ? error.code === 'unsupported-operation' ||
+            // Compatibility with older workers that returned this generic mode rejection as HTTP 500.
+            /^当前配置仅支持[^\n]+会话，不处理[^\n]+会话$/.test(error.message) ? 'unsupported' :
+            error.code === 'not-found' ? 'missing' : undefined : undefined;
+          this.sessionChecks.set(key, { at: Date.now(), state, issue: state === 'unsupported' ? '工具不支持' : state === 'missing' ? '会话不存在' :
+            error instanceof WorkerRequestError ? '原生会话读取失败：' + clean(error.message).slice(0, 200) :
+            '原生会话读取超时或连接失败，请刷新或检查 Worker' });
         }
       }
     }));
     const bindings = refs.flatMap(b => {
       const o = this.observations.get(b.toolId), group = chats.get(b.scope);
       const native = o?.sourceId === b.sourceId && o.nativeKnown ? o.native.find(r => r.nativeId === b.nativeId) : undefined;
-      // Route archival includes dissolution. It cannot establish native archival.
-      const archived = native ? native.archived === true : b.nativeId && c.toolBindings?.isArchived(b.toolId, b.sourceId, b.nativeId) ? true : undefined;
-      const groupState = ['dissolved', 'dissolved_save'].includes(group?.status ?? '') ? 'dissolved' :
-        group && !group.error && group.mode === 'group' && (!group.status || group.status === 'normal') ? 'active' : 'unknown';
-      // A group whose first message has not created the native session yet is not an anomaly.
-      const sessionState = !b.nativeId || b.nativeCreated === false ? 'pending' : archived === true ? 'archived' : native ? 'active' : 'unknown';
-      // Both sides are closed; nothing is left to manage.
+      const now = Date.now(), probe = this.sessionChecks.get(checkKey(b));
+      const groupNow: GroupState | undefined = ['dissolved', 'dissolved_save'].includes(group?.status ?? '') ? 'dissolved' :
+        group && !group.error && group.mode === 'group' && (!group.status || group.status === 'normal') ? 'active' : undefined;
+      const groupEvidence = groupNow ? this.states.confirm(groupKey(b.scope), groupNow, now) : this.states.get(groupKey(b.scope));
+      const groupState = groupEvidence?.state as GroupState | undefined;
+      const groupInspection: StateInspection = { result: groupNow ? 'ok' : 'failed', attemptedAt: now, checkedAt: groupEvidence?.checkedAt,
+        ...(!groupNow ? { reason: group?.error ? '群信息读取失败：' + group.error : '当前群类型或状态不支持个人 AI 会话群' } : {}) };
+      const pending = !b.nativeId || b.nativeCreated === false;
+      const sameWorker = o?.sourceId === b.sourceId;
+      const sessionNow: SessionState | undefined = pending ? 'pending' : native ? native.archived ? 'archived' : 'active' :
+        o?.online && o.nativeKnown && sameWorker ? probe?.state : undefined;
+      let sessionEvidence = sessionNow ? this.states.confirm(checkKey(b), sessionNow, native && probe?.session === native ? probe.at : now) : this.states.get(checkKey(b));
+      // A confirmed archival receipt is durable evidence, but not a fresh check for destructive actions.
+      if (!sessionEvidence && b.nativeId && c.toolBindings?.isArchived(b.toolId, b.sourceId, b.nativeId))
+        sessionEvidence = this.states.confirm(checkKey(b), 'archived', now);
+      const sessionState = sessionEvidence?.state as SessionState | undefined;
+      const result = pending || sessionNow ? 'ok' : !o?.online ? 'offline' : !sameWorker || !o.nativeKnown || probe?.issue ? 'failed' : 'unchecked';
+      const reason = result === 'ok' ? sessionNow === 'unsupported' ? '工具不支持' : sessionNow === 'missing' ? '会话不存在' : undefined :
+        !o?.online ? 'Worker 离线' : !sameWorker ? 'Worker 身份不匹配' : !o.nativeKnown ? '原生会话列表读取失败' :
+        probe?.issue ?? (!o.health?.capabilities?.conversation ? 'Worker 不支持会话状态读取' : '尚未检查');
+      const sessionInspection: StateInspection = { result, attemptedAt: now, checkedAt: sessionEvidence?.checkedAt, ...(reason ? { reason } : {}) };
+      // Hide only pairs with confirmed closed states; a failed read never creates either state.
       if (sessionState === 'archived' && groupState === 'dissolved') return [];
-      const issues = [groupState === 'unknown' ? '群状态未确认' : '', o?.sourceId && o.sourceId !== b.sourceId ? 'Worker 身份不匹配' : '',
-        !o?.online ? 'Worker 离线' : '', sessionState === 'unknown' ? this.sessionChecks.get(checkKey(b))?.issue ?? (o?.online && !o.nativeKnown ? '原生会话列表读取失败' : '原生会话状态未确认') : '',
-        groupState === 'active' && sessionState === 'active' && native?.name && group?.name && native.name !== group.name ? '群名与会话名不一致' : '',
-        o?.online && o.nativeKnown && o.health?.capabilities?.sessionListAuthoritative && b.nativeCreated !== false && b.nativeId && !native ? '原生会话不存在或已移出列表' : ''].filter(Boolean);
+      const issues = [groupInspection.result !== 'ok' ? groupInspection.reason : '', sessionInspection.reason,
+        groupNow === 'active' && sessionNow === 'active' && native?.name && group?.name && native.name !== group.name ? '群名与会话名不一致' : ''].filter((v): v is string => !!v);
+      const verified = groupInspection.result === 'ok' && sessionInspection.result === 'ok';
       return [{ id: hash([c.profile, c.profileConfig.accounts.app.id, b.revision]), scope: b.scope, chatId: b.scope, toolId: b.toolId, sourceId: b.sourceId, tool: o?.label ?? b.toolId,
         kind: '个人 AI 群', nativeId: b.nativeId, groupName: group?.name ?? b.name ?? native?.name ?? b.scope,
-        sessionName: native?.name ?? b.name ?? b.nativeId ?? '尚未创建', cwd: personalRows.find(s => s.scope === b.scope)?.cwd ?? b.cwd ?? native?.cwd ?? '', issues, groupState, sessionState,
+        sessionName: native?.name ?? b.name ?? b.nativeId ?? '尚未创建', cwd: personalRows.find(s => s.scope === b.scope)?.cwd ?? b.cwd ?? native?.cwd ?? '', issues, groupState, sessionState, groupInspection, sessionInspection,
         sessionId: groupState === 'active' && sessionState === 'active' ? personalRows.find(s => s.scope === b.scope)?.id : undefined,
-        canDissolve: !!this.deps.cleanDissolvedGroup && groupState === 'active' && sessionState === 'archived' &&
+        canDissolve: verified && !!this.deps.cleanDissolvedGroup && groupState === 'active' && sessionState === 'archived' &&
           o?.online === true && o.nativeKnown && o.sourceId === b.sourceId,
-        canArchive: !!this.deps.cleanDissolvedGroup && groupState === 'dissolved' && sessionState === 'active' && o?.online === true && o.sourceId === b.sourceId &&
+        canArchive: verified && !!this.deps.cleanDissolvedGroup && groupState === 'dissolved' && sessionState === 'active' && o?.online === true && o.sourceId === b.sourceId &&
           o.health?.capabilities?.sessions.archive === true && c.toolRegistry?.find(b.toolId)?.sessions?.nativeArchive === true,
-        canSync: !!this.deps.syncNames && groupState === 'active' && sessionState === 'active' && o?.online === true && o.nativeKnown && !!native &&
+        canSync: verified && !!this.deps.syncNames && groupState === 'active' && sessionState === 'active' && o?.online === true && o.nativeKnown && !!native &&
           o.sourceId === b.sourceId && o.health?.capabilities?.nativeSessionNames === true }];
     });
     const items = this.items();
@@ -196,6 +218,7 @@ export class BridgeConsoleService {
         pending: items.filter(i => i.toolId === id && ['queued', 'pending'].includes(i.status)).length };
     });
     if (this.owner() !== owner) throw new WebError(409, '所有者已变化，请刷新');
+    await this.states.save(new Set([...refs.map(checkKey), ...refs.map(b => groupKey(b.scope))]));
     return { at: Date.now(), bridge: { profile: c.profile, uptimeSeconds: Math.floor(process.uptime()),
       connection: this.deps.channel.getConnectionStatus?.()?.state ?? 'unknown' },
       summary: { workers: workers.length, online: workers.filter(w => w.online).length, bindings: bindings.length,

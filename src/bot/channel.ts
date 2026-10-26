@@ -834,7 +834,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       },
     });
     try {
-      const consoleService = new BridgeConsoleService({ controls, catalog: sessionCatalog, channel, personal: service,
+      const consoleService = new BridgeConsoleService({ controls, catalog: sessionCatalog, channel, personal: service, statePath: join(deps.appPaths.profileDir, 'web-management-state.json'),
         cleanDissolvedGroup: groupCleanupDeps ? async chatId => {
           if (disconnecting) throw new WebError(503, '桥接正在重连，请稍后重试');
           await cleanDissolvedChat(groupCleanupDeps, chatId);

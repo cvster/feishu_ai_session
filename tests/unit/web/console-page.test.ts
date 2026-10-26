@@ -131,3 +131,17 @@ it('groups multiple shared and private chats under the real session identity, se
   h.get('shared-search').value = ''; h.get('shared-search').handlers.input!();
   expect(h.get('shared-list').children[0]!.open).toBe(false);
 });
+
+it('shows tool support and inspection results separately from the last confirmed state', async () => {
+  const h = harness(false); await h.ready();
+  h.snapshot.bindings.push({ id: 'unsupported', groupName: '旧会话群', sessionName: '历史会话', tool: 'Tool', cwd: '/project',
+    sessionState: 'unsupported', groupState: 'active', issues: ['工具不支持'], sessionInspection: { result: 'ok', checkedAt: 100 }, groupInspection: { result: 'ok', checkedAt: 100 } } as any,
+    { id: 'offline', groupName: '离线群', sessionName: '原会话', tool: 'Tool', cwd: '/project', sessionState: 'active', groupState: 'active',
+      issues: ['Worker 离线'], sessionInspection: { result: 'offline', checkedAt: 100 }, groupInspection: { result: 'ok', checkedAt: 100 } } as any);
+  await h.nav[1]!.onclick!();
+  const text = h.get('binding-list').text;
+  expect(text).toContain('会话：工具不支持'); expect(text).toContain('会话：正常'); expect(text).toContain('会话检查：Worker 离线');
+  expect(text).toContain('会话确认于'); expect(text).not.toContain('未确认');
+  h.get('binding-status').value = 'unsupported'; h.get('binding-status').handlers.change!();
+  expect(h.get('binding-list').text).toContain('旧会话群'); expect(h.get('binding-list').text).not.toContain('离线群');
+});
