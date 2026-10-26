@@ -134,6 +134,23 @@ worker publishes a new token and is verified again. Reply, native-turn and name
 pollers back off exponentially (up to 1 minute, name sync up to 2 minutes) while a
 worker is unreachable, warn once per distinct error and log `*-recovered` on success.
 
+One worker per tool and profile holds `workers/<tool>/worker.lock`. A predecessor
+killed without releasing it keeps the lock until it goes stale (30 seconds), so
+startup retries the lock for about 36 seconds before failing; systemd restarts
+therefore wait the stale window out instead of erroring on every attempt. On
+`SIGTERM` the worker close path stops runs, refuses keep-alive on in-flight
+responses, and lets the HTTP server drain for at most 5 seconds before dropping the
+remaining connections. It then exits within a 20-second deadline, below the unit's
+`TimeoutStopSec=30`, so the lock is released on exit instead of surviving into the
+next start.
+
+Claude runs one CLI process per resumed session with no coordinator, so its adapter
+preflights only the target session: it lists this user's Claude processes in the
+working directory, resolves each one's current session from `claude agents --json`,
+then argv hints (`--resume`, `-r`, `--session-id`) and the per-pid registry file, and
+rejects the run only when that session ID is held elsewhere. Distinct sessions may
+share a directory; unattributable holders stay conservative.
+
 The shared worker runner also checks stale observers every 15 seconds after two
 minutes without events. Adapters may provide an optional read-only `checkLiveness`
 hook together with `detach`. Three consecutive checks must confirm the same

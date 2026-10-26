@@ -13,6 +13,8 @@ import { getMaxConcurrentRuns } from '../../config/schema';
 import { loadRuntimeEnv } from '../../config/runtime-env';
 
 interface WorkerOptions { profile?: string; config?: string; tool?: string }
+/** Below the unit's TimeoutStopSec=30. */
+const STOP_DEADLINE_MS = 20_000;
 const quote = (value: string) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
 export function buildWorkerUnit(inputs: { node: string; entry: string; profile: string; config: string; envPath: string; claudeConfigDir?: string; binary?: string; toolId?: ToolId; zcodeBinary?: string; zcodeDataDir?: string; kiloBinary?: string; kiloDataHome?: string; dshBinary?: string; dshHome?: string }): string {
   return `[Unit]
@@ -61,6 +63,8 @@ export async function runWorker(options: WorkerOptions): Promise<void> {
   let stopping = false;
   const stop = () => {
     if (stopping) return; stopping = true;
+    // Exit before systemd's TimeoutStopSec SIGKILL so the worker lock is released on exit.
+    setTimeout(() => { console.error(`worker shutdown exceeded ${STOP_DEADLINE_MS} ms; exiting`); process.exit(1); }, STOP_DEADLINE_MS).unref();
     void worker.close().then(() => process.exit(0), error => { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); });
   };
   process.once('SIGTERM', stop); process.once('SIGINT', stop);

@@ -13,7 +13,7 @@ import {
   type AgentRunOptions,
 } from '../types';
 import { translateEvent } from './stream-json';
-import { claudeWorkspaceOccupation } from './occupation';
+import { claudeSessionOccupation } from './occupation';
 import { RunRejected, SpawnFailed } from '../../runtime/errors';
 import { resolveReasoningEffort } from '../models';
 
@@ -56,9 +56,11 @@ export class ClaudeAdapter implements AgentAdapter {
     if (!availability.ok) throw new SpawnFailed('claude binary check failed', availability.error,
       availability.diagnostic.code, availability.diagnostic);
     if (!opts.sessionId || !opts.cwd) return;
-    const occupation = await claudeWorkspaceOccupation(opts.cwd, this.binary);
+    // Only this session is exclusive. Other Claude sessions in the same directory
+    // are supported by the CLI and no longer block the bridge.
+    const occupation = await claudeSessionOccupation(opts.cwd, opts.sessionId, this.binary);
     if (occupation === 'busy') throw new RunRejected('native-session-busy',
-      '该目录仍有 Claude Code 进程运行，请先在原终端结束会话，再从群内继续。');
+      '该会话正在另一个 Claude Code 进程中运行，请先在原终端结束该会话，再从群内继续。');
     if (occupation === 'unknown') throw new RunRejected('archive-check-unavailable',
       '无法确认原 Claude 会话是否被占用，本次请求未执行。');
   }

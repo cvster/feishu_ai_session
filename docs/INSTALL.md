@@ -316,6 +316,8 @@ pnpm deploy:local --profile <profile> --rollback <sha>   # 切回已有版本并
 
 脚本要求工作区干净，在仓库构建 `HEAD` 后以 `git archive` 加构建产物生成 `releases/<sha>`；锁文件未变时复用当前版本的生产依赖，否则执行 `pnpm install --prod --frozen-lockfile`。随后原子切换 `current` 链接，并把该 profile 的桥接和 worker 服务入口统一改为 `current/bin/lark-channel-bridge.mjs`（原单元文件备份到 `deployment-backups/`）。Node 按真实路径加载模块，运行中的进程继续使用启动时的版本目录；未列入 `--workers` 的 worker 不重启，仅在之后自行重启时加载 `current`。指定的 worker 先重启并确认 `/health`，再重启桥接，最后检查网页和所有 worker 的 `/health`，结果写入版本目录的 `deployment.json`。脚本不会启停 Codex Desktop、共享 app-server 或其他进程。默认部署根目录 `~/lark-coding-agent-bridge`，可用 `--root` 或 `LARK_BRIDGE_DEPLOY_ROOT` 指定。
 
+在通过 worker 会话内（例如飞书群里）执行部署时，脚本自身运行在即将被重启的服务单元里，重启会连带杀掉脚本。此时脚本先把重启计划和校验清单写入 `deployment-backups/<stamp>-<sha>/plan.json`，再用 `systemd-run --user` 启动一个独立的一次性单元接管全部重启与校验，然后自行退出；父会话可断开，用 `journalctl --user -u lark-bridge-deploy-*` 查看进度。因此该场景下当前 worker 会话结束属正常现象，`deployment.json` 由接管单元写入。脚本打印的 `rollback:` 行按 `previous-current` 生成，可直接用于回退。
+
 
 ## 10. 常见阻塞
 
@@ -328,7 +330,7 @@ pnpm deploy:local --profile <profile> --rollback <sha>   # 切回已有版本并
 | 前台正常后台失败 | 核对 runtime.env、服务 Node 路径、CLI 路径及运行 OS 用户 |
 | Claude worker 身份不匹配 | 同一 profile/app 和 CLAUDE_CONFIG_DIR，不能跨用户读取别人的 worker |
 | Codex 提示另一个 writer 占用 | 按第 6 节专门排查，连接原共享 writer；不杀进程、不删账本 |
-| Claude 提示该目录仍有进程运行 | 检查同项目目录的 Claude 终端；即使已回答完，进程没退出也占用。正常退出后再重发未执行消息，见下文 |
+| Claude 提示该会话正在另一个进程运行 | 该 session ID 已由原终端占用；在原终端结束该会话后再重发。同目录的其他会话不再拦截，见下文 |
 | Codex 只有历史没有执行 | 核对真实 writer、公开端点及目录；不是重装 npm 依赖能解决 |
 | 飞书能执行但 Codex 桌面不刷新，停止/交互无法作用于桌面任务 | 排查旧 CLI 或不同 app-server；见第 6 节“旧版 CLI 与桌面 App 未共用 app-server” |
 | 飞书已连接却没事件/按钮无效 | 核对权限、消息事件、卡片回调、发布和可用范围 |
@@ -338,8 +340,10 @@ pnpm deploy:local --profile <profile> --rollback <sha>   # 切回已有版本并
 
 所有工具需独立 worker，例如 `worker start --profile my-bot --tool codex` 或 `--tool kilo`。桥接自动扫描 `workers/*/endpoint.json`，无需工具专用桥接配置。旧部署升级请先阅读 [完整迁移步骤](WORKER_MIGRATION.md)。
 
-### Claude 目录占用与 Codex writer 占用的区别
+### Claude 会话占用与 Codex writer 占用的区别
 
-`该目录仍有 Claude Code 进程运行，请先在原终端结束会话，再从群内继续。` 是本项目的保护检查，表示这次请求被拒绝，尚未执行。恢复已有 Claude 会话前，Linux worker 只读检查同 OS 用户的 Claude 进程及其工作目录；**按目录判断，不按会话 ID 判断**。交互终端可以在启动后切换会话，因此即使另一个会话或已空闲的 Claude 终端，只要进程仍在同一目录也会拦截。专用不保存会话的模型列表查询不占用该目录。
+`该会话正在另一个 Claude Code 进程中运行，请先在原终端结束该会话，再从群内继续。` 是本项目的保护检查，表示这次请求被拒绝，尚未执行。恢复已有 Claude 会话前，Linux worker 只读列出同 OS 用户、同工作目录的 Claude 进程，再逐个确定它们当前持有的 session ID，**只拒绝与目标 session ID 相同的进程**。同一目录下的其他会话互不影响：Claude Code 本身支持一个目录并发多个会话，真正会互相破坏的是两个进程读写同一份会话记录和 `~/.claude/tasks/<sessionId>/`。
 
-在对应原终端正常退出 Claude，或等待同目录另一个 Claude 任务结束并退出后，再从群里发送未执行的消息。不要仅因为收到提示就强杀所有 Claude 进程；确需同时在同一目录使用多个会话时，现有保护策略仍会拒绝。该检查不能防止外部终端在检查后启动，非 Linux 或无法读取进程信息时则报“无法确认原 Claude 会话是否被占用”。它与 Codex app-server 的 writer 所有权冲突是两套机制。
+现有进程的 session ID 依次取 `claude agents --json` 的实时列表（能反映进程内 `/resume` 切换）、启动参数中的 `--resume`/`-r`/`--session-id`、以及 CLI 启动时写下的 `~/.claude/sessions/<pid>.json`（校验 pid 与 `procStart`，避免 pid 复用误判）。目录下没有其他 Claude 进程时直接返回空闲，不产生子进程调用；worker 自己拉起的子进程和专用不保存会话的模型列表查询都不计入。若某个进程的 session ID 无法确定（例如旧版 CLI 且进程内切换过会话），仍按保守策略拒绝并提示“无法确认原 Claude 会话是否被占用”。
+
+在对应原终端正常退出该会话，或对同一会话改用新的会话（`--fork-session` 复制历史到新 ID）后，再从群里发送未执行的消息。不要仅因为收到提示就强杀所有 Claude 进程。该检查不能防止外部终端在检查后启动同一会话，非 Linux 或无法读取进程信息时同样报“无法确认”。它与 Codex app-server 的 writer 所有权冲突是两套机制。

@@ -11,6 +11,10 @@ import { handleWorkerToolRequest, workerCapabilities, readWorkerBody, WorkerApiE
 import { writeFileAtomic } from '../platform/atomic-write';
 import { resolveRunReasoning } from './reasoning';
 
+const CLOSE_GRACE_MS = 5000;
+/** ~36 s: longer than the 30 s stale window of a SIGKILLed holder. */
+const LOCK_RETRIES = 12;
+
 export interface WorkerServerOptions {
   stateDir: string;
   agent: AgentAdapter;
@@ -33,7 +37,10 @@ export async function startWorkerServer(options: WorkerServerOptions) {
   await mkdir(options.stateDir, { recursive: true, mode: 0o700 });
   const lockPath = join(options.stateDir, 'worker.lock');
   await writeFile(lockPath, '', { flag: 'a', mode: 0o600 });
-  const release = await lockfile.lock(lockPath, { realpath: false, stale: 30_000, update: 5_000 });
+  // A killed predecessor leaves the lock until it goes stale; wait it out
+  // instead of failing every systemd restart attempt in the meantime.
+  const release = await lockfile.lock(lockPath, { realpath: false, stale: 30_000, update: 5_000,
+    retries: { retries: LOCK_RETRIES, factor: 1, minTimeout: 3000, maxTimeout: 3000 } });
   const store = new JobStore(join(options.stateDir, 'jobs'));
   try { await store.load(); } catch (error) { await release(); throw error; }
   for (const job of store.list()) if (isJobActive(job)) {
@@ -231,6 +238,8 @@ export async function startWorkerServer(options: WorkerServerOptions) {
   });
   const token = randomBytes(32).toString('hex');
   const server = createServer((req, res) => {
+    // Keep-alive pollers would otherwise hold server.close() open indefinitely.
+    if (closing) res.shouldKeepAlive = false;
     void handle(req, res).catch(error => reply(res, error instanceof WorkerApiError ? error.status : 500,
       { error: error instanceof Error ? error.message : String(error), code: error instanceof WorkerApiError ? error.code : 'internal-error', retryable: error instanceof WorkerApiError && error.retryable }));
   });
@@ -275,7 +284,10 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       const closed = new Promise<void>(resolve => server.close(() => resolve())); server.closeIdleConnections();
       for (const id of tasks.keys()) stopped.add(id);
       await Promise.allSettled([...runs.values()].map(run => run.stop()));
-      await Promise.allSettled([...tasks.values()]); await closed;
+      await Promise.allSettled([...tasks.values()]);
+      // In-flight requests get a short grace period; then drop what is left.
+      const grace = setTimeout(() => server.closeAllConnections(), CLOSE_GRACE_MS); grace.unref();
+      await closed; clearTimeout(grace);
       const endpoint = JSON.parse(await readFile(endpointFile, 'utf8'));
       if (endpoint.token === token) await unlink(endpointFile);
       await options.sessions?.close?.();

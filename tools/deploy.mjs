@@ -16,6 +16,8 @@ const { values: args } = parseArgs({ options: {
   profile: { type: 'string' }, root: { type: 'string' }, home: { type: 'string' },
   workers: { type: 'string' }, rollback: { type: 'string' },
   'skip-build': { type: 'boolean' }, 'no-restart': { type: 'boolean' },
+  /** Set by the transient handoff unit: path to the restart plan to finish. */
+  'self-restart': { type: 'string' },
 } });
 if (!args.profile) throw new Error('--profile is required');
 const repo = resolve(dirname(new URL(import.meta.url).pathname), '..');
@@ -31,7 +33,8 @@ const BUILD_OUTPUTS = ['dist', 'packages/codex-core/dist', 'apps/web-app/upstrea
 
 const sh = (cmd, argv, opts = {}) => (execFileSync(cmd, argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], ...opts }) ?? '').trim();
 const systemctl = (...argv) => sh('systemctl', ['--user', ...argv]);
-const step = message => console.log(`• ${message}`);
+const step = message => { notes.push(`• ${message}`); console.log(`• ${message}`); };
+const notes = [];
 const exists = path => lstat(path).then(() => true, () => false);
 const sha256 = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 const sleep = ms => new Promise(done => setTimeout(done, ms));
@@ -146,7 +149,47 @@ async function workerHealth(attempts) {
   return result;
 }
 
+/** Units restarted in order: workers first, so the new bridge attaches to their new capabilities. */
+const restartGroups = args['no-restart'] ? [] : [restartWorkers, [bridgeUnit]].filter(group => group.length);
+
+/** The systemd service this script runs inside, if any: restarting it would kill the script itself. */
+async function hostingUnit() {
+  if (!process.env.SYSTEMD_EXEC_PID) return undefined;
+  const line = await readFile('/proc/self/cgroup', 'utf8').catch(() => '');
+  return /([^/\n]+\.service)(?::|\n|$)/.exec(line.trim())?.[1];
+}
+
+async function restartAndRecord(plan) {
+  const untouched = plan.untouched;
+  const restarted = { before: {}, after: {} };
+  for (const group of plan.restartGroups) {
+    const result = await restart(group);
+    Object.assign(restarted.before, result.before); Object.assign(restarted.after, result.after);
+    if (group !== plan.restartGroups.at(-1)) await workerHealth(20);
+  }
+  for (const [unit, pid] of Object.entries(untouched)) if (mainPid(unit) !== pid) console.warn(`⚠ ${unit} changed PID during deployment (${pid} -> ${mainPid(unit)})`);
+  const count = plan.restartGroups.some(group => group !== plan.restartGroups.at(-1)) ? 20 : 1;
+  const checks = { web: await webCheck(), workers: await workerHealth(count) };
+  const releaseDir = plan.release;
+  const record = { ...plan.record, restarted: restarted.after, pidsBefore: restarted.before, checks, deployedAt: new Date().toISOString(),
+    artifacts: Object.fromEntries(await Promise.all(['dist/cli.js', 'dist/index.js', 'packages/codex-core/dist/index.js']
+      .map(async file => [file, await sha256(join(releaseDir, file)).catch(() => null)]))) };
+  await writeFile(join(releaseDir, 'deployment.json'), `${JSON.stringify(record, null, 2)}\n`);
+  console.log(JSON.stringify({ release: releaseDir, restarted: restarted.after, checks }, null, 2));
+  if (Object.values(checks.workers).some(status => status !== 200)) console.warn('⚠ some workers did not answer /health; see checks.workers');
+  if (plan.previousCurrent) console.log(`rollback: node tools/deploy.mjs --profile ${args.profile} --rollback ${basename(plan.previousCurrent)}`);
+  return record;
+}
+
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+if (args['self-restart']) {
+  const plan = JSON.parse(await readFile(args['self-restart'], 'utf8'));
+  for (const note of plan.notes) console.log(note);
+  step(`resumed after the handoff unit restarted ${plan.selfUnit}`);
+  await restartAndRecord(plan);
+  process.exit(0);
+}
+
 let release;
 if (args.rollback) {
   release = join(root, 'releases', args.rollback);
@@ -162,24 +205,28 @@ const previous = await switchCurrent(release);
 await writeFile(join(backup, 'previous-current'), `${previous ?? ''}\n`);
 step(`current -> ${release} (was ${previous ?? 'unset'})`);
 const untouched = Object.fromEntries(workerUnits.filter(unit => !restartWorkers.includes(unit)).map(unit => [unit, mainPid(unit)]));
-// Workers first, so the new bridge attaches to their new capabilities on startup.
-const restarted = { before: {}, after: {} };
-if (!args['no-restart']) for (const group of [restartWorkers, [bridgeUnit]]) {
-  if (!group.length) continue;
-  const result = await restart(group);
-  Object.assign(restarted.before, result.before); Object.assign(restarted.after, result.after);
-  if (group === restartWorkers) await workerHealth(20);
-}
-for (const [unit, pid] of Object.entries(untouched)) if (mainPid(unit) !== pid) console.warn(`⚠ ${unit} changed PID during deployment (${pid} -> ${mainPid(unit)})`);
-const checks = { web: await webCheck(), workers: await workerHealth(restartWorkers.length ? 20 : 1) };
-const record = {
-  commit: (await readFile(join(release, 'DEPLOYED_COMMIT'), 'utf8')).trim(), release, previousCurrent: previous, backup,
-  rollback: !!args.rollback, unitsPinnedToCurrent: pinned, restarted: restarted.after, pidsBefore: restarted.before,
-  workersUntouched: Object.keys(untouched), checks, deployedAt: new Date().toISOString(),
-  artifacts: Object.fromEntries(await Promise.all(['dist/cli.js', 'dist/index.js', 'packages/codex-core/dist/index.js']
-    .map(async file => [file, await sha256(join(release, file)).catch(() => null)]))),
+const plan = {
+  notes: [], release, previousCurrent: previous, backup, selfUnit: await hostingUnit(),
+  restartGroups: restartGroups.filter(group => group.length),
+  untouched,
+  record: { commit: (await readFile(join(release, 'DEPLOYED_COMMIT'), 'utf8')).trim(), release, previousCurrent: previous, backup,
+    rollback: !!args.rollback, unitsPinnedToCurrent: pinned, workersUntouched: Object.keys(untouched) },
 };
-await writeFile(join(release, 'deployment.json'), `${JSON.stringify(record, null, 2)}\n`);
-console.log(JSON.stringify({ release, restarted: restarted.after, checks }, null, 2));
-if (Object.values(checks.workers).some(status => status !== 200)) console.warn('⚠ some workers did not answer /health; see checks.workers');
-if (previous) console.log(`rollback: node tools/deploy.mjs --profile ${args.profile} --rollback ${basename(previous)}`);
+await writeFile(join(backup, 'plan.json'), `${JSON.stringify(plan, null, 2)}\n`);
+
+if (plan.selfUnit && plan.restartGroups.some(group => group.includes(plan.selfUnit))) {
+  // This script runs inside a unit it must restart. Hand the restart and the
+  // verification to a transient unit outside that service's cgroup.
+  const unit = `lark-bridge-deploy-${stamp}-${basename(release)}`;
+  const planFile = join(backup, 'plan.json');
+  plan.notes = notes;
+  await writeFile(planFile, `${JSON.stringify(plan, null, 2)}\n`);
+  sh('systemd-run', ['--user', '--collect', '--unit', unit, `--working-directory=${repo}`,
+    `--setenv=PATH=${dirname(process.execPath)}:${process.env.PATH}`,
+    process.execPath, join(repo, 'tools/deploy.mjs'), '--profile', args.profile, '--root', root, '--home', home,
+    '--self-restart', planFile]);
+  console.log(`handing over to ${unit}: this process runs inside ${plan.selfUnit}, so the restarted unit must live elsewhere`);
+  console.log(`follow: journalctl --user -u ${unit} -f`);
+  process.exit(0);
+}
+await restartAndRecord({ ...plan, notes });
