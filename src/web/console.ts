@@ -127,7 +127,8 @@ export class BridgeConsoleService {
         } catch (error) {
           // Keep unknown; a missing/unreadable record cannot prove archival.
           this.sessionChecks.set(key, { at: Date.now(), issue: error instanceof WorkerRequestError && error.status === 404 ?
-            '会话不存在或不属于当前工具模式' : '原生会话读取失败，请刷新或检查 Worker' });
+            '会话不存在或不属于当前工具模式' : error instanceof WorkerRequestError ?
+              '原生会话读取失败：' + clean(error.message).slice(0, 200) : '原生会话读取超时或连接失败，请刷新或检查 Worker' });
         }
       }
     }));

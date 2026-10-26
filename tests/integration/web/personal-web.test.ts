@@ -1154,7 +1154,7 @@ it.each([true, false])('reads omitted native sessions by exact identity and hide
 it('preserves uncertain native sessions when exact reads fail or return a different identity', async () => {
   const h = await harness('codex'); await h.replies.stop(); h.provider.list.mockResolvedValue([]);
   h.provider.conversation.mockRejectedValue(Error('unavailable'));
-  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: 'unknown', canDissolve: false });
+  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: 'unknown', canDissolve: false, issues: ['原生会话读取失败：unavailable'] });
   h.provider.conversation.mockResolvedValue({ ...h.conversation, id: 'other', archived: true });
   expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: 'unknown', canDissolve: false });
 });
