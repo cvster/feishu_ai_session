@@ -1221,3 +1221,15 @@ it('retains an archived label but rejects dissolution when the fresh native chec
   expect((await h.request('/api/console/action', { action: 'personal-dissolve', id: first.id })).status).toBe(409);
   expect(vi.mocked(h.channel.rawClient.im.v1.chat.delete)).not.toHaveBeenCalled();
 });
+
+it('returns durable send confirmations across restart and native read failures without exposing another owner\'s receipts', async () => {
+  const h = await harness('codex'); h.pending.block('oc_group'); const session = (await h.service.list())[0]!;
+  const requestId = 'durable-ack-request-123'; await h.service.send(session.id, requestId, 'receipt confirmation');
+  expect((await h.service.read(session.id)).confirmedRequestIds).toContain(requestId);
+  const restarted = h.makeService(); await restarted.load();
+  vi.spyOn(h.client, 'conversation').mockRejectedValue(Error('native temporarily unavailable'));
+  expect((await restarted.read(session.id)).confirmedRequestIds).toContain(requestId);
+  h.controls.botOwnerId = 'ou_new_owner';
+  expect((await restarted.read(session.id)).confirmedRequestIds).not.toContain(requestId);
+  expect(h.create).toHaveBeenCalledOnce(); expect(h.calls).toHaveLength(0);
+});

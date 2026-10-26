@@ -25,7 +25,7 @@ export interface WebSession {
   updatedAtMs: number; favorite: boolean; online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
 }
 export interface WebTurn { id: string; input: string; inputMessages?: { senderName: string; text: string }[]; answer: string; answerSections?: WebAnswerSection[]; requestIds?: string[]; progress?: string[]; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
-export interface WebConversation { session: WebSession; turns: WebTurn[]; queuedMessages?: QueuedMessage[]; notice?: string }
+export interface WebConversation { session: WebSession; turns: WebTurn[]; queuedMessages?: QueuedMessage[]; confirmedRequestIds?: string[]; notice?: string }
 interface Receipt { fingerprint: string; sessionId: string; owner: string; createdAt: number; messageId?: string; enqueued?: boolean }
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
 const answer = (s: RunState) => s.blocks.flatMap(b => b.kind === 'text' ? [b.content] : []).join('\n\n');
@@ -275,11 +275,12 @@ export class PersonalSessionService {
   async read(id: string): Promise<WebConversation> {
     const { session, b, client } = await this.resolve(id);
     const queuedMessages = this.deps.controls.messageQueue?.list(session.scope) ?? [];
-    const owner = this.owner(), requests = new Map<string, string[]>();
+    const owner = this.owner(), requests = new Map<string, string[]>(), confirmedRequestIds: string[] = [];
     // Messages sent before the first run created the native session were recorded under its pending identity.
     const ids = new Set([id, this.identity(session.scope, { ...b, nativeId: undefined })]);
     for (const [requestId, receipt] of Object.entries(this.receipts)) if (ids.has(receipt.sessionId) && receipt.owner === owner && receipt.messageId) {
       const ids = requests.get(receipt.messageId) ?? []; ids.push(requestId); requests.set(receipt.messageId, ids);
+      if (receipt.enqueued) confirmedRequestIds.push(requestId);
     }
     const runtime = this.deps.controls.workerRuntimes?.get(b.toolId);
     const receipts = this.receiptScopes(session.scope).flatMap(scope => runtime?.inbox.receipts(scope) ?? []);
@@ -289,7 +290,7 @@ export class PersonalSessionService {
       const receipt = receipts.find(r => 'receipt:' + r.message.messageId === turn.id)!;
       if (receipt.scope !== session.scope) turn.inputMessages = [{ senderName: await feishuSenderName(this.deps.channel, receipt.message), text: receipt.message.content }];
     }
-    if (!session.online || !client) return { session, queuedMessages, turns: this.conversations.get(id)?.turns ?? turns, notice: 'Worker 离线；恢复后会重新读取会话' };
+    if (!session.online || !client) return { session, queuedMessages, confirmedRequestIds, turns: this.conversations.get(id)?.turns ?? turns, notice: 'Worker 离线；恢复后会重新读取会话' };
     try {
       const [native, allJobs] = await Promise.all([session.nativeConversation && b.nativeCreated !== false && b.nativeId ? client.conversation(b.nativeId) : undefined, client.list()]);
       this.assertBinding(id, session.scope);
@@ -339,12 +340,12 @@ export class PersonalSessionService {
         createdAtMs: turn.createdAtMs, origin: turn.bridge ? 'bridge' : 'native',
       });
       turns.sort((a, z) => a.createdAtMs - z.createdAtMs || a.id.localeCompare(z.id));
-      const result = { session, turns, queuedMessages, ...(!session.nativeConversation ? { notice: '此 worker 尚未提供原生对话读取；当前显示桥接消息' } : {}) };
+      const result = { session, turns, queuedMessages, confirmedRequestIds, ...(!session.nativeConversation ? { notice: '此 worker 尚未提供原生对话读取；当前显示桥接消息' } : {}) };
       this.assertBinding(id, session.scope);
       this.conversations.set(id, result); return result;
     } catch (e) {
       if (e instanceof WebError) throw e;
-      return { session: { ...session, online: false, canSend: false, canRename: false }, queuedMessages, turns: this.conversations.get(id)?.turns ?? turns, notice: '会话读取失败，稍后自动重试' };
+      return { session: { ...session, online: false, canSend: false, canRename: false }, queuedMessages, confirmedRequestIds, turns: this.conversations.get(id)?.turns ?? turns, notice: '会话读取失败，稍后自动重试' };
     }
   }
 }

@@ -47,13 +47,14 @@ async function favorite(id){const row=rows.find(r=>r.id===id);if(!row||favoriteB
 function current(){return rows.find(r=>r.id===selected);}
 function storageKey(id=selected){return 'bridge-web-draft:'+id;}
 function pending(id=selected){try{const value=JSON.parse(localStorage.getItem(storageKey(id))||'null');return value&&typeof value.requestId==='string'&&/^[\w-]{16,120}$/.test(value.requestId)&&typeof value.text==='string'?value:null;}catch{return null;}}
-function knownRequest(id,requestId){return chatCache.get(id)?.snapshot.turns.some(turn=>turn.requestIds?.includes(requestId));}
+function knownRequest(id,requestId){const c=chatCache.get(id)?.snapshot;return c?.confirmedRequestIds?.includes(requestId)||c?.turns.some(turn=>turn.requestIds?.includes(requestId));}
 function draftKey(id=selected){return 'bridge-web-compose:'+id;}
 function saveDraft(id=selected){if(!id||pending(id))return;const text=$('input').value;try{text?localStorage.setItem(draftKey(id),text):localStorage.removeItem(draftKey(id));}catch{}}
 function loadDraft(id){if(pending(id))return '';try{return localStorage.getItem(draftKey(id))||'';}catch{return '';}}
 function clearPending(id,requestId){if(pending(id)?.requestId===requestId)try{localStorage.removeItem(storageKey(id));}catch{}}
 function restorePending(id){const request=pending(id);if(request&&!knownRequest(id,request.requestId)&&!localMessages.has(request.requestId))localMessages.set(request.requestId,{id:'web:'+request.requestId,sessionId:id,requestIds:[request.requestId],input:request.text,answer:'',origin:'bridge',createdAtMs:request.createdAtMs||Date.now(),status:'send_unknown'});}
 function renderLocal(id,bottom=false){if(selected!==id||!current())return;const c=chatCache.get(id)?.snapshot||{session:current(),turns:[]};renderChat(c,false,true);if(bottom){$('messages').scrollTop=$('messages').scrollHeight;saveScroll();}}
+function reconcileReceipt(c){const request=pending(c.session.id);if(!request)return false;const confirmed=new Set([...(c.confirmedRequestIds||[]),...c.turns.flatMap(turn=>turn.requestIds||[])]);if(!confirmed.has(request.requestId))return false;clearPending(c.session.id,request.requestId);const turn=localMessages.get(request.requestId);if(turn&&['sending','send_unknown'].includes(turn.status))turn.status='queued';if(selected===c.session.id)$('message-error').textContent='';return true;}
 function visibleTurns(c,includeQueued=false){const confirmed=new Set(c.turns.flatMap(turn=>turn.requestIds||[]));for(const requestId of confirmed)if(localMessages.get(requestId)?.sessionId===c.session.id)localMessages.delete(requestId);return [...c.turns,...[...localMessages.values()].filter(turn=>turn.sessionId===c.session.id)].filter(turn=>includeQueued||!['queued','cancelled'].includes(turn.status));}
 function updateSessionControls(turns=visibleTurns(chatCache.get(selected)?.snapshot||{session:{id:selected},turns:[]},true)){const r=current(),completed=turns.length>0&&!turns.some(t=>['sending','send_unknown','queued','accepted','running','waiting_input'].includes(t.status))&&['done','completed'].includes(turns.at(-1)?.status);for(const button of $('session-controls').querySelectorAll('button')){const done=button.dataset.control==='stop'&&completed;if(button.dataset.control==='stop'){button.dataset.completed=String(done);button.textContent='■ 停止';button.title=done?'本次任务已完成':'停止当前回复';button.setAttribute('aria-label',button.title);}button.disabled=done||!r?.online||controlling;}}
 function updateHeader(){for(const button of $('tree').querySelectorAll('.session-more'))button.disabled=controlling;const r=current();if(!r)return;$('title').textContent=r.name;$('subtitle').textContent=r.tool+' / '+r.cwd+(!r.online?' · Worker 离线':'');$('subtitle').title=r.cwd;$('group').href='https://applink.feishu.cn/client/chat/open?openChatId='+encodeURIComponent(r.scope);$('group').hidden=false;$('composer').hidden=false;$('input').disabled=!r.canSend||sending;$('input').readOnly=!!pending();$('send').disabled=!r.canSend||sending;$('send').textContent=sending&&sendingSession===selected?'发送中…':pending()?'重试':'发送';updateSessionControls();}
@@ -92,6 +93,7 @@ function renderChat(c,restore=false,local=false){
   if(c.unavailable){$('notice').hidden=false;$('notice').textContent=c.error;$('composer').hidden=true;return;}
   if(c.session.id!==selected||!current())return;
   if(!local)chatRevision++;
+  if(reconcileReceipt(c))updateHeader();
   const turns=visibleTurns(c),cached=chatCache.get(selected),signature=JSON.stringify([turns,c.notice]);
   updateSessionControls(visibleTurns(c,true));renderQueue(c);
   $('notice').hidden=!c.notice;$('notice').textContent=c.notice||'';

@@ -501,3 +501,20 @@ it('creates in the selected project and opens model settings through the common 
   expect(h.node('controls-dialog').open).toBe(true); expect(h.node('controls-title').text).toContain('模型和推理程度');
   expect(h.node('controls-body').querySelectorAll('select').map(e => e.name)).toEqual(['model', 'reasoningEffort']);
 });
+
+it.each(['turn', 'receipt'] as const)('clears a lost acknowledgement only after a later %s confirms the same request', async source => {
+  const h = harness(); await h.ready(); const empty = h.conversation(0, '', 0); h.requests[0]!.resolve(empty); await h.settle();
+  h.node('input').value = '迟到的确认'; const send = h.node('composer').onsubmit!({ preventDefault() {} });
+  const requestId = h.requests[1]!.data.requestId; h.requests[1]!.reject(Error('connection interrupted')); await send;
+  expect(h.node('send').textContent).toBe('重试'); expect(h.node('messages').text).toContain('发送未确认');
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: empty });
+  expect(h.node('send').textContent).toBe('重试');
+  const confirmation = source === 'turn' ? { turns: [{ id: 'job:confirmed', input: '迟到的确认', answer: '', status: 'running', requestIds: [requestId], createdAtMs: Date.now() }] } :
+    { confirmedRequestIds: [requestId], queuedMessages: [{ id: 'a'.repeat(48), text: '迟到的确认' }] };
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...empty, ...confirmation } });
+  expect(h.node('send').textContent).toBe('发送'); expect(h.node('message-error').textContent).toBe('');
+  expect(h.node('messages').text).not.toContain('发送未确认'); expect(h.storage.has('bridge-web-draft:' + h.rows[0]!.id)).toBe(false);
+  if (source === 'receipt') { expect(h.node('queued-messages').text).toContain('迟到的确认'); expect(h.node('messages').text).not.toContain('迟到的确认'); }
+  else expect(h.node('messages').querySelectorAll('.user').filter(e => e.text === '迟到的确认')).toHaveLength(1);
+  expect(h.requests).toHaveLength(2);
+});
