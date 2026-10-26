@@ -394,7 +394,7 @@ export async function runCommandHandler(
   args: string,
   ctx: CommandContext,
 ): Promise<boolean> {
-  ctx = await routeCommandContext(ctx);
+  ctx = await routeCommandContext(ctx, { skipSessionIdentity: name === 'finish' && !args.trim() });
   if (
     ctx.chatMode === 'p2p' &&
     ctx.dmGroupCreationOnly &&

@@ -1253,11 +1253,46 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('loads inline %s s
 it('serves exact Feishu control PNGs from same-origin URLs under the existing image security policy', async () => {
   const h = await harness();
   for (const [action, encoded] of Object.entries({ stop: RUN_BUTTON_IMAGES.stop, refresh: RUN_BUTTON_IMAGES.refresh,
-    fork: RUN_BUTTON_IMAGES.fork, finish: RUN_BUTTON_IMAGES.finish, 'stop-completed': COMPLETED_STOP_IMAGE })) {
+    config: RUN_BUTTON_IMAGES.config, fork: RUN_BUTTON_IMAGES.fork, finish: RUN_BUTTON_IMAGES.finish, 'stop-completed': COMPLETED_STOP_IMAGE })) {
     const response = await h.request('/assets/run-controls/' + action + '.png');
     expect(response.status).toBe(200); expect(response.headers.get('content-type')).toBe('image/png');
     expect(response.headers.get('content-security-policy')).toContain("img-src 'self';");
     expect(Buffer.from(await response.arrayBuffer()).equals(Buffer.from(encoded, 'base64'))).toBe(true);
   }
   expect((await h.request('/assets/run-controls/unknown.png')).status).toBe(404);
+});
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('opens the fixed %s archive menu without worker reads and revalidates confirmation', async tool => {
+  const h = await harness(tool), id = (await h.service.list())[0]!.id;
+  const health = vi.spyOn(h.client, 'health').mockRejectedValue(Error('worker offline'));
+  const models = vi.spyOn(h.client, 'models').mockRejectedValue(Error('worker offline'));
+  const sessions = vi.spyOn(h.client, 'listSessions').mockRejectedValue(Error('worker offline'));
+  const conversation = vi.spyOn(h.client, 'conversation').mockRejectedValue(Error('worker offline'));
+  const confirmation = flatten((await h.service.control(id, 'finish')).elements);
+  expect(confirmation.filter(e => e.kind === 'button').map(e => e.text)).toEqual(['归档', '归档并解散群']);
+  for (const spy of [health, models, sessions, conversation]) expect(spy).not.toHaveBeenCalled();
+  expect(h.provider.archive).not.toHaveBeenCalled();
+  const archive = confirmation.find(e => e.kind === 'button' && e.text === '归档')!;
+  if (archive.kind !== 'button') throw Error('archive');
+  await expect(h.service.control(id, archive.action)).rejects.toMatchObject({ status: 503 });
+  expect(health).toHaveBeenCalled(); expect(h.provider.archive).not.toHaveBeenCalled();
+});
+
+it('uses historical execution details in the shared status format and freezes completed snapshot clocks', async () => {
+  const h = await harness(), id = (await h.service.list())[0]!.id;
+  const state = h.conversation.turns[0]!.state;
+  Object.assign(state, { execution: { model: 'old-model', reasoningEffort: 'high' },
+    runtime: { startedAtMs: 1000, checkedAtMs: 61000, lastActivityAtMs: 61000, processRunning: false } });
+  h.controls.profileConfig.preferences.model = 'new-model';
+  const first = (await h.service.read(id)).turns[0]!;
+  expect(first).toMatchObject({ statusColor: 'green' });
+  expect(first.statusText).toContain('✅ 已完成 · 用时 1分');
+  expect(first.statusText).toContain('项目 project · old-model · high');
+  expect(first.statusText).not.toContain('new-model');
+  state.runtime!.checkedAtMs += 60000; state.runtime!.lastActivityAtMs += 60000;
+  expect((await h.service.read(id)).turns[0]!.statusText).toBe(first.statusText);
+  state.terminal = 'running'; state.footer = 'streaming';
+  expect((await h.service.read(id)).turns[0]).toMatchObject({ statusColor: 'blue', statusText: expect.stringContaining('运行中 · 正在输出') });
+  state.terminal = 'interrupted';
+  expect((await h.service.read(id)).turns[0]).toMatchObject({ statusColor: 'red', statusText: expect.stringContaining('⏹ 已中断') });
 });

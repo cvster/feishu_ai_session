@@ -10,9 +10,10 @@ import type { WorkerCapabilities } from '../worker/protocol';
 import type { ToolSession } from '../tools/types';
 import { sessionOperations } from '../tools/session-api';
 import { log } from '../core/logger';
-import { initialState, reduce, type RunState } from '../card/run-state';
+import { initialState, reduce, startRunRuntime, updateRunRuntime, type RunState } from '../card/run-state';
 import { writeFileAtomic } from '../platform/atomic-write';
 import type { WebControlResult } from './controls';
+import { renderRunStatus, runStatusColor } from '../card/run-status-render';
 import { runProgress } from '../card/run-progress';
 import { WebMarkdown, type WebAnswerSection } from './markdown';
 import { renameChat } from '../bot/group';
@@ -24,7 +25,7 @@ export interface WebSession {
   id: string; scope: string; toolId: string; tool: string; project: string; cwd: string; name: string;
   updatedAtMs: number; favorite: boolean; online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
 }
-export interface WebTurn { id: string; input: string; inputMessages?: { senderName: string; text: string }[]; answer: string; answerSections?: WebAnswerSection[]; requestIds?: string[]; progress?: string[]; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
+export interface WebTurn { id: string; input: string; inputMessages?: { senderName: string; text: string }[]; answer: string; answerSections?: WebAnswerSection[]; requestIds?: string[]; progress?: string[]; statusText?: string; statusColor?: string; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
 export interface WebConversation { session: WebSession; turns: WebTurn[]; queuedMessages?: QueuedMessage[]; confirmedRequestIds?: string[]; notice?: string }
 interface Receipt { fingerprint: string; sessionId: string; owner: string; createdAt: number; messageId?: string; enqueued?: boolean }
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
@@ -41,6 +42,7 @@ export class PersonalSessionService {
   private conversations = new Map<string, WebConversation>();
   private groups = new Map<string, { mode: string; name?: string; bindingName?: string }>();
   private listing?: Promise<void>;
+  private terminalClocks = new Map<string, { signature: string; checkedAt: number }>();
   private jobs = new Map<string, { cursor: number; state: RunState; turnId?: string; nativeId?: string; updatedAt?: number }>();
   constructor(private readonly deps: {
     controls: Controls; catalog?: SessionCatalog; channel: LarkChannel; path: string;
@@ -262,6 +264,13 @@ export class PersonalSessionService {
   }
   async control(id: string, action: string, values?: unknown) {
     return this.serial('control:' + id, async () => {
+      if (action === 'finish') {
+        const owner = this.owner(), entry = this.bindings().find(([scope, b]) => this.identity(scope, b) === id);
+        if (!entry) throw new WebError(404, '会话已归档或绑定已变化');
+        this.assertBinding(id, entry[0]);
+        if (!this.deps.control) throw new WebError(503, '会话操作尚未就绪');
+        return this.deps.control(id, entry[0], owner, action, values);
+      }
       const { session } = await this.resolve(id, true);
       this.assertBinding(id, session.scope);
       if (action === 'refresh') {
@@ -271,6 +280,26 @@ export class PersonalSessionService {
       const result = await this.deps.control(id, session.scope, this.owner(), action, values);
       this.listedAt = 0; return result;
     });
+  }
+  private runStatus(state: RunState, project: string, checkedAt?: number, key?: string) {
+    const view: RunState = { ...state, projectName: state.projectName ?? project };
+    if (state.runtime) {
+      let clock = checkedAt ?? state.runtime.checkedAtMs;
+      // Some workers refresh snapshot clocks for completed turns. Freeze unchanged history.
+      if (key && state.terminal !== 'running') {
+        const signature = JSON.stringify({ ...state, runtime: undefined });
+        const previous = this.terminalClocks.get(key);
+        if (previous?.signature === signature) clock = previous.checkedAt;
+        else {
+          if (this.terminalClocks.size >= 2000) this.terminalClocks.delete(this.terminalClocks.keys().next().value!);
+          this.terminalClocks.set(key, { signature, checkedAt: clock });
+        }
+      } else if (key) this.terminalClocks.delete(key);
+      view.runtime = { ...state.runtime, checkedAtMs: clock, processRunning: state.terminal === 'running' };
+    }
+    const context = renderRunStatus(view);
+    const label = { running: '运行中', done: '✅ 已完成', interrupted: '⏹ 已中断', error: '⚠️ 运行失败', idle_timeout: '⏱ 已超时' }[state.terminal];
+    return { statusText: view.runtime ? context : [label, context].filter(Boolean).join(' · '), statusColor: runStatusColor(view) };
   }
   async read(id: string): Promise<WebConversation> {
     const { session, b, client } = await this.resolve(id);
@@ -301,11 +330,11 @@ export class PersonalSessionService {
       for (const job of jobs) {
         const cacheKey = b.sourceId + ':' + job.id;
         let view = this.jobs.get(cacheKey);
-        if (!view) { view = { cursor: 0, state: structuredClone(initialState) }; this.jobs.set(cacheKey, view); }
+        if (!view) { view = { cursor: 0, state: structuredClone(startRunRuntime(initialState, job.createdAt)) }; this.jobs.set(cacheKey, view); }
         const snapshot = view.updatedAt !== job.updatedAt || ['running', 'accepted'].includes(job.status) ? await client.snapshot(job.id, view.cursor) : undefined;
         for (const row of snapshot?.events ?? []) {
           if (row.seq <= view.cursor) continue;
-          view.cursor = row.seq; view.state = reduce(view.state, row.event);
+          view.cursor = row.seq; view.state = updateRunRuntime(reduce(view.state, row.event), { nowMs: row.at, activity: true });
           if (row.event.type === 'system') { if (row.event.turnId) view.turnId = row.event.turnId; if (row.event.threadId ?? row.event.sessionId) view.nativeId = row.event.threadId ?? row.event.sessionId; }
         }
         view.updatedAt = job.updatedAt;
@@ -325,10 +354,17 @@ export class PersonalSessionService {
         let state = shared ? view.state : nativeTurn?.state ?? view.state;
         if (shared && this.deps.controls.auxiliaryApprovals) state = await this.deps.controls.auxiliaryApprovals.review(job.options.delivery!.scope, job.id, job.options.delivery!.replyTo, state);
         if (shared && sharedJobPersonalScope(this.deps.controls, this.deps.catalog, job) !== session.scope) continue;
+        const terminal = { accepted: 'running', running: 'running', completed: 'done', failed: 'error', interrupted: 'interrupted', unknown: state.terminal }[job.status] as RunState['terminal'];
+        const statusState: RunState = { ...state, terminal, runtime: view.state.runtime,
+          execution: state.execution || view.state.execution || job.options.model || job.options.reasoningEffort
+            ? { ...(job.options.model ? { model: job.options.model } : {}),
+                ...(job.options.reasoningEffort ? { requestedReasoningEffort: job.options.reasoningEffort } : {}),
+                ...view.state.execution, ...state.execution } : undefined };
         turns.push({ id: 'job:' + job.id, input: inputs.map(r => r.message.content).join('\n\n'), answer: answer(state), status,
           ...(shared ? { inputMessages: inputs.map(r => ({ senderName: r.message.senderName!, text: r.message.content })) } : {}),
           answerSections: this.markdown.sections(state),
           requestIds: inputs.flatMap(r => requests.get(r.message.messageId) ?? []),
+          ...this.runStatus(statusState, session.project, ['running', 'accepted'].includes(job.status) ? Date.now() : job.updatedAt),
           progress: runProgress({ ...state, terminal: ['running', 'accepted'].includes(job.status) ? 'running' : 'done' }),
           createdAtMs: job.createdAt, origin: 'bridge' });
       }
@@ -337,6 +373,7 @@ export class PersonalSessionService {
         id: 'native:' + turn.id, input: turn.bridge ? '' : turn.input, answer: answer(turn.state), status: turn.state.footer === 'waiting_input' ? 'waiting_input' : turn.state.terminal,
         answerSections: this.markdown.sections(turn.state),
         progress: runProgress(turn.state),
+        ...this.runStatus(turn.state, session.project, undefined, id + ':' + turn.id),
         createdAtMs: turn.createdAtMs, origin: turn.bridge ? 'bridge' : 'native',
       });
       turns.sort((a, z) => a.createdAtMs - z.createdAtMs || a.id.localeCompare(z.id));

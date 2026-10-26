@@ -136,7 +136,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
       chatMode: mode,
       sessions: deps.sessions,
       sessionCatalog: deps.sessionCatalog,
-      sessionCatalogIdentity: await commandSessionCatalogIdentity({
+      sessionCatalogIdentity: cmd === 'finish' ? undefined : await commandSessionCatalogIdentity({
         msg,
         scope,
         mode,
@@ -162,7 +162,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     const args = composeArgs(sub, payload);
 
     try {
-      const scopedCtx = await routeCommandContext(ctx);
+      const scopedCtx = await routeCommandContext(ctx, { skipSessionIdentity: cmd === 'finish' });
       const ok = await runCommandHandler(name ?? '', args, scopedCtx);
       if (!ok) log.warn('cardAction', 'unknown', { cmd });
     } catch (err) {

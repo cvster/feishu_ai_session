@@ -39,7 +39,8 @@ class Element {
   getAttribute(key: string) { return this.attributes.get(key); }
   getBoundingClientRect() { return { right: 285, top: 150, bottom: 180 }; }
   contains(target: Element): boolean { return this === target || this.children.some(child => child.contains(target)); }
-  addEventListener() {}
+  listeners = new Map<string, () => void>();
+  addEventListener(name: string, callback: () => void) { this.listeners.set(name, callback); }
   close() { this.open = false; }
   showModal() { this.open = true; }
   focus() {}
@@ -57,13 +58,12 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const node = (id: string) => elements.get(id)!;
   node('app').style.setProperty = ((key: string, value: string) => { node('app').style[key] = value; }) as any;
   node('session-menu').hidden = true; node('session-menu').append(node('session-rename'), node('session-archive'), node('session-copy'));
-  for (const action of ['stop', 'refresh', 'fork', 'finish']) { const button = new Element('button'); const img = new Element('img'); img.src = '/assets/run-controls/' + action + '.png'; button.append(img); button.setAttribute('data-control', action); node('session-controls').append(button); }
+  for (const action of ['stop', 'refresh', 'fork', 'finish', 'config']) { const button = new Element('button'); const img = new Element('img'); img.src = '/assets/run-controls/' + action + '.png'; button.append(img); button.setAttribute('data-control', action); node('session-controls').append(button); }
   const rows = Array.from({ length: count }, (_, i) => String.fromCharCode(97 + i)).map((id, index) => ({ id: id.repeat(64), toolId: index ? 'another' : 'generic', tool: index ? 'Other' : 'Tool', favorite: false, updatedAtMs: updatedAtMs?.[index] ?? count - index,
     project: 'project', cwd: '/project', scope: 'oc_' + id, name: '会话' + index, online: true, canSend: true, canRename: true }));
   const conversation = (index: number, answer = '回答', count = 12) => ({ session: rows[index], turns: Array.from({ length: count }, (_, i) => ({
     id: String(i), input: '问题' + i, answer, status: 'completed', origin: 'native', createdAtMs: 1,
   })) });
-  const settingsRequests: string[] = [], settingsDeferred = new Map<string, Promise<any>>();
   const settings = { elements: [{ kind: 'select', name: 'model', value: 'model-a', options: [{ value: 'model-a', text: 'Model A' }, { value: 'model-b', text: 'Model B' }] }, { kind: 'select', name: 'reasoning_effort', value: 'high', options: [{ value: 'high', text: '高' }, { value: 'medium', text: '中' }] }, { kind: 'button', command: 'config.submit', action: 'inline-save' }, { kind: 'button', command: 'config.models.0', action: 'inline-refresh' }] };
   const requests: { id: string; path: string; data?: any; resolve(value: unknown): void; reject(error: Error): void }[] = [];
   class Stream {
@@ -82,7 +82,6 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
     document: { getElementById: node, createElement: (tag: string) => new Element(tag), createElementNS: (_ns: string, tag: string) => new Element(tag), body: new Element('body'), addEventListener() {} },
     window: browserWindow, URL,
     fetch: async (path: string, options?: { body?: string }) => {
-      if (path.endsWith('/settings')) { settingsRequests.push(path); return response(settingsDeferred.has(path) ? await settingsDeferred.get(path) : settings); }
       if (path === '/api/access') return response({ loginRequired: false });
       if (path === '/api/sessions' && !options?.body) return response(rows);
       // Deliberately allow a response after abort to check the selection guard.
@@ -95,7 +94,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const menu = (index: number) => node('tree').querySelectorAll('button').find(button => button.getAttribute('aria-label') === rows[index]!.name + '的会话选项')!.onclick!({ stopPropagation() {} });
   const settle = () => new Promise<void>(resolve => setTimeout(resolve, 0));
   const snapshot = (index: number, answer?: string, count?: number) => Stream.all.at(-1)!.emit('snapshot', { sessions: rows, conversation: conversation(index, answer, count) });
-  return { node, rows, requests, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all, storage, browserWindow, settings, settingsRequests, settingsDeferred };
+  return { node, rows, requests, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all, storage, browserWindow, settings };
 }
 
 it.each([true, false])('opens the most recently updated session on entry when recent visibility is %s and preserves later selections', async showRecent => {
@@ -502,19 +501,17 @@ it('creates in the selected project and opens model settings through the common 
   h.requests[1]!.resolve({ session: h.rows[1] }); await h.settle();
   // Harness session inventory uses the immediate response; selecting loads new history.
   h.requests[2]!.resolve(h.conversation(1)); await create;
-  expect(h.node('model-select').value).toBe('model-a'); expect(h.node('effort-select').value).toBe('high');
-  h.node('model-select').value = 'model-b'; (h.node('model-select') as any).onchange();
-  expect(h.requests[3]!.data).toEqual({ action: 'inline-save', values: { model: 'model-b', reasoning_effort: 'high' } });
-  h.settings.elements[0]!.value = 'model-b'; h.requests[3]!.resolve({ elements: [] }); await h.settle();
-  expect(h.node('model-select').value).toBe('model-b'); expect(h.node('controls-dialog').open).toBe(false);
-  expect(h.node('model-select').children.at(-1)!.text).toBe('↻ 刷新模型');
-  h.node('model-select').value = '__refresh_models__'; (h.node('model-select') as any).onchange();
-  expect(h.requests[4]!.data).toEqual({ action: 'inline-refresh', values: { model: 'model-b', reasoning_effort: 'high' } });
-  h.requests[4]!.resolve(h.settings); await h.settle(); expect(h.node('model-select').value).toBe('model-b');
-  h.node('effort-select').value = 'medium'; (h.node('effort-select') as any).onchange();
-  expect(h.requests[5]!.data.values).toEqual({ model: 'model-b', reasoning_effort: 'medium' });
-  h.settings.elements[1]!.value = 'medium'; h.requests[5]!.resolve({ elements: [] }); await h.settle();
-  expect(h.node('effort-select').value).toBe('medium');
+  const config = h.node('session-controls').querySelectorAll('button').find(b => b.dataset.control === 'config')!;
+  const opening = config.onclick!(); expect(h.requests[3]!.data).toEqual({ action: 'config' });
+  h.requests[3]!.resolve(h.settings); await opening;
+  expect(h.node('controls-dialog').open).toBe(true);
+  const selects = h.node('controls-body').querySelectorAll('select');
+  expect(selects.map(e => e.value)).toEqual(['model-a', 'high']);
+  selects[0]!.value = 'model-b'; selects[1]!.value = 'medium';
+  const saving = h.node('controls-body').querySelectorAll('button')[0]!.onclick!();
+  expect(h.requests[4]!.data).toEqual({ action: 'inline-save', values: { model: 'model-b', reasoning_effort: 'medium' } });
+  h.requests[4]!.resolve({ elements: [] }); await saving;
+
 });
 
 it.each(['turn', 'receipt'] as const)('clears a lost acknowledgement only after a later %s confirms the same request', async source => {
@@ -544,14 +541,13 @@ it('keeps mobile Enter as newline while desktop Enter sends and Shift+Enter rema
   expect(submit).toHaveBeenCalledOnce(); expect(preventDefault).toHaveBeenCalledOnce();
 });
 
-it('ignores a late settings response after switching to a different session', async () => {
+it('ignores a late settings dialog after switching to a different session', async () => {
   const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
-  let resolve!: (value: unknown) => void;
-  h.settingsDeferred.set('/api/sessions/' + h.rows[1]!.id + '/settings', new Promise(r => { resolve = r; }));
-  h.choose(1); h.requests[1]!.resolve(h.conversation(1)); await h.settle();
-  h.choose(0); await h.settle();
-  resolve({ elements: h.settings.elements.map(e => e.name === 'model' ? { ...e, value: 'model-b' } : e) }); await h.settle();
-  expect(h.node('model-select').value).toBe('model-a'); expect(h.node('title').textContent).toBe(h.rows[0]!.name);
+  const config = h.node('session-controls').querySelectorAll('button').find(b => b.dataset.control === 'config')!;
+  const opening = config.onclick!();
+  h.choose(1); h.requests[2]!.resolve(h.conversation(1)); await h.settle();
+  h.requests[1]!.resolve(h.settings); await opening;
+  expect(h.node('controls-dialog').open).toBe(false); expect(h.node('title').textContent).toBe(h.rows[1]!.name);
 });
 
 it('restores the last selected session after reload even when recent ordering changes', async () => {
@@ -585,7 +581,7 @@ it('updates the session URL when choosing another conversation, so reload does n
 it('opens copy and archive from icon controls without executing either action before confirmation', async () => {
   const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
   const buttons = h.node('session-controls').querySelectorAll('button');
-  expect(buttons.map(b => b.dataset.control)).toEqual(['stop', 'refresh', 'fork', 'finish']);
+  expect(buttons.map(b => b.dataset.control)).toEqual(['stop', 'refresh', 'fork', 'finish', 'config']);
   expect(buttons.every(b => b.textContent === '' && b.querySelector('img'))).toBe(true);
   const copy = buttons.find(b => b.dataset.control === 'fork')!;
   const copying = copy.onclick!(); expect(h.requests[1]!.data).toEqual({ action: 'fork', values: undefined });
@@ -596,4 +592,43 @@ it('opens copy and archive from icon controls without executing either action be
   h.requests[2]!.resolve({ elements: [{ kind: 'button', text: '归档', action: 'archive-choice', danger: true }, { kind: 'button', text: '归档并解散群', action: 'archive-dissolve-choice', danger: true }] }); await archiving;
   expect(h.node('controls-body').querySelectorAll('button').map(b => b.text)).toEqual(['归档', '归档并解散群']);
   expect(h.requests).toHaveLength(3);
+});
+
+it('persists sidebar expansion defaults and order while retaining manual section choices during updates', async () => {
+  const h = harness({ showRecent: true }); await h.ready();
+  expect(h.node('tree').children.slice(0, 2).map(e => e.open)).toEqual([true, true]);
+  h.node('settings').onclick!();
+  h.node('favorites-expanded').checked = false; h.node('recent-expanded').checked = false;
+  h.node('sidebar-order').value = 'recent-first';
+  await h.node('settings-form').onsubmit!({ preventDefault() {} });
+  expect(h.node('tree').children.slice(0, 2).map(e => e.querySelector('summary')!.text)).toEqual(['最近更新2', '收藏0']);
+  expect(h.node('tree').children.slice(0, 2).map(e => e.open)).toEqual([false, false]);
+  const recent = h.node('tree').children[0]!; recent.open = true; recent.listeners.get('toggle')!();
+  h.rows[0]!.name = 'updated'; h.streams.at(-1)!.emit('sessions', h.rows);
+  expect(h.node('tree').children.slice(0, 2).map(e => e.open)).toEqual([true, false]);
+  const restored = harness(undefined, 2, h.storage); await restored.ready();
+  expect(restored.node('tree').children.slice(0, 2).map(e => e.open)).toEqual([false, false]);
+  restored.node('settings').onclick!(); expect(restored.node('sidebar-order').value).toBe('recent-first');
+});
+
+it('renders the server Feishu status summary and color without private details', async () => {
+  const h = harness(); await h.ready(); const conversation = h.conversation(0, 'answer', 1);
+  Object.assign(conversation.turns[0]!, { statusText: '✅ 已完成 · 用时 2秒 · 项目 project · model-a · high', statusColor: 'green' });
+  h.requests[0]!.resolve(conversation); await h.settle();
+  expect(h.node('messages').querySelector('.status')!.text).toContain('项目 project · model-a · high');
+  expect(h.node('messages').querySelector('.status')!.className).toContain('green');
+  Object.assign(conversation.turns[0]!, { status: 'running', statusText: '运行中 · 正在输出 · 项目 project · model-a · high', statusColor: 'blue' });
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation });
+  expect(h.node('messages').querySelector('.status')!.className).toContain('blue');
+});
+
+it('allows opening archive choices for an offline worker without reading model settings', async () => {
+  const h = harness(); await h.ready(); h.rows[0]!.online = false; h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  const buttons = h.node('session-controls').querySelectorAll('button');
+  expect(buttons.find(b => b.dataset.control === 'config')!.disabled).toBe(true);
+  const archive = buttons.find(b => b.dataset.control === 'finish')!;
+  expect(archive.disabled).toBe(false);
+  const opening = archive.onclick!(); expect(h.requests[1]!.data.action).toBe('finish');
+  h.requests[1]!.resolve({ elements: [{ kind: 'button', text: '归档', action: 'signed-archive' }, { kind: 'button', text: '归档并解散群', action: 'signed-dissolve' }] }); await opening;
+  expect(h.node('controls-body').querySelectorAll('button').map(b => b.text)).toEqual(['归档', '归档并解散群']);
 });

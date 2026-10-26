@@ -21,6 +21,17 @@ describe('signed card callback dispatch', () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
+  it('opens the fixed archive menu without resolving the tool session', async () => {
+    const h = await createHarness();
+    h.controls.botOwnerId = 'ou_operator';
+    const cwd = vi.spyOn(h.workspaces, 'cwdFor').mockImplementation(() => { throw Error('must not resolve session'); });
+    await h.dispatch({ cmd: 'finish' });
+    expect(cwd).not.toHaveBeenCalled();
+    const cards = JSON.stringify(h.channel.sent);
+    expect(cards).toContain('finish.archive'); expect(cards).toContain('finish.archive-dissolve');
+    expect(h.agent.runs).toHaveLength(0);
+  });
+
   it.each(['stop', 'panel.stop'])('preserves unsent worker intake after a %s card action', async cmd => {
     const h = await createHarness();
     h.pending.push('oc_group', { messageId: 'next', content: 'keep next' } as any);

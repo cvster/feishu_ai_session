@@ -55,7 +55,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     const url = new URL(req.url ?? '/', origin);
     if (url.pathname === '/' && req.method === 'GET') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(bridgeWebPage); return; }
     if (['/console', '/console/'].includes(url.pathname) && req.method === 'GET') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(bridgeConsolePage); return; }
-    const controlIcon = /^\/assets\/run-controls\/(stop|stop-completed|refresh|fork|finish)\.png$/.exec(url.pathname);
+    const controlIcon = /^\/assets\/run-controls\/(stop|stop-completed|refresh|fork|finish|config)\.png$/.exec(url.pathname);
     if (controlIcon && req.method === 'GET') {
       const name = controlIcon[1]!;
       const encoded = name === 'stop-completed' ? COMPLETED_STOP_IMAGE : RUN_BUTTON_IMAGES[name as keyof typeof RUN_BUTTON_IMAGES];

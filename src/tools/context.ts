@@ -39,7 +39,7 @@ export function toolForScope(controls: Controls, scope: string): AgentKind {
   return controls.toolBindings?.get(scope)?.toolId ?? controls.profileConfig.agentKind;
 }
 
-export async function routeCommandContext(ctx: CommandContext): Promise<CommandContext> {
+export async function routeCommandContext(ctx: CommandContext, options: { skipSessionIdentity?: boolean } = {}): Promise<CommandContext> {
   if (!ctx.controls.toolRegistry || !ctx.controls.toolRegistry.has(toolForScope(ctx.controls, ctx.scope))) return ctx;
   const id = toolForScope(ctx.controls, ctx.scope);
   const tool = ctx.controls.toolRegistry.get(id);
@@ -48,7 +48,7 @@ export async function routeCommandContext(ctx: CommandContext): Promise<CommandC
   const controls = controlsForTool(ctx.controls, id, ctx.scope);
   const access = ctx.msg.chatType === 'p2p' ? canUseDm(controls.profileConfig, controls, ctx.msg.senderId) : canUseGroup(controls.profileConfig, controls, ctx.msg.chatId, ctx.msg.senderId);
   return { ...ctx, agent: tool.agent, controls,
-    sessionCatalogIdentity: ctx.sessionCatalogIdentity?.agentId === id ? ctx.sessionCatalogIdentity : await commandSessionCatalogIdentity({ msg: ctx.msg, scope: ctx.scope, mode: ctx.chatMode, workspaces: ctx.workspaces, controls, access }),
+    sessionCatalogIdentity: options.skipSessionIdentity ? undefined : ctx.sessionCatalogIdentity?.agentId === id ? ctx.sessionCatalogIdentity : await commandSessionCatalogIdentity({ msg: ctx.msg, scope: ctx.scope, mode: ctx.chatMode, workspaces: ctx.workspaces, controls, access }),
     runExecutor: ctx.controls.executorForTool?.(id) ?? ctx.runExecutor };
 }
 
