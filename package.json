@@ -47,6 +47,7 @@
     "ci:local": "git diff --check && pnpm test && pnpm typecheck && pnpm build",
     "ci:platform": "pnpm test && pnpm typecheck && pnpm build",
     "install:guided": "node tools/install.mjs",
+    "deploy:local": "node tools/deploy.mjs",
     "prepublishOnly": "pnpm typecheck && pnpm build"
   },
   "dependencies": {

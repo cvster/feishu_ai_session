@@ -304,7 +304,17 @@ Linux 若需退出登录后继续运行，由管理员为部署账户开启 syst
 
 运行中的 worker 保持已加载的代码。只更新磁盘产物不会使其自动支持新执行能力；涉及原生参数或执行协议变化时，单独安排对应 worker 升级，重启该 worker 会中断其任务。新桥接通过 `capabilities.reasoningMapping` 识别统一推理档位映射支持；涉及统一档位的请求需要新 worker。worker 根据原生模型能力映射档位，并在回复中记录实际值。此检查不会重启任何服务。
 
-部署产物、依赖或 Node/CLI 路径变更仍可能影响旧进程后续启动子进程或延迟加载文件。需要严格隔离版本时，桥接和各 worker 固定到独立版本目录，保留旧目录及其依赖，分别切换各自服务入口；避免原地删除旧 worker 使用的文件。
+部署产物、依赖或 Node/CLI 路径变更仍可能影响旧进程后续启动子进程或延迟加载文件。每个版本放在独立目录，保留旧目录及其依赖；避免原地删除旧 worker 使用的文件。
+
+### 本机 systemd 部署脚本
+
+```bash
+pnpm deploy:local --profile <profile>                    # 只重启桥接（含内置网页）
+pnpm deploy:local --profile <profile> --workers codex    # 同时重启指定 worker，逗号分隔或 all
+pnpm deploy:local --profile <profile> --rollback <sha>   # 切回已有版本并重启桥接
+```
+
+脚本要求工作区干净，在仓库构建 `HEAD` 后以 `git archive` 加构建产物生成 `releases/<sha>`；锁文件未变时复用当前版本的生产依赖，否则执行 `pnpm install --prod --frozen-lockfile`。随后原子切换 `current` 链接，并把该 profile 的桥接和 worker 服务入口统一改为 `current/bin/lark-channel-bridge.mjs`（原单元文件备份到 `deployment-backups/`）。Node 按真实路径加载模块，运行中的进程继续使用启动时的版本目录；未列入 `--workers` 的 worker 不重启，仅在之后自行重启时加载 `current`。指定的 worker 先重启并确认 `/health`，再重启桥接，最后检查网页和所有 worker 的 `/health`，结果写入版本目录的 `deployment.json`。脚本不会启停 Codex Desktop、共享 app-server 或其他进程。默认部署根目录 `~/lark-coding-agent-bridge`，可用 `--root` 或 `LARK_BRIDGE_DEPLOY_ROOT` 指定。
 
 
 ## 10. 常见阻塞
