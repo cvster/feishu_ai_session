@@ -35,3 +35,11 @@ pnpm test:live:bridge
 - 启动代码源码顺序 2 项、策略源码 IO 字符串检查 1 项：不再将文本排列当作行为验证；保留工厂、重连限制、运行时锁及策略行为测试。
 
 新增自动建群暂停后补扫和停止后不补扫的回归测试，防止每分钟群清理与建群扫描定时器重合时长期漏建群。保留静态架构边界和私有状态原子写入检查。
+
+## 2026-10-26 死代码清理
+
+删除已无生产入口的实现及其 120 项测试（按 vitest 展开后的用例计）：
+
+- Codex `exec --json` 及嵌入式 app-server 传输（`app-server-run`、`jsonl`、`buildCodexArgs`）：适配器只走原生队列，新会话 `createCodexQueuedFreshRun`，已有会话 `createCodexQueueRun`；`useAppServerForFreshThreads`、`useQueueForExistingThreads` 及只作用于 exec 的 `ignoreUserConfig`、`ignoreRules`、`stopGraceMs` 适配器选项一并移除。
+- 仅接受式提交（`AgentAdapter.submit`、`RunExecutor.submitMessage`、`codex-submission-flow`、`codex-submission-stop`）、旧 `codex-turn-sync`、`codex-user-input`、`kilo-turn-sync`、`WorkerSessionClient` 及只服务它们的 `Controls` 字段。
+- 归档通知、权限确认卡由 `startNativeTurnSync`、`syncAaSessionGroupsOnce` 和 `startWorkerReplies` 的测试覆盖；Codex 输入由 `codex-queue-adapter` 测试覆盖。`spawn-env` 的无 shell 启动检查改为针对唯一直接启动 Codex 的 `queue.ts`。

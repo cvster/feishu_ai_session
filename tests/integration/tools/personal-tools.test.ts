@@ -296,7 +296,7 @@ describe('personal multi-tool workflows', () => {
     expect(h.catalog.entries().filter(e => e.status === 'active').map(e => [e.agentId, e.threadId ?? e.sessionId]))
       .toEqual([['codex', 'same-uuid'], ['claude', 'same-uuid']]);
     const ctx = await routeCommandContext(h.context(h.groups[1]!.id, 'group'));
-    expect(ctx.agent.id).toBe('claude'); expect(ctx.controls.codexSubmissions).toBeUndefined();
+    expect(ctx.agent.id).toBe('claude');
     expect(ctx.controls.profileConfig.preferences.model).toBeUndefined();
     const flow = await startRunFlow({ scopeId: ctx.scope, scope: { source: 'im', chatId: ctx.scope, actorId: 'ou_owner' },
       prompt: 'continue', attachments: [], access: { ok: true, reason: 'owner' }, capability: claudeCapability(ctx.controls.profileConfig),

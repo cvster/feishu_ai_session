@@ -4,7 +4,6 @@ import { expect, it, vi } from 'vitest';
 import { fixture } from '../../helpers/worker-fixture';
 import type { WorkerSessionService } from '../../../src/worker/protocol';
 import { WorkerClient, WorkerRequestError } from '../../../src/worker/client';
-import { WorkerSessionClient } from '../../../src/worker/session-client';
 import { exportWorkerHistory } from '../../../src/worker/sessions';
 import { DurableAgentAdapter } from '../../../src/worker/adapter';
 import { ZcodeAdapter } from '../../../src/agent/zcode/adapter';
@@ -146,27 +145,3 @@ it('exports bounded native history without accepting file paths or partial JSONL
   await expect(exportWorkerHistory(provider, 'native')).rejects.toThrow();
 });
 
-it('uses worker session APIs and caches validated records for existing consumers', async () => {
-  const sessions = service(), h = await fixture('claude', sessions);
-  const legacy = { historyMode: 'file' as const, historyPath: vi.fn(async () => undefined), rename: vi.fn(async () => {}),
-    archive: vi.fn(async () => {}), fork: vi.fn(async () => ({ nativeId: 'legacy-copy', name: 'copy', cwd: h.dir })) };
-  const list = vi.fn(async () => []);
-  const client = new WorkerSessionClient(h.client, list, legacy, join(h.dir, 'cache'));
-  expect(await client.listSessions()).toEqual([session]);
-  const path = await client.historyPath(session.nativeId); expect(await readFile(path!, 'utf8')).toBe('{"type":"user"}\n');
-  await client.rename(session.nativeId, 'new'); await client.archive(session.nativeId);
-  expect(await client.fork!(session.nativeId)).toMatchObject({ nativeId: 'copy:id' });
-  expect(list).not.toHaveBeenCalled(); expect(legacy.rename).not.toHaveBeenCalled(); expect(legacy.archive).not.toHaveBeenCalled();
-  vi.mocked(sessions.history).mockResolvedValue({ nativeId: 'wrong', format: 'jsonl', content: 'secret' });
-  await expect(client.historyPath(session.nativeId)).rejects.toThrow('incompatible');
-});
-
-it('rejects old workers before writes and retains catalog-only archival without native mutations', async () => {
-  const h = await fixture('zcode'); vi.spyOn(h.client, 'health').mockResolvedValue({ zcodeSessionNames: true });
-  const legacy = { nativeArchive: false, historyPath: vi.fn(async () => undefined), rename: vi.fn(async () => {}), archive: vi.fn(async () => {}) };
-  const proxy = new WorkerSessionClient(h.client, async () => [session], legacy, join(h.dir, 'cache'));
-  await expect(proxy.listSessions()).rejects.toMatchObject({ code: 'unsupported-operation' });
-  await expect(proxy.rename('native', 'new')).rejects.toMatchObject({ code: 'unsupported-operation' });
-  await proxy.archive('native'); expect(legacy.archive).not.toHaveBeenCalled(); expect(legacy.rename).not.toHaveBeenCalled();
-  await expect(h.client.renameSession('native', 'new', h.dir)).rejects.toBeInstanceOf(WorkerRequestError);
-});

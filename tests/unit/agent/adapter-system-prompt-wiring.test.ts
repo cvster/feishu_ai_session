@@ -11,15 +11,8 @@ vi.mock('../../../src/platform/spawn', async (importOriginal) => {
   return { ...actual, spawnProcess: spawnMock.spawnProcess };
 });
 
-// Codex spawning lives in the shared core; Claude keeps its adapter facade.
-vi.mock('../../../packages/codex-core/src/spawn', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../packages/codex-core/src/spawn')>();
-  return { ...actual, spawnProcess: spawnMock.spawnProcess };
-});
-
 import { wrapAuxiliaryPrompt } from '../../../src/bot/auxiliary-groups';
 import { ClaudeAdapter } from '../../../src/agent/claude/adapter';
-import { CodexAdapter } from '../../../src/agent/codex/adapter';
 
 interface FakeChild extends EventEmitter {
   pid: number;
@@ -53,15 +46,13 @@ const prompts = [
   ['group', wrapAuxiliaryPrompt('检查', false, { chatId: 'oc_target' })],
 ];
 
-describe.each(['claude', 'codex'] as const)('%s prompt delivery', tool => {
+// Codex input travels through the native queue; its contract lives in codex-queue-adapter.test.ts.
+describe('claude prompt delivery', () => {
   it.each(prompts)('passes %s input unchanged for fresh and resumed conversations', async (_kind, prompt) => {
     for (const resumed of [false, true]) {
       const child = fakeChild();
       spawnMock.spawnProcess.mockReturnValue(child);
-      const adapter = tool === 'claude' ? new ClaudeAdapter() : new CodexAdapter({
-        binary: '/usr/local/bin/codex', profileStateDir: '/tmp/codex-profile',
-        useAppServerForFreshThreads: false, useQueueForExistingThreads: false,
-      });
+      const adapter = new ClaudeAdapter();
       adapter.run({ runId: 'r1', prompt: prompt!, cwd: '/tmp',
         ...(resumed ? { sessionId: 'session-1', threadId: 'thread-1' } : {}),
       });

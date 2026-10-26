@@ -112,9 +112,6 @@ export interface AgentAdapter {
   stopNativeTurn?(id: string, turnId: string, cwd: string): Promise<boolean>;
   prepareRun?(opts: AgentRunOptions): Promise<void>;
   run(opts: AgentRunOptions): AgentRun;
-  /** Queue acceptance only; subsequent execution belongs to the shared writer. */
-  submit?(opts: AgentRunOptions, beforeSend: (prepared: { threadId: string; knownTurnIds: string[];
-    transport: 'rpc' | 'cli' }) => Promise<void>): Promise<AgentSubmissionResult>;
   setThreadName?(threadId: string, name: string): Promise<void>;
   archiveThread?(threadId: string): Promise<void>;
   forkThread?(threadId: string): Promise<{ threadId: string; name: string; cwd: string }>;
@@ -126,8 +123,3 @@ export interface AgentAdapter {
   setBotIdentity?(identity: AgentBotIdentity): void;
 }
 
-/** Queue acceptance contract; threadId is the legacy native-queue wire name. */
-export type AgentSubmissionResult = { submissionId: string; threadId: string; transport: 'rpc' | 'cli' } & (
-  | { status: 'accepted'; queueId?: string; clientUserMessageId?: string; continuationWarning?: string }
-  | { status: 'rejected' | 'unknown'; message: string }
-);

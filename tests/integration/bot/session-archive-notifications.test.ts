@@ -9,7 +9,6 @@ import { SessionCatalog } from '../../../src/session/catalog';
 import { ToolBindingStore } from '../../../src/tools/bindings';
 import { ToolRegistry } from '../../../src/tools/types';
 import { syncAaSessionGroupsOnce } from '../../../src/bot/aa-session-groups';
-import { startCodexTurnSync } from '../../../src/bot/codex-turn-sync';
 import { startNativeTurnSync } from '../../../src/bot/native-turn-sync';
 import { WorkspaceStore } from '../../../src/workspace/store';
 import { createFakeChannel } from '../../helpers/fake-channel';
@@ -161,26 +160,6 @@ it.each(['kilo', 'zcode', 'dsh'] as const)('detects explicit %s native archival 
   await syncAaSessionGroupsOnce(deps); await syncAaSessionGroupsOnce(deps);
   expect(h.create).toHaveBeenCalledOnce(); expect(h.catalog.isScopeArchived('oc_group')).toBe(true);
   expect(h.bindings.isArchived(toolId, 'source', 'native')).toBe(true);
-});
-
-it('detects native Codex archival and notifies once across repeated archive checks and bridge restart', async () => {
-  const h = await fixture(); h.add('oc_group');
-  const reader = { listArchivedThreadIds: vi.fn(async () => [] as string[]),
-    readThread: vi.fn(async () => ({ id: 'native', turns: [] })), stop: vi.fn(async () => {}) };
-  const start = async () => {
-    const notifications = h.start(); h.controls.sessionArchiveNotifications = notifications;
-    const sync = await startCodexTurnSync({ channel: h.channel as unknown as LarkChannel, controls: h.controls,
-      sessionCatalog: h.catalog, profileStateDir: h.tmp.profile, intervalMs: 60_000, reader });
-    cleanup.push(() => sync.stop()); await sync.runNow(); return { sync, notifications };
-  };
-  const first = await start(); expect(h.create).not.toHaveBeenCalled();
-  reader.listArchivedThreadIds.mockRejectedValueOnce(new Error('account unavailable'));
-  await first.sync.runNow(); expect(h.create).not.toHaveBeenCalled(); expect(h.catalog.isScopeArchived('oc_group')).toBe(false);
-  reader.listArchivedThreadIds.mockResolvedValue(['native']);
-  await first.sync.runNow(); await first.sync.runNow(); expect(await first.sync.isScopeArchived('oc_group')).toBe(true);
-  expect(h.create).toHaveBeenCalledOnce();
-  await first.sync.stop(); await first.notifications.stop(); await h.reload(); await start();
-  expect(h.create).toHaveBeenCalledOnce();
 });
 
 it.each(['kilo', 'zcode'] as const)('detects confirmed %s snapshot archival only for a matching project', async toolId => {

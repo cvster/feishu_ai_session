@@ -869,7 +869,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       await bridgeWeb?.close();
       await a2a?.close();
       pending.cancelAll();
-      await Promise.all([executor, ...executors.values()].map(item => item.waitForSubmissions()));
       await activeRuns.disconnectAll();
       await Promise.allSettled([...batchTasks]);
       await Promise.all(workerReplies.map(replies => replies.stop()));

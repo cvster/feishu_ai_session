@@ -16,10 +16,6 @@ import type { Controls } from '../../../src/commands';
 const mock = vi.hoisted(() => ({ channel: undefined as unknown }));
 vi.mock('@larksuite/channel', async original => ({ ...await original<typeof import('@larksuite/channel')>(), createLarkChannel: () => mock.channel }));
 vi.mock('../../../src/bot/aa-session-groups', () => ({ startAaSessionGroupSync: () => ({ stop() {}, withPaused: async (f: () => Promise<unknown>) => f() }) }));
-vi.mock('../../../src/bot/codex-turn-sync', () => ({ startCodexTurnSync: async () => ({
-  observeTurn() {}, runNow: async () => {}, stop: async () => {}, refreshMessage: async () => false,
-}) }));
-vi.mock('../../../src/bot/codex-user-input', () => ({ startCodexUserInput: async () => ({ stop: async () => {} }) }));
 import { startChannel } from '../../../src/bot/channel';
 import { commandSessionCatalogIdentity } from '../../../src/bot/session-catalog-identity';
 import { runCommandHandler } from '../../../src/commands';

@@ -27,52 +27,6 @@ describe('CodexAdapter native queue mode', () => {
     expect(requests.at(-1).argv).toEqual(['app-server', 'proxy', ...(remote?.startsWith('unix:///') ? ['--sock', remote.slice(7)] : [])]);
   });
 
-  it('accepts a message without observing an unfinished turn and validates attachments before sending', async () => {
-    const fake = await createQueueCodex('inProgress'); cleanup.push(fake.dir);
-    // Isolate endpoint discovery from a real local Codex Desktop socket.
-    const adapter = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir, codexHome: fake.dir });
-    const prepared: unknown[] = [];
-    const result = await adapter.submit({ runId: 'accept-only', cwd: fake.dir, prompt: 'do not wait', threadId: 'thread-existing' },
-      async value => { prepared.push(value); });
-    expect(result).toMatchObject({ status: 'accepted', threadId: 'thread-existing', transport: 'cli' });
-    expect(prepared).toHaveLength(1);
-    expect(prepared[0]).toMatchObject({ threadId: 'thread-existing', knownTurnIds: [], transport: 'cli' });
-    await expect(adapter.submit({ runId: 'bad-image', cwd: fake.dir, prompt: 'image', threadId: 'thread-existing',
-      images: [join(fake.dir, 'missing.png')] }, async () => {})).rejects.toThrow();
-    await expect(adapter.submit({ runId: 'bad-file', cwd: fake.dir, prompt: 'file', threadId: 'thread-existing',
-      attachmentPaths: [join(fake.dir, 'missing.txt')] }, async () => {})).rejects.toThrow();
-    expect(JSON.parse(await readFile(join(fake.dir, 'state.json'), 'utf8')).prompt).toBe('do not wait');
-    const requests = await readFile(join(fake.dir, 'requests.jsonl'), 'utf8');
-    expect(requests).not.toContain('turn/interrupt'); expect(requests).not.toContain('thread/queue/delete');
-  });
-
-  it.each(['rpc', 'cli'] as const)('creates in the shared writer for RPC and releases the owned creator for CLI (%s)', async transport => {
-    const fake = await createQueueCodex('inProgress', true); cleanup.push(fake.dir);
-    const adapter = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir, codexHome: fake.dir,
-      ...(transport === 'rpc' ? { appServerRemote: 'unix://' } : {}) });
-    const prepared: string[] = [];
-    const result = await adapter.submit({ runId: 'fresh-accept', cwd: fake.dir, prompt: 'first group message',
-      model: 'gpt-6.1-sol', reasoningEffort: 'high', sessionName: 'AA-蓝图' }, async value => { prepared.push(value.threadId); });
-    expect(result).toMatchObject({ status: 'accepted', transport, threadId: 'thread-existing' });
-    expect(prepared).toEqual(['thread-existing']);
-    if (transport === 'cli') expect(await readFile(join(fake.dir, 'creator-released.txt'), 'utf8')).toBe('released');
-    else await expect(readFile(join(fake.dir, 'creator-released.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(JSON.parse(await readFile(join(fake.dir, 'state.json'), 'utf8')).prompt).toBe('first group message');
-    const requests = (await readFile(join(fake.dir, 'requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-    const methods = requests.map(r => r.method);
-    expect(requests.find(r => r.method === 'thread/start')).toMatchObject({
-      transport: transport === 'rpc' ? 'shared' : 'owned',
-      params: { approvalPolicy: 'never', sandbox: 'danger-full-access', threadSource: 'user' },
-    });
-    expect(requests.find(r => r.method === 'thread/start').params).not.toHaveProperty('developerInstructions');
-    expect(requests.find(r => r.method === 'thread/name/set').params.name).toBe('AA-蓝图');
-    if (transport === 'rpc') expect(methods).not.toContain('thread/resume');
-    expect(methods.filter(method => method === 'thread/start')).toHaveLength(1);
-    expect(methods).not.toContain('turn/start');
-    expect(methods).not.toContain('turn/interrupt');
-    expect(methods).not.toContain('thread/queue/delete');
-  });
-
   it.each([undefined, 'AA-Skill-仿真展示'])('names/materializes a fresh thread before queueing (%s), without starting a bridge-owned turn', async sessionName => {
     const fake = await createQueueCodex(); cleanup.push(fake.dir);
     const run = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir }).run({

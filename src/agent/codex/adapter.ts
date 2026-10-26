@@ -1,50 +1,29 @@
 import { listCodexModels } from './models';
-import { createInterface } from 'node:readline';
-import type { Readable, Writable } from 'node:stream';
-import { join } from 'node:path';
 import type { SandboxMode } from '../../config/profile-schema';
-import { log } from '../../core/logger';
-import { mergeProcessEnv, type SpawnedProcessByStdio } from '../../platform/spawn';
-import { spawnCodexProcess as spawnProcess } from '../../platform/codex-binary';
 import { SpawnFailed } from '../../runtime/errors';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import type {
   AgentAdapter,
-  AgentEvent,
   AgentRun,
   AgentRunOptions,
 } from '../types';
-import { buildCodexArgs } from './argv';
-import { createCodexAppServerRun } from './app-server-run';
 import { createCodexQueueRun } from './queue';
 import { createCodexQueuedFreshRun } from './queued-fresh-run';
-import { CodexJsonlTranslator, type CodexFinishReason } from './jsonl';
 import { archiveCodexThread, setCodexThreadName } from '../../session/codex-history';
 import { codexBridgeClientMessageId } from '../../session/codex-origin';
 import { CodexThreadReader } from '../../session/codex-thread-reader';
-import { submitCodexMessage } from './submission';
-import type { CodexSubmissionResult } from '../../../packages/codex-core/src/submission';
 
 export interface CodexAdapterOptions {
   binary: string;
   profileStateDir: string;
   codexHome?: string;
   inheritCodexHome?: boolean;
-  ignoreUserConfig?: boolean;
-  ignoreRules?: boolean;
   sandbox?: SandboxMode;
-  stopGraceMs?: number;
   larkChannel?: LarkChannelEnvContext;
-  /** @deprecated Modern app-server transport is enabled by default. */
-  useAppServerForFreshThreads?: boolean;
-  /** @deprecated Native queue transport is enabled by default. */
-  useQueueForExistingThreads?: boolean;
   /** Shared app-server endpoint used for queueing and thread mutations. */
   appServerRemote?: string;
 }
-
-type CodexChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
 
 export class CodexAdapter implements AgentAdapter {
   readonly id = 'codex';
@@ -54,13 +33,8 @@ export class CodexAdapter implements AgentAdapter {
   private readonly profileStateDir: string;
   private readonly codexHome: string | undefined;
   private readonly inheritCodexHome: boolean;
-  private readonly ignoreUserConfig: boolean;
-  private readonly ignoreRules: boolean;
   private readonly sandbox: SandboxMode;
-  private readonly defaultStopGraceMs: number;
   private readonly larkChannel: LarkChannelEnvContext | undefined;
-  private readonly useAppServerForFreshThreads: boolean;
-  private readonly useQueueForExistingThreads: boolean;
   private readonly appServerRemote: string | undefined;
 
   constructor(opts: CodexAdapterOptions) {
@@ -68,13 +42,8 @@ export class CodexAdapter implements AgentAdapter {
     this.profileStateDir = opts.profileStateDir;
     this.codexHome = opts.codexHome;
     this.inheritCodexHome = opts.inheritCodexHome !== false;
-    this.ignoreUserConfig = opts.ignoreUserConfig === true;
-    this.ignoreRules = opts.ignoreRules !== false;
     this.sandbox = opts.sandbox ?? 'danger-full-access';
-    this.defaultStopGraceMs = opts.stopGraceMs ?? 5000;
     this.larkChannel = opts.larkChannel;
-    this.useAppServerForFreshThreads = opts.useAppServerForFreshThreads !== false;
-    this.useQueueForExistingThreads = opts.useQueueForExistingThreads !== false;
     this.appServerRemote = opts.appServerRemote ?? process.env.CODEX_QUEUE_REMOTE;
   }
 
@@ -159,20 +128,15 @@ export class CodexAdapter implements AgentAdapter {
     }
   }
 
-  async submit(opts: AgentRunOptions, beforeSend: (prepared: { threadId: string; knownTurnIds: string[];
-    transport: 'rpc' | 'cli' }) => Promise<void>): Promise<CodexSubmissionResult> {
-    return submitCodexMessage({ ...opts, sandbox: opts.sandbox ?? this.sandbox, binary: this.binary, profileStateDir: this.profileStateDir,
-      codexHome: this.codexHome, inheritCodexHome: this.inheritCodexHome, remote: this.appServerRemote,
-      env: buildLarkChannelEnv(this.larkChannel) }, beforeSend);
-  }
-
+  /** Every Codex turn goes through the native queue: fresh threads create one,
+   * existing threads enqueue into the one Codex Desktop owns. */
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) {
       throw new Error('cwd is required for CodexAdapter.run');
     }
 
-    if (!opts.threadId && this.useAppServerForFreshThreads) {
-      if (this.useQueueForExistingThreads) return createCodexQueuedFreshRun({
+    if (!opts.threadId) {
+      return createCodexQueuedFreshRun({
         runId: opts.runId, binary: this.binary, profileStateDir: this.profileStateDir,
         codexHome: this.codexHome, inheritCodexHome: this.inheritCodexHome,
         cwd: opts.cwd, sandbox: opts.sandbox ?? this.sandbox, prompt: opts.prompt,
@@ -181,252 +145,24 @@ export class CodexAdapter implements AgentAdapter {
         images: opts.images, model: opts.model, reasoningEffort: opts.reasoningEffort,
         remote: this.appServerRemote, env: buildLarkChannelEnv(this.larkChannel),
       });
-      return createCodexAppServerRun({
-        runId: opts.runId,
-        binary: this.binary,
-        profileStateDir: this.profileStateDir,
-        ...(this.codexHome ? { codexHome: this.codexHome } : {}),
-        inheritCodexHome: this.inheritCodexHome,
-        cwd: opts.cwd,
-        sandbox: opts.sandbox ?? this.sandbox,
-        prompt: opts.prompt,
-        sessionName: opts.sessionName,
-        clientUserMessageId: codexBridgeClientMessageId(opts.runId),
-        images: opts.images,
-        model: opts.model,
-        reasoningEffort: opts.reasoningEffort,
-        env: buildLarkChannelEnv(this.larkChannel),
-        stopGraceMs: opts.stopGraceMs ?? this.defaultStopGraceMs,
-      });
     }
 
-    if (opts.threadId && this.useQueueForExistingThreads) {
-      return createCodexQueueRun({
-        runId: opts.runId,
-        binary: this.binary,
-        profileStateDir: this.profileStateDir,
-        ...(this.codexHome ? { codexHome: this.codexHome } : {}),
-        inheritCodexHome: this.inheritCodexHome,
-        cwd: opts.cwd,
-        sandbox: opts.sandbox ?? this.sandbox,
-        threadId: opts.threadId,
-        prompt: opts.prompt,
-        clientUserMessageId: codexBridgeClientMessageId(opts.runId),
-        images: opts.images,
-        model: opts.model,
-        reasoningEffort: opts.reasoningEffort,
-        ...(this.appServerRemote ? { remote: this.appServerRemote } : {}),
-        env: buildLarkChannelEnv(this.larkChannel),
-      });
-    }
-
-    const args = buildCodexArgs({
+    return createCodexQueueRun({
+      runId: opts.runId,
+      binary: this.binary,
+      profileStateDir: this.profileStateDir,
+      ...(this.codexHome ? { codexHome: this.codexHome } : {}),
+      inheritCodexHome: this.inheritCodexHome,
       cwd: opts.cwd,
       sandbox: opts.sandbox ?? this.sandbox,
       threadId: opts.threadId,
+      prompt: opts.prompt,
+      clientUserMessageId: codexBridgeClientMessageId(opts.runId),
       images: opts.images,
-      ignoreUserConfig: this.ignoreUserConfig,
-      ignoreRules: this.ignoreRules,
       model: opts.model,
       reasoningEffort: opts.reasoningEffort,
+      ...(this.appServerRemote ? { remote: this.appServerRemote } : {}),
+      env: buildLarkChannelEnv(this.larkChannel),
     });
-    const envOverrides: NodeJS.ProcessEnv = buildLarkChannelEnv(this.larkChannel);
-    if (this.codexHome) {
-      envOverrides.CODEX_HOME = this.codexHome;
-    } else if (!this.inheritCodexHome) {
-      envOverrides.CODEX_HOME = join(this.profileStateDir, 'codex-home');
-    }
-    const child = spawnProcess(this.binary, args, {
-      cwd: opts.cwd,
-      env: mergeProcessEnv(process.env, envOverrides),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }) as CodexChild;
-
-    log.info('agent', 'spawn', {
-      pid: child.pid ?? null,
-      cwd: opts.cwd,
-      hasThread: Boolean(opts.threadId),
-      promptChars: opts.prompt.length,
-      images: opts.images?.length ?? 0,
-      model: opts.model,
-      reasoningEffort: opts.reasoningEffort,
-    });
-
-    const stderrChunks: Buffer[] = [];
-    let runtimeError: Error | null = null;
-    let stderrBuffer = '';
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderrChunks.push(chunk);
-      stderrBuffer += chunk.toString('utf8');
-      let nl = stderrBuffer.indexOf('\n');
-      while (nl !== -1) {
-        const line = stderrBuffer.slice(0, nl);
-        stderrBuffer = stderrBuffer.slice(nl + 1);
-        if (line.trim()) log.warn('agent', 'stderr', { line });
-        if (isWindowsCommandNotFoundLine(line)) {
-          runtimeError = new Error(`failed to spawn codex: ${line.trim()}`);
-          child.stdout.destroy();
-          child.kill();
-        }
-        nl = stderrBuffer.indexOf('\n');
-      }
-    });
-
-    let stopReason: CodexFinishReason | undefined;
-    child.on('error', (err) => {
-      runtimeError = err;
-    });
-    child.on('exit', (code, signal) => {
-      log.info('agent', 'exit', { pid: child.pid ?? null, code, signal });
-    });
-    child.stdin.on('error', (err) => {
-      log.warn('agent', 'stdin-error', { message: err.message });
-    });
-    child.stdin.end(opts.prompt, 'utf8');
-
-    const stopGraceMs = opts.stopGraceMs ?? this.defaultStopGraceMs;
-
-    return {
-      runId: opts.runId,
-      events: createEventStream(child, stderrChunks, () => runtimeError, () => stopReason),
-      async stop() {
-        if (child.exitCode !== null || child.signalCode !== null) return;
-        stopReason = 'interrupted';
-        log.info('agent', 'stop-sigterm', { pid: child.pid ?? null, graceMs: stopGraceMs });
-        child.kill('SIGTERM');
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
-            if (child.exitCode === null && child.signalCode === null) {
-              log.warn('agent', 'stop-sigkill', {
-                pid: child.pid ?? null,
-                graceMs: stopGraceMs,
-                reason: 'grace-period-expired',
-              });
-              child.kill('SIGKILL');
-            }
-            resolve();
-          }, stopGraceMs);
-          child.once('exit', () => {
-            clearTimeout(timer);
-            resolve();
-          });
-        });
-      },
-      waitForExit(timeoutMs: number): Promise<boolean> {
-        if (child.exitCode !== null || child.signalCode !== null) {
-          return Promise.resolve(true);
-        }
-        return new Promise<boolean>((resolve) => {
-          const onExit = (): void => {
-            clearTimeout(timer);
-            resolve(true);
-          };
-          const timer = setTimeout(() => {
-            child.removeListener('exit', onExit);
-            resolve(false);
-          }, timeoutMs);
-          child.once('exit', onExit);
-        });
-      },
-    };
   }
-}
-
-async function* createEventStream(
-  child: CodexChild,
-  stderrChunks: Buffer[],
-  getError: () => Error | null,
-  getStopReason: () => CodexFinishReason | undefined,
-): AsyncGenerator<AgentEvent> {
-  const translator = new CodexJsonlTranslator();
-  if (!child.pid) {
-    const err = getError();
-    yield {
-      type: 'error',
-      message: err ? `failed to spawn codex: ${err.message}` : 'spawn returned no pid',
-      terminationReason: 'failed',
-    };
-    return;
-  }
-
-  const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  let sawStdout = false;
-  let silentExitTimer: ReturnType<typeof setTimeout> | undefined;
-  const closeSilentStdout = (): void => {
-    silentExitTimer = setTimeout(() => {
-      if (!sawStdout && !child.stdout.readableEnded) child.stdout.destroy();
-    }, 50);
-  };
-  child.once('exit', closeSilentStdout);
-  try {
-    for await (const line of rl) {
-      sawStdout = true;
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(trimmed);
-      } catch {
-        continue;
-      }
-      yield* translator.translate(parsed);
-    }
-  } finally {
-    if (silentExitTimer) clearTimeout(silentExitTimer);
-    child.removeListener('exit', closeSilentStdout);
-    rl.close();
-  }
-
-  const earlyRuntimeError = getError();
-  if (earlyRuntimeError && child.exitCode === null && child.signalCode === null) {
-    yield terminalError(`codex runtime error: ${earlyRuntimeError.message}`);
-    return;
-  }
-
-  const exitCode = await waitForExitCode(child);
-  const stopReason = getStopReason();
-  if (stopReason) {
-    yield* translator.finish(stopReason);
-    return;
-  }
-
-  const runtimeError = getError();
-  if (exitCode !== 0 && exitCode !== null) {
-    if (!translator.terminalEmitted()) {
-      const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
-      const detail = stderr ? `: ${stderr.slice(0, 500)}` : '';
-      yield terminalError(`codex exited with code ${exitCode}${detail}`);
-    }
-    return;
-  }
-  if (runtimeError && !translator.terminalEmitted()) {
-    yield terminalError(`codex runtime error: ${runtimeError.message}`);
-    return;
-  }
-
-  yield* translator.finish();
-}
-
-function terminalError(message: string): AgentEvent {
-  return {
-    type: 'error',
-    message,
-    terminationReason: 'failed',
-  };
-}
-
-async function waitForExitCode(child: CodexChild): Promise<number | null> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return child.exitCode;
-  }
-  return new Promise<number | null>((resolve) => {
-    child.once('exit', (code) => resolve(code));
-  });
-}
-
-function isWindowsCommandNotFoundLine(line: string): boolean {
-  return (
-    process.platform === 'win32' &&
-    /is not recognized as an internal or external command|operable program or batch file/i.test(line)
-  );
 }

@@ -27,7 +27,7 @@ export function controlsForTool(root: Controls, toolId: AgentKind, scope?: strin
       if (key === 'cfg') return { ...target.cfg, agentKind: toolId,
         preferences: { ...target.cfg.preferences, model: profile.preferences.model, reasoningEffort: profile.preferences.reasoningEffort } };
       if (key === 'workerInbox') return target.workerRuntimes?.get(toolId)?.inbox;
-      if (key === 'workerReplySync' || key === 'claudeReplySync') return target.workerRuntimes?.get(toolId)?.replies;
+      if (key === 'workerReplySync') return target.workerRuntimes?.get(toolId)?.replies;
       return Reflect.get(target, key, receiver);
     },
   });

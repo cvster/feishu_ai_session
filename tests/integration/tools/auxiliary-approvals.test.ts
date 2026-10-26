@@ -11,8 +11,6 @@ import { SessionStore } from '../../../src/session/store';
 import { WorkspaceStore } from '../../../src/workspace/store';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import { SessionCatalog } from '../../../src/session/catalog';
-import { CodexSubmissionStore } from '../../../src/session/codex-submissions';
-import { startCodexTurnSync } from '../../../src/bot/codex-turn-sync';
 import { startWorkerReplies } from '../../../src/worker/replies';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import { initialState, type RunState } from '../../../src/card/run-state';
@@ -145,27 +143,6 @@ it('parses only explicit complete permission requests, including JSON fences', (
   expect(parseApprovalRequest('```json\n' + requestText + '\n```')?.action).toContain('src/main.ts');
 });
 
-it('turns a completed Codex permission response into an owner card instead of exposing control JSON', async () => {
-  const h = await setup();
-  const catalog = new SessionCatalog(join(h.dir, 'catalog')); await catalog.load();
-  catalog.upsertActive({ scopeId: h.scope, agentId: 'codex', cwdRealpath: h.dir, policyFingerprint: 'p', threadId: '11111111-1111-4111-8111-111111111111' });
-  const submissions = new CodexSubmissionStore(join(h.dir, 'submissions')); await submissions.load();
-  await submissions.prepare({ id: 's1', scope: h.scope, messages: [h.message], status: 'accepted', createdAtMs: 1, updatedAtMs: 1,
-    threadId: '11111111-1111-4111-8111-111111111111', clientUserMessageId: 'client-approval', prompt: '请修改源码', replyTo: 'om_question' });
-  await catalog.flush();
-  const profile = createDefaultProfileConfig({ agentKind: 'codex', codex: { binaryPath: 'codex' }, accounts: { app: { id: 'cli_bot', secret: 's', tenant: 'feishu' } } });
-  const sync = await startCodexTurnSync({ channel: h.channel, sessionCatalog: catalog, profileStateDir: h.dir, intervalMs: 60_000,
-    controls: { profileConfig: profile, cfg: profile, auxiliary: h.auxiliary, auxiliaryApprovals: h.approvals } as any, submissionStore: submissions,
-    reader: { readThread: async () => ({ id: '11111111-1111-4111-8111-111111111111', turns: [{ id: 'turn-needs-approval', status: 'completed', items: [
-      { type: 'userMessage', id: 'u', clientId: 'client-approval', content: [{ type: 'inputText', text: '请修改源码' }] },
-      { type: 'agentMessage', id: 'a', text: requestText },
-    ] }] }), stop: async () => {} } });
-  try {
-    await sync.runNow(); expect(h.create).toHaveBeenCalledOnce(); expect(h.cards).toHaveLength(2);
-    expect(JSON.stringify(h.cards[1])).toContain('确认卡片'); expect(JSON.stringify(h.cards[1])).not.toContain('ff_permission_request');
-    expect(h.resume).not.toHaveBeenCalled();
-  } finally { await sync.stop(); await catalog.flush(); }
-});
 it.each([false, true])('routes a completed Claude permission response to the correct approval destination (private=%s)', async privateEntry => {
   const h = await setup(privateEntry, 'claude');
   const catalog = new SessionCatalog(join(h.dir, 'catalog')); await catalog.load();

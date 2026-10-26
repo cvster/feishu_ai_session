@@ -133,23 +133,12 @@ export interface Controls {
   executorForTool?(id: import('../config/profile-schema').AgentKind): RunExecutor;
   workerRuntimes?: Map<ToolId, { inbox: import('../worker/inbox').WorkerInbox; replies?: WorkerReplySync }>;
   workerReplySync?: WorkerReplySync;
-  claudeReplySync?: WorkerReplySync;
   workerQuestions?: { handleAction(scope: string, messageId: string, token: string, form?: Record<string, unknown>): Promise<void> };
   workerInbox?: import('../worker/inbox').WorkerInbox;
-  codexSubmissions?: import('../session/codex-submissions').CodexSubmissionStore;
-  codexUserInput?: import('../bot/codex-user-input').CodexInputHandle;
   sessionArchiveNotifications?: { flush(): Promise<void> };
   /** Refresh a persisted mirrored CardKit delivery using its original sequence owner. */
   refreshMirroredRunCard?(scope: string, messageId: string): Promise<boolean>;
   nativeReplySync?: { stopScope(scope: string, messageId?: string): Promise<boolean>; ownsMessage?(scope: string, messageId: string): boolean };
-  /** Codex replies have one owner, keyed by thread/turn/scope, for all input sources. */
-  codexReplySync?: {
-    isThreadArchived?(threadId: string): Promise<boolean>;
-    isScopeArchived?(scope: string): Promise<boolean>;
-    observeTurn(scope: string, threadId: string, turnId: string, replyTo: string, replyInThread?: boolean): void;
-    runNow(): Promise<void>;
-    registerSubmission?(record: import('../session/codex-submissions').CodexSubmissionRecord): Promise<void>;
-  };
   runControlIcons?: RunControlIcons;
   profile: string;
   profileConfig: ProfileConfig;

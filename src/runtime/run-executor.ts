@@ -7,7 +7,6 @@ import { ProcessPool } from '../bot/process-pool';
 import type { RunPolicyAllow } from '../policy/run-policy';
 import { log } from '../core/logger';
 import { RunRejected, SpawnFailed } from './errors';
-import type { AgentSubmissionResult } from '../agent/types';
 import type { RunDelivery } from '../worker/protocol';
 
 export interface RunExecutorDeps {
@@ -66,7 +65,6 @@ export class RunExecutor {
   private readonly nativeSessionKey?: RunExecutorDeps['nativeSessionKey'];
   private readonly initialSessionIdForScope?: RunExecutorDeps['initialSessionIdForScope'];
   private readonly sessionNameForScope: RunExecutorDeps['sessionNameForScope'];
-  private readonly submissions = new Set<Promise<AgentSubmissionResult>>();
   private readonly agent: AgentAdapter;
   private readonly pool: ProcessPool;
   private readonly activeRuns: ActiveRuns;
@@ -87,14 +85,6 @@ export class RunExecutor {
     this.postDoneExitGraceMs = deps.postDoneExitGraceMs ?? DEFAULT_POST_DONE_EXIT_GRACE_MS;
   }
 
-  submitMessage(input: SubmitRunInput, beforeSend: (prepared: { threadId: string; knownTurnIds: string[];
-    transport: 'rpc' | 'cli' }) => Promise<void>): Promise<AgentSubmissionResult> {
-    const task = this.submitMessageImpl(input, beforeSend);
-    this.submissions.add(task);
-    void task.finally(() => this.submissions.delete(task)).catch(() => {});
-    return task;
-  }
-
   private async validateModel(options: Pick<AgentRunOptions, 'model' | 'cwd' | 'reasoningEffort'>): Promise<void> {
     const effort = resolveReasoningEffort(options.reasoningEffort);
     if (options.reasoningEffort && options.reasoningEffort !== 'default' && !effort) throw new RunRejected('model-unavailable', '推理档位格式无效，请通过 /config 重新选择。');
@@ -108,36 +98,6 @@ export class RunExecutor {
     const selected = options.model ? models.find(model => model.value === options.model)
       : models.find(model => model.value === DEFAULT_MODEL) ?? models.find(model => model.isDefault);
     if (effort && !selected?.reasoningEfforts?.some(option => option.value === effort)) throw new RunRejected('model-unavailable', '已选模型的推理档位已变化或未提供该档位，本次未执行。请通过 /config 刷新，或选择跟随工具默认。');
-  }
-
-  async waitForSubmissions(): Promise<void> { await Promise.allSettled([...this.submissions]); }
-
-  private async submitMessageImpl(input: SubmitRunInput, beforeSend: (prepared: { threadId: string; knownTurnIds: string[];
-    transport: 'rpc' | 'cli' }) => Promise<void>): Promise<AgentSubmissionResult> {
-    if (!this.agent.submit) throw new Error('Agent does not support acceptance-only submission');
-    if (this.activeRuns.newRunsPaused()) throw new RunRejected('reconnect-in-progress', 'Bridge is disconnecting');
-    const releaseScope = this.activeRuns.reserve(input.scopeId);
-    if (!releaseScope) throw new RunRejected('run-already-active', 'Submission already in progress');
-    let release: (() => void) | undefined;
-    try {
-      release = await this.pool.acquire();
-      const validate = () => {
-        if (input.policy.expiresAt <= this.now()) throw new RunRejected('policy-expired', 'Submission policy expired');
-        if (this.activeRuns.newRunsPaused()) throw new RunRejected('reconnect-in-progress', 'Bridge is disconnecting');
-        input.validateBeforeStart?.();
-      };
-      validate();
-      const opts = { runId: input.submissionId ?? this.createRunId(), prompt: input.policy.prompt,
-        sessionName: this.sessionNameForScope?.(input.scopeId),
-        cwd: input.policy.cwdRealpath, threadId: input.threadId, model: input.model,
-        reasoningEffort: input.reasoningEffort, images: input.images, attachmentPaths: input.attachmentPaths, sandbox: input.policy.sandbox };
-      await this.validateModel(opts);
-      await this.agent.prepareRun?.(opts);
-      await input.beforeSpawn?.(); validate();
-      return await this.agent.submit(opts, async prepared => {
-        await input.beforeSpawn?.(); validate(); await beforeSend(prepared);
-      });
-    } finally { release?.(); releaseScope(); }
   }
 
   async submit(input: SubmitRunInput): Promise<RunExecution> {
