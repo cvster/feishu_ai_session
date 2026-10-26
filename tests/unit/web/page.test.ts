@@ -2,6 +2,7 @@ import { runInNewContext } from 'node:vm';
 import { webcrypto } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { WebMarkdown } from '../../../src/web/markdown';
+import { COMPLETED_STOP_IMAGE, RUN_BUTTON_IMAGES } from '../../../src/card/run-button-images';
 import { bridgeWebPage } from '../../../apps/bridge-web/page';
 
 // Exercise the shipped browser script with controlled HTTP/SSE arrival order.
@@ -9,6 +10,7 @@ class Element {
   children: Element[] = [];
   textContent = '';
   className = '';
+  src = '';
   hidden = false;
   value = '';
   name = '';
@@ -56,7 +58,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const node = (id: string) => elements.get(id)!;
   node('app').style.setProperty = ((key: string, value: string) => { node('app').style[key] = value; }) as any;
   node('session-menu').hidden = true; node('session-menu').append(node('session-rename'), node('session-archive'), node('session-copy'));
-  for (const action of ['stop', 'refresh']) { const button = new Element('button'); button.setAttribute('data-control', action); node('session-controls').append(button); }
+  for (const action of ['stop', 'refresh', 'fork', 'finish']) { const button = new Element('button'); const img = new Element('img'); img.src = 'data:image/png;base64,' + RUN_BUTTON_IMAGES[action as keyof typeof RUN_BUTTON_IMAGES]; button.append(img); button.setAttribute('data-control', action); node('session-controls').append(button); }
   const rows = Array.from({ length: count }, (_, i) => String.fromCharCode(97 + i)).map((id, index) => ({ id: id.repeat(64), toolId: index ? 'another' : 'generic', tool: index ? 'Other' : 'Tool', favorite: false, updatedAtMs: updatedAtMs?.[index] ?? count - index,
     project: 'project', cwd: '/project', scope: 'oc_' + id, name: '会话' + index, online: true, canSend: true, canRename: true }));
   const conversation = (index: number, answer = '回答', count = 12) => ({ session: rows[index], turns: Array.from({ length: count }, (_, i) => ({
@@ -126,19 +128,21 @@ it('reuses cached content without another history request and restores each sess
 it('keeps the stop label on completion and restores its active state when new input or running work appears', async () => {
   const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
   const stop = h.node('session-controls').querySelectorAll('button')[0]!;
-  expect(stop.textContent).toBe('■ 停止'); expect(stop.dataset.completed).toBe('true'); expect(stop.disabled).toBe(true);
+  expect(stop.textContent).toBe(''); expect(stop.dataset.completed).toBe('true'); expect(stop.disabled).toBe(true);
+  expect(stop.querySelector('img')!.src).toBe('data:image/png;base64,' + COMPLETED_STOP_IMAGE);
   const requests = h.requests.length; stop.onclick!(); expect(h.requests).toHaveLength(requests);
   for (const status of ['running', 'interrupted', 'error', 'waiting_input', 'queued', 'unknown']) {
     const c = h.conversation(0, '回答', 1); c.turns[0]!.status = status;
     h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: c });
-    expect(stop.textContent).toBe('■ 停止'); expect(stop.dataset.completed).toBe('false'); expect(stop.disabled).toBe(false);
+    expect(stop.textContent).toBe(''); expect(stop.dataset.completed).toBe('false'); expect(stop.disabled).toBe(false);
+    expect(stop.querySelector('img')!.src).toBe('data:image/png;base64,' + RUN_BUTTON_IMAGES.stop);
   }
   h.snapshot(0, '完成', 1); expect(stop.disabled).toBe(true);
   h.node('input').value = '新消息';
   const sending = h.node('composer').onsubmit!({ preventDefault() {} });
-  expect(stop.textContent).toBe('■ 停止'); expect(stop.disabled).toBe(false);
+  expect(stop.textContent).toBe(''); expect(stop.disabled).toBe(false);
   h.requests.at(-1)!.resolve({ status: 'queued' }); await sending;
-  expect(stop.textContent).toBe('■ 停止'); expect(stop.disabled).toBe(false);
+  expect(stop.textContent).toBe(''); expect(stop.disabled).toBe(false);
 });
 
 it('renders each shared sender name beside its original message as text', async () => {
@@ -577,4 +581,20 @@ it('updates the session URL when choosing another conversation, so reload does n
   expect(browser.location.search).toBe('?session=' + h.rows[1]!.id + '&view=chat');
   expect(new URL(browser.location.href).hash).toBe('#anchor');
   expect(h.storage.get('bridge-web-selected-session')).toBe(h.rows[1]!.id);
+});
+
+it('opens copy and archive from icon controls without executing either action before confirmation', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  const buttons = h.node('session-controls').querySelectorAll('button');
+  expect(buttons.map(b => b.dataset.control)).toEqual(['stop', 'refresh', 'fork', 'finish']);
+  expect(buttons.every(b => b.textContent === '' && b.querySelector('img'))).toBe(true);
+  const copy = buttons.find(b => b.dataset.control === 'fork')!;
+  const copying = copy.onclick!(); expect(h.requests[1]!.data).toEqual({ action: 'fork', values: undefined });
+  h.requests[1]!.resolve({ elements: [{ kind: 'input', name: 'new_session_name', value: '副本' }, { kind: 'button', text: '确认复制', action: 'copy-choice', primary: true }] }); await copying;
+  expect(h.node('controls-dialog').open).toBe(true); expect(h.requests).toHaveLength(2);
+  const archive = buttons.find(b => b.dataset.control === 'finish')!;
+  const archiving = archive.onclick!(); expect(h.requests[2]!.data.action).toBe('finish');
+  h.requests[2]!.resolve({ elements: [{ kind: 'button', text: '归档', action: 'archive-choice', danger: true }, { kind: 'button', text: '归档并解散群', action: 'archive-dissolve-choice', danger: true }] }); await archiving;
+  expect(h.node('controls-body').querySelectorAll('button').map(b => b.text)).toEqual(['归档', '归档并解散群']);
+  expect(h.requests).toHaveLength(3);
 });
