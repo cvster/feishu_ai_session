@@ -31,8 +31,12 @@ export function validWorkerHealth(value: unknown, botAppId: string): value is Wo
 export class WorkerRequestError extends Error {
   constructor(readonly status: number, message: string, readonly retryable = false, readonly code?: WorkerErrorCode) { super(message); }
 }
+/** A worker writes a fresh random token on every start, so url+token names one process. */
+const VERIFIED_HEALTH_TTL_MS = 5_000;
+
 export class WorkerClient {
   private sessionRoster?: { at: number; ids: Set<string> };
+  private verified?: { key: string; at: number; health: WorkerHealth };
   private rosterLoading?: Promise<ToolSession[]>;
   constructor(readonly stateDir: string, readonly sourceId: string, readonly botAppId: string, readonly toolId = 'claude',
     private readonly expectedManifest?: Pick<WorkerManifest, 'nativeField' | 'sessionKind'>) {}
@@ -43,25 +47,38 @@ export class WorkerClient {
         value.manifest!.nativeField === this.expectedManifest.nativeField &&
         value.manifest!.sessionKind === this.expectedManifest.sessionKind));
   }
-  private async request<T>(path: string, body?: unknown, timeoutMs = 15_000): Promise<T> {
+  private async endpoint(): Promise<WorkerEndpoint> {
     const endpoint = JSON.parse(await readFile(join(this.stateDir, 'endpoint.json'), 'utf8')) as WorkerEndpoint;
     if (endpoint.version !== 1 || !/^http:\/\/127\.0\.0\.1:\d+$/.test(endpoint.url) || typeof endpoint.token !== 'string') throw new WorkerRequestError(400, 'Invalid worker endpoint', false, 'invalid-request');
-    if (path !== '/health') {
-      const identity = await fetch(`${endpoint.url}/health`, { headers: { Authorization: `Bearer ${endpoint.token}` }, signal: AbortSignal.timeout(2000) });
-      if (!identity.ok) throw new WorkerRequestError(identity.status, 'Worker unavailable', identity.status >= 500 || identity.status === 429, 'unavailable');
-      const value = await identity.json() as WorkerHealth;
-      if (!this.matchesIdentity(value)) throw new WorkerRequestError(409, 'Worker identity changed or unavailable', false, 'conflict');
-    }
-    const result = await fetch(`${endpoint.url}${path}`, { method: body === undefined ? 'GET' : 'POST',
-      headers: { Authorization: `Bearer ${endpoint.token}`, 'Content-Type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeoutMs) });
+    return endpoint;
+  }
+  /** Every call is identity-checked; a restarted worker has a new token and is re-verified. */
+  private async verifiedHealth(endpoint: WorkerEndpoint, mismatch = 'Worker identity changed or unavailable'): Promise<WorkerHealth> {
+    const key = `${endpoint.url}\n${endpoint.token}`;
+    if (this.verified?.key === key && Date.now() - this.verified.at < VERIFIED_HEALTH_TTL_MS) return this.verified.health;
+    this.verified = undefined;
+    const identity = await fetch(`${endpoint.url}/health`, { headers: { Authorization: `Bearer ${endpoint.token}` }, signal: AbortSignal.timeout(2000) });
+    if (!identity.ok) throw new WorkerRequestError(identity.status, 'Worker unavailable', identity.status >= 500 || identity.status === 429, 'unavailable');
+    const value = await identity.json() as WorkerHealth;
+    if (!this.matchesIdentity(value)) throw new WorkerRequestError(409, mismatch, false, 'conflict');
+    this.verified = { key, at: Date.now(), health: value };
+    return value;
+  }
+  private async request<T>(path: string, body?: unknown, timeoutMs = 15_000): Promise<T> {
+    const endpoint = await this.endpoint();
+    await this.verifiedHealth(endpoint);
+    let result: Response;
+    try {
+      result = await fetch(`${endpoint.url}${path}`, { method: body === undefined ? 'GET' : 'POST',
+        headers: { Authorization: `Bearer ${endpoint.token}`, 'Content-Type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeoutMs) });
+    } catch (error) { this.verified = undefined; throw error; }
     const value = await result.json();
     if (!result.ok) throw new WorkerRequestError(result.status, (value as { error: string }).error, (value as { retryable?: boolean }).retryable === true, (value as { code?: WorkerErrorCode }).code);
     return value as T;
   }
   async health(): Promise<HealthDetails> {
-    const value = await this.request<WorkerHealth>('/health');
-    if (!this.matchesIdentity(value)) throw new WorkerRequestError(409, '执行服务的工具、账户目录、会话格式或飞书应用不匹配', false, 'conflict');
+    const value = await this.verifiedHealth(await this.endpoint(), '执行服务的工具、账户目录、会话格式或飞书应用不匹配');
     const { version: _version, toolId: _toolId, sourceId: _sourceId, botAppId: _botAppId, ...details } = value;
     return details;
   }

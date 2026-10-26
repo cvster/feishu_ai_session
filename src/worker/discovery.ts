@@ -55,9 +55,10 @@ export function workerTool(worker: DiscoveredWorker): AgentTool {
 export async function loadWorkerRegistry(profileDir: string, botAppId: string): Promise<DiscoveredWorker[]> {
   const root = join(profileDir, 'workers');
   const file = join(root, 'registry.json');
-  let cached: DiscoveredWorker[] = [];
+  let cached: DiscoveredWorker[] = [], saved = '';
   try {
-    const parsed: unknown = JSON.parse(await readFile(file, 'utf8'));
+    saved = await readFile(file, 'utf8');
+    const parsed: unknown = JSON.parse(saved);
     if (Array.isArray(parsed)) cached = parsed.filter((w): w is DiscoveredWorker => {
       const item = w as DiscoveredWorker, suffix = typeof item?.directory === 'string' ? relative(root, item.directory) : '..';
       return validWorkerHealth(item?.health, botAppId) &&
@@ -80,6 +81,7 @@ export async function loadWorkerRegistry(profileDir: string, botAppId: string): 
     }
     result.set(item.health.toolId, item);
   }
-  const values = [...result.values()];
-  await writeFileAtomic(file, JSON.stringify(values), { mode: 0o600 }); return values;
+  const values = [...result.values()], text = JSON.stringify(values);
+  if (text !== saved) await writeFileAtomic(file, text, { mode: 0o600 });
+  return values;
 }

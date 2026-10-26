@@ -58,14 +58,20 @@ const digest = (value: string) => createHash('sha256').update(value).digest('hex
 export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
   const { toolId, displayName } = deps;
   const phase = `${toolId}-turn-sync`;
-  let state: State = { version: 1, bindings: {} };
+  let state: State = { version: 1, bindings: {} }, saved = '';
   try {
-    state = JSON.parse(await readFile(deps.statePath, 'utf8'));
+    saved = await readFile(deps.statePath, 'utf8');
+    state = JSON.parse(saved);
     if (state.version !== 1 || !state.bindings || Array.isArray(state.bindings)) throw new Error('Invalid native mirror ledger');
     for (const binding of Object.values(state.bindings)) if (!Number.isFinite(binding.baselineAtMs) || !binding.turns || Array.isArray(binding.turns)) throw new Error('Invalid native mirror binding');
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const now = deps.now ?? Date.now;
-  const save = () => writeFileAtomic(deps.statePath, JSON.stringify(state), { mode: 0o600 });
+  // Each pass ends with a save; skip the atomic write when nothing changed.
+  const save = async () => {
+    const text = JSON.stringify(state);
+    if (text === saved) return;
+    await writeFileAtomic(deps.statePath, text, { mode: 0o600 }); saved = text;
+  };
   let stopped = false, running: Promise<void> | undefined, lastWarning = 0;
   const active = (scope: string, id: string): boolean => {
     const binding = deps.controls.toolBindings?.get(scope);

@@ -49,10 +49,10 @@ export function createCodexWorkerSessions(options: CodexThreadReaderOptions, sou
     targets: () => [...observed].filter(([id, at]) => Date.now() - at < 60_000 && !metadata.get(id)?.archived).map(([id]) => id),
     statePath: join(options.profileStateDir, 'auto-continue.json') });
   const rosterPath = join(options.profileStateDir, 'native-roster.json');
-  let rosterLoaded = false;
+  let rosterLoaded = false, rosterSaved = '';
   const list = async () => {
     if (!rosterLoaded) {
-      try { for (const row of JSON.parse(await readFile(rosterPath, 'utf8')) as ToolSession[]) metadata.set(row.nativeId, row); }
+      try { rosterSaved = await readFile(rosterPath, 'utf8'); for (const row of JSON.parse(rosterSaved) as ToolSession[]) metadata.set(row.nativeId, row); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       rosterLoaded = true;
     }
@@ -61,7 +61,8 @@ export function createCodexWorkerSessions(options: CodexThreadReaderOptions, sou
     for (const row of rows) metadata.set(row.threadId, { nativeId: row.threadId, name: row.name, cwd: row.cwd,
       createdAtMs: row.createdAtMs, updatedAtMs: row.updatedAtMs, archived: archivedIds.has(row.threadId) });
     for (const [id, row] of metadata) if (archivedIds.has(id)) metadata.set(id, { ...row, archived: true });
-    await writeFileAtomic(rosterPath, JSON.stringify([...metadata.values()]), { mode: 0o600 });
+    const roster = JSON.stringify([...metadata.values()]);
+    if (roster !== rosterSaved) { await writeFileAtomic(rosterPath, roster, { mode: 0o600 }); rosterSaved = roster; }
     return [...metadata.values()].filter(row => rows.some(r => r.threadId === row.nativeId) || row.archived);
   };
   const conversation = async (id: string) => {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, readFile, appendFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, appendFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -74,6 +74,18 @@ it('requires a local bearer token and verifies the configured application/source
   await expect(new WorkerClient(h.stateDir, 'another-account', 'cli_test').health()).rejects.toThrow('不匹配');
   await expect(new WorkerClient(h.stateDir, 'local-claude', 'cli_test', 'codex').health()).rejects.toThrow('不匹配');
   expect(h.calls).toHaveLength(0);
+});
+it('reuses a verified identity for the same worker process and re-verifies when the endpoint token changes', async () => {
+  const h = await fixture();
+  const fetchSpy = vi.spyOn(globalThis, 'fetch');
+  const healthCalls = () => fetchSpy.mock.calls.filter(([url]) => String(url).endsWith('/health')).length;
+  await h.client.health(); await h.client.list(); await h.client.list();
+  expect(healthCalls()).toBe(1);
+  const file = join(h.stateDir, 'endpoint.json'), endpoint = JSON.parse(await readFile(file, 'utf8'));
+  await writeFile(file, JSON.stringify({ ...endpoint, token: 'replaced' }));
+  await expect(h.client.list()).rejects.toMatchObject({ status: 401 });
+  expect(healthCalls()).toBe(2);
+  fetchSpy.mockRestore();
 });
 it('defines an independent systemd unit with no bridge lifetime dependency', () => {
   const unit = buildWorkerUnit({ node: '/node', entry: '/bridge/bin/entry.mjs', profile: 'p', config: '/state/config.json', envPath: '/bin' });
