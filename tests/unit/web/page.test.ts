@@ -2,7 +2,6 @@ import { runInNewContext } from 'node:vm';
 import { webcrypto } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { WebMarkdown } from '../../../src/web/markdown';
-import { COMPLETED_STOP_IMAGE, RUN_BUTTON_IMAGES } from '../../../src/card/run-button-images';
 import { bridgeWebPage } from '../../../apps/bridge-web/page';
 
 // Exercise the shipped browser script with controlled HTTP/SSE arrival order.
@@ -58,7 +57,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const node = (id: string) => elements.get(id)!;
   node('app').style.setProperty = ((key: string, value: string) => { node('app').style[key] = value; }) as any;
   node('session-menu').hidden = true; node('session-menu').append(node('session-rename'), node('session-archive'), node('session-copy'));
-  for (const action of ['stop', 'refresh', 'fork', 'finish']) { const button = new Element('button'); const img = new Element('img'); img.src = 'data:image/png;base64,' + RUN_BUTTON_IMAGES[action as keyof typeof RUN_BUTTON_IMAGES]; button.append(img); button.setAttribute('data-control', action); node('session-controls').append(button); }
+  for (const action of ['stop', 'refresh', 'fork', 'finish']) { const button = new Element('button'); const img = new Element('img'); img.src = '/assets/run-controls/' + action + '.png'; button.append(img); button.setAttribute('data-control', action); node('session-controls').append(button); }
   const rows = Array.from({ length: count }, (_, i) => String.fromCharCode(97 + i)).map((id, index) => ({ id: id.repeat(64), toolId: index ? 'another' : 'generic', tool: index ? 'Other' : 'Tool', favorite: false, updatedAtMs: updatedAtMs?.[index] ?? count - index,
     project: 'project', cwd: '/project', scope: 'oc_' + id, name: '会话' + index, online: true, canSend: true, canRename: true }));
   const conversation = (index: number, answer = '回答', count = 12) => ({ session: rows[index], turns: Array.from({ length: count }, (_, i) => ({
@@ -129,13 +128,13 @@ it('keeps the stop label on completion and restores its active state when new in
   const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
   const stop = h.node('session-controls').querySelectorAll('button')[0]!;
   expect(stop.textContent).toBe(''); expect(stop.dataset.completed).toBe('true'); expect(stop.disabled).toBe(true);
-  expect(stop.querySelector('img')!.src).toBe('data:image/png;base64,' + COMPLETED_STOP_IMAGE);
+  expect(stop.querySelector('img')!.src).toBe('/assets/run-controls/stop-completed.png');
   const requests = h.requests.length; stop.onclick!(); expect(h.requests).toHaveLength(requests);
   for (const status of ['running', 'interrupted', 'error', 'waiting_input', 'queued', 'unknown']) {
     const c = h.conversation(0, '回答', 1); c.turns[0]!.status = status;
     h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: c });
     expect(stop.textContent).toBe(''); expect(stop.dataset.completed).toBe('false'); expect(stop.disabled).toBe(false);
-    expect(stop.querySelector('img')!.src).toBe('data:image/png;base64,' + RUN_BUTTON_IMAGES.stop);
+    expect(stop.querySelector('img')!.src).toBe('/assets/run-controls/stop.png');
   }
   h.snapshot(0, '完成', 1); expect(stop.disabled).toBe(true);
   h.node('input').value = '新消息';

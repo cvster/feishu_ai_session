@@ -32,6 +32,7 @@ import { startWorkerNameSync } from '../../../src/bot/tool-name-sync';
 import { recordRunSessionEvent } from '../../../src/bot/run-flow';
 import { capabilityForTool } from '../../../src/agent/capability';
 import type { RunPolicyAllow } from '../../../src/policy/run-policy';
+import { RUN_BUTTON_IMAGES, COMPLETED_STOP_IMAGE } from '../../../src/card/run-button-images';
 import { WorkerApiError } from '../../../src/worker/tool-api';
 import type { WebConfig } from '../../../src/web/config';
 
@@ -1247,4 +1248,16 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('loads inline %s s
   const refreshed = await h.request('/api/sessions/' + id + '/control', { action: refresh.action, values: { model: 'default', reasoning_effort: 'high' } });
   expect(refreshed.status).toBe(200); expect(flatten((await refreshed.json() as WebControlResult).elements).some(e => e.kind === 'select' && e.name === 'model')).toBe(true);
   expect(h.send).not.toHaveBeenCalled(); expect(h.calls).toHaveLength(0);
+});
+
+it('serves exact Feishu control PNGs from same-origin URLs under the existing image security policy', async () => {
+  const h = await harness();
+  for (const [action, encoded] of Object.entries({ stop: RUN_BUTTON_IMAGES.stop, refresh: RUN_BUTTON_IMAGES.refresh,
+    fork: RUN_BUTTON_IMAGES.fork, finish: RUN_BUTTON_IMAGES.finish, 'stop-completed': COMPLETED_STOP_IMAGE })) {
+    const response = await h.request('/assets/run-controls/' + action + '.png');
+    expect(response.status).toBe(200); expect(response.headers.get('content-type')).toBe('image/png');
+    expect(response.headers.get('content-security-policy')).toContain("img-src 'self';");
+    expect(Buffer.from(await response.arrayBuffer()).equals(Buffer.from(encoded, 'base64'))).toBe(true);
+  }
+  expect((await h.request('/assets/run-controls/unknown.png')).status).toBe(404);
 });

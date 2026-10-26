@@ -5,6 +5,7 @@ import { PersonalSessionService, WebError } from './service';
 import { bridgeWebPage } from '../../apps/bridge-web/page';
 import { bridgeConsolePage } from '../../apps/bridge-web/console';
 import type { BridgeConsoleService } from './console';
+import { RUN_BUTTON_IMAGES, COMPLETED_STOP_IMAGE } from '../card/run-button-images';
 import { GROUP_AVATAR_IMAGES } from '../bot/group-avatar-images';
 import { log } from '../core/logger';
 
@@ -54,6 +55,12 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     const url = new URL(req.url ?? '/', origin);
     if (url.pathname === '/' && req.method === 'GET') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(bridgeWebPage); return; }
     if (['/console', '/console/'].includes(url.pathname) && req.method === 'GET') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(bridgeConsolePage); return; }
+    const controlIcon = /^\/assets\/run-controls\/(stop|stop-completed|refresh|fork|finish)\.png$/.exec(url.pathname);
+    if (controlIcon && req.method === 'GET') {
+      const name = controlIcon[1]!;
+      const encoded = name === 'stop-completed' ? COMPLETED_STOP_IMAGE : RUN_BUTTON_IMAGES[name as keyof typeof RUN_BUTTON_IMAGES];
+      res.setHeader('Content-Type', 'image/png'); res.end(Buffer.from(encoded, 'base64')); return;
+    }
     const avatar = /^\/assets\/session-avatars\/([a-z0-9-]+)\.png$/.exec(url.pathname);
     if (avatar && req.method === 'GET') {
       const image = Object.hasOwn(GROUP_AVATAR_IMAGES, avatar[1]!) ? GROUP_AVATAR_IMAGES[avatar[1]! as keyof typeof GROUP_AVATAR_IMAGES] : undefined;
