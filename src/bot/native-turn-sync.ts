@@ -10,6 +10,7 @@ import { renderText } from '../card/text-renderer';
 import { getMessageReplyMode, getShowToolCalls } from '../config/schema';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { log } from '../core/logger';
+import { PollHealth } from '../core/poll-health';
 import { publishCards, type CardPart } from '../card/multipart';
 import { notifyCompletion, type CompletionDelivery } from './completion-notification';
 import type { SessionNameSync } from './thread-name';
@@ -72,7 +73,8 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
     if (text === saved) return;
     await writeFileAtomic(deps.statePath, text, { mode: 0o600 }); saved = text;
   };
-  let stopped = false, running: Promise<void> | undefined, lastWarning = 0;
+  let stopped = false, running: Promise<void> | undefined;
+  const health = new PollHealth(phase, 'sync-unavailable', {}, deps.intervalMs ?? 2000, 60_000, now);
   const active = (scope: string, id: string): boolean => {
     const binding = deps.controls.toolBindings?.get(scope);
     if (!/^oc_[A-Za-z0-9]+$/.test(scope) || !binding || binding.toolId !== toolId || binding.sourceId !== deps.sourceId || binding.nativeId !== id ||
@@ -156,8 +158,10 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
     const groups = targets();
     if (!groups.size) return false;
     if (deps.ready && !await deps.ready()) return false;
+    let attempts = 0, failures = 0;
     for (const [id, scopes] of groups) {
       if (stopped) break;
+      attempts++;
       try {
         if (deps.available && !await deps.available(id)) continue;
         const snapshot = await deps.reader.read(id);
@@ -232,19 +236,17 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
             binding.baselineAtMs = Math.max(binding.baselineAtMs, delivery.createdAtMs); delete binding.turns[turnId];
           }
         }
-      } catch (error) {
-        if (now() - lastWarning >= 30_000) {
-          lastWarning = now(); log.warn(phase, 'sync-unavailable', { error: error instanceof Error ? error.message : String(error) });
-        }
-      }
+      } catch (error) { failures++; health.warn(error); }
     }
+    // Back off only when every session failed, i.e. the worker itself is unreachable.
+    if (!failures) health.ok(); else if (failures === attempts) health.backoff();
     await save(); return refreshed;
   }
   const runNow = (): Promise<void> => {
     if (stopped) return Promise.resolve();
     return running ??= sync().then(() => {}).catch(error => log.fail(phase, error)).finally(() => { running = undefined; });
   };
-  const timer = setInterval(() => void runNow(), deps.intervalMs ?? 2000); timer.unref?.();
+  const timer = setInterval(() => { if (health.due()) void runNow(); }, deps.intervalMs ?? 2000); timer.unref?.();
   await runNow();
   return {
     runNow,

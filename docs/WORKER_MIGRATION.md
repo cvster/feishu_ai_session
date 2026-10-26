@@ -57,7 +57,8 @@
 群绑定和原生会话 ID 保留。旧 Codex intake 收据导入 `codex-inbox.json`：只有从未
 提交的 `pending` 恢复入队；已提交、回执不确定或完成的记录不重发。旧原生同步卡片
 导入 `<tool>-native-turn-sync.json`，保留消息 ID、卡片 ID、序号和去重记录。缺少
-可靠投递凭据的旧记录跳过自动补发。旧 Codex 问答卡 token 和投递记录继续可用；
+可靠投递凭据的旧记录跳过自动补发。收据导入只执行一次，完成后写入
+`codex-inbox.legacy-imported`，避免收件箱过期清理后重新导入旧的 `pending` 记录。旧 Codex 问答卡 token 和投递记录继续可用；
 重启时尚在提交的答案转为未确认，不能自动再次提交。
 
 日常桥接重启不停止 worker 或原生 writer。worker/主机重启后的未完成任务状态

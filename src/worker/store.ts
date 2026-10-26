@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, open, truncate } from 'node:fs/promises';
+import { mkdir, readFile, readdir, open, rm, truncate } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../platform/atomic-write';
 import type { AgentEvent } from '../agent/types';
-import type { JobSnapshot, StoredEvent, WorkerJob, WorkerSubmission } from './protocol';
+import { isJobActive, type JobSnapshot, type StoredEvent, type WorkerJob, type WorkerSubmission } from './protocol';
 
 export const jobIdFor = (key: string): string => createHash('sha256').update(key).digest('hex');
 export function submissionFingerprint(input: WorkerSubmission): string {
@@ -18,11 +18,16 @@ export function submissionFingerprint(input: WorkerSubmission): string {
   return jobIdFor(JSON.stringify(fields));
 }
 
+/** Finished jobs stay replayable for this long; the bridge inbox keeps receipts longer so redelivery cannot re-run them. */
+export const JOB_RETENTION_MS = 14 * 24 * 60 * 60_000;
+const PRUNE_INTERVAL_MS = 60 * 60_000;
+
 /** Worker-only writer. Records acceptance before spawning and fsyncs every event. */
 export class JobStore {
   private jobs = new Map<string, WorkerJob>();
   private events = new Map<string, StoredEvent[]>();
-  constructor(readonly root: string) {}
+  private prunedAt = 0;
+  constructor(readonly root: string, private readonly now: () => number = Date.now) {}
   async load(): Promise<void> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     for (const name of await readdir(this.root)) {
@@ -42,6 +47,17 @@ export class JobStore {
       }
       this.events.set(job.id, rows);
     }
+    await this.prune();
+  }
+  /** Removes the event log first, so an interrupted prune leaves a loadable job without events. */
+  async prune(): Promise<void> {
+    const now = this.now(); this.prunedAt = now;
+    for (const job of [...this.jobs.values()]) {
+      if (isJobActive(job) || now - job.updatedAt < JOB_RETENTION_MS) continue;
+      await rm(join(this.root, `${job.id}.ndjson`), { force: true });
+      await rm(join(this.root, `${job.id}.json`), { force: true });
+      this.jobs.delete(job.id); this.events.delete(job.id);
+    }
   }
   get(id: string): WorkerJob | undefined { return this.jobs.get(id); }
   list(): WorkerJob[] { return [...this.jobs.values()]; }
@@ -52,6 +68,7 @@ export class JobStore {
   async put(job: WorkerJob): Promise<void> {
     await writeFileAtomic(join(this.root, `${job.id}.json`), `${JSON.stringify(job)}\n`, { mode: 0o600 });
     this.jobs.set(job.id, job);
+    if (!isJobActive(job) && this.now() - this.prunedAt >= PRUNE_INTERVAL_MS) await this.prune();
   }
   async append(id: string, event: AgentEvent): Promise<void> {
     const rows = this.events.get(id) ?? [];

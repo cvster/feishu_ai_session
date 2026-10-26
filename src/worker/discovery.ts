@@ -1,4 +1,4 @@
-import { readdir, readFile, lstat } from 'node:fs/promises';
+import { readdir, readFile, lstat, rm, stat } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import { probeWorker, WorkerClient, validWorkerHealth } from './client';
 import type { WorkerHealth } from './protocol';
@@ -27,6 +27,17 @@ export async function discoverWorkers(profileDir: string, botAppId: string, dupl
   });
 }
 
+/** Copies are handed to another agent to read later, so they expire by age rather than on first use. */
+const HISTORY_COPY_RETENTION_MS = 3 * 24 * 60 * 60_000;
+async function pruneHistoryCopies(root: string, keep: string): Promise<void> {
+  for (const name of await readdir(root)) {
+    const path = join(root, name);
+    if (path === keep || !/^[a-f0-9]{64}\.jsonl?$/.test(name)) continue;
+    const info = await stat(path).catch(() => undefined);
+    if (info && Date.now() - info.mtimeMs > HISTORY_COPY_RETENTION_MS) await rm(path, { force: true });
+  }
+}
+
 export function workerTool(worker: DiscoveredWorker): AgentTool {
   const { health, directory } = worker, manifest = health.manifest!, capabilities = health.capabilities!;
   registerToolDefinition(health.toolId, { label: manifest.label, backend: 'worker', nativeField: manifest.nativeField,
@@ -42,8 +53,9 @@ export function workerTool(worker: DiscoveredWorker): AgentTool {
         if (history.nativeId !== id || !['json', 'jsonl'].includes(history.format) || typeof history.content !== 'string' || Buffer.byteLength(history.content) > 32 * 1024 * 1024)
           throw new Error('Invalid worker history');
         const { createHash } = await import('node:crypto');
-        const path = join(directory, 'bridge-history', `${createHash('sha256').update(id).digest('hex')}.${history.format}`);
-        await writeFileAtomic(path, history.content, { mode: 0o600 }); return path;
+        const root = join(directory, 'bridge-history'), path = join(root, `${createHash('sha256').update(id).digest('hex')}.${history.format}`);
+        await writeFileAtomic(path, history.content, { mode: 0o600 });
+        await pruneHistoryCopies(root, path); return path;
       },
       rename: (id, name) => client.renameSession(id, name),
       archive: async id => { if (capabilities.sessions.archive) await client.archiveSession(id); },

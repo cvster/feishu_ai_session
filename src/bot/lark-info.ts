@@ -17,7 +17,6 @@ export async function fetchKnownChatsResult(channel: LarkChannel): Promise<Known
       id: c.id,
       name: c.name || '(无名)',
     }));
-    log.info('lark-info', 'chats-fetched', { count: chats.length });
     return { ok: true, chats };
   } catch (err) {
     log.warn('lark-info', 'chats-fetch-failed', {

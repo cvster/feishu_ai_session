@@ -6,13 +6,15 @@ import type { WorkerJob } from './protocol';
 
 interface InboxEntry { scope: string; message: NormalizedMessage; status: 'pending' | 'accepted' | 'rejected' | 'cancelled'; notified?: boolean;
   diagnostic?: { at: number; code: string; message: string; retryable: boolean } }
+/** Outlives worker job retention (14 days) so a redelivered message is never accepted twice. */
+const RECEIPT_RETENTION_MS = 30 * 24 * 60 * 60_000;
 /** Bridge-only writer; persists input before debounce and keeps receipt identities. */
 export class WorkerInbox {
   private entries: Record<string, InboxEntry> = {};
   private queued = new Set<string>();
   private deferredUntil = new Map<string, number>();
   private saving: Promise<void> = Promise.resolve();
-  constructor(private readonly path: string) {}
+  constructor(private readonly path: string, private readonly now: () => number = Date.now) {}
   async load(): Promise<void> {
     try {
       const raw = JSON.parse(await readFile(this.path, 'utf8'));
@@ -20,6 +22,12 @@ export class WorkerInbox {
       for (const value of Object.values(raw.entries) as InboxEntry[]) if (!value.message?.messageId || !value.scope || !['pending', 'accepted', 'rejected', 'cancelled'].includes(value.status)) throw new Error('Invalid worker inbox receipt');
       this.entries = raw.entries;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    const cutoff = this.now() - RECEIPT_RETENTION_MS;
+    let pruned = false;
+    for (const [key, entry] of Object.entries(this.entries)) {
+      if (entry.status !== 'pending' && Number(entry.message.createTime) < cutoff) { delete this.entries[key]; pruned = true; }
+    }
+    if (pruned) await this.persist();
   }
   private key(scope: string, message: NormalizedMessage) { return JSON.stringify([scope, messageRequestId(message)]); }
   async receive(scope: string, message: NormalizedMessage): Promise<boolean> {

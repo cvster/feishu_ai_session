@@ -89,13 +89,16 @@ it('blocks a running legacy worker migration without moving or stopping it', asy
 it('recovers only never-submitted intake and keeps uncertain/accepted receipts immutable', async () => {
   const dir = await profile();
   const records = ['pending', 'sending', 'accepted', 'unknown', 'completed', 'rejected', 'cancelled'].map((status, i) => ({
-    id: `om_${i}`, scope: 'oc_group', status, messages: [{ messageId: `om_${i}`, createTime: i }], createdAtMs: 1, updatedAtMs: 2,
+    id: `om_${i}`, scope: 'oc_group', status, messages: [{ messageId: `om_${i}`, createTime: Date.now() + i }], createdAtMs: 1, updatedAtMs: 2,
   }));
   await writeFile(join(dir, 'codex-submissions.json'), JSON.stringify({ version: 1, records }));
   await migrateLegacyIntake(dir); const inbox = new WorkerInbox(join(dir, 'codex-inbox.json')); await inbox.load();
   expect(inbox.available().map(entry => entry.message.messageId)).toEqual(['om_0']);
   await inbox.rejectScope('oc_group'); await migrateLegacyIntake(dir); await inbox.load(); expect(inbox.available()).toEqual([]);
   for (const record of records) expect(await inbox.receive(record.scope, record.messages[0] as any)).toBe(false);
+  // After expiry, a later startup must not re-import the rejected legacy pending record.
+  const expired = new WorkerInbox(join(dir, 'codex-inbox.json'), () => Date.now() + 40 * 24 * 60 * 60_000); await expired.load();
+  await migrateLegacyIntake(dir); await inbox.load(); expect(inbox.available()).toEqual([]);
 });
 it('preserves old card IDs and sequences including bridge-origin in-flight replies', async () => {
   const dir = await profile(), catalog = new SessionCatalog(join(dir, 'catalog')); await catalog.load();

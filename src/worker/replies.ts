@@ -12,6 +12,7 @@ import { renderCard, type RunCardRenderOptions } from '../card/run-renderer';
 import { renderText } from '../card/text-renderer';
 import { getMessageReplyMode, getShowToolCalls } from '../config/schema';
 import { log } from '../core/logger';
+import { PollHealth } from '../core/poll-health';
 import { publishCards, checkSendWindow, deliveryUuid, sendDeliveryMessage, type CardPart } from '../card/multipart';
 import { notifyCompletion, type CompletionDelivery } from '../bot/completion-notification';
 import { DurableAgentAdapter } from './adapter';
@@ -95,7 +96,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
   }
   let stopped = false;
   let running: Promise<void> | undefined;
-  let lastWarning = 0;
+  const health = new PollHealth('worker-replies', 'sync-unavailable', { toolId: deps.adapter.id });
   async function sync(): Promise<void> {
     const jobs = await deps.adapter.client.list();
     for (const [id, cached] of nativeCache) if (Date.now() - cached.at > 60_000) nativeCache.delete(id);
@@ -248,11 +249,9 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
   }
   const runNow = (): Promise<void> => {
     if (stopped) return Promise.resolve();
-    return running ??= sync().catch(error => {
-      if (Date.now() - lastWarning > 30_000) { lastWarning = Date.now(); log.warn('worker-replies', 'sync-unavailable', { toolId: deps.adapter.id, error: error instanceof Error ? error.message : String(error) }); }
-    }).finally(() => { running = undefined; });
+    return running ??= sync().then(() => health.ok(), error => health.failed(error)).finally(() => { running = undefined; });
   };
-  const timer = setInterval(() => { void runNow(); }, deps.intervalMs ?? 1000); timer.unref?.();
+  const timer = setInterval(() => { if (health.due()) void runNow(); }, deps.intervalMs ?? 1000); timer.unref?.();
   void runNow();
   return {
     runNow,

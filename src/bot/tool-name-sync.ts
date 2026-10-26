@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { DurableAgentAdapter } from '../worker/adapter';
 import { NAME_SYNC_INTERVAL_MS, SessionNameSync } from './thread-name';
 import { log } from '../core/logger';
+import { PollHealth } from '../core/poll-health';
 
 /** Poll native metadata only; remote mutations go through the owning worker. */
 export async function startToolNameSync(options: {
@@ -44,7 +45,8 @@ export async function startToolNameSync(options: {
       if (binding.name !== name) { controls.toolBindings!.set(scope, { ...binding, name }); await controls.toolBindings!.flush(); }
     } });
   await sync.load();
-  let stopped = false, running: Promise<void> | undefined, lastWarning = 0;
+  let stopped = false, running: Promise<void> | undefined;
+  const health = new PollHealth('session', 'native-name-poll-failed', { toolId: tool.id }, options.intervalMs ?? NAME_SYNC_INTERVAL_MS, 2 * 60_000);
   const tick = () => {
     if (stopped) return Promise.resolve();
     if (running) return running;
@@ -57,12 +59,10 @@ export async function startToolNameSync(options: {
         if (!row.archived && wanted.has(row.nativeId))
           await sync.observe({ id: row.nativeId, name: row.name }, entries, scope => !stopped && exclusive(scope, row.nativeId));
       }
-    })().catch(error => {
-      if (Date.now() - lastWarning > 60_000) { lastWarning = Date.now(); log.warn('session', 'native-name-poll-failed', { toolId: tool.id, error: String(error) }); }
-    }).finally(() => { running = undefined; });
+    })().then(() => health.ok(), error => health.failed(error)).finally(() => { running = undefined; });
     return running;
   };
-  const timer = setInterval(() => { void tick(); }, options.intervalMs ?? NAME_SYNC_INTERVAL_MS); timer.unref();
+  const timer = setInterval(() => { if (health.due()) void tick(); }, options.intervalMs ?? NAME_SYNC_INTERVAL_MS); timer.unref();
   void tick();
   return { tick, async stop() { stopped = true; clearInterval(timer); await running; } };
 }

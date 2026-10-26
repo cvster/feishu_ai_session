@@ -82,6 +82,8 @@ export async function cleanDissolvedChat(deps: Deps, chatId: string): Promise<vo
   const binding = controls.toolBindings?.get(chatId);
   const personalGroup = personal && binding?.nativeId && !binding.linkedSource && !binding.sharedScope && !binding.auxiliaryWorkgroup
     ? { agentId: binding.toolId, sourceId: binding.sourceId, nativeId: binding.nativeId, name: binding.name } : undefined;
+  // Startup re-runs cleanup for every recorded dissolution; only the first one is news.
+  const first = !catalog.isChatDissolved(chatId);
   catalog.markChatDissolved(chatId, refs, personalGroup);
   await catalog.flush();
   await controls.auxiliary?.closeDissolvedChat(chatId);
@@ -98,7 +100,7 @@ export async function cleanDissolvedChat(deps: Deps, chatId: string): Promise<vo
   await Promise.all([sessions.flush(), workspaces.flush(), controls.toolBindings?.flush()]);
   await removeAllowedChat(controls, chatId);
   controls.knownChats = controls.knownChats?.filter(chat => chat.id !== chatId);
-  log.info('group-cleanup', 'dissolved-chat-cleaned', { chatId, scopes: scopes.size });
+  if (first) log.info('group-cleanup', 'dissolved-chat-cleaned', { chatId, scopes: scopes.size });
 }
 
 /** Read-only Feishu probes; only local routing state is changed after confirmed dissolution. */

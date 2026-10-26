@@ -124,6 +124,16 @@ endpoint to replay a mutation. Metadata mutations are serialized against admissi
 and rejected when a job owns the target session; paired transports also require
 an idle connection. Blocking native questions pause the worker idle watchdog.
 
+Finished jobs and their event logs are kept for 14 days after their last update,
+then pruned at worker start and at most hourly afterwards; accepted and running
+jobs are never pruned. The bridge inbox keeps settled receipts for 30 days, longer
+than job retention, so a redelivered message cannot be accepted twice. History
+copies written to `bridge-history/` for session copy expire after 3 days. The
+bridge caches a verified `/health` for 5 seconds per endpoint token; a restarted
+worker publishes a new token and is verified again. Reply, native-turn and name
+pollers back off exponentially (up to 1 minute, name sync up to 2 minutes) while a
+worker is unreachable, warn once per distinct error and log `*-recovered` on success.
+
 The shared worker runner also checks stale observers every 15 seconds after two
 minutes without events. Adapters may provide an optional read-only `checkLiveness`
 hook together with `detach`. Three consecutive checks must confirm the same

@@ -21,8 +21,11 @@ export async function migrateWorkerConfiguration(profileDir: string, profile: Pr
   return next;
 }
 
-/** Import receipt identities; accepted/uncertain old writes can never be submitted again. Idempotent across crashes. */
+/** Import receipt identities; accepted/uncertain old writes can never be submitted again. Idempotent across crashes.
+ * Runs once: the inbox later expires settled receipts, and re-importing would revive a legacy pending record. */
 export async function migrateLegacyIntake(profileDir: string): Promise<void> {
+  const marker = join(profileDir, 'codex-inbox.legacy-imported');
+  if (await stat(marker).catch(error => { if (error.code === 'ENOENT') return; throw error; })) return;
   let old;
   try { old = JSON.parse(await readFile(join(profileDir, 'codex-submissions.json'), 'utf8')); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
@@ -42,4 +45,5 @@ export async function migrateLegacyIntake(profileDir: string): Promise<void> {
     }
   }
   await writeFileAtomic(file, JSON.stringify(inbox), { mode: 0o600 });
+  await writeFileAtomic(marker, `${new Date().toISOString()}\n`, { mode: 0o600 });
 }

@@ -75,3 +75,15 @@ it('persists the last rejection cause and only releases retry backoff for unsent
   h.inbox.releaseQueued('group', [msg('pending')]); await h.inbox.reconcile([{ options: { delivery: { scope: 'group', messageIds: ['pending'] } } } as WorkerJob]);
   expect(h.inbox.retryPending('group', 'pending')).toBe(false);
 });
+
+it('drops settled receipts after the retention window but keeps pending input and undated receipts', async () => {
+  const h = await inboxFixture(), day = 24 * 60 * 60_000, now = 100 * day;
+  const old = (id: string) => ({ ...msg(id), createTime: now - 31 * day });
+  await h.inbox.receive('group', old('old-accepted')); await h.inbox.reconcile([{ options: { delivery: { scope: 'group', messageIds: ['old-accepted'] } } } as WorkerJob]);
+  await h.inbox.receive('group', old('old-pending'));
+  await h.inbox.receive('group', { ...msg('recent'), createTime: now - day }); await h.inbox.reject('group', [msg('recent')]);
+  await h.inbox.receive('group', msg('undated')); await h.inbox.reject('group', [msg('undated')]);
+  const restored = new WorkerInbox(h.path, () => now); await restored.load();
+  expect(restored.receipts('group').map(r => r.message.messageId).sort()).toEqual(['old-pending', 'recent', 'undated']);
+  expect(Object.keys(JSON.parse(await readFile(h.path, 'utf8')).entries)).toHaveLength(3);
+});
