@@ -29,7 +29,7 @@ const entryPattern = new RegExp(`${root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/
 const BUILD_OUTPUTS = ['dist', 'packages/codex-core/dist', 'apps/web-app/upstream-overrides/claudecodeui-1.25.2/server/codex-core',
   'apps/web-app/upstream-overrides/claudecodeui-1.25.2/shared/codex-core-models.js'];
 
-const sh = (cmd, argv, opts = {}) => execFileSync(cmd, argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], ...opts }).trim();
+const sh = (cmd, argv, opts = {}) => (execFileSync(cmd, argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], ...opts }) ?? '').trim();
 const systemctl = (...argv) => sh('systemctl', ['--user', ...argv]);
 const step = message => console.log(`• ${message}`);
 const exists = path => lstat(path).then(() => true, () => false);
