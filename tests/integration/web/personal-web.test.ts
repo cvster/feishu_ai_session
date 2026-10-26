@@ -1233,3 +1233,18 @@ it('returns durable send confirmations across restart and native read failures w
   expect((await restarted.read(session.id)).confirmedRequestIds).not.toContain(requestId);
   expect(h.create).toHaveBeenCalledOnce(); expect(h.calls).toHaveLength(0);
 });
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('loads inline %s settings and refreshes models through authenticated common commands', async tool => {
+  const h = await harness(tool, '127.0.0.2', { trustedNetworks: [] }); const id = (await h.service.list())[0]!.id;
+  expect((await h.request('/api/sessions/' + id + '/settings')).status).toBe(401); await h.login();
+  const response = await h.request('/api/sessions/' + id + '/settings'); expect(response.status).toBe(200);
+  const elements = flatten((await response.json() as WebControlResult).elements);
+  const save = elements.find(e => e.kind === 'button' && e.command === 'config.submit')!;
+  const refresh = elements.find(e => e.kind === 'button' && e.command === 'config.models.0')!;
+  expect(save).toBeDefined(); expect(refresh).toBeDefined();
+  expect(elements.find(e => e.kind === 'select' && e.name === 'reasoning_effort')).toBeDefined();
+  if (refresh.kind !== 'button') throw Error('refresh');
+  const refreshed = await h.request('/api/sessions/' + id + '/control', { action: refresh.action, values: { model: 'default', reasoning_effort: 'high' } });
+  expect(refreshed.status).toBe(200); expect(flatten((await refreshed.json() as WebControlResult).elements).some(e => e.kind === 'select' && e.name === 'model')).toBe(true);
+  expect(h.send).not.toHaveBeenCalled(); expect(h.calls).toHaveLength(0);
+});

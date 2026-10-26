@@ -11,6 +11,8 @@ export interface ConfigFormOpts {
   modelNotice?: string;
   modelOptions?: ModelOption[];
   modelPage?: number;
+  /** Web selectors do not have Feishu's 80-option limit. */
+  unpagedModels?: boolean;
   reasoningEffort: string;
   reasoningNotice?: string;
   messageReply: MessageReplyMode;
@@ -62,9 +64,9 @@ export function configFormCard(opts: ConfigFormOpts): object {
   });
   const allModels = [...(opts.modelOptions ?? supportedModels(opts.agentKind))];
   if (!allModels.some(model => model.value === opts.model)) allModels.push({ value: opts.model, label: `未验证 · ${opts.model}` });
-  const pages = Math.max(1, Math.ceil(allModels.filter(model => model.value !== 'default').length / 80));
+  const pages = opts.unpagedModels ? 1 : Math.max(1, Math.ceil(allModels.filter(model => model.value !== 'default').length / 80));
   const page = Math.max(0, Math.min(pages - 1, Math.floor(Number.isFinite(opts.modelPage) ? opts.modelPage! : 0)));
-  const modelOptions = allModels.filter(model => model.value !== 'default').slice(page * 80, (page + 1) * 80);
+  const modelOptions = allModels.filter(model => model.value !== 'default').slice(opts.unpagedModels ? 0 : page * 80, opts.unpagedModels ? undefined : (page + 1) * 80);
   for (const model of allModels) if ((model.value === 'default' || model.value === opts.model) && !modelOptions.some(m => m.value === model.value)) modelOptions.unshift(model);
   const effortOptions = reasoningOptions(allModels.find(model => model.value === opts.model));
   const effort = normalizeReasoningEffort(opts.agentKind, opts.reasoningEffort);

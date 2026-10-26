@@ -7,7 +7,7 @@ import { WebError } from './service';
 
 export type WebControlElement =
   | { kind: 'text'; text: string }
-  | { kind: 'button'; text: string; action: string; primary: boolean; danger?: boolean }
+  | { kind: 'button'; text: string; action: string; command?: string; primary: boolean; danger?: boolean }
   | { kind: 'select'; name: string; value: string; options: { value: string; text: string }[] }
   | { kind: 'input'; name: string; value: string; label?: string }
   | { kind: 'section'; text: string; elements: WebControlElement[] };
@@ -77,7 +77,7 @@ export class WebSessionControls {
       if (v.tag === 'button' || v.tag === 'interactive_container') {
         const payload = v.behaviors?.find((b: any) => b.type === 'callback')?.value ?? v.value;
         return typeof payload?.cmd === 'string' && callbackCommand.test(payload.cmd) ? [{ kind: 'button',
-          text: String(v.text?.content ?? v.hover_tips?.content ?? '继续'), action: issue(payload.cmd, payload.arg ?? ''), primary: v.type === 'primary', danger: v.type === 'danger' }] : [];
+          text: String(v.text?.content ?? v.hover_tips?.content ?? '继续'), action: issue(payload.cmd, payload.arg ?? ''), command: payload.cmd, primary: v.type === 'primary', danger: v.type === 'danger' }] : [];
       }
       const children = (v.elements ?? v.columns ?? []).flatMap(read);
       return v.tag === 'collapsible_panel' ? [{ kind: 'section', text: String(v.header?.title?.content ?? '更多设置'), elements: children }] : children;

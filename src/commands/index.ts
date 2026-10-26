@@ -2796,7 +2796,7 @@ async function showConfigForm(ctx: CommandContext,
     } catch { reasoningNotice = '暂时无法读取原会话档位，初始选择高；保存后按所选模型自动适配。'; }
   }
   const card = configFormCard({
-    modelOptions: modelChoices.options, modelPage,
+    modelOptions: modelChoices.options, modelPage, unpagedModels: ctx.fromWeb,
     agentKind: ctx.controls.profileConfig.agentKind,
     model: selectedModel,
     reasoningEffort: selectedEffort, reasoningNotice,

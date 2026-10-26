@@ -62,3 +62,13 @@ it('offers the fixed unified list without a default or per-model read button', (
   expect(picker.options!.map(option => option.value)).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
   expect(JSON.stringify(card)).not.toContain('config.preview');
 });
+
+it('offers the entire model catalog to Web without requiring Feishu model pages', () => {
+  const modelOptions = Array.from({ length: 160 }, (_, i) => ({ value: `provider/model-${i}`, label: `Model ${i}` }));
+  const card = configFormCard({ ...defaults, modelOptions, model: 'provider/model-0', unpagedModels: true }) as { body: { elements: Element[] } };
+  const form = card.body.elements.find(e => e.tag === 'form')!;
+  const picker = form.elements!.find(e => e.name === 'model')!;
+  expect(picker.options).toHaveLength(160);
+  expect(picker.options?.at(-1)?.value).toBe('provider/model-159');
+  expect(JSON.stringify(card)).not.toContain('config.models.1');
+});
