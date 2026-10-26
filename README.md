@@ -8,10 +8,10 @@
 
 本仓库包含个人工作群、AA 会话自动建群、开放群直接关联原会话、折叠回复和各工具统一 worker 等定制功能。使用本仓库版本请按下文从源码构建；公开 npm 包不保证包含这些改动。
 
-- [完整安装配置指引](docs/INSTALL.md)：一键安装、二选一/双工具、版本检查、登录、writer/worker、后台环境及验收。
+- [完整安装配置指引](docs/INSTALL.md)：从最短 Linux 安装路线开始，含独立 worker、内置网页、Codex writer 占用与 Claude 目录占用排错。
 - [动态模型列表](docs/MODELS.md)：Codex、Claude、ZCode、Kilo 原生模型发现，供应商区分、刷新及删除后的处理。
 - [ZCode 接入与工具扩展](docs/ZCODE.md)：本机模型账号、独立 worker、可选桌面远控配对、支持范围及架构说明。
-- [Kilo 接入与使用](docs/KILO.md)：VS Code 插件或 App 互斥模式、动态模型及推理档位、独立 worker 和会话操作。
+- [Kilo 接入与使用](docs/KILO.md)：VS Code 插件或独立 CLI 模式、动态模型及推理档位、独立 worker 和会话操作。
 - [DeepSeek Harness 接入](docs/DSH.md)：官方 DSH CLI 安装、原生模型配置、独立 worker、AA 工作群、会话共享和会话操作。
 - [飞书权限申请清单](docs/FEISHU_PERMISSIONS.md)：权限标识、申请用途、事件订阅与验收步骤。
 - [回复卡片与群消息](docs/CARD_DELIVERY.md)：去除思考和工具详情、超长分卡、个人群无需 @及完成提醒。
@@ -89,7 +89,7 @@ pnpm test
 pnpm build
 ```
 
-`pnpm build` 生成根目录 `dist/` 的飞书桥接产物，同时准备共享 core 产物；不会启动或部署 Web 服务。
+`pnpm build` 生成根目录 `dist/` 的桥接及内置轻量网页产物，同时准备共享 core；不会启动服务。内置网页与桥接同进程，独立的 `apps/web-app` 才需另行构建和部署。
 
 ### 2. 创建机器人配置
 

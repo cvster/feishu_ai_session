@@ -97,10 +97,8 @@ Node.js >=20.12（推荐24）和 Git 需预装。默认不登录、不启动模�
   catch (error) { if (error.code !== 'EEXIST') throw error; }
   cli(['setup', '--profile', opts.profile]);
   if (!opts.start) { console.log('profile 已创建。请按 docs/INSTALL.md 完成登录、worker/writer 和飞书发布，再执行 doctor --runtime --network。'); return; }
-  if (kinds.includes('claude')) {
-    if (process.platform !== 'linux') throw new Error('此平台需手动托管 worker run，脚本未启动桥接；详见 docs/INSTALL.md');
-    cli(['worker', 'start', '--profile', opts.profile]);
-  }
+  if (process.platform !== 'linux') throw new Error('此平台需手动托管所选工具的 worker run，脚本未启动桥接；详见 docs/INSTALL.md');
+  for (const kind of kinds) cli(['worker', 'start', '--profile', opts.profile, '--tool', kind]);
   cli(['doctor', '--profile', opts.profile, '--agents', selection, '--runtime', '--network']);
   cli(['start', '--profile', opts.profile]);
 }

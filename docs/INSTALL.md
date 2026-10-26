@@ -2,6 +2,29 @@
 
 本指引适用于 [`cvster/feishu_ai_session`](https://github.com/cvster/feishu_ai_session)。不要用同名上游 npm 包代替本仓库构建。飞书桥接不需要 Web 子项目的 Python、nginx、数据库或前端依赖。
 
+## 最短安装路线（Linux）
+
+推荐直接在有项目代码和工具登录信息的机器上，以日常使用工具的 OS 用户部署。无需 Docker、Redis 或数据库；桥接内置轻量网页，与桥接同进程。`apps/web-app` 是另一套独立网页，不是安装本项目的前置依赖。
+
+1. 安装 Node 24（含 npm）和 Git，执行第 2 节的安装命令。只安装实际用的工具；Codex/Claude 可由脚本补装，Kilo/Zcode/Dsh 按各自接入文档配置。
+2. 登录所选工具，按第 4 节创建 profile 并运行 `setup`；完成第 7 节飞书权限、事件和应用发布。
+3. 启动所选 worker；Codex 先确认已有共享 writer，只有没有 writer 的新机器才按第 6 节启动 daemon。
+4. 前台运行桥接验证真实收发，再切换后台。以下以 Codex 为例；Claude 把 `--tool codex` 和 `--agents codex` 换为 `claude`：
+
+   ```bash
+   node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool codex
+   node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool codex
+   node bin/lark-channel-bridge.mjs doctor --profile my-bot --agents codex --runtime --network
+   node bin/lark-channel-bridge.mjs run --profile my-bot
+   # 验证后 Ctrl-C 退出前台桥接，再启动后台
+   node bin/lark-channel-bridge.mjs start --profile my-bot
+   node bin/lark-channel-bridge.mjs status --profile my-bot
+   ```
+
+5. 如需网页，执行 `node bin/lark-channel-bridge.mjs web configure --profile my-bot`，按提示设置监听地址、端口和认证，然后 `node bin/lark-channel-bridge.mjs restart --profile my-bot`。只重启桥接，worker 保持运行；不需要单独安装前端依赖。具体访问控制见 [网页说明](BRIDGE_WEB_PLAN.md)。
+
+服务关系：飞书/内置网页 → 桥接 → 所选工具 worker → 原生工具；Codex worker 再连接真正持有会话的共享 writer。桥接自动发现 `workers/*/endpoint.json`，但不会因发现文件就启动 worker。下面各节用于解释首次登录、飞书发布及故障排查，不能用构建成功代替收发验收。
+
 ## 1. 选择工具和系统
 
 安装实际使用的工具即可：Codex、Claude、Kilo、ZCode 或 DSH。只用 Kilo 无需安装 Codex。一个 profile 的 `agentKind` 是默认工具；安装两个时，同一机器人创建个人工作群可分别选择 Codex 或 Claude，群创建后工具固定。`--agents both` 会检查两者；只选一个，不要求另一个存在。
@@ -137,6 +160,31 @@ codex app-server daemon version
 
 按所装版本的帮助配置并启动，或在 `runtime.env` 设置 `CODEX_QUEUE_REMOTE` 指向现有公开端点。默认发现 `CODEX_HOME/app-server-control/app-server-control.sock`。不要将另一进程私有连接地址当成公开共享端点；不要为日常桥接更新停止/重启现有 writer。版本和目录必须与登录账号、历史所在目录一致。doctor 只连公开端点做握手/只读 account/read，不提交任务、不读任务列表、不启动新 writer。
 
+#### 提示“另一个 writer 占用”怎么办
+
+**现象：** 恢复会话、改模型/推理档位或提交消息失败，原生错误提到 `writer`、`another writer` 或会话已被其他执行端持有（不同 Codex 版本措辞可能不同）；也可能表现为历史能读、提交失败，或飞书执行结果与桌面实时状态不一致。
+
+**原因：** 同一会话的执行所有权在另一个 app-server/客户端中，当前连接尝试恢复或修改它。桌面 App、独立 CLI、另起的 daemon 可能不是同一个 writer。账号、`CODEX_HOME` 和历史文件相同，并不等于共享运行实例。不要把多个 app-server 进程本身视为故障：只读历史进程可以正常存在，关键是写操作连接哪个实例。
+
+**推荐处理：**
+
+1. 保留原桌面/终端及其任务，先核对 worker 的 `options.binaryPath`、服务 OS 用户、`CODEX_HOME` 和 `CODEX_QUEUE_REMOTE`。使用下节的只读命令确认 CLI 能力与 daemon 来源；不要再启动一个 daemon 来“抢回”会话。
+2. 桌面和群需要共用会话时，让 worker 指向桌面实际使用且允许共享访问的公开 writer 端点。按下节配置 `CODEX_QUEUE_REMOTE`，不可使用猜测的 socket 或桌面私有连接。当前桥接通过原生队列提交；修改设置也在同一个共享 writer 中进行，不能通过独立 reader 的 `thread/resume` 强行抢占。
+3. **如果改的是 worker 的环境、CLI 路径或配置，需要单独重新启动 Codex worker 才能加载。** 仅重启桥接不会刷新正在运行的 worker 环境。在自己安排的维护窗口执行：
+
+   ```bash
+   node bin/lark-channel-bridge.mjs worker stop --profile my-bot --tool codex
+   node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool codex
+   node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool codex
+   node bin/lark-channel-bridge.mjs doctor --profile my-bot --agents codex --runtime --network
+   ```
+
+   worker 停止可能中断其任务，不能作为普通桥接部署的固定步骤。以上命令不停止桌面或共享 writer。
+4. 如果当前工具版本无法提供共享端点，就在原执行端继续该会话；需要切换执行端时，先在原端正常结束/退出，再安排由目标端接管。不要自动杀掉所有 Codex 进程，或删除 socket、锁文件、SQLite、会话历史、提交收据和队列账本。
+5. 恢复后先检查原消息有没有被接收/执行，再重试未执行的请求，避免重复任务。在专用测试会话验证群与桌面双向消息、停止和交互；doctor 连接通过不能独自证明桌面共用 writer。
+
+此处是本项目队列实现的排错说明。公开协议与传输以 [OpenAI 官方 app-server 文档](https://learn.chatgpt.com/docs/app-server) 和安装版本的 `--help` 为准；官方通用 app-server 文档并未保证每个桌面版本都开放相同的共享 writer 接入方式。
+
 #### 旧版 CLI 与桌面 App 未共用 app-server
 
 部分旧版 Codex CLI 与桌面 App 会各自启动 app-server；PATH 指向旧 CLI、后台服务使用另一份可执行文件，或另起独立 daemon，也可能出现同样的情况。**同一账号、相同 `CODEX_HOME`、能读取同一份历史，不代表共用同一个运行中的 app-server。** 这类问题不是飞书权限或 AA 群绑定错误。
@@ -167,21 +215,30 @@ codex app-server daemon version
 
    路径须替换为本机真实值；仅当该 socket 确实属于桌面使用的共享 writer 时，这个配置才解决运行时不同步。端点格式见 [官方 app-server 传输说明](https://learn.chatgpt.com/docs/app-server)。若旧桌面只提供自己的私有连接，先升级到兼容版本并按该版本支持的共享方式配置；不能只靠修改桥接端点强行接入私有连接，也不要猜测桌面启动参数。暂时使用独立 daemon 时，飞书可独立执行，但不应把桌面实时同步视为已验收。
 
-4. **重启桥接并验收。** 保存配置后只重启桥接，先执行 `node bin/lark-channel-bridge.mjs doctor --profile my-bot --agents codex --runtime --network` 检查公开端点，再在同一个个人工作群和桌面会话分别发送一条测试消息，确认双向显示、停止与交互都作用于同一会话。doctor 通过只证明连接与认证，不证明桌面已共用该实例。确需升级/重启桌面或 writer 时，另行安排维护；日常桥接部署不要连带重启它们，也不要删除会话、队列或回复账本来修复连接问题。
+4. **加载配置并验收。** 如果修改了 worker 的环境或 CLI 路径，按上节在维护窗口单独重新启动 Codex worker；只改桥接配置时仅重启桥接。然后执行 `node bin/lark-channel-bridge.mjs doctor --profile my-bot --agents codex --runtime --network` 检查公开端点，再在同一个个人工作群和桌面会话分别发送一条测试消息，确认双向显示、停止与交互都作用于同一会话。doctor 通过只证明连接与认证，不证明桌面已共用该实例。确需升级/重启桌面或 writer 时，另行安排维护；日常桥接部署不要连带重启它们，也不要删除会话、队列或回复账本来修复连接问题。
+
+Codex writer 准备好后，还必须启动 **Codex worker**（daemon 不是 worker）：
+
+```bash
+node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool codex
+node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool codex
+```
+
+macOS/Windows/无 systemd 环境使用 `worker run --profile my-bot --tool codex`，交给自己的进程管理器托管。
 
 ### Claude
 
 Linux：
 
 ```bash
-node bin/lark-channel-bridge.mjs worker start --profile my-bot
-node bin/lark-channel-bridge.mjs worker status --profile my-bot
+node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool claude
+node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool claude
 ```
 
 macOS/Windows/无 systemd 环境，单独终端或独立进程管理器运行：
 
 ```bash
-node bin/lark-channel-bridge.mjs worker run --profile my-bot
+node bin/lark-channel-bridge.mjs worker run --profile my-bot --tool claude
 ```
 
 worker 必须与桥接使用同一 profile、飞书应用、Claude 账号目录和 OS 用户。`worker stop` 会中断其 Claude 任务；普通更新只重启桥接。这里不要求另装 Python、Redis 或队列数据库。
@@ -233,7 +290,7 @@ node bin/lark-channel-bridge.mjs status --profile my-bot
 
 Linux 若需退出登录后继续运行，由管理员为部署账户开启 systemd linger。NVM、CLI 或安装目录迁移后，检查服务记录的绝对路径；从新目录重新注册，不要指向 npx 缓存。
 
-只有新 profile、登录、执行服务及飞书配置均准备好时，才可以给安装命令加 `--configure --start`。它不会自动配置或重启 Codex writer，也不会覆盖现有 profile。
+只有新 profile、登录、执行服务及飞书配置均准备好时，才可以给安装命令加 `--configure --start`。它会在 Linux 启动所选 Codex/Claude worker，再检查并启动桥接；不会自动配置或重启 Codex writer，也不会覆盖现有 profile。
 
 ## 9. 生产产物部署与升级
 
@@ -241,7 +298,7 @@ Linux 若需退出登录后继续运行，由管理员为部署账户开启 syst
 
 只部署已构建产物时，保留同一版本的 dist、bin、package.json、锁文件、workspace 清单及工作区 package.json/许可证，安装 `pnpm install --prod --frozen-lockfile`。该命令不再触发 TypeScript 构建；**它不会生成 dist**，必须先从构建阶段取得产物。缺少 dist 时 CLI 无法启动。
 
-升级前备份构建产物和服务配置；构建成功后只重启目标桥接。不要用旧备份覆盖新的会话、收据和队列账本；不要随代码复制他人的认证、profile 状态或 `.env`。Web 服务另行部署。
+升级前备份构建产物和服务配置；构建成功后只重启目标桥接。不要用旧备份覆盖新的会话、收据和队列账本；不要随代码复制他人的认证、profile 状态或 `.env`。桥接内置网页随桥接一起部署；独立 `apps/web-app` 才需另行部署。
 
 新增工具时，更新桥接并为新工具启动自己的 worker；已有 worker 与 Codex writer 不随桥接重启，已接收任务继续运行。桥接重连期间回复同步可能短暂停顿，恢复后读取原收据；不要重发任务或重建执行队列。
 
@@ -260,6 +317,8 @@ Linux 若需退出登录后继续运行，由管理员为部署账户开启 syst
 | 版本达标但能力失败 | PATH 指向了其他 CLI/不兼容发行版；按 doctor 的具体命令修复 |
 | 前台正常后台失败 | 核对 runtime.env、服务 Node 路径、CLI 路径及运行 OS 用户 |
 | Claude worker 身份不匹配 | 同一 profile/app 和 CLAUDE_CONFIG_DIR，不能跨用户读取别人的 worker |
+| Codex 提示另一个 writer 占用 | 按第 6 节专门排查，连接原共享 writer；不杀进程、不删账本 |
+| Claude 提示该目录仍有进程运行 | 检查同项目目录的 Claude 终端；即使已回答完，进程没退出也占用。正常退出后再重发未执行消息，见下文 |
 | Codex 只有历史没有执行 | 核对真实 writer、公开端点及目录；不是重装 npm 依赖能解决 |
 | 飞书能执行但 Codex 桌面不刷新，停止/交互无法作用于桌面任务 | 排查旧 CLI 或不同 app-server；见第 6 节“旧版 CLI 与桌面 App 未共用 app-server” |
 | 飞书已连接却没事件/按钮无效 | 核对权限、消息事件、卡片回调、发布和可用范围 |
@@ -268,3 +327,9 @@ Linux 若需退出登录后继续运行，由管理员为部署账户开启 syst
 检查源码/测试仅证明本地兼容；真实账号授权、特定模型、企业网络和每个平台的后台保活需实际验收。
 
 所有工具需独立 worker，例如 `worker start --profile my-bot --tool codex` 或 `--tool kilo`。桥接自动扫描 `workers/*/endpoint.json`，无需工具专用桥接配置。旧部署升级请先阅读 [完整迁移步骤](WORKER_MIGRATION.md)。
+
+### Claude 目录占用与 Codex writer 占用的区别
+
+`该目录仍有 Claude Code 进程运行，请先在原终端结束会话，再从群内继续。` 是本项目的保护检查，表示这次请求被拒绝，尚未执行。恢复已有 Claude 会话前，Linux worker 只读检查同 OS 用户的 Claude 进程及其工作目录；**按目录判断，不按会话 ID 判断**。交互终端可以在启动后切换会话，因此即使另一个会话或已空闲的 Claude 终端，只要进程仍在同一目录也会拦截。专用不保存会话的模型列表查询不占用该目录。
+
+在对应原终端正常退出 Claude，或等待同目录另一个 Claude 任务结束并退出后，再从群里发送未执行的消息。不要仅因为收到提示就强杀所有 Claude 进程；确需同时在同一目录使用多个会话时，现有保护策略仍会拒绝。该检查不能防止外部终端在检查后启动，非 Linux 或无法读取进程信息时则报“无法确认原 Claude 会话是否被占用”。它与 Codex app-server 的 writer 所有权冲突是两套机制。
