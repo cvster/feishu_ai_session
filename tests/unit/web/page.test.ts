@@ -79,7 +79,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const browserWindow = { innerWidth: 1280, innerHeight: 900, addEventListener() {} };
   runInNewContext(bridgeWebPage.match(/<script>([\s\S]*?)<\/script>/)![1]!, {
     document: { getElementById: node, createElement: (tag: string) => new Element(tag), createElementNS: (_ns: string, tag: string) => new Element(tag), body: new Element('body'), addEventListener() {} },
-    window: browserWindow,
+    window: browserWindow, URL,
     fetch: async (path: string, options?: { body?: string }) => {
       if (path.endsWith('/settings')) { settingsRequests.push(path); return response(settingsDeferred.has(path) ? await settingsDeferred.get(path) : settings); }
       if (path === '/api/access') return response({ loginRequired: false });
@@ -286,7 +286,7 @@ it('persists recent visibility and count, validates settings, and cancels unsave
   h.node('settings').onclick!();
   expect(h.node('show-recent').checked).toBe(true); expect(h.node('recent-count').value).toBe('9');
   h.node('recent-count').value = '0'; await h.node('settings-form').onsubmit!({ preventDefault() {} });
-  expect(h.node('settings-dialog').open).toBe(true); expect(h.storage.size).toBe(0);
+  expect(h.node('settings-dialog').open).toBe(true); expect(h.storage.has('bridge-web-preferences')).toBe(false);
   h.node('recent-count').value = '3'; await h.node('settings-form').onsubmit!({ preventDefault() {} });
   expect(h.node('tree').children[1]!.querySelector('summary')!.text).toBe('最近更新3');
   expect(h.node('settings-dialog').open).toBe(false);
@@ -484,9 +484,9 @@ it('keeps unsent drafts isolated across session switches and browser reloads', a
   h.choose(0); expect(h.node('input').value).toBe('第一份草稿');
   h.choose(1); expect(h.node('input').value).toBe('第二份草稿');
   const restored = harness(undefined, 2, h.storage); await restored.ready();
-  expect(restored.node('input').value).toBe('第一份草稿');
+  expect(restored.node('input').value).toBe('第二份草稿');
   restored.node('input').value = ''; (restored.node('input') as any).oninput();
-  restored.choose(1); restored.choose(0); expect(restored.node('input').value).toBe('');
+  restored.choose(0); restored.choose(1); expect(restored.node('input').value).toBe('');
 });
 
 it('creates in the selected project and opens model settings through the common controls', async () => {
@@ -549,4 +549,32 @@ it('ignores a late settings response after switching to a different session', as
   h.choose(0); await h.settle();
   resolve({ elements: h.settings.elements.map(e => e.name === 'model' ? { ...e, value: 'model-b' } : e) }); await h.settle();
   expect(h.node('model-select').value).toBe('model-a'); expect(h.node('title').textContent).toBe(h.rows[0]!.name);
+});
+
+it('restores the last selected session after reload even when recent ordering changes', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  h.node('input').value = '第一会话草稿'; h.choose(1); h.requests[1]!.resolve(h.conversation(1)); await h.settle();
+  h.node('input').value = '第二会话草稿'; (h.node('input') as any).oninput();
+  const reloaded = harness(undefined, 2, h.storage, [100, 1]); await reloaded.ready();
+  expect(reloaded.requests[0]!.path).toBe('/api/sessions/' + h.rows[1]!.id);
+  expect(reloaded.node('title').textContent).toBe(h.rows[1]!.name);
+  expect(reloaded.node('input').value).toBe('第二会话草稿');
+});
+
+it.each(['bad-data', 'f'.repeat(64)])('falls back to the latest visible session when the saved selection is %s', async saved => {
+  const storage = new Map([['bridge-web-selected-session', saved]]);
+  const h = harness(undefined, 2, storage, [1, 10]); await h.ready();
+  expect(h.requests[0]!.path).toBe('/api/sessions/' + h.rows[1]!.id);
+  expect(storage.get('bridge-web-selected-session')).toBe(h.rows[1]!.id);
+});
+
+it('updates the session URL when choosing another conversation, so reload does not follow the old deep link', async () => {
+  const h = harness(); await h.ready();
+  const browser = h.browserWindow as any;
+  browser.location = { href: 'http://bridge/?session=' + h.rows[0]!.id + '&view=chat#anchor', search: '?session=' + h.rows[0]!.id };
+  browser.history = { replaceState: vi.fn((_state, _title, value) => { browser.location.href = new URL(value, browser.location.href).href; browser.location.search = new URL(browser.location.href).search; }) };
+  h.choose(1);
+  expect(browser.location.search).toBe('?session=' + h.rows[1]!.id + '&view=chat');
+  expect(new URL(browser.location.href).hash).toBe('#anchor');
+  expect(h.storage.get('bridge-web-selected-session')).toBe(h.rows[1]!.id);
 });
