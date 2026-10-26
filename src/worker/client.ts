@@ -121,8 +121,8 @@ export class WorkerClient {
     if (!(await this.capabilities())?.sessions.fork) this.unsupported();
     return this.request(`/sessions/${encodeURIComponent(id)}/fork`, {}, 60_000);
   }
-  async conversation(id: string): Promise<import('../agent/native-conversation').NativeConversationSnapshot> {
-    return this.request(`/sessions/${encodeURIComponent(id)}/conversation`, undefined, 60_000);
+  async conversation(id: string, timeoutMs = 60_000): Promise<import('../agent/native-conversation').NativeConversationSnapshot> {
+    return this.request(`/sessions/${encodeURIComponent(id)}/conversation`, undefined, timeoutMs);
   }
   async questions(id: string): Promise<import('./protocol').WorkerQuestion[]> {
     return this.request(`/sessions/${encodeURIComponent(id)}/questions`, undefined, 60_000);

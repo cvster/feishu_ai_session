@@ -5,6 +5,7 @@ import type { SessionCatalog } from '../session/catalog';
 import type { AgentKind } from '../config/profile-schema';
 import type { ToolSession } from '../tools/types';
 import { isPersonalWorkgroup } from '../tools/bindings';
+import { WorkerRequestError } from '../worker/client';
 import { DurableAgentAdapter } from '../worker/adapter';
 import { isJobActive, type WorkerJob } from '../worker/protocol';
 import type { HealthDetails } from '../worker/client';
@@ -23,6 +24,7 @@ export interface ConsoleItem {
 
 /** Read-only observations and existing maintenance paths; no provider protocols or new job writer. */
 export class BridgeConsoleService {
+  private sessionChecks = new Map<string, { at: number; session?: ToolSession; issue?: string }>();
   private observations = new Map<string, Observation>();
   private cached?: { at: number; value: Awaited<ReturnType<BridgeConsoleService['collect']>> };
   private running?: Promise<Awaited<ReturnType<BridgeConsoleService['collect']>>>;
@@ -40,10 +42,10 @@ export class BridgeConsoleService {
     this.owner();
     if (this.running) return this.running;
     if (!force && this.cached && Date.now() - this.cached.at < 10_000) return this.cached.value;
-    this.running = this.collect().then(value => { this.cached = { at: Date.now(), value }; return value; }).finally(() => { this.running = undefined; });
+    this.running = this.collect(force).then(value => { this.cached = { at: Date.now(), value }; return value; }).finally(() => { this.running = undefined; });
     return this.running;
   }
-  private async collect() {
+  private async collect(force = false) {
     const owner = this.owner(), c = this.deps.controls, entries = c.toolBindings?.entries() ?? [], sharedRows = c.auxiliary?.groups?.() ?? [];
     const dissolved = (this.deps.catalog?.dissolvedPersonalGroups() ?? []).filter(r => !c.auxiliary?.isAuxiliary(r.chatId) &&
       (!r.botAppId || r.botAppId === c.profileConfig.accounts.app.id));
@@ -92,33 +94,68 @@ export class BridgeConsoleService {
       const catalog = this.deps.catalog?.entries().filter(r => r.scopeId === scope && r.agentId === b.toolId &&
         (!r.botAppId || r.botAppId === c.profileConfig.accounts.app.id) && (!r.sourceId || r.sourceId === b.sourceId) &&
         (r.threadId ?? r.sessionId) === b.nativeId).sort((a, z) => (z.boundAt ?? z.updatedAt) - (a.boundAt ?? a.updatedAt))[0];
-      return { scope, toolId: b.toolId, sourceId: b.sourceId, nativeId: b.nativeId, name: b.name,
+      return { scope, toolId: b.toolId, sourceId: b.sourceId, nativeId: b.nativeId, nativeCreated: b.nativeCreated, name: b.name,
         cwd: catalog?.cwdRealpath, revision: hash([scope, b, catalog?.boundAt]) };
     });
     for (const r of dissolved) if (!refs.some(b => b.scope === r.chatId)) refs.push({ scope: r.chatId, toolId: r.agentId, sourceId: r.sourceId,
-      nativeId: r.nativeId, name: r.name, cwd: r.cwd, revision: hash(r) });
-    const bindings = refs.map(b => {
+      nativeId: r.nativeId, nativeCreated: true, name: r.name, cwd: r.cwd, revision: hash(r) });
+    // Roster omission is not archival. Query exact missing identities through
+    // the common read-only conversation endpoint (also works with older workers).
+    const checkKey = (b: typeof refs[number]) => hash([c.profileConfig.accounts.app.id, b.toolId, b.sourceId, b.nativeId]);
+    const checksInUse = new Set(refs.map(checkKey));
+    for (const key of this.sessionChecks.keys()) if (!checksInUse.has(key)) this.sessionChecks.delete(key);
+    let refIndex = 0;
+    await Promise.all(Array.from({ length: Math.min(4, refs.length) }, async () => {
+      while (refIndex < refs.length) {
+        const b = refs[refIndex++]!, o = this.observations.get(b.toolId), tool = c.toolRegistry?.find(b.toolId);
+        if (b.nativeCreated === false || !b.nativeId || !o?.online || !o.nativeKnown || o.sourceId !== b.sourceId ||
+          o.native.some(row => row.nativeId === b.nativeId) || !o.health?.capabilities?.conversation ||
+          !(tool?.agent instanceof DurableAgentAdapter)) continue;
+        const key = checkKey(b), cached = this.sessionChecks.get(key);
+        if (!force && cached && Date.now() - cached.at < 60_000) {
+          if (cached.session) o.native.push(cached.session);
+          continue;
+        }
+        try {
+          const snapshot = await tool.agent.client.conversation(b.nativeId, 5000);
+          if (snapshot.id !== b.nativeId || typeof snapshot.archived !== 'boolean') {
+            this.sessionChecks.set(key, { at: Date.now(), issue: '原生会话身份或状态返回不匹配' }); continue;
+          }
+          const session = { nativeId: snapshot.id, name: snapshot.name, cwd: snapshot.cwd,
+            archived: snapshot.archived, createdAtMs: 0, updatedAtMs: 0 };
+          o.native.push(session); this.sessionChecks.set(key, { at: Date.now(), session });
+        } catch (error) {
+          // Keep unknown; a missing/unreadable record cannot prove archival.
+          this.sessionChecks.set(key, { at: Date.now(), issue: error instanceof WorkerRequestError && error.status === 404 ?
+            '会话不存在或不属于当前工具模式' : '原生会话读取失败，请刷新或检查 Worker' });
+        }
+      }
+    }));
+    const bindings = refs.flatMap(b => {
       const o = this.observations.get(b.toolId), group = chats.get(b.scope);
       const native = o?.sourceId === b.sourceId && o.nativeKnown ? o.native.find(r => r.nativeId === b.nativeId) : undefined;
       // Route archival includes dissolution. It cannot establish native archival.
       const archived = native ? native.archived === true : b.nativeId && c.toolBindings?.isArchived(b.toolId, b.sourceId, b.nativeId) ? true : undefined;
       const groupState = ['dissolved', 'dissolved_save'].includes(group?.status ?? '') ? 'dissolved' :
         group && !group.error && group.mode === 'group' && (!group.status || group.status === 'normal') ? 'active' : 'unknown';
-      const sessionState = archived === true ? 'archived' : native ? 'active' : 'unknown';
+      // A group whose first message has not created the native session yet is not an anomaly.
+      const sessionState = !b.nativeId || b.nativeCreated === false ? 'pending' : archived === true ? 'archived' : native ? 'active' : 'unknown';
+      // Both sides are closed; nothing is left to manage.
+      if (sessionState === 'archived' && groupState === 'dissolved') return [];
       const issues = [groupState === 'unknown' ? '群状态未确认' : '', o?.sourceId && o.sourceId !== b.sourceId ? 'Worker 身份不匹配' : '',
-        !o?.online ? 'Worker 离线' : '', sessionState === 'unknown' ? '原生会话状态未确认' : '',
+        !o?.online ? 'Worker 离线' : '', sessionState === 'unknown' ? this.sessionChecks.get(checkKey(b))?.issue ?? (o?.online && !o.nativeKnown ? '原生会话列表读取失败' : '原生会话状态未确认') : '',
         groupState === 'active' && sessionState === 'active' && native?.name && group?.name && native.name !== group.name ? '群名与会话名不一致' : '',
-        o?.online && o.nativeKnown && o.health?.capabilities?.sessionListAuthoritative && !native ? '原生会话不存在或已移出列表' : ''].filter(Boolean);
-      return { id: hash([c.profile, c.profileConfig.accounts.app.id, b.revision]), scope: b.scope, chatId: b.scope, toolId: b.toolId, sourceId: b.sourceId, tool: o?.label ?? b.toolId,
+        o?.online && o.nativeKnown && o.health?.capabilities?.sessionListAuthoritative && b.nativeCreated !== false && b.nativeId && !native ? '原生会话不存在或已移出列表' : ''].filter(Boolean);
+      return [{ id: hash([c.profile, c.profileConfig.accounts.app.id, b.revision]), scope: b.scope, chatId: b.scope, toolId: b.toolId, sourceId: b.sourceId, tool: o?.label ?? b.toolId,
         kind: '个人 AI 群', nativeId: b.nativeId, groupName: group?.name ?? b.name ?? native?.name ?? b.scope,
-        sessionName: native?.name ?? b.name ?? b.nativeId ?? '尚未创建', cwd: native?.cwd ?? b.cwd ?? '', issues, groupState, sessionState,
+        sessionName: native?.name ?? b.name ?? b.nativeId ?? '尚未创建', cwd: personalRows.find(s => s.scope === b.scope)?.cwd ?? b.cwd ?? native?.cwd ?? '', issues, groupState, sessionState,
         sessionId: groupState === 'active' && sessionState === 'active' ? personalRows.find(s => s.scope === b.scope)?.id : undefined,
         canDissolve: !!this.deps.cleanDissolvedGroup && groupState === 'active' && sessionState === 'archived' &&
           o?.online === true && o.nativeKnown && o.sourceId === b.sourceId,
         canArchive: !!this.deps.cleanDissolvedGroup && groupState === 'dissolved' && sessionState === 'active' && o?.online === true && o.sourceId === b.sourceId &&
           o.health?.capabilities?.sessions.archive === true && c.toolRegistry?.find(b.toolId)?.sessions?.nativeArchive === true,
         canSync: !!this.deps.syncNames && groupState === 'active' && sessionState === 'active' && o?.online === true && o.nativeKnown && !!native &&
-          o.sourceId === b.sourceId && o.health?.capabilities?.nativeSessionNames === true };
+          o.sourceId === b.sourceId && o.health?.capabilities?.nativeSessionNames === true }];
     });
     const items = this.items();
     const sharedTargets = [...this.observations.values()].flatMap(o => o.online && o.nativeKnown && o.sourceId ?

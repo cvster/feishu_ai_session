@@ -7,7 +7,7 @@ import { codexInputKey, type CodexInputAnswers } from '../../../src/session/code
 const mocks = vi.hoisted(() => ({ snapshot: {} as any, reader: {} as any,
   rows: [] as Array<{ threadId: string; cwd: string; createdAtMs: number; updatedAtMs: number }> }));
 vi.mock('../../../src/session/codex-thread-reader', () => ({ CodexThreadReader: class { constructor() { return mocks.reader; } } }));
-vi.mock('../../../src/session/codex-history', () => ({ listCodexThreadHistory: async () => mocks.rows }));
+vi.mock('../../../src/session/codex-history', async importOriginal => ({ ...await importOriginal<object>(), listCodexThreadHistory: async () => mocks.rows }));
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
 beforeEach(() => {
@@ -16,7 +16,8 @@ beforeEach(() => {
     { type: 'userMessage', content: [{ type: 'text', text: 'input' }] },
     { type: 'agentMessage', id: 'question', questions: [{ title: 'Choose', options: ['A', 'B'] }, { title: 'Other?' }] },
   ] }] };
-  mocks.reader = { readThread: vi.fn(async () => mocks.snapshot), watchLoadedThread: vi.fn(async () => true), listArchivedThreadIds: vi.fn(async () => []), steerTurn: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+  mocks.reader = { readThread: vi.fn(async () => mocks.snapshot), watchLoadedThread: vi.fn(async () => true), listArchivedThreadIds: vi.fn(async () => [] as string[]), steerTurn: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+  mocks.reader.listArchivedThreads = vi.fn(async () => (await mocks.reader.listArchivedThreadIds()).map((id: string) => ({ id })));
 });
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'codex-worker-input-')); cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -33,6 +34,13 @@ it('reads an existing new fork by exact ID when the native list omits it, withou
   expect(mocks.reader.rpc).toHaveBeenCalledWith('thread/read', { threadId: 'thread', includeTurns: false });
   await h.sessions.conversation!('thread');
   expect(mocks.reader.rpc).toHaveBeenCalledOnce();
+});
+it('lists archived threads the worker never saw active, with their archive metadata', async () => {
+  mocks.reader.listArchivedThreads = vi.fn(async () => [{ id: 'old', cwd: '/project', name: 'AA-old', createdAt: 1, updatedAt: 2 }, { id: 'thread', cwd: '/project' }]);
+  const h = await fixture();
+  const rows = await h.sessions.list!();
+  expect(rows.find(row => row.nativeId === 'old')).toEqual({ nativeId: 'old', name: 'AA-old', cwd: '/project', createdAtMs: 1000, updatedAtMs: 2000, archived: true });
+  expect(rows.find(row => row.nativeId === 'thread')).toMatchObject({ archived: true, createdAtMs: 1, updatedAtMs: 2 });
 });
 it('still reports archived status for a readable thread omitted from the active list', async () => {
   mocks.rows = [];

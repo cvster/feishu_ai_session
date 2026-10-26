@@ -17,6 +17,7 @@ import { runProgress } from '../card/run-progress';
 import { WebMarkdown, type WebAnswerSection } from './markdown';
 import { renameChat } from '../bot/group';
 import { sharedPersonalScope, sharedJobPersonalScope, namedSharedMessages, feishuSenderName } from '../worker/shared-history';
+import { isPersonalWorkgroup, type ToolBinding } from '../tools/bindings';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
@@ -45,6 +46,8 @@ export class PersonalSessionService {
     controls: Controls; catalog?: SessionCatalog; channel: LarkChannel; path: string;
     enqueue(msg: NormalizedMessage): Promise<void>;
     control?(id: string, scope: string, owner: string, action: string, values?: unknown): Promise<WebControlResult>;
+    create?(owner: string, toolId: string, cwd: string, name: string): Promise<{ scope?: string } & WebControlResult>;
+    cwdFor?(scope: string): string | undefined;
   }) {}
   async load() {
     try {
@@ -71,6 +74,16 @@ export class PersonalSessionService {
     return [scope, ...(this.deps.controls.toolBindings?.entries() ?? []).flatMap(([source]) =>
       sharedPersonalScope(this.deps.controls, this.deps.catalog, source) === scope ? [source] : [])];
   }
+  /**
+   * Active personal routes plus fresh groups whose native session is created by
+   * their first message, so a group created here can be used before that.
+   */
+  private bindings(): [string, ToolBinding][] {
+    const tools = this.deps.controls.toolBindings, active = tools?.activePersonalBindings() ?? [];
+    const scopes = new Set(active.map(([scope]) => scope));
+    return [...active, ...(tools?.entries() ?? []).filter(([scope, b]) => !scopes.has(scope) && b.nativeCreated === false &&
+      isPersonalWorkgroup(scope, b) && !this.deps.catalog?.isScopeArchived(scope))];
+  }
   private async refresh(force = false) {
     if (this.listing) return this.listing;
     if (!force && Date.now() - this.listedAt < 15_000) return;
@@ -87,7 +100,7 @@ export class PersonalSessionService {
           this.metadata.set(tool.id, { label: tool.label, sourceId: tool.sourceId, rows, capabilities: health.capabilities, online: true, listed: health.capabilities?.sessions.list === true });
         } catch { this.metadata.set(tool.id, { label: tool.label, sourceId: tool.sourceId, rows: previous?.sourceId === tool.sourceId ? previous.rows : [], capabilities: previous?.capabilities, online: false, listed: previous?.sourceId === tool.sourceId && previous.listed === true }); }
       }));
-      const bindings = this.deps.controls.toolBindings?.activePersonalBindings() ?? [];
+      const bindings = this.bindings();
       const scopes = new Set(bindings.map(([scope]) => scope));
       for (const scope of this.groups.keys()) if (!scopes.has(scope)) this.groups.delete(scope);
       await Promise.all(bindings.map(async ([scope, binding]) => {
@@ -106,16 +119,19 @@ export class PersonalSessionService {
   }
   async list(): Promise<WebSession[]> {
     this.owner(); await this.refresh(); const owner = this.owner();
-    return (this.deps.controls.toolBindings?.activePersonalBindings() ?? []).flatMap(([scope, b]) => {
+    return this.bindings().flatMap(([scope, b]) => {
       if (this.deps.controls.auxiliary?.isAuxiliary(scope) || ['topic', 'p2p'].includes(this.groups.get(scope)?.mode ?? '')) return [];
+      // A not-yet-started session is only shown while its group is confirmed.
+      if (b.nativeCreated === false && this.groups.get(scope)?.mode !== 'group') return [];
       const meta = this.metadata.get(b.toolId), tool = this.deps.controls.toolRegistry?.find(b.toolId);
       const row = meta?.sourceId === b.sourceId ? meta.rows.find(r => r.nativeId === b.nativeId) : undefined;
-      if (row?.archived || (meta?.sourceId === b.sourceId && meta.listed && meta.capabilities?.sessionListAuthoritative && !row)) return [];
+      if (row?.archived || (meta?.sourceId === b.sourceId && meta.listed && meta.capabilities?.sessionListAuthoritative && b.nativeCreated !== false && b.nativeId && !row)) return [];
       const catalog = this.deps.catalog?.entries().filter(r => r.scopeId === scope && r.status === 'active' && r.agentId === b.toolId &&
         (!r.sourceId || r.sourceId === b.sourceId) && (!r.botAppId || r.botAppId === this.deps.controls.profileConfig.accounts.app.id) &&
         (r.threadId ?? r.sessionId) === b.nativeId).sort((a, z) => z.updatedAt - a.updatedAt)[0];
-      const cwd = normalize(row?.cwd ?? catalog?.cwdRealpath ?? '.');
-      const online = this.groups.get(scope)?.mode === 'group' && meta?.online === true && !!tool && tool.sourceId === b.sourceId && !!row;
+      // Project ownership is stable even when the tool changes cwd while executing.
+      const cwd = normalize(this.deps.cwdFor?.(scope) ?? catalog?.cwdRealpath ?? row?.cwd ?? '.');
+      const online = this.groups.get(scope)?.mode === 'group' && meta?.online === true && !!tool && tool.sourceId === b.sourceId && (!!row || b.nativeCreated === false);
       const group = this.groups.get(scope);
       // A confirmed name sync may be newer than our 15-second group snapshot.
       const name = group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
@@ -144,7 +160,7 @@ export class PersonalSessionService {
   }
   private assertBinding(id: string, scope: string) {
     this.owner();
-    const b = this.deps.controls.toolBindings?.activePersonalBindings().find(([s, b]) => s === scope && this.identity(s, b) === id);
+    const b = this.bindings().find(([s, b]) => s === scope && this.identity(s, b) === id);
     if (!b || this.deps.controls.auxiliary?.isAuxiliary(scope)) throw new WebError(409, '会话绑定已变化，未继续提交');
   }
   private serial<T>(key: string, action: () => Promise<T>): Promise<T> {
@@ -211,7 +227,7 @@ export class PersonalSessionService {
   async rename(id: string, name: string) {
     name = name.trim(); if (!name || name.length > 100 || /[\u0000-\u001f]/.test(name)) throw new WebError(400, '名称需为 1–100 字');
     this.owner();
-    const entry = this.deps.controls.toolBindings?.activePersonalBindings().find(([scope, b]) => this.identity(scope, b) === id);
+    const entry = this.bindings().find(([scope, b]) => this.identity(scope, b) === id);
     if (!entry) throw new WebError(404, '会话已归档、群已失效或绑定已变化');
     const [scope, binding] = entry;
     this.assertBinding(id, scope);
@@ -229,6 +245,21 @@ export class PersonalSessionService {
     }
     this.listedAt = 0; return { name };
   }
+  /** Create a personal AI group in an existing project; its session starts with the first message. */
+  async create(toolId: string, cwd: string, name: string) {
+    name = name.trim(); if (name.length > 100 || /[\u0000-\u001f]/.test(name)) throw new WebError(400, '名称最多 100 字');
+    if (!cwd.startsWith('/') || cwd.length > 4096) throw new WebError(400, '项目路径无效');
+    const owner = this.owner();
+    if (!this.deps.controls.toolRegistry?.find(toolId)) throw new WebError(404, '工具 worker 未发现');
+    if (!this.deps.create) throw new WebError(503, '会话操作尚未就绪');
+    return this.serial('create', async () => {
+      const result = await this.deps.create!(owner, toolId, cwd, name);
+      if (!result.scope) return { elements: result.elements };
+      this.listedAt = 0;
+      const session = (await this.list()).find(row => row.scope === result.scope);
+      return { elements: result.elements, ...(session ? { session } : {}) };
+    });
+  }
   async control(id: string, action: string, values?: unknown) {
     return this.serial('control:' + id, async () => {
       const { session } = await this.resolve(id, true);
@@ -245,7 +276,9 @@ export class PersonalSessionService {
     const { session, b, client } = await this.resolve(id);
     const queuedMessages = this.deps.controls.messageQueue?.list(session.scope) ?? [];
     const owner = this.owner(), requests = new Map<string, string[]>();
-    for (const [requestId, receipt] of Object.entries(this.receipts)) if (receipt.sessionId === id && receipt.owner === owner && receipt.messageId) {
+    // Messages sent before the first run created the native session were recorded under its pending identity.
+    const ids = new Set([id, this.identity(session.scope, { ...b, nativeId: undefined })]);
+    for (const [requestId, receipt] of Object.entries(this.receipts)) if (ids.has(receipt.sessionId) && receipt.owner === owner && receipt.messageId) {
       const ids = requests.get(receipt.messageId) ?? []; ids.push(requestId); requests.set(receipt.messageId, ids);
     }
     const runtime = this.deps.controls.workerRuntimes?.get(b.toolId);
@@ -258,7 +291,7 @@ export class PersonalSessionService {
     }
     if (!session.online || !client) return { session, queuedMessages, turns: this.conversations.get(id)?.turns ?? turns, notice: 'Worker 离线；恢复后会重新读取会话' };
     try {
-      const [native, allJobs] = await Promise.all([session.nativeConversation ? client.conversation(b.nativeId!) : undefined, client.list()]);
+      const [native, allJobs] = await Promise.all([session.nativeConversation && b.nativeCreated !== false && b.nativeId ? client.conversation(b.nativeId) : undefined, client.list()]);
       this.assertBinding(id, session.scope);
       if ((native?.id !== undefined && native.id !== b.nativeId) || native?.archived) throw new WebError(404, '会话已归档或身份变化');
       const jobs = allJobs.filter(j => (j.options.delivery?.scope === session.scope || sharedJobPersonalScope(this.deps.controls, this.deps.catalog, j) === session.scope) &&

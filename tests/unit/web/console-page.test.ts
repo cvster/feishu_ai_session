@@ -19,7 +19,7 @@ class Element {
 function harness(loginRequired = true, authorized = true) {
   const nodes = new Map([...bridgeConsolePage.matchAll(/id="([^"]+)"/g)].map(m => [m[1]!, new Element()]));
   const get = (id: string) => nodes.get(id)!;
-  const nav = ['overview', 'queue', 'bindings', 'shared'].map(page => { const e = new Element('button'); e.dataset.page = page; return e; });
+  const nav = ['overview', 'bindings', 'shared'].map(page => { const e = new Element('button'); e.dataset.page = page; return e; });
   const snapshot = { at: Date.now(), bridge: { connection: 'connected', uptimeSeconds: 120 },
     summary: { online: 1, workers: 1, pending: 1, active: 1, failed: 0 }, canDiscover: true, canSync: true,
     workers: [{ id: 'generic', label: '<script>Tool</script>', online: true, checkedAt: Date.now(), capabilities: { jobs: { submit: true }, sessions: { archive: true } }, sessions: 2, active: 1, pending: 1 }],
@@ -53,19 +53,8 @@ it('reuses the existing authenticated cookie on password-protected peers and ren
 it('requires login when a peer has neither trust nor a valid cookie', async () => {
   const h = harness(true, false); await h.ready(); expect(h.get('login').hidden).toBe(false); expect(h.get('app').hidden).toBe(true);
 });
-it('filters the message queue and exposes retry only on unsent input', async () => {
-  const h = harness(false); await h.ready(); await h.nav[1]!.onclick!();
-  expect(h.get('queue-list').text).toContain('<img src=x onerror=attack()>');
-  const buttons = (node: Element): Element[] => node.children.flatMap(c => [...(c.tag === 'button' ? [c] : []), ...buttons(c)]);
-  const retries = buttons(h.get('queue-list')).filter(b => b.textContent === '重试'); expect(retries).toHaveLength(1);
-  await retries[0]!.onclick!(); await vi.waitFor(() => expect(h.requests.some(r => r.body?.action === 'retry')).toBe(true));
-  expect(h.requests.find(r => r.body?.action === 'retry')?.body.id).toBe('pending');
-  h.get('queue-status').value = 'active'; h.get('queue-status').handlers.change!();
-  expect(h.get('queue-list').text).toContain('已提交消息'); expect(h.get('queue-list').text).not.toContain('onerror');
-});
-
 it('opens shared management dialogs and submits only after confirmation with the selected target', async () => {
-  const h = harness(false); await h.ready(); await h.nav[3]!.onclick!();
+  const h = harness(false); await h.ready(); await h.nav[2]!.onclick!();
   const buttons = (node: Element): Element[] => node.children.flatMap(c => [...(c.tag === 'button' ? [c] : []), ...buttons(c)]);
   const all = buttons(h.get('shared-list')); const change = all.find(b => b.textContent === '换会话')!;
   expect(h.get('shared-list').text).toContain('<群>'); expect(all.filter(b => b.textContent === '换会话')).toHaveLength(1);
@@ -89,7 +78,7 @@ it('opens shared management dialogs and submits only after confirmation with the
 
 
 it('shows only the mismatch management buttons and requires confirmation before closing either side', async () => {
-  const h = harness(false); await h.ready(); await h.nav[2]!.onclick!();
+  const h = harness(false); await h.ready(); await h.nav[1]!.onclick!();
   expect(bridgeConsolePage).not.toContain('诊断日志'); expect(h.get('heading').textContent).toBe('AI会话群管理');
   const buttons = (node: Element): Element[] => node.children.flatMap(c => [...(c.tag === 'button' ? [c] : []), ...buttons(c)]);
   const controls = buttons(h.get('binding-list'));
@@ -108,7 +97,7 @@ it('cascades tools, full project paths and session choices without retaining a h
   const h = harness(false); await h.ready();
   h.snapshot.sharedTargets.push({ id: 'third', name: '同名项目会话', toolId: 'other', tool: 'Other', cwd: '/else/next' },
     { id: 'fourth', name: '另一工具会话', toolId: 'generic', tool: 'Tool', cwd: '/next' });
-  await h.nav[3]!.onclick!();
+  await h.nav[2]!.onclick!();
   const buttons = (node: Element): Element[] => node.children.flatMap(c => [...(c.tag === 'button' ? [c] : []), ...buttons(c)]);
   await buttons(h.get('shared-list')).find(b => b.textContent === '换会话')!.onclick!();
   h.get('shared-tool').value = 'other'; h.get('shared-tool').handlers.change!();
@@ -126,7 +115,7 @@ it('groups multiple shared and private chats under the real session identity, se
   const h = harness(false); await h.ready();
   h.snapshot.sharedGroups.push({ ...h.snapshot.sharedGroups[0]!, id: 'same-name', chatId: 'oc_other', name: '同名会话的其他群', associationId: 'different-worker-session', canLeave: false, canBind: false },
     { ...h.snapshot.sharedGroups[0]!, id: 'pending', chatId: 'oc_pending', name: '待绑定的群', associationId: undefined, targetId: undefined, status: 'pending', sessionName: '尚未关联' });
-  await h.nav[3]!.onclick!();
+  await h.nav[2]!.onclick!();
   const panels = h.get('shared-list').children;
   expect(panels).toHaveLength(3); expect(panels.map(p => p.tag)).toEqual(['details', 'details', 'details']);
   expect(panels[0]!.children[0]!.text).toContain('2 个群');

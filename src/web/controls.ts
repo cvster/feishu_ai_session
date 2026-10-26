@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { LarkChannel } from '@larksuite/channel';
-import { runCommandHandler, type CommandContext } from '../commands';
+import { createPersonalWorkgroup, runCommandHandler, type CommandContext } from '../commands';
+import { isToolId } from '../tools/definitions';
 import { sendManagedCard } from '../card/managed';
 import { WebError } from './service';
 
@@ -42,7 +43,17 @@ export class WebSessionControls {
     return choice.result ??= this.run(sessionId, scope, owner, choice.cmd, choice.args, form);
   }
 
-  private async run(sessionId: string, scope: string, owner: string, cmd: string, args: string, formValue: Record<string, string>): Promise<WebControlResult> {
+  /** Create a personal group bound to `cwd`. Command replies are captured on a throwaway scope. */
+  async create(owner: string, toolId: string, cwd: string, name: string): Promise<{ scope?: string } & WebControlResult> {
+    if (!isToolId(toolId)) throw new WebError(400, '无效的执行工具');
+    let created: { chatId: string } | undefined;
+    const result = await this.run('', 'web-new-session:' + randomUUID(), owner, 'new', '', {},
+      async ctx => { created = await createPersonalWorkgroup(ctx, name, cwd, toolId); return true; });
+    return { ...result, ...(created ? { scope: created.chatId } : {}) };
+  }
+
+  private async run(sessionId: string, scope: string, owner: string, cmd: string, args: string, formValue: Record<string, string>,
+    invoke: (ctx: CommandContext) => Promise<boolean> = ctx => runCommandHandler(cmd, args, ctx)): Promise<WebControlResult> {
     const ctx = await this.context(scope, owner), elements: WebControlElement[] = [];
     const fields = new Map<string, Field>();
     const issue = (command: string, arg = '') => {
@@ -89,7 +100,7 @@ export class WebSessionControls {
       };
       const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
     } }) as LarkChannel;
-    if (!await runCommandHandler(cmd, args, { ...ctx, channel, groupChannel: ctx.channel, fromWeb: true, fromCardAction: false, formValue })) throw new WebError(400, '不支持的会话操作');
+    if (!await invoke({ ...ctx, channel, groupChannel: ctx.channel, fromWeb: true, fromCardAction: false, formValue })) throw new WebError(400, '不支持的会话操作');
     if (!elements.length) elements.push({ kind: 'text', text: cmd === 'stop' ? '已检查并请求停止当前任务。' : '操作已完成。' });
     return { elements };
   }

@@ -243,7 +243,12 @@ export class CodexThreadReader {
 
   /** Read-only archive lookup. Exhaust pagination; never infer from runtime status. */
   async listArchivedThreadIds(): Promise<string[]> {
-    const ids = new Set<string>();
+    return (await this.listArchivedThreads()).map(thread => thread.id as string);
+  }
+
+  /** Raw archived thread records (id, cwd, name, timestamps), one per id. */
+  async listArchivedThreads(): Promise<Record<string, unknown>[]> {
+    const threads = new Map<string, Record<string, unknown>>();
     const cursors = new Set<string>();
     let cursor: string | undefined;
     do {
@@ -255,7 +260,7 @@ export class CodexThreadReader {
       for (const item of result.data) {
         const thread = recordValue(item);
         if (typeof thread?.id !== 'string') throw new Error('thread/list returned malformed archive id');
-        ids.add(thread.id);
+        threads.set(thread.id, thread);
       }
       if (result.nextCursor != null && typeof result.nextCursor !== 'string') {
         throw new Error('thread/list returned malformed archive cursor');
@@ -264,7 +269,7 @@ export class CodexThreadReader {
       if (cursor && cursors.has(cursor)) throw new Error('thread/list repeated archive cursor');
       if (cursor) cursors.add(cursor);
     } while (cursor);
-    return [...ids];
+    return [...threads.values()];
   }
 
   async interruptTurn(threadId: string, turnId: string): Promise<void> {

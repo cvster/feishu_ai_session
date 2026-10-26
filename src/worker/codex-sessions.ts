@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { CodexThreadReader, type CodexThreadReaderOptions } from '../session/codex-thread-reader';
-import { listCodexThreadHistory } from '../session/codex-history';
+import { listCodexThreadHistory, normalizeThread } from '../session/codex-history';
 import { nativeSessionOperations } from '../tools/session-operations';
 import { exportWorkerHistory } from './history';
 import type { AgentAdapter } from '../agent/types';
@@ -56,11 +56,18 @@ export function createCodexWorkerSessions(options: CodexThreadReaderOptions, sou
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       rosterLoaded = true;
     }
-    const [rows, archived] = await Promise.all([listCodexThreadHistory({ ...options, limit: 10000 }), reader.listArchivedThreadIds()]);
-    const archivedIds = new Set(archived);
+    const [rows, archived] = await Promise.all([listCodexThreadHistory({ ...options, limit: 10000 }), reader.listArchivedThreads()]);
+    const archivedIds = new Set(archived.map(thread => thread.id as string));
     for (const row of rows) metadata.set(row.threadId, { nativeId: row.threadId, name: row.name, cwd: row.cwd,
       createdAtMs: row.createdAtMs, updatedAtMs: row.updatedAtMs, archived: archivedIds.has(row.threadId) });
     for (const [id, row] of metadata) if (archivedIds.has(id)) metadata.set(id, { ...row, archived: true });
+    // Archived threads leave thread/list; list them from their archive records so a
+    // binding archived before this worker first saw it is still reported as archived.
+    for (const thread of archived) {
+      const row = normalizeThread(thread);
+      if (row && !metadata.has(row.threadId)) metadata.set(row.threadId, { nativeId: row.threadId, name: row.name, cwd: row.cwd,
+        createdAtMs: row.createdAtMs, updatedAtMs: row.updatedAtMs, archived: true });
+    }
     const roster = JSON.stringify([...metadata.values()]);
     if (roster !== rosterSaved) { await writeFileAtomic(rosterPath, roster, { mode: 0o600 }); rosterSaved = roster; }
     return [...metadata.values()].filter(row => rows.some(r => r.threadId === row.nativeId) || row.archived);

@@ -820,6 +820,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     const service = new PersonalSessionService({ controls, catalog: sessionCatalog, channel,
       path: join(deps.appPaths.profileDir, 'web-receipts.json'),
       control: (id, scope, owner, action, values) => webControls.execute(id, scope, owner, action, values),
+      create: (owner, toolId, cwd, name) => webControls.create(owner, toolId, cwd, name),
+      cwdFor: scope => workspaces.cwdFor(scope),
       enqueue: async msg => {
         if (disconnecting) throw new WebError(503, '桥接正在重连，请稍后重试');
         const binding = controls.toolBindings!.get(msg.chatId);

@@ -252,7 +252,8 @@ function parseThreadListResponse(
   };
 }
 
-function normalizeThread(input: unknown): CodexThreadHistoryEntry | undefined {
+/** One `thread/list` record, archived or not; undefined when id or cwd is missing. */
+export function normalizeThread(input: unknown): CodexThreadHistoryEntry | undefined {
   const raw = recordValue(input);
   if (!raw) return undefined;
   const threadId = stringValue(raw.id);

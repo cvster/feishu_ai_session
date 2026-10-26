@@ -87,7 +87,8 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'ki
       mentionedBot: true, mentionAll: false, rawContentType: 'interactive', createTime: Date.now() } }));
   const servicePath = join(h.dir, 'web-receipts.json');
   const makeService = () => new PersonalSessionService({ controls, catalog, channel, path: servicePath, enqueue,
-    control: (id, scope, owner, action, values) => webControls.execute(id, scope, owner, action, values) });
+    control: (id, scope, owner, action, values) => webControls.execute(id, scope, owner, action, values),
+    create: (owner, toolId, cwd, name) => webControls.create(owner, toolId, cwd, name), cwdFor: scope => workspaces.cwdFor(scope) });
   const service = makeService(); await service.load();
   const socket = createServer(); await new Promise<void>(r => socket.listen(0, '127.0.0.1', r)); const port = (socket.address() as { port: number }).port; await new Promise<void>(r => socket.close(() => r()));
   const configPath = join(h.dir, 'web.json'), { secret } = await configureWeb(configPath, '127.0.0.1', port);
@@ -868,7 +869,7 @@ it('console marks unreadable native state and disables name sync without treatin
   vi.spyOn(h.client, 'listSessions').mockRejectedValue(Error('native list unavailable'));
   const snapshot = await h.consoleService.snapshot(true), binding = snapshot.bindings[0]!;
   expect(snapshot.workers[0]).toMatchObject({ online: true, error: '会话读取失败：Error: native list unavailable' });
-  expect(binding.issues).toContain('原生会话状态未确认'); expect(binding.canSync).toBe(false);
+  expect(binding.issues).toContain('原生会话列表读取失败'); expect(binding.canSync).toBe(false);
   expect(h.catalog.isScopeArchived('oc_group')).toBe(false);
   expect((await h.request('/api/console/action', { action: 'sync-names', id: binding.id })).status).toBe(409);
 });
@@ -988,13 +989,13 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('AI group manageme
   const restored = new SessionCatalog(join(h.dir, 'catalog.json')); await restored.load();
   expect(restored.dissolvedPersonalGroups()).toHaveLength(1);
   row = (await h.consoleService.snapshot(true)).bindings[0]!;
-  expect(row).toMatchObject({ groupState: 'dissolved', sessionState: 'archived', canDissolve: false, canArchive: false, groupName: 'AA-web', cwd: '/project' });
+  expect(row).toBeUndefined();
   h.native.archived = false;
   row = (await h.consoleService.snapshot(true)).bindings[0]!;
   expect(row).toMatchObject({ groupState: 'dissolved', sessionState: 'active', canDissolve: false, canArchive: true });
   expect((await h.request('/api/console/action', { action: 'personal-archive', id: row.id })).status).toBe(200);
   expect(h.provider.archive).toHaveBeenCalledWith('native');
-  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: 'archived', canArchive: false });
+  expect((await h.consoleService.snapshot(true)).bindings).toHaveLength(0);
   expect((await h.request('/api/console/action', { action: 'personal-archive', id: row.id })).status).toBe(409);
   expect(h.provider.archive).toHaveBeenCalledTimes(1); expect(h.calls).toHaveLength(0);
 });
@@ -1103,4 +1104,68 @@ it('updates native reply queue rows after the controls without sending a separat
     expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1])).not.toContain('排队消息');
     expect(h.create).toHaveBeenCalledTimes(afterSend); expect(h.stop).not.toHaveBeenCalled();
   } finally { await mirror.stop(); }
+});
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('shows new %s project groups before their first message, including reserved native ids', async tool => {
+  const h = await harness(tool, '127.0.0.1', {}, true); await h.login();
+  const chatCreate = vi.fn(async () => ({ code: 0, data: { chat_id: 'oc_new' } }));
+  h.channel.rawClient.im.v1.chat.create = chatCreate as any;
+  vi.spyOn(h.channel.rawClient.im.v1.chat, 'get').mockImplementation(async payload => ({ code: 0, data: { name: payload?.path.chat_id === 'oc_new' ? 'AA-new' : 'AA-web', chat_mode: 'group' } }));
+  const result = await h.request('/api/sessions', { toolId: tool, cwd: h.dir, name: 'AA-new' });
+  expect(result.status).toBe(200); const created = await result.json() as any;
+  expect(created.session).toMatchObject({ scope: 'oc_new', name: 'AA-new', cwd: h.dir, online: true, canSend: true });
+  expect(h.bindings.get('oc_new')).toMatchObject({ toolId: tool, nativeCreated: false });
+  expect(h.workspaces.cwdFor('oc_new')).toBe(h.dir); expect(chatCreate).toHaveBeenCalledOnce();
+  h.bindings.set('oc_new', { ...h.bindings.get('oc_new')!, nativeId: 'reserved', nativeCreated: false });
+  const fresh = h.makeService(); await fresh.load();
+  const row = (await fresh.list()).find(r => r.scope === 'oc_new')!;
+  expect(row).toMatchObject({ online: true, canSend: true, cwd: h.dir });
+  const read = vi.spyOn(h.client, 'conversation');
+  expect((await fresh.read(row.id)).turns).toEqual([]); expect(read).not.toHaveBeenCalledWith('reserved');
+  const management = await h.consoleService.snapshot(true);
+  expect(management.bindings.find(r => r.scope === 'oc_new')).toMatchObject({ sessionState: 'pending', issues: [] });
+  h.pending.block('oc_new');
+  const acknowledgement = await fresh.send(row.id, 'first-message-request-123', 'first message');
+  expect(acknowledgement.queuedMessages).toHaveLength(1);
+  expect(h.calls).toHaveLength(0);
+});
+
+it('uses the bound project for Web and management when the native execution cwd changes', async () => {
+  const h = await harness('claude'); h.workspaces.setCwd('oc_group', '/project');
+  h.native.cwd = '/project/tools';
+  expect((await h.service.list())[0]).toMatchObject({ cwd: '/project', project: 'project' });
+  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ cwd: '/project' });
+  h.native.cwd = '/project/tests';
+  const restored = h.makeService(); await restored.load();
+  expect((await restored.list())[0]).toMatchObject({ cwd: '/project', project: 'project' });
+});
+
+it.each([true, false])('reads omitted native sessions by exact identity and hides closed pairs only after proven archival (%s)', async archived => {
+  const h = await harness('codex'); await h.replies.stop();
+  h.provider.list.mockResolvedValue([]); h.conversation.archived = archived;
+  const row = (await h.consoleService.snapshot(true)).bindings[0]!;
+  expect(row.sessionState).toBe(archived ? 'archived' : 'active');
+  vi.spyOn(h.channel.rawClient.im.v1.chat, 'get').mockResolvedValue({ code: 232009 });
+  const next = await h.consoleService.snapshot(true);
+  expect(next.bindings).toHaveLength(archived ? 0 : 1);
+  if (!archived) expect(next.bindings[0]).toMatchObject({ canArchive: true });
+});
+
+it('preserves uncertain native sessions when exact reads fail or return a different identity', async () => {
+  const h = await harness('codex'); await h.replies.stop(); h.provider.list.mockResolvedValue([]);
+  h.provider.conversation.mockRejectedValue(Error('unavailable'));
+  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: 'unknown', canDissolve: false });
+  h.provider.conversation.mockResolvedValue({ ...h.conversation, id: 'other', archived: true });
+  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: 'unknown', canDissolve: false });
+});
+
+it('caches omitted-session observations during polling but refreshes them before management actions', async () => {
+  const h = await harness('codex'); await h.replies.stop(); h.provider.list.mockResolvedValue([]);
+  await h.consoleService.snapshot(true); h.provider.conversation.mockClear();
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 11_000);
+  expect((await h.consoleService.snapshot()).bindings[0]).toMatchObject({ sessionState: 'active' });
+  expect(h.provider.conversation).not.toHaveBeenCalled();
+  h.conversation.archived = true;
+  expect((await h.consoleService.snapshot(true)).bindings[0]).toMatchObject({ sessionState: 'archived', canDissolve: true });
+  expect(h.provider.conversation).toHaveBeenCalledWith('native');
 });

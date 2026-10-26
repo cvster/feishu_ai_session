@@ -104,6 +104,11 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       sessions.delete(token!); res.setHeader('Set-Cookie', 'bridge_web=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); respond(res, 200, { ok: true }); return;
     }
     if (url.pathname === '/api/sessions' && req.method === 'GET') { respond(res, 200, await options.service.list()); return; }
+    if (url.pathname === '/api/sessions' && req.method === 'POST') {
+      const input = await body(req);
+      if (typeof input.toolId !== 'string' || typeof input.cwd !== 'string' || (input.name !== undefined && typeof input.name !== 'string')) throw new WebError(400, '请求内容无效');
+      respond(res, 200, await options.service.create(input.toolId, input.cwd, (input.name as string | undefined) ?? '')); return;
+    }
     if (url.pathname === '/api/events' && req.method === 'GET') {
       if (streams.size >= 32) throw new WebError(429, '连接数量过多');
       const id = url.searchParams.get('session') ?? undefined;

@@ -932,6 +932,11 @@ async function finishPanelGroup(ctx: CommandContext, token: string, dissolve = f
   else if (ctx.msg.chatId !== target.chatId) await reply(ctx, notice);
 }
 
+/** Web entry to the same personal group creation as `/new chat`; replies go to `ctx.msg.chatId`. */
+export async function createPersonalWorkgroup(ctx: CommandContext, name: string, cwd: string, toolId: ToolId): Promise<{ chatId: string; name: string } | undefined> {
+  return handleNewChat(name, ctx, cwd, toolId);
+}
+
 async function handleNewChat(
   rawName: string,
   ctx: CommandContext,

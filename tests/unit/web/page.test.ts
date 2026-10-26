@@ -56,7 +56,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const node = (id: string) => elements.get(id)!;
   node('app').style.setProperty = ((key: string, value: string) => { node('app').style[key] = value; }) as any;
   node('session-menu').hidden = true; node('session-menu').append(node('session-rename'), node('session-archive'), node('session-copy'));
-  for (const action of ['stop', 'refresh']) { const button = new Element('button'); button.setAttribute('data-control', action); node('session-controls').append(button); }
+  for (const action of ['stop', 'refresh', 'config']) { const button = new Element('button'); button.setAttribute('data-control', action); node('session-controls').append(button); }
   const rows = Array.from({ length: count }, (_, i) => String.fromCharCode(97 + i)).map((id, index) => ({ id: id.repeat(64), toolId: index ? 'another' : 'generic', tool: index ? 'Other' : 'Tool', favorite: false, updatedAtMs: updatedAtMs?.[index] ?? count - index,
     project: 'project', cwd: '/project', scope: 'oc_' + id, name: '会话' + index, online: true, canSend: true, canRename: true }));
   const conversation = (index: number, answer = '回答', count = 12) => ({ session: rows[index], turns: Array.from({ length: count }, (_, i) => ({
@@ -80,7 +80,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
     window: browserWindow,
     fetch: async (path: string, options?: { body?: string }) => {
       if (path === '/api/access') return response({ loginRequired: false });
-      if (path === '/api/sessions') return response(rows);
+      if (path === '/api/sessions' && !options?.body) return response(rows);
       // Deliberately allow a response after abort to check the selection guard.
       return new Promise((resolve, reject) => requests.push({ id: path.split('/').at(-1)!, path, data: options?.body ? JSON.parse(options.body) : undefined, resolve: value => resolve(response(value)), reject }));
     },
@@ -98,7 +98,7 @@ it.each([true, false])('opens the most recently updated session on entry when re
   const h = harness({ showRecent }, 3, undefined, [10, 30, 20]); await h.ready();
   expect(h.requests[0]!.path).toBe('/api/sessions/' + h.rows[1]!.id);
   expect(h.node('title').textContent).toBe(h.rows[1]!.name);
-  if (showRecent) expect(h.node('tree').children[1]!.querySelector('.session')?.text).toBe(h.rows[1]!.name);
+  if (showRecent) expect(h.node('tree').children[1]!.querySelector('.session')?.textContent).toBe(h.rows[1]!.name);
   h.requests[0]!.resolve(h.conversation(1)); await h.settle();
   h.choose(0); h.requests[1]!.resolve(h.conversation(0)); await h.settle();
   h.rows[2]!.updatedAtMs = 40;
@@ -262,16 +262,18 @@ it('renders tool icons and favorites across tools under one project, without loa
   expect(favorite(h.rows[1]!.name).getAttribute('aria-pressed')).toBe('false');
 });
 
-it('limits recent updates before search, groups projects, and follows SSE timestamps without reading history', async () => {
+it('limits recent updates before search, shows flat sessions with project labels, and follows SSE timestamps without reading history', async () => {
   const h = harness(undefined, 12, undefined, Array.from({ length: 12 }, (_, i) => i + 1)); await h.ready();
   const recent = () => h.node('tree').children[1]!;
   expect(recent().querySelector('summary')!.text).toBe('最近更新9');
-  expect(recent().querySelectorAll('.session').map(e => e.text)).toEqual(Array.from({ length: 9 }, (_, i) => '会话' + (11 - i)));
+  expect(recent().querySelectorAll('details')).toHaveLength(0);
+  expect(recent().querySelectorAll('.session-project').map(e => e.text)).toEqual(Array(9).fill('project'));
+  expect(recent().querySelectorAll('.session').map(e => e.textContent)).toEqual(Array.from({ length: 9 }, (_, i) => '会话' + (11 - i)));
   h.rows[0]!.updatedAtMs = 20;
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows });
-  expect(recent().querySelectorAll('.session')[0]!.text).toBe('会话0');
+  expect(recent().querySelectorAll('.session')[0]!.textContent).toBe('会话0');
   h.node('search').value = '会话1'; (h.node('search') as any).oninput();
-  expect(recent().querySelectorAll('.session').map(e => e.text)).toEqual(['会话11', '会话10']);
+  expect(recent().querySelectorAll('.session').map(e => e.textContent)).toEqual(['会话11', '会话10']);
   expect(h.requests).toHaveLength(1);
 });
 
@@ -468,4 +470,34 @@ it('shows the live queue above the composer and deletes one message without addi
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...view, turns: [...view.turns, { id: 'receipt:pending', input: items[0]!.text, answer: '', status: 'cancelled', createdAtMs: Date.now() }, { id: 'job:next', input: items[1]!.text, answer: '', status: 'running', createdAtMs: Date.now() }], queuedMessages: [] } });
   expect(h.node('messages').text).not.toContain('first long');
   expect(h.node('messages').querySelectorAll('.user').filter(e => e.text === items[1]!.text)).toHaveLength(1);
+});
+
+it('keeps unsent drafts isolated across session switches and browser reloads', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  h.node('input').value = '第一份草稿'; (h.node('input') as any).oninput();
+  h.choose(1); h.requests[1]!.resolve(h.conversation(1)); await h.settle();
+  expect(h.node('input').value).toBe(''); h.node('input').value = '第二份草稿';
+  h.choose(0); expect(h.node('input').value).toBe('第一份草稿');
+  h.choose(1); expect(h.node('input').value).toBe('第二份草稿');
+  const restored = harness(undefined, 2, h.storage); await restored.ready();
+  expect(restored.node('input').value).toBe('第一份草稿');
+  restored.node('input').value = ''; (restored.node('input') as any).oninput();
+  restored.choose(1); restored.choose(0); expect(restored.node('input').value).toBe('');
+});
+
+it('creates in the selected project and opens model settings through the common controls', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  const add = h.node('tree').querySelector('.project-new')!;
+  add.onclick!({ preventDefault() {}, stopPropagation() {} } as any);
+  expect(h.node('create-dialog').open).toBe(true); expect(h.node('create-target').text).toContain('/project');
+  h.node('create-name').value = 'AA-new'; const create = h.node('create-form').onsubmit!({ preventDefault() {} });
+  expect(h.requests[1]!.data).toEqual({ toolId: 'generic', cwd: '/project', name: 'AA-new' });
+  h.requests[1]!.resolve({ session: h.rows[1] }); await h.settle();
+  // Harness session inventory uses the immediate response; selecting loads new history.
+  h.requests[2]!.resolve(h.conversation(1)); await create;
+  const settings = h.node('session-controls').querySelectorAll('button').find(b => b.dataset.control === 'config')!;
+  const open = settings.onclick!(); expect(h.requests[3]!.data.action).toBe('config');
+  h.requests[3]!.resolve({ elements: [{ kind: 'select', name: 'model', value: 'model-a', options: [{ value: 'model-a', text: 'Model A' }] }, { kind: 'select', name: 'reasoningEffort', value: 'high', options: [{ value: 'high', text: '高' }] }] }); await open;
+  expect(h.node('controls-dialog').open).toBe(true); expect(h.node('controls-title').text).toContain('模型和推理程度');
+  expect(h.node('controls-body').querySelectorAll('select').map(e => e.name)).toEqual(['model', 'reasoningEffort']);
 });
