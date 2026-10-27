@@ -15,5 +15,5 @@
 
 # Delivery workflow
 
-- After completing each user-requested feature or bug fix in this project, run the relevant checks, commit the related changes, and push to both `origin` (`ssh://git@code.tars-ai.com:2222/lennox/feishuaisession.git`) and `codexfeishu` (`git@github.com:cvster/feishu_ai_session.git`) without requiring another request. The current delivery branch is `main`.
+- After completing each user-requested feature or bug fix in this project, run the relevant checks, commit the related changes, and push to all three remotes: `origin` (`ssh://git@code.tars-ai.com:2222/lennox/feishuaisession.git`), `codexfeishu` (`git@github.com:cvster/feishu_ai_session.git`), and `redgitlab` (`ssh://git@red-gitlab.tars-ai.com:2222/soft_platform/ai_native/feishu_ai_session.git`) without requiring another request. The current delivery branch is `main`.
 - Keep unrelated user changes out of the commit. Do not force-push or silently resolve a remote divergence; report a blocked push or failed verification clearly. Automatic deployment is limited to the bridge and bundled Web changes covered by the operational safety rules above; it does not authorize worker or unrelated service restarts.
