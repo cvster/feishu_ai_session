@@ -1,5 +1,6 @@
 import { migrateMirrorLedger } from '../worker/mirror-migration';
 import { migrateLegacyIntake } from '../worker/migration';
+import { startWorkerModelCache } from './worker-model-cache';
 import { startWorkerNameSync } from './tool-name-sync';
 import { toolDefinition, workerInboxName, workerRepliesName, type ToolId } from '../tools/definitions';
 import { auxiliaryLinkError } from './auxiliary-membership';
@@ -751,6 +752,13 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     }));
     } catch (error) { log.warn('worker', 'name-monitor-failed', { toolId: tool.id, error: String(error) }); }
   };
+  const modelCacheSync = deps.appPaths?.profileDir ? startWorkerModelCache({
+    profileDir: deps.appPaths.profileDir, botAppId: cfg.accounts.app.id,
+    tools: () => controls.toolRegistry?.all() ?? [],
+    projects: tool => (sessionCatalog?.entries() ?? []).filter(row => row.status === 'active' && row.agentId === tool.id &&
+      row.botAppId === cfg.accounts.app.id && (!row.sourceId || row.sourceId === tool.sourceId))
+      .map(row => workspaces.cwdFor(row.scopeId) ?? row.cwdRealpath),
+  }) : undefined;
   for (const tool of controls.toolRegistry?.all() ?? []) await attachWorker(tool).catch(error => log.warn('worker', 'attach-failed', { toolId: tool.id, error: String(error) }));
   let discovering: Promise<void> | undefined;
   const discover = () => discovering ??= (async () => {
@@ -774,6 +782,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       await attachWorker(tool).catch(error => log.warn('worker', 'attach-failed', { toolId: tool.id, error: String(error) }));
 
     }
+    void modelCacheSync?.tick();
   })().catch(error => log.warn('worker', 'discovery-failed', { error: String(error) })).finally(() => { discovering = undefined; });
   const runtimeStop = async (id: string) => { const replies = controls.workerRuntimes?.get(id)?.replies;
     await (replies as { stop?(): Promise<void> } | undefined)?.stop?.(); };
@@ -863,6 +872,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     channel,
     disconnect: async () => {
       disconnecting = true;
+      modelCacheSync?.stop();
       clearInterval(discoveryTimer); await discovering;
       controls.refreshWorkerDiscovery = undefined;
       await groupCleanup?.stop();

@@ -6,11 +6,11 @@ import { isPersonalWorkgroup, PersonalBindingConflict, type ToolBindingStore } f
 import type { CopiedSessionSource } from '../tools/bindings';
 import { currentCopySource, readCopiedSession, sessionCopyChoice, showSessionCopyMenu } from './session-copy';
 import { DurableAgentAdapter } from '../worker/adapter';
-import { randomUUID, createHash } from 'node:crypto';
-import { cachedModelChoices } from '../agent/model-cache';
+import { randomUUID } from 'node:crypto';
+import { cachedModelChoices, modelCachePath } from '../agent/model-cache';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { capabilityForTool } from '../agent/capability';
 import { DEFAULT_MODEL, loadModelChoices, normalizeModelSelection, normalizeReasoningEffort,
@@ -2780,8 +2780,10 @@ async function showConfigForm(ctx: CommandContext,
   const selectedModel = normalizeModelSelection(ctx.controls.profileConfig.agentKind, String(draft.model ?? ctx.controls.cfg.preferences?.model ?? DEFAULT_MODEL));
   const cwd = effectiveWorkspaceCwd(ctx);
   const tool = ctx.controls.toolRegistry?.find(ctx.controls.profileConfig.agentKind);
-  const cacheKey = createHash('sha256').update(JSON.stringify([ctx.controls.profileConfig.accounts.app.id, ctx.agent.id, tool?.sourceId, cwd])).digest('hex');
-  const modelChoices = await cachedModelChoices(join(commandProfilePaths(ctx).profileDir, 'model-cache', cacheKey + '.json'), ctx.agent, cwd, selectedModel, refreshModels);
+  const profileDir = commandProfilePaths(ctx).profileDir;
+  const appId = ctx.controls.profileConfig.accounts.app.id;
+  const modelChoices = await cachedModelChoices(modelCachePath(profileDir, appId, ctx.agent.id, tool?.sourceId, cwd), ctx.agent, cwd, selectedModel, refreshModels,
+    { fallbackPath: modelCachePath(profileDir, appId, ctx.agent.id, tool?.sourceId) });
   let selectedEffort = normalizeReasoningEffort(ctx.controls.profileConfig.agentKind,
     String(draft.reasoning_effort ?? ctx.controls.cfg.preferences?.reasoningEffort ?? ''));
   let reasoningNotice: string | undefined;
