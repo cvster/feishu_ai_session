@@ -33,7 +33,10 @@ class Element {
   offsetHeight = 128;
   classList = { remove() {}, toggle() {} };
   constructor(readonly tag = 'div', readonly id = '') {}
-  append(...children: Element[]) { this.children.push(...children); }
+  parent?: Element;
+  select() {}
+  remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
+  append(...children: Element[]) { for (const child of children) child.parent = this; this.children.push(...children); }
   replaceChildren(...children: Element[]) { this.children = children; }
   setAttribute(key: string, value: string) { this.attributes.set(key, value); if (key.startsWith('data-')) this.dataset[key.slice(5)] = value; }
   getAttribute(key: string) { return this.attributes.get(key); }
@@ -77,9 +80,12 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   }
   const response = (value: unknown) => ({ ok: true, json: async () => value });
   const storage = savedStorage ?? new Map(preferences === undefined ? [] : [['bridge-web-preferences', JSON.stringify(preferences)]]);
+  const clipboard = { writeText: vi.fn(async (_text: string) => {}) }, body = new Element('body');
+  const fallbackCopy = vi.fn((_command: string) => true);
   const browserWindow = { innerWidth: 1280, innerHeight: 900, addEventListener() {} };
   runInNewContext(bridgeWebPage.match(/<script>([\s\S]*?)<\/script>/)![1]!, {
-    document: { getElementById: node, createElement: (tag: string) => new Element(tag), createElementNS: (_ns: string, tag: string) => new Element(tag), body: new Element('body'), addEventListener() {} },
+    document: { getElementById: node, createElement: (tag: string) => new Element(tag), createElementNS: (_ns: string, tag: string) => new Element(tag), body, execCommand: fallbackCopy, addEventListener() {} },
+    navigator: { clipboard },
     window: browserWindow, URL,
     fetch: async (path: string, options?: { body?: string }) => {
       if (path === '/api/access') return response({ loginRequired: false });
@@ -94,7 +100,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const menu = (index: number) => node('tree').querySelectorAll('button').find(button => button.getAttribute('aria-label') === rows[index]!.name + '的会话选项')!.onclick!({ stopPropagation() {} });
   const settle = () => new Promise<void>(resolve => setTimeout(resolve, 0));
   const snapshot = (index: number, answer?: string, count?: number) => Stream.all.at(-1)!.emit('snapshot', { sessions: rows, conversation: conversation(index, answer, count) });
-  return { node, rows, requests, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all, storage, browserWindow, settings };
+  return { node, rows, requests, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all, storage, browserWindow, settings, clipboard, fallbackCopy, body };
 }
 
 it.each([true, false])('opens the most recently updated session on entry when recent visibility is %s and preserves later selections', async showRecent => {
@@ -464,7 +470,7 @@ it('shows the live queue above the composer and deletes one message without addi
   expect(h.node('messages').text).not.toContain('first long');
   const queue = h.node('queued-messages'); expect(queue.hidden).toBe(false);
   expect(queue.children[0]!.text).toBe('排队消息（2）');
-  const button = queue.children[1]!.querySelector('button')!;
+  const button = queue.children[1]!.querySelectorAll('button').find(b => b.text === '删除')!;
   const clicked = button.onclick!(); await h.settle();
   expect(button.disabled).toBe(true);
   expect(h.requests[1]!.path).toBe('/api/sessions/' + h.rows[0]!.id + '/queue');
@@ -671,4 +677,18 @@ it.each(['success', 'failure'] as const)('clears the previous queue immediately 
     h.choose(1); expect(queue.hidden).toBe(true); expect(queue.children).toHaveLength(0);
     expect(h.requests).toHaveLength(2);
   }
+});
+
+it.each([false, true])('copies complete queue text without deleting or submitting it (HTTP fallback=%s)', async fallback => {
+  const h = harness(); await h.ready();
+  const text = '第一行\n  第二行  '+ 'long text '.repeat(100);
+  h.requests[0]!.resolve({ ...h.conversation(0), queuedMessages: [{ id: 'a'.repeat(48), text }] }); await h.settle();
+  const queue = h.node('queued-messages');
+  if (fallback) h.clipboard.writeText.mockRejectedValue(Error('insecure origin'));
+  let copied = ''; h.fallbackCopy.mockImplementation(command => { expect(command).toBe('copy'); copied = h.body.children.at(-1)!.value; return true; });
+  const copy = queue.querySelectorAll('button').find(b => b.text === '复制')!;
+  await copy.onclick!(); expect(h.clipboard.writeText).toHaveBeenCalledWith(text);
+  expect(copy.text).toBe('已复制'); expect(queue.hidden).toBe(false); expect(h.requests).toHaveLength(1);
+  if (fallback) { expect(copied).toBe(text); expect(h.body.children).toHaveLength(0); }
+  else expect(h.fallbackCopy).not.toHaveBeenCalled();
 });

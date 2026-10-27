@@ -294,3 +294,14 @@ it('keeps controls and queue together on the last part of an oversized reply', a
     expect(calls.every(([, card]) => Buffer.byteLength(JSON.stringify({ data: JSON.stringify(card) })) <= 26_000)).toBe(true);
   } finally { await publisher.stop(); await h.catalog.flush(); await h.sessions.flush(); }
 });
+
+it('does not mention the owner when a private auxiliary conversation finishes', async () => {
+  const h = await repliesFixture('card', true); h.controls.botOwnerId = 'ou_owner';
+  const sync = await h.start();
+  try {
+    await sync.runNow(); h.finish();
+    await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('completed'));
+    await sync.runNow(); await sync.runNow();
+    expect(h.reply.mock.calls.filter(([request]) => (request as any).data.msg_type === 'post')).toHaveLength(0);
+  } finally { await sync.stop(); }
+});

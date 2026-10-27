@@ -1561,8 +1561,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     (cotEnabled || replyMode === 'card')
       ? undefined : addWorkingReaction(channel, lastMsg.messageId);
 
+  const completionBinding = controls.toolBindings?.get(scope);
   const notifyLegacyCompletion = () => notifyCompletion({ channel, target: { chatId, ...sendOpts },
-    ownerId: controls.botOwnerId, key: `bridge-run:${execution.runId}`, delivery: {}, save: async () => {},
+    ownerId: !controls.auxiliary?.isAuxiliary(scope) && !completionBinding?.linkedSource && !completionBinding?.sharedScope && !completionBinding?.auxiliaryWorkgroup ? controls.botOwnerId : undefined, key: `bridge-run:${execution.runId}`, delivery: {}, save: async () => {},
     active: () => !sessionCatalog?.isScopeArchived(scope) &&
       (!controls.auxiliary?.isAuxiliary(scope) || controls.auxiliary.isActive(scope)) });
   try {

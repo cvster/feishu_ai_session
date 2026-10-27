@@ -159,6 +159,8 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('shows shared %s i
     state: { ...initialState, blocks: [], terminal: 'running' } } as any);
   h.finish(); await vi.waitFor(async () => expect((await h.client.list())[0]?.status).toBe('completed'));
   await h.replies.runNow(); await h.replies.runNow();
+  expect(h.create.mock.calls.filter(([request]) => (request as any).data.msg_type === 'post')).toHaveLength(0);
+  expect(reply.mock.calls.filter(([request]) => request?.data.msg_type === 'post')).toHaveLength(0);
   const completed = await h.service.read(id);
   expect(completed.turns.filter(t => t.id === 'job:' + shared.job.id || t.id === 'native:native-shared-turn')).toHaveLength(1);
   expect(completed.turns.find(t => t.id === 'job:' + shared.job.id)).toMatchObject({ answer: 'before restart\nafter restart', status: 'completed', inputMessages: running.inputMessages });

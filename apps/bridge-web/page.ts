@@ -80,19 +80,25 @@ function rememberChat(id,cached){chatCache.delete(id);chatCache.set(id,cached);w
 // A new session's id changes once its native session exists; carry local state over by group scope.
 function follow(from,to){for(const turn of localMessages.values())if(turn.sessionId===from)turn.sessionId=to;try{for(const key of [storageKey,draftKey]){const value=localStorage.getItem(key(from));if(value!==null&&localStorage.getItem(key(to))===null)localStorage.setItem(key(to),value);localStorage.removeItem(key(from));}}catch{}chatCache.delete(from);if(sendingSession===from)sendingSession=to;}
 function setRows(next){rows=next;let moved;if(selected&&selectedScope&&!current()){moved=rows.find(r=>r.scope===selectedScope)?.id;if(moved)follow(selected,moved);}const valid=new Set(rows.map(r=>r.id));for(const id of chatCache.keys())if(!valid.has(id))chatCache.delete(id);for(const [key,turn]of localMessages)if(!valid.has(turn.sessionId))localMessages.delete(key);return moved;}
+async function copyQueueText(text){
+  try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);return;}}catch{}
+  const active=document.activeElement,field=el('textarea');field.value=text;field.readOnly=true;field.style.position='fixed';field.style.opacity='0';field.setAttribute('aria-hidden','true');document.body.append(field);
+  try{field.select();if(!document.execCommand?.('copy'))throw Error('浏览器未允许复制，请手动复制消息文本');}finally{field.remove();active?.focus({preventScroll:true});}
+}
 function renderQueue(c){
   if(c.session.id!==selected)return;
   const box=$('queued-messages'),items=c.queuedMessages||[],signature=JSON.stringify([c.session.id,items,[...queueRemoving]]);if(signature===lastQueue)return;lastQueue=signature;box.hidden=!items.length;box.replaceChildren();
   if(!items.length)return;
   box.append(el('div','排队消息（'+items.length+'）','queue-heading'));
-  for(const item of items){const row=el('div',undefined,'queue-row'),preview=el('span',item.text.replace(/\s+/g,' ').trim(),'queue-preview'),button=el('button','删除','danger');
+  for(const item of items){const row=el('div',undefined,'queue-row'),preview=el('span',item.text.replace(/\s+/g,' ').trim(),'queue-preview'),copy=el('button','复制'),button=el('button','删除','danger');
+    copy.type='button';copy.setAttribute('aria-label','复制排队消息：'+item.text.slice(0,40));copy.onclick=async()=>{if(selected!==c.session.id)return;copy.disabled=true;try{await copyQueueText(item.text);copy.textContent='已复制';}catch(e){if(selected===c.session.id)$('message-error').textContent=e.message;}finally{copy.disabled=false;}};
     button.type='button';const removeKey=c.session.id+':'+item.id;button.disabled=queueRemoving.has(removeKey);button.setAttribute('aria-label','删除排队消息：'+item.text.slice(0,40));
     button.onclick=async()=>{if(selected!==c.session.id||queueRemoving.has(removeKey))return;queueRemoving.add(removeKey);button.disabled=true;$('message-error').textContent='';
       try{const result=await api('/api/sessions/'+c.session.id+'/queue',{id:item.id});if(selected!==c.session.id)return;
         const cached=chatCache.get(c.session.id);if(cached)cached.snapshot={...cached.snapshot,queuedMessages:result.queuedMessages};
         renderQueue({...c,queuedMessages:result.queuedMessages});
       }catch(e){if(selected===c.session.id){$('message-error').textContent=e.message;button.disabled=false;}}finally{queueRemoving.delete(removeKey);lastQueue='';}
-    };row.append(preview,button);box.append(row);
+    };row.append(preview,copy,button);box.append(row);
   }
 }
 function renderChat(c,restore=false,local=false){

@@ -34,7 +34,6 @@ interface ReplyDelivery extends CompletionDelivery {
   skipped?: boolean;
   inputMessageId?: string;
   inputSendingSince?: number;
-  completionEligible?: boolean;
   queueSignature?: string;
   nativeRecovery?: { turnId: string; signature?: string; finished?: boolean };
 }
@@ -196,7 +195,6 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       deps.controls.toolBindings?.get(target.scope)?.sourceId === target.sourceId &&
       deps.controls.toolBindings?.get(target.scope)?.toolId === deps.adapter.id;
     if (mirror) {
-      delivery.completionEligible ??= !finished;
       if (!delivery.inputMessageId) {
         checkSendWindow(delivery.inputSendingSince, Date.now());
         delivery.inputSendingSince ??= Date.now(); await save();
@@ -239,7 +237,9 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       }
     }
     // Finished ledgers from earlier versions are not retroactively notified.
-    if (finished && !previousDelivery?.finished && (!mirror || delivery.completionEligible)) await notifyCompletion({ channel: deps.channel,
+    const sourceBinding = deps.controls.toolBindings?.get(source.scope);
+    if (finished && !previousDelivery?.finished && !mirror && !deps.controls.auxiliary?.isAuxiliary(source.scope) &&
+        !sourceBinding?.linkedSource && !sourceBinding?.sharedScope && !sourceBinding?.auxiliaryWorkgroup) await notifyCompletion({ channel: deps.channel,
       target: { ...target, replyTo: delivery.parts?.filter(part => part.messageId).at(-1)?.messageId ?? delivery.messageId },
       ownerId: deps.controls.botOwnerId, key: messageKey, delivery, save, active });
     if (nativeTurn) delivery.nativeRecovery = { turnId: nativeTurn.id, signature: nativeSignature, finished };
