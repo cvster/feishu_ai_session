@@ -650,3 +650,25 @@ it('removes a session only from recent updates, persists the choice, and restore
   h.rows[0]!.updatedAtMs += 10; h.streams.at(-1)!.emit('snapshot', { sessions: h.rows });
   expect(recent().querySelectorAll('.session').map(e => e.textContent)).toEqual(['会话0', '会话1']);
 });
+
+it.each(['success', 'failure'] as const)('clears the previous queue immediately while another session loads (%s), then restores cached queues correctly', async result => {
+  const h = harness(); await h.ready();
+  const queued = { ...h.conversation(0), queuedMessages: [{ id: '1'.repeat(48), text: 'only session A' }] };
+  h.requests[0]!.resolve(queued); await h.settle();
+  const queue = h.node('queued-messages'), oldStream = h.streams.at(-1)!;
+  expect(queue.hidden).toBe(false); expect(queue.text).toContain('only session A');
+  h.choose(1);
+  expect(h.node('messages').text).toContain('正在读取会话');
+  expect(queue.hidden).toBe(true); expect(queue.children).toHaveLength(0);
+  oldStream.emit('snapshot', { sessions: h.rows, conversation: queued });
+  expect(queue.hidden).toBe(true); expect(queue.text).not.toContain('only session A');
+  if (result === 'success') h.requests[1]!.resolve(h.conversation(1));
+  else h.requests[1]!.reject(Error('session B unavailable'));
+  await h.settle(); expect(queue.hidden).toBe(true);
+  h.choose(0);
+  expect(queue.hidden).toBe(false); expect(queue.text).toContain('only session A');
+  if (result === 'success') {
+    h.choose(1); expect(queue.hidden).toBe(true); expect(queue.children).toHaveLength(0);
+    expect(h.requests).toHaveLength(2);
+  }
+});

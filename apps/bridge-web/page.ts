@@ -81,6 +81,7 @@ function rememberChat(id,cached){chatCache.delete(id);chatCache.set(id,cached);w
 function follow(from,to){for(const turn of localMessages.values())if(turn.sessionId===from)turn.sessionId=to;try{for(const key of [storageKey,draftKey]){const value=localStorage.getItem(key(from));if(value!==null&&localStorage.getItem(key(to))===null)localStorage.setItem(key(to),value);localStorage.removeItem(key(from));}}catch{}chatCache.delete(from);if(sendingSession===from)sendingSession=to;}
 function setRows(next){rows=next;let moved;if(selected&&selectedScope&&!current()){moved=rows.find(r=>r.scope===selectedScope)?.id;if(moved)follow(selected,moved);}const valid=new Set(rows.map(r=>r.id));for(const id of chatCache.keys())if(!valid.has(id))chatCache.delete(id);for(const [key,turn]of localMessages)if(!valid.has(turn.sessionId))localMessages.delete(key);return moved;}
 function renderQueue(c){
+  if(c.session.id!==selected)return;
   const box=$('queued-messages'),items=c.queuedMessages||[],signature=JSON.stringify([c.session.id,items,[...queueRemoving]]);if(signature===lastQueue)return;lastQueue=signature;box.hidden=!items.length;box.replaceChildren();
   if(!items.length)return;
   box.append(el('div','排队消息（'+items.length+'）','queue-heading'));
@@ -134,6 +135,7 @@ async function select(id){
   saveDraft();saveScroll();loadAbort&&loadAbort.abort();const generation=++selectionGeneration;
   controlGeneration++;closeSessionMenu();$('controls-dialog').close();$('rename-dialog').close();renameSession=null;$('control-status').textContent='';selected=id;selectedScope=rows.find(r=>r.id===id)?.scope??null;lastChat='';$('notice').hidden=true;$('message-error').textContent='';restorePending(id);$('input').value=loadDraft(id);tree();updateHeader();
   const cached=chatCache.get(id);
+  renderQueue(cached?.snapshot||{session:current(),queuedMessages:[]});
   if(cached)renderChat(cached.snapshot,true);else if([...localMessages.values()].some(turn=>turn.sessionId===id))renderLocal(id);else $('messages').replaceChildren(el('div','正在读取会话…','empty'));
   watch();if(cached)return;
   const request=loadAbort=new AbortController(),revision=chatRevision;
