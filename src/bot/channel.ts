@@ -752,13 +752,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     }));
     } catch (error) { log.warn('worker', 'name-monitor-failed', { toolId: tool.id, error: String(error) }); }
   };
-  const modelCacheSync = deps.appPaths?.profileDir ? startWorkerModelCache({
-    profileDir: deps.appPaths.profileDir, botAppId: cfg.accounts.app.id,
-    tools: () => controls.toolRegistry?.all() ?? [],
-    projects: tool => (sessionCatalog?.entries() ?? []).filter(row => row.status === 'active' && row.agentId === tool.id &&
-      row.botAppId === cfg.accounts.app.id && (!row.sourceId || row.sourceId === tool.sourceId))
-      .map(row => workspaces.cwdFor(row.scopeId) ?? row.cwdRealpath),
-  }) : undefined;
+  let modelCacheSync: ReturnType<typeof startWorkerModelCache> | undefined;
   for (const tool of controls.toolRegistry?.all() ?? []) await attachWorker(tool).catch(error => log.warn('worker', 'attach-failed', { toolId: tool.id, error: String(error) }));
   let discovering: Promise<void> | undefined;
   const discover = () => discovering ??= (async () => {
@@ -854,6 +848,14 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     } catch { log.warn('web', 'startup-failed', { reason: '请检查 web 配置或端口占用' }); }
   }
   await controls.auxiliaryApprovals?.recover();
+
+  modelCacheSync = deps.appPaths?.profileDir ? startWorkerModelCache({
+    profileDir: deps.appPaths.profileDir, botAppId: cfg.accounts.app.id,
+    tools: () => controls.toolRegistry?.all() ?? [],
+    projects: tool => (sessionCatalog?.entries() ?? []).filter(row => row.status === 'active' && row.agentId === tool.id &&
+      row.botAppId === cfg.accounts.app.id && (!row.sourceId || row.sourceId === tool.sourceId))
+      .map(row => workspaces.cwdFor(row.scopeId) ?? row.cwdRealpath),
+  }) : undefined;
 
   // App-level keepalive: 15s probe + wake-up detection + HTTP reachability.
   // Defense-in-depth — the SDK's pingTimeout watchdog handles half-dead WS,
