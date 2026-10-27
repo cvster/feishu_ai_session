@@ -1,6 +1,6 @@
 import { createServer, request as httpRequest } from 'node:http';
 import { join } from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, stat } from 'node:fs/promises';
 import { expect, it, vi } from 'vitest';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { fixture, cleanups } from '../../helpers/worker-fixture';
@@ -1295,4 +1295,45 @@ it('uses historical execution details in the shared status format and freezes co
   expect((await h.service.read(id)).turns[0]).toMatchObject({ statusColor: 'blue', statusText: expect.stringContaining('运行中 · 正在输出') });
   state.terminal = 'interrupted';
   expect((await h.service.read(id)).turns[0]).toMatchObject({ statusColor: 'red', statusText: expect.stringContaining('⏹ 已中断') });
+});
+
+it.each(['token', 'password'] as const)('preserves %s credentials and browser login across server redeployment while persisting logout', async kind => {
+  const h = await harness('kilo', '127.0.0.2', { trustedNetworks: [] });
+  const cfg = JSON.parse(await readFile(h.configPath, 'utf8'));
+  cfg.passwordHash = await webPasswordHash('restart-test-password'); await writeFile(h.configPath, JSON.stringify(cfg));
+  const credentialsBefore = await readFile(h.configPath, 'utf8');
+  const login = await h.request('/api/login', { secret: kind === 'token' ? h.secret : 'restart-test-password' });
+  expect(login.status).toBe(200);
+  const cookie = login.headers.get('set-cookie')!.split(';')[0]!;
+  const token = cookie.split('=')[1]!;
+  const path = join(h.dir, 'web-sessions.json'), stored = await readFile(path, 'utf8');
+  expect(stored).not.toContain(token); expect(stored).not.toContain(h.secret); expect(stored).not.toContain('restart-test-password');
+  expect((await stat(path)).mode & 0o777).toBe(0o600);
+  await h.web.close();
+  const next = (await startBridgeWeb({ configPath: h.configPath, service: h.service }))!; cleanups.push(() => next.close());
+  expect(await readFile(h.configPath, 'utf8')).toBe(credentialsBefore);
+  expect((await h.request('/api/sessions', undefined, { Cookie: cookie })).status).toBe(200);
+  expect((await h.request('/api/sessions', undefined, { Authorization: 'Bearer ' + h.secret })).status).toBe(200);
+  expect((await h.request('/api/logout', {}, { Cookie: cookie })).status).toBe(200);
+  await next.close();
+  const third = (await startBridgeWeb({ configPath: h.configPath, service: h.service }))!; cleanups.push(() => third.close());
+  expect((await h.request('/api/sessions', undefined, { Cookie: cookie })).status).toBe(401);
+  expect((await h.request('/api/login', { secret: kind === 'token' ? h.secret : 'restart-test-password' })).status).toBe(200);
+});
+
+it.each(['expiry', 'owner', 'password', 'access'] as const)('rejects a persisted login after %s changes across restart', async change => {
+  const h = await harness('kilo', '127.0.0.2', { trustedNetworks: [] });
+  const login = await h.request('/api/login', { secret: h.secret });
+  const cookie = login.headers.get('set-cookie')!.split(';')[0]!;
+  await h.web.close();
+  const cfg = JSON.parse(await readFile(h.configPath, 'utf8'));
+  if (change === 'owner') h.controls.botOwnerId = 'ou_new_owner';
+  if (change === 'password') cfg.passwordHash = await webPasswordHash('changed-password');
+  if (change === 'access') cfg.trustedNetworks = ['10.0.0.0/8'];
+  await writeFile(h.configPath, JSON.stringify(cfg));
+  const clock = change === 'expiry' ? vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 13 * 60 * 60_000) : undefined;
+  try {
+    const next = (await startBridgeWeb({ configPath: h.configPath, service: h.service }))!; cleanups.push(() => next.close());
+    expect((await h.request('/api/sessions', undefined, { Cookie: cookie })).status).toBe(401);
+  } finally { clock?.mockRestore(); }
 });

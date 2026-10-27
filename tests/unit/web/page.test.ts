@@ -57,7 +57,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const elements = new Map(ids.map(id => [id, new Element('div', id)]));
   const node = (id: string) => elements.get(id)!;
   node('app').style.setProperty = ((key: string, value: string) => { node('app').style[key] = value; }) as any;
-  node('session-menu').hidden = true; node('session-menu').append(node('session-rename'), node('session-archive'), node('session-copy'));
+  node('session-menu').hidden = true; node('session-menu').append(node('session-rename'), node('session-archive'), node('session-copy'), node('session-remove-recent'));
   for (const action of ['stop', 'refresh', 'fork', 'finish', 'config']) { const button = new Element('button'); const img = new Element('img'); img.src = '/assets/run-controls/' + action + '.png'; button.append(img); button.setAttribute('data-control', action); node('session-controls').append(button); }
   const rows = Array.from({ length: count }, (_, i) => String.fromCharCode(97 + i)).map((id, index) => ({ id: id.repeat(64), toolId: index ? 'another' : 'generic', tool: index ? 'Other' : 'Tool', favorite: false, updatedAtMs: updatedAtMs?.[index] ?? count - index,
     project: 'project', cwd: '/project', scope: 'oc_' + id, name: '会话' + index, online: true, canSend: true, canRename: true }));
@@ -604,7 +604,7 @@ it('persists sidebar expansion defaults and order while retaining manual section
   expect(h.node('tree').children.slice(0, 2).map(e => e.querySelector('summary')!.text)).toEqual(['最近更新2', '收藏0']);
   expect(h.node('tree').children.slice(0, 2).map(e => e.open)).toEqual([false, false]);
   const recent = h.node('tree').children[0]!; recent.open = true; recent.listeners.get('toggle')!();
-  h.rows[0]!.name = 'updated'; h.streams.at(-1)!.emit('sessions', h.rows);
+  h.rows[0]!.name = 'updated'; h.streams.at(-1)!.emit('snapshot', { sessions: h.rows });
   expect(h.node('tree').children.slice(0, 2).map(e => e.open)).toEqual([true, false]);
   const restored = harness(undefined, 2, h.storage); await restored.ready();
   expect(restored.node('tree').children.slice(0, 2).map(e => e.open)).toEqual([false, false]);
@@ -631,4 +631,22 @@ it('allows opening archive choices for an offline worker without reading model s
   const opening = archive.onclick!(); expect(h.requests[1]!.data.action).toBe('finish');
   h.requests[1]!.resolve({ elements: [{ kind: 'button', text: '归档', action: 'signed-archive' }, { kind: 'button', text: '归档并解散群', action: 'signed-dissolve' }] }); await opening;
   expect(h.node('controls-body').querySelectorAll('button').map(b => b.text)).toEqual(['归档', '归档并解散群']);
+});
+
+it('removes a session only from recent updates, persists the choice, and restores it on new activity', async () => {
+  const h = harness({ recentCount: 2 }, 3); await h.ready();
+  const recent = () => h.node('tree').children[1]!;
+  const openRecentMenu = () => recent().querySelectorAll('.session-more')[0]!.onclick!({ stopPropagation() {} });
+  h.node('tree').children[2]!.querySelector('.session-more')!.onclick!({ stopPropagation() {} });
+  expect(h.node('session-remove-recent').hidden).toBe(true);
+  h.node('session-menu').onkeydown!({ key: 'Escape', preventDefault() {} });
+  openRecentMenu(); expect(h.node('session-remove-recent').hidden).toBe(false);
+  h.node('session-remove-recent').onclick!();
+  expect(recent().querySelectorAll('.session').map(e => e.textContent)).toEqual(['会话1', '会话2']);
+  expect(h.node('tree').querySelectorAll('.session').some(e => e.textContent === '会话0')).toBe(true);
+  expect(h.requests).toHaveLength(1);
+  const restored = harness({ recentCount: 2 }, 3, h.storage); await restored.ready();
+  expect(restored.node('tree').children[1]!.querySelectorAll('.session').map(e => e.textContent)).toEqual(['会话1', '会话2']);
+  h.rows[0]!.updatedAtMs += 10; h.streams.at(-1)!.emit('snapshot', { sessions: h.rows });
+  expect(recent().querySelectorAll('.session').map(e => e.textContent)).toEqual(['会话0', '会话1']);
 });

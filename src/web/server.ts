@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { loadWebConfig, trustedWebPeer, webListenHosts, webAccessUrls, webHostAllowed, verifyWebCredential, webCredentialSignature, type WebConfig } from './config';
+import { dirname, join, basename } from 'node:path';
+import { WebLoginSessions } from './login-sessions';
+import { loadWebConfig, trustedWebPeer, webListenHosts, webAccessUrls, webHostAllowed, verifyWebCredential, webCredentialSignature, webSecretHash, type WebConfig } from './config';
 import { PersonalSessionService, WebError } from './service';
 import { bridgeWebPage } from '../../apps/bridge-web/page';
 import { bridgeConsolePage } from '../../apps/bridge-web/console';
@@ -24,13 +26,15 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
   if (!initial?.enabled) return;
   await options.service.load();
   let closed = false;
-  const sessions = new Map<string, { owner: string; hash: string; expires: number }>();
+  const sessions = new WebLoginSessions(join(dirname(options.configPath), basename(options.configPath, '.json') + '-sessions.json'));
+  await sessions.load();
   const failures = new Map<string, { count: number; until: number }>();
   const streams = new Map<ServerResponse, { token?: string; bearer?: string; local: boolean; id?: string; previous?: string }>();
   const cookie = (req: IncomingMessage) => /(?:^|;\s*)bridge_web=([A-Za-z0-9_-]{43})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
   const config = () => options.config ? Promise.resolve(options.config) : loadWebConfig(options.configPath);
   const hosts = webListenHosts(initial);
   const accessSignature = (c: WebConfig) => JSON.stringify([webListenHosts(c), c.port, c.trustedNetworks ?? []]);
+  const sessionSignature = (c: WebConfig) => webSecretHash(JSON.stringify([webCredentialSignature(c), accessSignature(c)]));
   const initialAccess = accessSignature(initial);
   const sameAccess = (c: WebConfig | undefined): c is WebConfig => !!c?.enabled && accessSignature(c) === initialAccess;
   const localRequest = (req: IncomingMessage) => trustedWebPeer(initial, req.socket.remoteAddress);
@@ -42,7 +46,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       if (!await verifyWebCredential(c, bearer, false)) throw new WebError(401, 'Token 无效');
       options.service.ownerIdentity(); return;
     }
-    if (!session || session.expires <= Date.now() || session.hash !== webCredentialSignature(c)) throw new WebError(401, '请重新登录');
+    if (!session || session.expires <= Date.now() || session.hash !== sessionSignature(c)) throw new WebError(401, '请重新登录');
     if (session.owner !== options.service.ownerIdentity()) throw new WebError(401, '所有者已变化，请重新登录');
   };
   const handler = (req: IncomingMessage, res: ServerResponse) => { void (async () => {
@@ -85,10 +89,8 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       }
       const owner = options.service.ownerIdentity();
       failures.delete(ip);
-      for (const [t, s] of sessions) if (s.expires < Date.now()) sessions.delete(t);
-      if (sessions.size >= 64) sessions.delete(sessions.keys().next().value!);
       const token = randomBytes(32).toString('base64url');
-      sessions.set(token, { owner, hash: webCredentialSignature(c), expires: Date.now() + 12 * 60 * 60_000 });
+      await sessions.set(token, { owner, hash: sessionSignature(c), expires: Date.now() + 12 * 60 * 60_000 });
       res.setHeader('Set-Cookie', `bridge_web=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`);
       respond(res, 200, { ok: true }); return;
     }
@@ -108,7 +110,7 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       throw new WebError(404, '控制台接口不存在');
     }
     if (url.pathname === '/api/logout' && req.method === 'POST') {
-      sessions.delete(token!); res.setHeader('Set-Cookie', 'bridge_web=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); respond(res, 200, { ok: true }); return;
+      if (token) await sessions.delete(token); res.setHeader('Set-Cookie', 'bridge_web=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); respond(res, 200, { ok: true }); return;
     }
     if (url.pathname === '/api/sessions' && req.method === 'GET') { respond(res, 200, await options.service.list()); return; }
     if (url.pathname === '/api/sessions' && req.method === 'POST') {
