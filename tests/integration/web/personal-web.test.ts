@@ -633,18 +633,23 @@ it('closes previously opened listeners when a later listener cannot bind', async
 
 function flatten(elements: WebControlElement[]): WebControlElement[] { return elements.flatMap(e => e.kind === 'section' ? flatten(e.elements) : [e]); }
 
-it('initializes settings from the existing native effort and preserves the saved unified choice on reopening', async () => {
-  const h = await harness('kilo'), id=(await h.service.list())[0]!.id;
+it('uses saved effort when opening settings and reads the native effort only on explicit refresh', async () => {
+  const h = await harness('kilo'), id = (await h.service.list())[0]!.id;
   h.workspaces.setCwd('oc_group', '/project');
-  Object.assign(h.conversation,{settings:{model:'p/model',reasoningEffort:'medium'}});
-  const response=await h.request('/api/sessions/'+id+'/control',{action:'config'});
-  expect(response.status).toBe(200);
-  const elements=flatten(((await response.json()) as {elements:WebControlElement[]}).elements);
-  expect(elements.find(e=>e.kind==='select'&&e.name==='reasoning_effort')).toMatchObject({value:'medium'});
+  Object.assign(h.conversation, { settings: { model: 'p/model', reasoningEffort: 'medium' } });
+  const native = vi.spyOn(h.client, 'readReasoning');
+  const open = flatten((await h.service.control(id, 'config')).elements);
+  expect(open.find(e => e.kind === 'select' && e.name === 'reasoning_effort')).toMatchObject({ value: 'high' });
+  expect(native).not.toHaveBeenCalled();
+  const refresh = open.find(e => e.kind === 'button' && e.command === 'config.models.0')!;
+  if (refresh.kind !== 'button') throw Error('refresh');
+  const refreshed = flatten((await h.service.control(id, refresh.action)).elements);
+  expect(refreshed.find(e => e.kind === 'select' && e.name === 'reasoning_effort')).toMatchObject({ value: 'medium' });
   expect(h.bindings.get('oc_group')?.reasoningEffort).toBe('medium');
-  Object.assign(h.conversation,{settings:{model:'p/model',reasoningEffort:'max'}});
-  const again=await h.request('/api/sessions/'+id+'/control',{action:'config'});
-  expect(flatten(((await again.json()) as {elements:WebControlElement[]}).elements).find(e=>e.kind==='select'&&e.name==='reasoning_effort')).toMatchObject({value:'medium'});
+  native.mockClear(); Object.assign(h.conversation, { settings: { model: 'p/model', reasoningEffort: 'max' } });
+  const again = flatten((await h.service.control(id, 'config')).elements);
+  expect(again.find(e => e.kind === 'select' && e.name === 'reasoning_effort')).toMatchObject({ value: 'medium' });
+  expect(native).not.toHaveBeenCalled();
 });
 
 it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs Web controls through existing %s handlers: stop, settings save/preview, refresh, copy menu and confirmed archive', async tool => {
@@ -1336,4 +1341,25 @@ it.each(['expiry', 'owner', 'password', 'access'] as const)('rejects a persisted
     const next = (await startBridgeWeb({ configPath: h.configPath, service: h.service }))!; cleanups.push(() => next.close());
     expect((await h.request('/api/sessions', undefined, { Cookie: cookie })).status).toBe(401);
   } finally { clock?.mockRestore(); }
+});
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('opens %s settings from persistent models without worker reads, including when offline', async tool => {
+  const h = await harness(tool), id = (await h.service.list())[0]!.id;
+  const models = vi.spyOn(h.client, 'models').mockResolvedValue([{ value: 'provider/first', label: 'First' }]);
+  const open = flatten((await h.service.control(id, 'config')).elements);
+  expect(models).not.toHaveBeenCalled();
+  const refresh = open.find(e => e.kind === 'button' && e.command === 'config.models.0')!;
+  if (refresh.kind !== 'button') throw Error('refresh');
+  const refreshed = flatten((await h.service.control(id, refresh.action)).elements);
+  expect(models).toHaveBeenCalledOnce();
+  expect(refreshed.find(e => e.kind === 'select' && e.name === 'model')).toMatchObject({ options: expect.arrayContaining([{ value: 'provider/first', text: 'First' }]) });
+  const health = vi.spyOn(h.client, 'health').mockRejectedValue(Error('offline'));
+  const roster = vi.spyOn(h.client, 'listSessions').mockRejectedValue(Error('offline'));
+  const conversation = vi.spyOn(h.client, 'conversation').mockRejectedValue(Error('offline'));
+  const reasoning = vi.spyOn(h.client, 'readReasoning').mockRejectedValue(Error('offline'));
+  models.mockClear(); models.mockRejectedValue(Error('offline'));
+  const restarted = h.makeService(); await restarted.load();
+  const cached = flatten((await restarted.control(id, 'config')).elements);
+  expect(cached.find(e => e.kind === 'select' && e.name === 'model')).toMatchObject({ options: expect.arrayContaining([{ value: 'provider/first', text: 'First' }]) });
+  for (const spy of [models, health, roster, conversation, reasoning]) expect(spy).not.toHaveBeenCalled();
 });

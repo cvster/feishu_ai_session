@@ -62,7 +62,7 @@ export async function loadModelChoices(agent: AgentAdapter, cwd?: string, curren
     return { options, available: true };
   } catch {
     if (current && current !== DEFAULT_MODEL) options.push({ value: current, label: `未验证 · ${current}`, unavailable: true });
-    return { options, available: false, notice: '暂时无法读取工具模型列表，保留原选择。可重新打开 /config 刷新，或选择跟随工具默认。' };
+    return { options, available: false, notice: '暂时无法读取工具模型列表，保留原选择。可在设置中点击“刷新模型”，或选择跟随工具默认。' };
   }
 }
 /** Native levels are tokens, not free text; never guess unsupported levels. */

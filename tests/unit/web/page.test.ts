@@ -625,7 +625,7 @@ it('renders the server Feishu status summary and color without private details',
 it('allows opening archive choices for an offline worker without reading model settings', async () => {
   const h = harness(); await h.ready(); h.rows[0]!.online = false; h.requests[0]!.resolve(h.conversation(0)); await h.settle();
   const buttons = h.node('session-controls').querySelectorAll('button');
-  expect(buttons.find(b => b.dataset.control === 'config')!.disabled).toBe(true);
+  expect(buttons.find(b => b.dataset.control === 'config')!.disabled).toBe(false);
   const archive = buttons.find(b => b.dataset.control === 'finish')!;
   expect(archive.disabled).toBe(false);
   const opening = archive.onclick!(); expect(h.requests[1]!.data.action).toBe('finish');

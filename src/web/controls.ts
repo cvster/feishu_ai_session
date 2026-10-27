@@ -17,7 +17,7 @@ interface Choice {
   owner: string; sessionId: string; cmd: string; args: string; fields: Map<string, Field>; expires: number;
   result?: Promise<WebControlResult>; fingerprint?: string;
 }
-const callbackCommand = /^(?:config\.(?:models\.\d+|preview|submit|cancel)|fork\.(?:same|to)|finish\.(?:archive|archive-dissolve))$/;
+const callbackCommand = /^(?:config\.(?:(?:models|page)\.\d+|preview|submit|cancel)|fork\.(?:same|to)|finish\.(?:archive|archive-dissolve))$/;
 
 /** Present existing command cards through a Web transport. Native operations stay in the common handlers. */
 export class WebSessionControls {

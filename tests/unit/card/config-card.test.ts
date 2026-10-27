@@ -52,7 +52,7 @@ it('pages large native catalogs while retaining the current selection as a valid
   expect(picker.options!.length).toBeLessThanOrEqual(82);
   expect(picker.options!.some(o => o.value === picker.initial_option)).toBe(true);
   expect(picker.options!.some(o => o.value === 'model-100')).toBe(true);
-  expect(JSON.stringify(card)).toContain('config.models.2');
+  expect(JSON.stringify(card)).toContain('config.page.2');
 });
 
 it('offers the fixed unified list without a default or per-model read button', () => {

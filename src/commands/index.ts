@@ -6,10 +6,11 @@ import { isPersonalWorkgroup, PersonalBindingConflict, type ToolBindingStore } f
 import type { CopiedSessionSource } from '../tools/bindings';
 import { currentCopySource, readCopiedSession, sessionCopyChoice, showSessionCopyMenu } from './session-copy';
 import { DurableAgentAdapter } from '../worker/adapter';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { cachedModelChoices } from '../agent/model-cache';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { capabilityForTool } from '../agent/capability';
 import { DEFAULT_MODEL, loadModelChoices, normalizeModelSelection, normalizeReasoningEffort,
@@ -393,7 +394,7 @@ export async function runCommandHandler(
   args: string,
   ctx: CommandContext,
 ): Promise<boolean> {
-  ctx = await routeCommandContext(ctx, { skipSessionIdentity: name === 'finish' && !args.trim() });
+  ctx = await routeCommandContext(ctx, { skipSessionIdentity: ['finish', 'config'].includes(name) && !args.trim() });
   if (
     ctx.chatMode === 'p2p' &&
     ctx.dmGroupCreationOnly &&
@@ -2742,6 +2743,8 @@ async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
     case '':
       return showConfigForm(ctx);
     case 'models':
+      return showConfigForm(ctx, { refreshModels: true, modelPage: Number(args.trim().split(/\s+/)[1]) || 0, updateForm: true });
+    case 'page':
       return showConfigForm(ctx, { modelPage: Number(args.trim().split(/\s+/)[1]) || 0, updateForm: true });
     case 'preview':
       if (ctx.fromWeb) return showConfigForm(ctx, { preview: true, updateForm: true });
@@ -2760,9 +2763,9 @@ async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function showConfigForm(ctx: CommandContext,
-  { modelPage = 0, preview = false, updateForm = false }: { modelPage?: number; preview?: boolean; updateForm?: boolean } = {},
+  { modelPage = 0, preview = false, updateForm = false, refreshModels = false }: { modelPage?: number; preview?: boolean; updateForm?: boolean; refreshModels?: boolean } = {},
 ): Promise<void> {
-  await Promise.all([
+  if (refreshModels) await Promise.all([
     ctx.controls.refreshOwner(ctx.channel).catch(() => {}),
     fetchKnownChats(ctx.channel)
       .then((chats) => {
@@ -2775,13 +2778,16 @@ async function showConfigForm(ctx: CommandContext,
   const access = ctx.controls.profileConfig.access;
   const draft = preview || updateForm ? ctx.formValue ?? {} : {};
   const selectedModel = normalizeModelSelection(ctx.controls.profileConfig.agentKind, String(draft.model ?? ctx.controls.cfg.preferences?.model ?? DEFAULT_MODEL));
-  const modelChoices = await loadModelChoices(ctx.agent, effectiveWorkspaceCwd(ctx), selectedModel);
+  const cwd = effectiveWorkspaceCwd(ctx);
+  const tool = ctx.controls.toolRegistry?.find(ctx.controls.profileConfig.agentKind);
+  const cacheKey = createHash('sha256').update(JSON.stringify([ctx.controls.profileConfig.accounts.app.id, ctx.agent.id, tool?.sourceId, cwd])).digest('hex');
+  const modelChoices = await cachedModelChoices(join(commandProfilePaths(ctx).profileDir, 'model-cache', cacheKey + '.json'), ctx.agent, cwd, selectedModel, refreshModels);
   let selectedEffort = normalizeReasoningEffort(ctx.controls.profileConfig.agentKind,
     String(draft.reasoning_effort ?? ctx.controls.cfg.preferences?.reasoningEffort ?? ''));
   let reasoningNotice: string | undefined;
   const settingsScope = ctx.controls.toolBindings?.settingsScope(ctx.scope);
   const binding = settingsScope ? ctx.controls.toolBindings?.get(settingsScope) : undefined;
-  if (!preview && binding?.nativeId && binding.nativeCreated !== false &&
+  if (refreshModels && !preview && binding?.nativeId && binding.nativeCreated !== false &&
       (!binding.reasoningEffort || binding.reasoningEffort === DEFAULT_REASONING) && ctx.agent.readReasoning) {
     try {
       const selection = await ctx.agent.readReasoning(binding.nativeId, effectiveWorkspaceCwd(ctx));
@@ -2969,7 +2975,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
         const choices = await loadModelChoices(ctx.agent, effectiveWorkspaceCwd(ctx));
         if (!choices.available || !choices.options.some(option => option.value === modelSelection && !option.unavailable)) {
           await waitForSettle();
-          await showResultCardInPlace(ctx, formMsgId, configFailedCard('模型列表已变化或暂时无法读取，请重新打开 /config 刷新后选择；原设置未修改。'));
+          await showResultCardInPlace(ctx, formMsgId, configFailedCard('模型列表已变化或暂时无法读取，请在设置中点击“刷新模型”后选择；原设置未修改。'));
           return;
         }
         modelOptions = choices.options;

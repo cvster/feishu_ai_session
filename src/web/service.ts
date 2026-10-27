@@ -264,7 +264,7 @@ export class PersonalSessionService {
   }
   async control(id: string, action: string, values?: unknown) {
     return this.serial('control:' + id, async () => {
-      if (action === 'finish') {
+      if (action === 'finish' || action === 'config') {
         const owner = this.owner(), entry = this.bindings().find(([scope, b]) => this.identity(scope, b) === id);
         if (!entry) throw new WebError(404, '会话已归档或绑定已变化');
         this.assertBinding(id, entry[0]);

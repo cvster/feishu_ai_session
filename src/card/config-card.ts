@@ -77,9 +77,9 @@ export function configFormCard(opts: ConfigFormOpts): object {
       elements: [
         { tag: 'markdown', content: '⚙️ **偏好设置** · 保存后下次请求生效' },
         { tag: 'column_set', flex_mode: 'flow', horizontal_spacing: 'small', columns: [
-          ...(page > 0 ? [button('models_prev', '上一页模型', `config.models.${page - 1}`)] : []),
+          ...(page > 0 ? [button('models_prev', '上一页模型', `config.page.${page - 1}`)] : []),
           button('models_refresh', pages > 1 ? `刷新模型（${page + 1}/${pages}）` : '刷新模型', `config.models.${page}`),
-          ...(page + 1 < pages ? [button('models_next', '下一页模型', `config.models.${page + 1}`)] : []),
+          ...(page + 1 < pages ? [button('models_next', '下一页模型', `config.page.${page + 1}`)] : []),
         ].map(action => ({ tag: 'column', width: 'auto', elements: [action] })) },
         ...(opts.modelNotice ? [{ tag: 'markdown', content: `⚠️ ${opts.modelNotice}` }] : []),
         {

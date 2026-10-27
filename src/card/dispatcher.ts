@@ -135,7 +135,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
       chatMode: mode,
       sessions: deps.sessions,
       sessionCatalog: deps.sessionCatalog,
-      sessionCatalogIdentity: cmd === 'finish' ? undefined : await commandSessionCatalogIdentity({
+      sessionCatalogIdentity: ['finish', 'config'].includes(cmd) ? undefined : await commandSessionCatalogIdentity({
         msg,
         scope,
         mode,
