@@ -96,10 +96,10 @@ Answer text is not stored in the answer-claim or question-delivery ledger.
 | Worker | Native rename | Native archive | Fork | Conversation mirror | Questions |
 | --- | --- | --- | --- | --- | --- |
 | Codex | Yes | Yes | Yes | Yes | Yes, when the native connection can answer |
-| Claude | CLI title metadata | Catalog only | No | No | No |
+| Claude | CLI title metadata | Catalog only | No | Yes | No |
 | Kilo | Yes | Yes | Yes | Yes, configured VS Code/CLI or App | No |
 | ZCode | Paired title or CLI labels | Catalog only | Yes | Paired mode | No |
-| DSH | Yes | Yes | Yes | No | No |
+| Dsh | Yes | Yes | Yes | Yes | No |
 
 Native stop is available for Codex with a usable shared writer, Kilo, and paired
 ZCode. Workers recheck cwd, current turn and archive state before stopping.

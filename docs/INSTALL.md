@@ -306,15 +306,35 @@ Linux 若需退出登录后继续运行，由管理员为部署账户开启 syst
 
 部署产物、依赖或 Node/CLI 路径变更仍可能影响旧进程后续启动子进程或延迟加载文件。每个版本放在独立目录，保留旧目录及其依赖；避免原地删除旧 worker 使用的文件。
 
-### 本机 systemd 部署脚本
+### 已有 profile 一键部署（Linux 用户 systemd）
+
+以运行桥接的同一个 OS 用户，在源码仓库中运行。首次安装、工具登录、飞书发布和服务创建先按前面的章节完成；升级不再次运行 `setup` 或 `web configure`。
 
 ```bash
-pnpm deploy:local --profile <profile>                    # 只重启桥接（含内置网页）
-pnpm deploy:local --profile <profile> --workers codex    # 同时重启指定 worker，逗号分隔或 all
-pnpm deploy:local --profile <profile> --rollback <sha>   # 切回已有版本并重启桥接
+# 只读预检；不安装、不构建、不重启
+node tools/deploy.mjs --profile my-bot --check
+
+# 一键升级：准备 pnpm → 冻结依赖 → 类型检查 → 构建 → 部署 → 健康检查
+node tools/deploy.mjs --profile my-bot
+
+# 查看帮助不要求已安装依赖或存在服务
+node tools/deploy.mjs --help
+
+# 对应 pnpm 简写；旧的 deploy:local 入口仍可用
+pnpm deploy --profile my-bot
+
+# worker 代码确有变化时才单独安排更新
+node tools/deploy.mjs --profile my-bot --workers codex
+
+# 使用脚本打印的旧版本号回退
+node tools/deploy.mjs --profile my-bot --rollback <旧版本号>
 ```
 
-脚本要求工作区干净，在仓库构建 `HEAD` 后以 `git archive` 加构建产物生成 `releases/<sha>`；锁文件未变时复用当前版本的生产依赖，否则执行 `pnpm install --prod --frozen-lockfile`。随后原子切换 `current` 链接，并把该 profile 的桥接和 worker 服务入口统一改为 `current/bin/lark-channel-bridge.mjs`（原单元文件备份到 `deployment-backups/`）。Node 按真实路径加载模块，运行中的进程继续使用启动时的版本目录；未列入 `--workers` 的 worker 不重启，仅在之后自行重启时加载 `current`。指定的 worker 先重启并确认 `/health`，再重启桥接，最后检查网页和所有 worker 的 `/health`，结果写入版本目录的 `deployment.json`。脚本不会启停 Codex Desktop、共享 app-server 或其他进程。默认部署根目录 `~/lark-coding-agent-bridge`，可用 `--root` 或 `LARK_BRIDGE_DEPLOY_ROOT` 指定。
+Node >=20.12（推荐 24）、npm、Git 和 tar 需已安装，用户 systemd 需可访问。脚本与安装器共用用户目录里的固定版本 pnpm，自动补装，不要求全局 pnpm、Corepack 或 sudo。`--check` 会显示部署目录、服务名及工作区是否干净，缺少服务时提示先 `start`。首次在仓库构建前自动安装开发依赖；默认执行类型检查，修改代码后的测试按 [测试指引](TESTING.md) 运行。同一 Git 版本再次部署复用完整的不可变版本目录，支持重试，不要求删除旧版本。`--skip-build` 仅用于本地构建已经验证的场景；`--no-restart` 只切换磁盘版本，运行中的服务仍使用旧代码。
+
+部署不修改 profile 的应用凭据、worker 配置、`runtime.env`、会话关联、网页密码/Token 和未过期的网页登录状态。密码仍是原密码，Token 仍是原 Token；只有主动重新配置/轮换才更改。网页登录保留原有 12 小时有效期，不因部署续期。
+
+脚本要求工作区干净，在仓库安装冻结依赖、类型检查并构建 `HEAD` 后以 `git archive` 加构建产物生成 `releases/<sha>`；锁文件未变时复用当前版本的生产依赖，否则执行 `pnpm install --prod --frozen-lockfile`。随后原子切换 `current` 链接，并把该 profile 的桥接和 worker 服务入口统一改为 `current/bin/lark-channel-bridge.mjs`（原单元文件备份到 `deployment-backups/`）。Node 按真实路径加载模块，运行中的进程继续使用启动时的版本目录；未列入 `--workers` 的 worker 不重启，仅在之后自行重启时加载 `current`。指定的 worker 先重启并确认 `/health`，再重启桥接，最后检查网页和所有 worker 的 `/health`，结果写入版本目录的 `deployment.json`。脚本不会启停 Codex Desktop、共享 app-server 或其他进程。默认部署根目录 `~/lark-coding-agent-bridge`，可用 `--root` 或 `LARK_BRIDGE_DEPLOY_ROOT` 指定。
 
 在通过 worker 会话内（例如飞书群里）执行部署时，脚本自身运行在即将被重启的服务单元里，重启会连带杀掉脚本。此时脚本先把重启计划和校验清单写入 `deployment-backups/<stamp>-<sha>/plan.json`，再用 `systemd-run --user` 启动一个独立的一次性单元接管全部重启与校验，然后自行退出；父会话可断开，用 `journalctl --user -u lark-bridge-deploy-*` 查看进度。因此该场景下当前 worker 会话结束属正常现象，`deployment.json` 由接管单元写入。脚本打印的 `rollback:` 行按 `previous-current` 生成，可直接用于回退。
 

@@ -8,6 +8,7 @@
 
 本仓库包含个人工作群、AA 会话自动建群、开放群直接关联原会话、折叠回复和各工具统一 worker 等定制功能。使用本仓库版本请按下文从源码构建；公开 npm 包不保证包含这些改动。
 
+- [新工具接入简介](docs/NEW_WORKER.md)：统一 worker 协议、能力声明和自动发现。
 - [完整安装配置指引](docs/INSTALL.md)：从最短 Linux 安装路线开始，含独立 worker、内置网页、Codex writer 占用与 Claude 目录占用排错。
 - [动态模型列表](docs/MODELS.md)：Codex、Claude、ZCode、Kilo 原生模型发现，供应商区分、刷新及删除后的处理。
 - [ZCode 接入与工具扩展](docs/ZCODE.md)：本机模型账号、独立 worker、可选桌面远控配对、支持范围及架构说明。
@@ -18,6 +19,20 @@
 - [详细配置与排错](README.zh.md)：权限模式、访问控制、会话与日志等进阶说明。
 - [多服务目录说明](docs/MONOREPO.md)：飞书桥接、共享 Codex core 与独立 Web 服务的边界。
 - [AI助手 A2A 接口](docs/A2A_API.md)：通过内网 HTTP 给其他 agent 委派任务，默认端口 36999，支持双别名、完整结果轮询及飞书权限确认。
+
+## 安装与一键部署
+
+首次安装按 [安装指引](docs/INSTALL.md) 完成工具登录、飞书应用配置及服务创建。已有 Linux profile 更新代码后，只需：
+
+```bash
+node tools/deploy.mjs --profile my-bot
+```
+
+自动准备用户目录中的 pnpm、安装冻结依赖、类型检查、构建、切换版本、重启桥接并检查健康；默认保留所有 worker 和 Codex writer。无需全局 pnpm 或 Corepack。`--check` 可只读预检，`--help` 查看参数；同版本可重复部署。网页密码、Token、未过期登录和会话绑定保留，旧版本保留供回退。
+
+## 新工具接入
+
+新工具实现统一 worker HTTP 接口，在 `profiles/<profile>/workers/<目录>/endpoint.json` 发布地址与凭据。桥接校验 `/health` 的工具、账户及机器人身份，通过 manifest 展示工具名，通过 capabilities 启用操作。原生协议、模型读取及推理档位映射放在 worker 内，不需要给桥接或网页增加工具分支。具体步骤和最小能力见 [新工具接入简介](docs/NEW_WORKER.md)。
 
 ## 主要功能
 

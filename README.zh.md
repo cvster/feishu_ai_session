@@ -6,7 +6,7 @@ Kilo 可直接使用本机 VS Code 扩展附带的运行时，动态读取其模
 
 本项目基于 [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge)（原名 `feishu-claude-code-bridge`） 二次开发。开发者：**Lennox Gao**；有问题、建议或需求，欢迎联系。
 
-[完整安装与配置](docs/INSTALL.md) · [中文主 README：主要用法与部署](./README.md) · [飞书权限申请清单](./docs/FEISHU_PERMISSIONS.md)
+[完整安装与一键部署](docs/INSTALL.md) · [新工具接入简介](docs/NEW_WORKER.md) · [中文主 README：主要用法与部署](./README.md) · [飞书权限申请清单](./docs/FEISHU_PERMISSIONS.md)
 
 其他 agent 可通过 [AI助手 A2A 接口](./docs/A2A_API.md) 委派问答/调试任务。默认端口 36999，使用自定义用户名路径、永久及易读双别名、独立密钥、全量轮询和飞书私聊权限确认；默认关闭，不是通用模型供应商接口。
 

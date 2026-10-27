@@ -152,7 +152,7 @@ export function sessionCopyCard(current: ToolId, token: string, tools: { id: Too
       { tag: 'input', name: 'new_session_name', label: { tag: 'plain_text', content: '新会话名字' }, default_value: defaultName, required: true },
       cardKitButtonRow([{ text: toolDefinition(current).label, value: { cmd: 'fork.same', arg: token }, style: 'primary', submitName: 'copy_same' }], '复制会话：'),
       ...(tools.length ? [cardKitButtonRow(tools.map(tool => ({
-        text: toolDefinition(tool.id).label, value: { cmd: 'fork.to', arg: tool.token }, submitName: `create_${tool.id}`,
+        text: toolDefinition(tool.id).label, value: { cmd: 'fork.to', arg: tool.token }, style: tool.id === current ? 'primary' : 'default', submitName: `create_${tool.id}`,
       })), '在新工具中创建会话：')] : []),
     ] }] },
   };

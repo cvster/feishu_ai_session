@@ -1,12 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import { parseArgs } from 'node:util';
+import { ensurePnpm, npmCommand, PNPM_VERSION } from './lib/package-manager.mjs';
 
-export const VERSIONS = { pnpm: '10.33.0', codex: '0.159.2', claude: '2.1.261', lark: '1.0.97' };
+export const VERSIONS = { pnpm: PNPM_VERSION, codex: '0.159.2', claude: '2.1.261', lark: '1.0.97' };
 export function envLine(name, value) {
   if (/[\r\n]/.test(value)) throw new Error(`${name} 包含换行，请手动配置 runtime.env`);
   // Node dotenv does not JSON-decode backslashes. Single quotes preserve Windows paths.
@@ -42,22 +42,15 @@ Node.js >=20.12（推荐24）和 Git 需预装。默认不登录、不启动模�
   // Before dependencies exist, only fixed command names/argument arrays are used.
   // Windows npm.cmd is launched through npm's JS entry, never a shell string.
   const require = createRequire(import.meta.url);
-  const npmCandidates = [process.env.npm_execpath, join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'), join(dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js')].filter(Boolean);
-  let npmEntry;
-  for (const candidate of npmCandidates) { try { npmEntry = require.resolve(candidate); break; } catch {} }
   const invoke = (command, argv, stdio = 'inherit') => {
-    if (command === 'npm' && npmEntry) { argv = [npmEntry, ...argv]; command = process.execPath; }
+    if (command === 'npm') { const npm = npmCommand(argv); command = npm.command; argv = npm.args; }
     const result = spawnSync(command, argv, { stdio, encoding: 'utf8', windowsHide: true, env: process.env });
     if (result.error || result.status !== 0) throw new Error(`${command === process.execPath ? 'Node/npm' : command} 执行失败；请核对安装与网络，详见 docs/INSTALL.md`);
     return result;
   };
   invoke('git', ['--version']); invoke('npm', ['--version']);
   const tools = resolve(process.env.CODEXFEISHU_TOOLS_DIR ?? join(homedir(), '.local', 'share', 'codexfeishu-tools'));
-  await mkdir(tools, { recursive: true, mode: 0o700 });
-  // Pin pnpm locally instead of requiring Corepack or global administrator access.
-  let pnpm = join(tools, 'node_modules/pnpm/bin/pnpm.cjs');
-  try { if (JSON.parse(await readFile(join(tools, 'node_modules/pnpm/package.json'), 'utf8')).version !== VERSIONS.pnpm) throw new Error(); }
-  catch { invoke('npm', ['install', '--prefix', tools, '--no-audit', '--no-fund', '--ignore-scripts', '--save-exact', `pnpm@${VERSIONS.pnpm}`]); }
+  const { entry: pnpm } = await ensurePnpm(tools);
   const runPnpm = argv => invoke(process.execPath, [pnpm, ...argv]);
   const cliPaths = [join(tools, 'node_modules', '.bin'), join(homedir(), '.local', 'bin')];
   process.env.PATH = [...cliPaths, process.env.PATH ?? ''].join(process.platform === 'win32' ? ';' : ':');
@@ -87,7 +80,6 @@ Node.js >=20.12（推荐24）和 Git 需预装。默认不登录、不启动模�
   cli(['doctor', '--agents', selection, ...(opts.workspace ? ['--workspace', resolve(opts.workspace)] : [])]);
   console.log(`\n工具目录：${tools}\n以后手动运行前，把 ${cliPaths[0]} 加入 PATH（不要将 Node/npm 的环境变量值复制给别人）。`);
   if (!opts.configure) { console.log('安装和构建完成。下一步按 docs/INSTALL.md 登录所选 CLI、创建 profile 和配置飞书。'); return; }
-  if (!opts.workspace) throw new Error('--configure 需要 --workspace 项目绝对路径');
   cli(['profile', 'create', opts.profile, '--agent', kinds[0], '--workspace', resolve(opts.workspace)]);
   // Persist only non-secret tool paths; API keys/proxies remain explicit local config.
   const channelHome = process.env.LARK_CHANNEL_HOME ?? join(homedir(), '.lark-channel');

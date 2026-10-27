@@ -1,7 +1,6 @@
 import { nativeSessionFields, nativeSessionId } from '../tools/definitions';
 import { isToolId, toolDefinition, type ToolId } from '../tools/definitions';
-import { controlsForTool } from '../tools/context';
-import { routeCommandContext } from '../tools/context';
+import { controlsForTool, routeCommandContext } from '../tools/context';
 import type { ToolRegistry } from '../tools/types';
 import { isPersonalWorkgroup, PersonalBindingConflict, type ToolBindingStore } from '../tools/bindings';
 import type { CopiedSessionSource } from '../tools/bindings';

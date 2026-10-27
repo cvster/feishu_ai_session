@@ -98,6 +98,8 @@ describe('personal multi-tool workflows', () => {
     expect(copyButton(h, 'Codex').arg).not.toBe(copyButton(h, 'Codex', 'fork.same').arg);
     expect(copyButton(h, 'Zcode')).toBeUndefined(); expect(copyButton(h, 'Dsh')).toBeUndefined();
     const elements = copyElements(h);
+    expect(elements.find(row => row.tag === 'button' && row.name === 'create_codex')?.type).toBe('primary');
+    expect(elements.find(row => row.tag === 'button' && row.name === 'create_claude')?.type).toBe('default');
     expect(elements.filter(row => row.tag === 'column_set').map(row => row.columns[0].elements[0].content)).toEqual(['复制会话：', '在新工具中创建会话：']);
     expect(elements.find(row => row.tag === 'input')).toMatchObject({ name: 'new_session_name', default_value: 'AA-同名-2', required: true });
     expect(elements.filter(row => row.tag === 'button').every(row => row.form_action_type === 'submit' && row.name)).toBe(true);

@@ -1,6 +1,5 @@
 import type { CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { AgentAdapter } from '../agent/types';
-import { routeCommandContext } from '../tools/context';
 import { createHash } from 'node:crypto';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
@@ -162,8 +161,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     const args = composeArgs(sub, payload);
 
     try {
-      const scopedCtx = await routeCommandContext(ctx, { skipSessionIdentity: cmd === 'finish' });
-      const ok = await runCommandHandler(name ?? '', args, scopedCtx);
+      const ok = await runCommandHandler(name ?? '', args, ctx);
       if (!ok) log.warn('cardAction', 'unknown', { cmd });
     } catch (err) {
       log.fail('cardAction', err, { cmd });
