@@ -1,17 +1,38 @@
 # CodexFeishu · 飞书 AI助手桥接
 
-将飞书 / Lark 群聊接入本机 Codex、Claude Code、ZCode、Kilo 和 DeepSeek Harness（DSH）。私聊机器人创建或管理会话，在工作群中提问、处理图片和文件、执行项目任务；也可以把机器人加入已有协作群，关联一个已有会话作为背景。
+将飞书 / Lark 群聊接入本机 Codex、Claude、Zcode、Kilo 和 Dsh（DeepSeek Harness）。私聊机器人创建或管理会话，在工作群中提问、处理图片和文件、执行项目任务；也可以把机器人加入已有协作群，关联一个已有会话作为背景。
+
+- **功能一：个人 AI 会话群。** 将本地 AI 会话与飞书群一一对应，在群中发消息，等同于在ai会话里发消息，两边输入和回复实时同步，方便随时随地24小时远程办公。
+- **功能二：会话共享。** 将飞书机器人加入同事的协作群，选择绑定已有 AI 会话；同事在群里 `@机器人` 提问，即等同于向该会话发消息，并在群里获得响应回复。
+- **功能三：Web 统一管理。** 在网页中按工具、项目、会话查看已绑定个人 AI 群的会话，网页也可以实时对话，网页/飞书群/ai会话三者实时同步。web中还有管理页面，可管理个人AI会话、协作群和会话关联。
 
 本项目基于原始 GitHub 项目 [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge)（原名 `feishu-claude-code-bridge`） 二次开发，保留原项目的版权与许可证说明。
 
-**本项目开发者：Lennox Gao。** 使用过程中有问题、建议或需求，欢迎联系 Lennox Gao。
+**本项目开发者：Lennox Gao。** 使用过程中有问题、建议或需求，欢迎联系。
+
+## 主要用法
+
+先完成[安装与首次启动](#安装与首次启动)，让桥接与所需工具的 worker 保持运行，再按使用场景操作：
+
+| 使用场景           | 怎么做                                                     |
+| -------------- | ------------------------------------------------------- |
+| 在飞书继续自己的 AI 会话 | 在原生工具中将会话命名为 `AA-项目名`，飞书中会自动创建同名群；也可私聊机器人发送“控制台”选择已有会话  |
+| 新建一个 AI 会话     | 私聊机器人发送“新建会话”，选择工具、填写会话名和本机项目路径；创建后进入个人 AI 群直接提问，无需 `@` |
+| 让同事使用已有会话      | 把机器人加入协作群，由将群关联已有ai会话；群成员 `@机器人` 后提问                    |
+| 在网页统一使用        | [启用内置 Web](#web统一对话与控制台)，选中会话即可发消息；工具、群和网页共用同一会话，三者实时同步 |
+| 调整模型或处理排队      | 点击“设置”修改模型与推理档位；新模型可点“刷新模型”；网页排队区支持复制、删除待发送消息           |
+| 结束或复制会话        | 使用“复制会话”创建独立副本；使用“归档”结束会话，或“归档并解散群”同时关闭群聊               |
+
+例如：把Codex/Zcode等harness中的会话改名为 `AA-电机误差检测`，通常在下一次扫描（约 15 秒）创建个人群；在群里发送消息，等同于在harness中发送消息，两边都会得到同步输入和回复。手机飞书、工具界面和网页都可以继续这段对话。
+
+个人 AI 群与会话一对一绑定；共享群可以多个，但共用原会话上下文。项目所在机器需要保持在线，项目路径是部署机器上的本机路径。具体操作见[日常使用与会话管理](#日常使用与会话管理)。
 
 本仓库包含个人工作群、AA 会话自动建群、开放群直接关联原会话、折叠回复和各工具统一 worker 等定制功能。使用本仓库版本请按下文从源码构建；公开 npm 包不保证包含这些改动。
 
 - [新工具接入简介](docs/NEW_WORKER.md)：统一 worker 协议、能力声明和自动发现。
 - [完整安装配置指引](docs/INSTALL.md)：从最短 Linux 安装路线开始，含独立 worker、内置网页、Codex writer 占用与 Claude 目录占用排错。
-- [动态模型列表](docs/MODELS.md)：Codex、Claude、ZCode、Kilo 原生模型发现，供应商区分、刷新及删除后的处理。
-- [ZCode 接入与工具扩展](docs/ZCODE.md)：本机模型账号、独立 worker、可选桌面远控配对、支持范围及架构说明。
+- [动态模型列表](docs/MODELS.md)：Codex、Claude、Zcode、Kilo 原生模型发现，供应商区分、刷新及删除后的处理。
+- [Zcode 接入与工具扩展](docs/ZCODE.md)：本机模型账号、独立 worker、可选桌面远控配对、支持范围及架构说明。
 - [Kilo 接入与使用](docs/KILO.md)：VS Code 插件或独立 CLI 模式、动态模型及推理档位、独立 worker 和会话操作。
 - [DeepSeek Harness 接入](docs/DSH.md)：官方 DSH CLI 安装、原生模型配置、独立 worker、AA 工作群、会话共享和会话操作。
 - [飞书权限申请清单](docs/FEISHU_PERMISSIONS.md)：权限标识、申请用途、事件订阅与验收步骤。
@@ -38,27 +59,27 @@ node tools/deploy.mjs --profile my-bot
 
 **会话共享**是将已有会话提供给其他群使用的能力；使用该会话的群称为**共享群**，群内提供问答与执行能力的角色称为**AI助手**。个人工作群与原生会话保持一对一绑定，共享群是该会话的额外使用入口。
 
-- 给 Codex、Claude、ZCode 或 Kilo 会话创建个人飞书工作群，每个群对应一个会话，在群里发消息等同于ai会话中聊天。
+- 给 Codex、Claude、Zcode、Kilo 或 Dsh 会话创建个人 AI 工作群，每个群对应一个会话，在群里发消息即可继续原生工具中的对话。
 - 个人工作群支持所有成员直接提问，无需 @机器人；共享群仍须 @。个人 AI 会话群直接请求结束时 @机器人所有者；辅助群请求及其同步回复不发送完成艾特。
 - 回复卡片不包含思考过程和工具调用详情，超过安全大小时自动拆成多张卡片。
-- 一个机器人同时支持 Codex、Claude Code、ZCode、Kilo 和 DeepSeek Harness，创建工作群时选择工具与项目目录。
+- 一个机器人同时支持 Codex、Claude、Zcode、Kilo 和 Dsh，创建工作群时选择工具与项目目录。
 - 以 `AA` 开头的已有会话可自动创建同名的飞书工作群。
 - 新建工作群、关联共享群时，自动为飞书 CLI 所有者开启消息免打扰；不会更改其他成员的通知设置。主 CLI 需以应用所有者登录并授权 `im:chat.user_setting:write`，不影响 Agent 专用 CLI 的身份限制。
-- 把AI助手加入目标群后，由所有者在私聊选择已有会话，启用会话共享（优先选择 AA 会话）。共享群只响应真实 `@机器人` 的消息；同事可提问，回答仅回到提问群。
+- 把AI助手加入目标群后，由所有者在私聊选择已有会话，启用会话共享（优先选择 AA 会话）。共享群只响应真实 `@机器人` 的消息；同事可提问；若原会话已绑定个人 AI 群，公开共享群的成员消息和回复也会同步到该个人群及 Web，并显示提问者的飞书姓名。
 - 共享群默认简短回复，不提及来源会话和内部读取过程。长正文和代码默认折叠；结束后的状态与按钮也放入折叠区。
-- Codex、Claude、ZCode、Kilo 和 DSH 都通过独立 worker 执行；Codex worker 内继续使用原生队列。桥接重启后可继续同步已有结果。
-- ZCode 桌面新消息每约 2 秒回推绑定的个人工作群，首次启用不补发历史；开放群和私聊群不接收桌面广播。见 [ZCode 接入说明](docs/ZCODE.md#桌面消息回推个人工作群)。
+- Codex、Claude、Zcode、Kilo 和 Dsh 都通过独立 worker 执行；Codex worker 内继续使用原生队列。桥接重启后可继续同步已有结果。
+- Zcode 桌面新消息每约 2 秒回推绑定的个人工作群，首次启用不补发历史；开放群和私聊群不接收桌面广播。见 [Zcode 接入说明](docs/ZCODE.md#桌面消息回推个人工作群)。
 
 ## 环境要求
 
-| 项目      | 要求                                               |
-| ------- | ------------------------------------------------ |
-| Node.js | `>= 20.12.0`；本机部署已验证 Node 24                     |
-| pnpm    | `10.33.0`，以 `package.json` 的 `packageManager` 为准 |
-| 编程助手    | 至少配置 Codex、Claude、ZCode 或 Kilo 之一；各工具分别配置模型账号       |
-| 飞书应用    | 启用机器人能力，配置权限、事件与回调，并发布应用版本                       |
-| 飞书 CLI  | `lark-cli`；首次交互启动会检查安装及当前 profile 的应用绑定          |
-| 部署账户    | 可读写会话状态目录，并能访问对应项目、CLI 登录信息和网络                   |
+| 项目      | 要求                                                |
+| ------- | ------------------------------------------------- |
+| Node.js | `>= 20.12.0`；本机部署已验证 Node 24                      |
+| pnpm    | `10.33.0`，以 `package.json` 的 `packageManager` 为准  |
+| 编程助手    | 至少配置 Codex、Claude、Zcode、Kilo 或 Dsh 之一；各工具分别配置模型账号 |
+| 飞书应用    | 启用机器人能力，配置权限、事件与回调，并发布应用版本                        |
+| 飞书 CLI  | `lark-cli`；首次交互启动会检查安装及当前 profile 的应用绑定           |
+| 部署账户    | 可读写会话状态目录，并能访问对应项目、CLI 登录信息和网络                    |
 
 Codex 的发送、队列与选项交互依赖兼容的原生接口；桌面已有任务的问询需要可访问的公开共享 app-server，可按环境配置 `CODEX_QUEUE_REMOTE`。只安装 CLI 并不保证桌面私有连接上的交互可用。详见 [Codex 任务生命周期](docs/CODEX_TASK_LIFECYCLE.md)。
 
@@ -79,14 +100,14 @@ bash install.sh --agents codex --install-clis
 
 Windows 使用 `powershell -ExecutionPolicy Bypass -File .\install.ps1 --agents codex --install-clis`。脚本在用户目录准备固定 pnpm 和所选 CLI，执行依赖安装、版本/能力检查、类型检查、测试、构建；不自动登录或启动服务。Node/Git 未安装时明确提示，不通过 sudo 替换系统工具。
 
-安装后按 [完整指引](docs/INSTALL.md) 登录、创建 profile、绑定飞书 CLI、启动所需执行服务并发布应用。检查命令：
+安装后以运行服务的同一个 OS 用户登录所选工具。Codex 使用 `codex login`，Claude 使用 `claude auth login`；Kilo、Zcode、Dsh 按各自接入文档配置账号。然后创建 profile、运行 `setup` 绑定飞书 CLI，按[权限清单](docs/FEISHU_PERMISSIONS.md)配置并发布应用，再启动 worker 与桥接。检查命令：
 
 ```bash
 node bin/lark-channel-bridge.mjs doctor --agents codex
 node bin/lark-channel-bridge.mjs doctor --profile my-bot --agents codex --runtime --network
 ```
 
-可部署任意所需工具及其 worker，也可以同时存在多个工具。桥接创建配置无需先安装 Codex。ZCode 单独安装与配置，见 [接入指引](docs/ZCODE.md)。支持基线为 Codex 0.159.2、Claude 2.1.261、飞书 CLI 1.0.97；仍须通过功能检查。后台和前台可共用 `profiles/<profile>/runtime.env`，示例见 [环境模板](config/runtime.env.example)，Linux/macOS 必须 `chmod 600`。所选工具决定检查项，不因另一工具缺失报错。
+可部署任意所需工具及其 worker，也可以同时存在多个工具。桥接创建配置无需先安装 Codex。Zcode 单独安装与配置，见 [接入指引](docs/ZCODE.md)。支持基线为 Codex 0.159.2、Claude 2.1.261、飞书 CLI 1.0.97；仍须通过功能检查。后台和前台可共用 `profiles/<profile>/runtime.env`，示例见 [环境模板](config/runtime.env.example)，Linux/macOS 必须 `chmod 600`。所选工具决定检查项，不因另一工具缺失报错。
 
 ### 手动安装：下载和构建
 
@@ -106,7 +127,7 @@ pnpm build
 
 `pnpm build` 生成根目录 `dist/` 的桥接及内置轻量网页产物，同时准备共享 core；不会启动服务。内置网页与桥接同进程，独立的 `apps/web-app` 才需另行构建和部署。
 
-### 2. 创建机器人配置
+### 创建机器人配置
 
 下面的 `my-bot` 是自定义 profile 名，`/absolute/path/to/project` 请替换为本机真实项目目录。
 
@@ -116,6 +137,7 @@ node bin/lark-channel-bridge.mjs profile create my-bot \
   --workspace /absolute/path/to/project
 
 node bin/lark-channel-bridge.mjs profile use my-bot
+node bin/lark-channel-bridge.mjs setup --profile my-bot
 ```
 
 不传 App ID 时进入扫码向导。如果已有飞书应用，可使用：
@@ -129,9 +151,9 @@ node bin/lark-channel-bridge.mjs profile create my-bot \
 
 按提示交互输入 App Secret；不要把 Secret 写入命令历史或提交到仓库。Lark 国际版加 `--tenant lark`。应用权限与事件订阅按 [权限清单](docs/FEISHU_PERMISSIONS.md) 配置，修改后需发布生效。
 
-### 3. 启动 worker 与桥接
+### 启动 worker 与桥接
 
-每个使用的工具都需启动 worker。桥接自动扫描 `profiles/<profile>/workers/*/endpoint.json`，从健康接口读取工具和能力；只用 Kilo 时无需安装 Codex。配置放在对应 worker 的 `config.json`。详见 [统一接口](docs/WORKER_API.md) 和 [迁移步骤](docs/WORKER_MIGRATION.md)。
+每个使用的工具都需启动 worker；只启动实际使用的工具。Codex 还需要可用的公开共享 writer，先按[安装指引](docs/INSTALL.md#codex)核对现有执行端，日常部署不另起 writer。桥接自动扫描 `profiles/<profile>/workers/*/endpoint.json`，从健康接口读取工具和能力；只用 Kilo 时无需安装 Codex。配置放在对应 worker 的 `config.json`。详见 [统一接口](docs/WORKER_API.md) 和 [迁移步骤](docs/WORKER_MIGRATION.md)。
 
 ```bash
 node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool codex
@@ -142,9 +164,16 @@ node bin/lark-channel-bridge.mjs run --profile my-bot
 
 `run` 用于前台调试。首次启动会检查 `lark-cli`；无交互的系统服务不会自动安装缺失的 CLI，可预先运行 `npm install -g @larksuite/cli`。桥接会为 profile 绑定对应应用，agent 内的 CLI 自动使用该 profile，默认应用机器人身份。
 
-确认日志显示机器人已连接后，私聊它发送“新建会话”。完成前台验证后按 `Ctrl-C` 退出，再启动后台服务。
+确认日志显示机器人已连接后，私聊它发送“新建会话”，在新群发送一条简单问题，确认工具收到输入、群里收到回复。完成前台验证后按 `Ctrl-C` 退出前台桥接，再启动后台服务：
 
-## 主要用法
+```bash
+node bin/lark-channel-bridge.mjs start --profile my-bot
+node bin/lark-channel-bridge.mjs status --profile my-bot
+```
+
+后台服务与前台需使用相同账号、项目路径和环境变量，详见 [runtime.env 配置](docs/INSTALL.md#5-统一前台和后台环境)。
+
+## 日常使用与会话管理
 
 ### 个人工作群（含 AA 会话群）
 
@@ -152,23 +181,44 @@ AA 会话群就是个人工作群，不作为单独的群类型。个人工作�
 
 同一机器人、工具和数据源下，一个原生会话只能绑定一个有效个人工作群。再次建群会返回原群，即使群列表缓存缺失也不会重复创建；恢复会话时不能占用另一个个人群的会话。手动建群和自动扫描按会话串行处理。启动时，旧重复绑定保留最早建立的有效个人群；其余群关闭桥接入口，群、历史和原生会话保留。共享群、同事私聊群、API 及迁移后的旧 FF 群继续共享原会话，不占用个人群名额。
 
-个人工作群的直接对话原样传递消息，Codex、Claude Code、ZCode 和 Kilo 均不再附加通用桥接系统提示；有引用、附件等内容时，仅补充必要上下文。开放群入口（协作群、私聊群和 A2A）每次仅附加简短 JSON，包含当前入口、发送者权限和回复要求；不再读取来源快照或维护完整/精简提示周期。旧会话历史中的提示词不会自动删除。
+个人工作群的直接对话原样传递消息，Codex、Claude、Zcode 和 Kilo 均不再附加通用桥接系统提示；有引用、附件等内容时，仅补充必要上下文。开放群入口（协作群、私聊群和 A2A）每次仅附加简短 JSON，包含当前入口、发送者权限和回复要求；不再读取来源快照或维护完整/精简提示周期。旧会话历史中的提示词不会自动删除。
 
 归档确认提供两个红色按钮：“归档”保留群、目录和历史；“归档并解散群”先归档，再解散群并清理关联，保留原生会话历史。只有所有者或管理员可以解散群；归档失败不解散，解散失败保留归档结果并提示原因。新建群由机器人担任群主，旧群仍受原有权限限制。旧确认入口仍只归档。已归档群的后续消息、命令和旧卡片不再响应，也不会自动创建新会话。AA 扫描每 15 秒发现新会话、自动建群并检查原生归档状态。
 
-会话归档后，机器人会向对应的个人 AI 对话群发送一次“会话已归档。”，不向共享群广播。支持桥接中的归档操作，以及 Codex、Kilo、ZCode、DSH 明确提供归档状态的原生会话；扫描列表中缺少会话或工具暂时不可用不会触发通知。尚未发送的通知会在桥接重启后恢复。
+会话归档后，机器人会向对应的个人 AI 对话群发送一次“会话已归档。”，不向共享群广播。支持桥接中的归档操作，以及 Codex、Kilo、Zcode、Dsh 明确提供归档状态的原生会话；扫描列表中缺少会话或工具暂时不可用不会触发通知。尚未发送的通知会在桥接重启后恢复。
 
 1. 私聊机器人发送“新建会话”或“控制台”。本版私聊主要用于会话与工作群管理。
-2. 在卡片中选择 **Codex**、**Claude Code**、**ZCode**、**Kilo** 或 **DeepSeek Harness**，填写工作群名和本机项目目录。
-3. 创建后进入对应群提问；需要 @ 的群请真实选择并 @ 机器人。
-4. 在 `/config` 中动态选择该工具的模型，点击“刷新模型”读取新增或删除后的列表。已选模型被删除时会提示重新选择，不静默换模型；大列表支持分页。
+2. 在卡片中选择 **Codex**、**Claude**、**Zcode**、**Kilo** 或 **Dsh**，填写工作群名和本机项目目录。
+3. 创建后进入个人 AI 群直接提问，无需 `@机器人`；群里其他成员也可以使用，访问与执行权限仍以配置为准。
+4. 点击卡片“设置”或发送 `/config`，选择模型与推理档位并保存，下次请求生效。列表在启动时预加载、每 30 分钟自动刷新；打开设置只读缓存，也可点击“刷新模型”立即更新。已选模型失效时提示重新选择，不静默换模型。
 5. 在普通工作群中用 `/cd`、`/ws`、`/config` 等命令调整目录或偏好。群创建后工具固定，不会因重启或重置切换引擎。
 
 桌面 / CLI 中正式名称以 `AA` 开头的会话会被定期发现并创建工作群，沿用原会话 ID 与工作目录。例如 Claude 可通过 `/rename AA-项目名` 设置正式名称。已绑定的会话不重复建群；同名但不同工具、数据源或 ID 的会话分别处理。
 
-点击回复卡片中的“复制会话”，第一行显示“复制会话：”和当前工具按钮；有原生复制能力时保留历史。第二行显示“在新工具中创建会话：”和所有已安装且执行服务可用的工具，包含当前工具；无论选择哪个工具，都在同一项目目录创建全新的独立会话与工作群，不调用原生复制。Claude Code 等没有原生复制能力的工具，第一行也采用新建方式。
+点击回复卡片中的“复制会话”，填写新会话名字，默认在原名后加 `-2`；已有数字后缀则加一，重名时继续递增。第一行显示“复制会话：”和当前工具按钮；有原生复制能力时保留历史。第二行显示“在新工具中创建会话：”和所有已安装且执行服务可用的工具，包含当前工具，并高亮当前工具；无论选择哪个工具，都在同一项目目录创建全新的独立会话与工作群，不调用原生复制。Claude 等没有原生复制能力的工具，第一行会新建会话，并自动提交读取原会话记录的提示词，以接续原有上下文；这不是原生历史复制。
 
 从第二行创建的新群会显示“当前会话从‘来源工具’复制”和“读取原会话内容”按钮。点击后才向新会话提交 `读取来源工具 '项目名/会话名' 的内容`，并提供当时最新的本机会话记录路径；不向来源会话发送消息。读取按钮随群绑定持久保存，重启后仍可使用，同一按钮重复投递由消息队列去重。复制后不会自动持续同步来源；需要共用上下文时，将开放群直接关联原会话。
+
+### Web：统一对话与控制台
+
+内置网页与桥接同进程，无需另建 Web 服务。首次启用：
+
+```bash
+node bin/lark-channel-bridge.mjs web configure --profile my-bot
+node bin/lark-channel-bridge.mjs restart --profile my-bot
+node bin/lark-channel-bridge.mjs web status --profile my-bot
+```
+
+默认地址为 `http://127.0.0.1:3345`；以 `web status` 输出的实际地址为准。本机回环访问免登录，其他来源使用固定密码或登录 Token；监听网卡、端口及免登录网段见[网页配置](docs/BRIDGE_WEB_PLAN.md#启用)。日常升级无需重新运行 `web configure`，原密码、Token 和未过期登录继续有效。
+
+1. **选会话**：侧边栏按工具 → 项目 → 会话展示，仅显示已绑定个人 AI 群的活跃会话。首次打开默认进入最近更新的会话，刷新页面保留上次选择；输入草稿按会话保存。
+2. **发消息**：输入后点击“发送”；电脑可用 Enter 发送、Shift+Enter 换行，手机回车换行。发送中的消息立即显示，排队后仅出现在输入框上方；每条待发送消息可复制完整文本或删除。
+3. **操作会话**：输入框上方有停止、刷新、复制、归档、设置五个图标。刷新只更新已有状态，不重新执行问题；已完成的停止按钮变灰。
+4. **新建与整理**：项目旁的 `＋` 可新建会话；会话旁的 `⋯` 可改名、归档、复制。星标加入收藏；最近更新中的 `⋯` 提供“移出最近更新”，有新活动时自动重新出现。
+5. **显示偏好**：左下角“设置”可调整最近会话数量、收藏与最近更新的默认展开状态和排列顺序；电脑侧边栏可拖动调整宽度。
+6. **管理群**：左下角“控制台”提供 AI 会话群管理与共享群管理。可清理已归档但未解散的群、归档已解散群对应的会话；共享群可选择或更换会话，也可让机器人退出。
+
+模型、复制、归档等操作取决于 worker 支持的能力。网页中的排队状态、停止和会话名称同步沿用飞书与工具的同一条执行链路。
 
 ### 会话共享：把AI助手加入共享群
 
@@ -178,7 +228,7 @@ AA 会话群就是个人工作群，不作为单独的群类型。个人工作�
 4. 共享群继承所选会话的项目目录，每次真实 @ 直接续聊该原生会话，不创建或复制会话。
 5. 群成员真实 `@机器人` 后提问。未 @、`@所有人` 或其他机器人消息不处理。
 
-同一来源按 **工具 + 本地数据源 + 原生会话 ID** 区分。个人 AA 工作群、开放群、私聊群和 API 共用原会话历史；回答只投递到本次提问入口。各入口的讨论会进入同一上下文，不适合需要历史隔离的项目。
+同一来源按 **工具 + 本地数据源 + 原生会话 ID** 区分。个人 AA 工作群、开放群、私聊群和 API 共用原会话历史；共享群回复发送到当前提问群；若原会话已绑定个人工作群，公开共享群的成员消息和回复也会同步到个人群与 Web。文件仍按本次请求入口投递。各入口的讨论会进入同一上下文，不适合需要历史隔离的项目。
 
 开放群、私聊群、API 和旧 FF 工作群实时跟随原 AA 工作群的模型及推理档位；修改 AA 设置后，其他入口不再用关联时的旧配置覆盖它。在旧 FF 工作群修改模型，也写入同一个 AA 设置。没有唯一原工作群时不猜测，沿用工具自己的会话设置。
 
@@ -190,7 +240,7 @@ Codex 原生交互追问只发到已确认的原提问群；请求尚未匹配�
 
 不再创建 FF 原生会话或 FF 个人工作群。升级时，已有开放群、私聊群、API 和旧 FF 工作群自动改为使用对应原会话；保留旧 FF 历史、现有群和 API 别名，不自动合并旧 FF 内容。迁移会先持久化旧 FF 到原会话的对应表，中断后可继续恢复，旧版部分迁移也会核验原有绑定与会话记录。迁移使旧权限确认卡失效，未完成请求不会自动重跑。已归档的原会话保持关闭，不自动恢复。
 
-所有者在开放群真实 `@机器人 退出` 后，停止并撤销本群请求、让机器人退群并关闭本群入口。即使是最后一个关联群退出，也不归档原会话；原工作群和其他入口保留。更换关联时先退出，再重新邀请。
+所有者在开放群真实 `@机器人 退出` 后，停止并撤销本群请求、让机器人退群并关闭本群入口。即使是最后一个关联群退出，也不归档原会话；原工作群和其他入口保留。已有共享群可在 Web 控制台直接更换绑定会话或让机器人退出；工具、项目、会话按三级选择。每个群仅首次成功绑定时发送启用通知，后续换会话不另发通知。
 
 ### 受限操作由所有者确认
 
@@ -227,13 +277,13 @@ AI助手遇到修改本机项目源码、外传其他源码等会话共享权限
 | 指令                                    | 用途                       |
 | ------------------------------------- | ------------------------ |
 | “新建会话” / “控制台”                        | 私聊创建、关联或管理会话群            |
-| `/aux`                                | 私聊管理会话共享及获取共享群使用提示           |
+| `/aux`                                | 私聊管理会话共享及获取共享群使用提示       |
 | `/status`                             | 查看当前 profile、工具、目录与状态    |
 | `/new`、`/reset`                       | 重置当前个人工作群会话              |
 | `/cd /absolute/path`                  | 切换项目目录                   |
 | `/ws list`、`/ws save 名称`、`/ws use 名称` | 查看、保存和切换工作空间             |
 | `/resume`                             | 选择兼容的已有会话                |
-| `/config`                             | 修改模型、展示、访问及 CLI 身份偏好     |
+| `/config`                             | 打开模型、推理档位及其他偏好设置         |
 | `/stop`                               | 停止本群当前响应；共用原会话时不停止其他群的任务 |
 | `/refresh`                            | 刷新已有回复状态，不重跑任务           |
 | `/timeout 10`、`/timeout off`          | 设置或关闭个人工作群空闲超时           |
@@ -283,27 +333,28 @@ node bin/lark-channel-bridge.mjs status --profile my-bot
 node bin/lark-channel-bridge.mjs stop --profile my-bot
 ```
 
-`worker stop` 会停止 Claude 任务，不属于普通桥接重启步骤；也不要连带重启 Codex Desktop、共享 writer/app-server 或 Web 服务。
+`worker stop` 会停止对应 worker 的任务，不属于普通桥接重启步骤；也不要连带重启 Codex Desktop、共享 writer/app-server 或 Web 服务。
 
 ## 升级、回滚与部署目录
 
 ### 从源码升级
 
-升级前保存当前可回滚的构建产物和服务文件。不要把未提交代码、配置、密钥、运行账本或日志放进部署提交。
+Linux 用户 systemd 部署推荐使用版本目录脚本。工作区先保持干净；在源码仓库更新后执行：
 
 ```bash
 cd /path/to/CodexFeishu
 git pull --ff-only
-pnpm install --frozen-lockfile
-pnpm test
-pnpm typecheck
-pnpm build
-
-node bin/lark-channel-bridge.mjs restart --profile my-bot
-node bin/lark-channel-bridge.mjs status --profile my-bot
-# 若启用了 Claude，仅核对 worker，不重启它
-node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool codex
+node tools/deploy.mjs --profile my-bot --check
+node tools/deploy.mjs --profile my-bot
 ```
+
+脚本自动准备 pnpm、安装冻结依赖、类型检查、构建并切换 `current`，默认只重启桥接及内置网页，不重启任何 worker 或 Codex writer。代码修改后的测试应先按[测试指引](docs/TESTING.md)完成；`--check` 只读预检，不执行部署。部署成功后打印健康检查与回滚命令；回滚使用已有版本：
+
+```bash
+node tools/deploy.mjs --profile my-bot --rollback <旧版本号>
+```
+
+完整选项、其他平台的服务托管和手动部署见[部署与升级](docs/INSTALL.md#9-生产产物部署与升级)。涉及 worker 原生适配逻辑的修改，需要单独安排对应 worker 升级，不能把普通桥接重启当作 worker 更新。
 
 部署前检查版本、依赖与构建；部署后检查服务健康和 WebSocket 连接。无需把读取任务列表或等待全部任务结束作为日常桥接重启的前置条件。
 
@@ -323,19 +374,19 @@ node bin/lark-channel-bridge.mjs worker status --profile my-bot --tool codex
 
 默认数据根目录为 `~/.lark-channel`，可通过 `LARK_CHANNEL_HOME` 设置。所有运行状态与代码目录分开保存。
 
-| 路径（相对于数据根目录）                               | 内容                      |
-| ------------------------------------------ | ----------------------- |
-| `config.json`                              | 所有 profile 的配置          |
-| `profiles/<profile>/secrets.enc`           | 应用凭据                    |
-| `profiles/<profile>/lark-cli/`             | profile 隔离的飞书 CLI 身份与授权 |
-| `profiles/<profile>/sessions.json*`        | 会话状态、目录索引与归档            |
-| `profiles/<profile>/tool-bindings.json`    | 工具与原会话入口绑定             |
-| `profiles/<profile>/auxiliary-groups.json` | 共享群关联和生命周期              |
-| `profiles/<profile>/ff-approvals.json` | 受限操作确认、原请求上下文与恢复状态 |
-| `profiles/<profile>/<tool>-native-turn-sync.json` | 原生消息回复卡片、游标与更新序号；自动导入旧状态 |
-| `profiles/<profile>/<tool>-worker-replies.json` | worker 任务投递收据；Claude 沿用 `worker-replies.json` |
-| `profiles/<profile>/workers/<tool>/`     | 各工具 worker 配置、端点、收据与日志   |
-| `profiles/<profile>/logs/`                 | 桥接日志与 `daemon/` 服务日志    |
+| 路径（相对于数据根目录）                                      | 内容                                            |
+| ------------------------------------------------- | --------------------------------------------- |
+| `config.json`                                     | 所有 profile 的配置                                |
+| `profiles/<profile>/secrets.enc`                  | 应用凭据                                          |
+| `profiles/<profile>/lark-cli/`                    | profile 隔离的飞书 CLI 身份与授权                       |
+| `profiles/<profile>/sessions.json*`               | 会话状态、目录索引与归档                                  |
+| `profiles/<profile>/tool-bindings.json`           | 工具与原会话入口绑定                                    |
+| `profiles/<profile>/auxiliary-groups.json`        | 共享群关联和生命周期                                    |
+| `profiles/<profile>/ff-approvals.json`            | 受限操作确认、原请求上下文与恢复状态                            |
+| `profiles/<profile>/<tool>-native-turn-sync.json` | 原生消息回复卡片、游标与更新序号；自动导入旧状态                      |
+| `profiles/<profile>/<tool>-worker-replies.json`   | worker 任务投递收据；Claude 沿用 `worker-replies.json` |
+| `profiles/<profile>/workers/<tool>/`              | 各工具 worker 配置、端点、收据与日志                        |
+| `profiles/<profile>/logs/`                        | 桥接日志与 `daemon/` 服务日志                          |
 
 常见问题：
 
@@ -358,10 +409,6 @@ tail -n 60 ~/.lark-channel/profiles/my-bot/logs/daemon/daemon-stderr.log
 
 从仓库根目录运行 `pnpm test`、`pnpm typecheck`、`pnpm build`。本次只维护文档时，检查命令是否存在、相对链接及 Markdown 格式即可。
 
-真实 Codex、ZCode、Kilo 与飞书的双向消息及改名验证使用可选的 `pnpm test:live:bridge`，启用条件和项目路径参数见 [测试说明](docs/TESTING.md)。
+真实 Codex、Zcode、Kilo 与飞书的双向消息及改名验证使用可选的 `pnpm test:live:bridge`，启用条件和项目路径参数见 [测试说明](docs/TESTING.md)。
 
 飞书桥接与 `packages/codex-core` 使用 [MIT](LICENSE)。独立的 `apps/web-app` 保留自身 GPLv3 许可证、依赖和部署流程；更新飞书桥接不会自动更新该 Web 服务。详见 [目录与许可证边界](docs/MONOREPO.md)。
-
-### Personal conversation Web
-
-A lightweight Web groups bound personal AI conversations by tool → project → session. It shares the bridge inbox, execution queue, replies and name synchronization. After deployment, run `lark-channel-bridge web configure --profile <profile>`, restart the bridge, then open `http://127.0.0.1:3345`. All-interface listeners and custom ports are supported. Loopback and explicitly trusted source networks skip login; other sources use a fixed password or generated login token. Operations follow worker capabilities. See [Web setup and architecture](docs/BRIDGE_WEB_PLAN.md).
