@@ -222,7 +222,11 @@ it.each(['session-archive', 'session-copy'])('keeps %s confirmation callbacks ti
   expect(h.node('controls-title').textContent).toContain('会话1'); expect(h.node('title').textContent).toBe('会话0');
   h.node('controls-body').querySelector('button')!.onclick!();
   expect(h.requests[2]).toMatchObject({ path: '/api/sessions/' + h.rows[1]!.id + '/control', data: { action: 'signed-target-choice' } });
-  h.requests[2]!.resolve({ elements: [{ kind: 'text', text: '完成' }] }); await h.settle();
+  const copy = { ...h.rows[1]!, id: 'c'.repeat(64), scope: 'oc_copy', name: '新复制会话', updatedAtMs: Date.now() };
+  h.requests[2]!.resolve({ elements: [{ kind: 'text', text: '完成' }], sessions: [...h.rows, copy] }); await h.settle();
+  expect(h.node('tree').text).toContain('新复制会话');
+  const recent = h.node('tree').children.find(e => e.querySelector('summary')?.text.includes('最近更新'))!;
+  expect(recent.querySelectorAll('button')[0]!.text).toContain('新复制会话');
 });
 
 it('shows the default copy name with its label and submits edits for the sidebar target', async () => {

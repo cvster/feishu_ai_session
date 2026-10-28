@@ -11,7 +11,7 @@ import { SessionCatalog } from '../../../src/session/catalog';
 import { SessionStore } from '../../../src/session/store';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import type { Controls } from '../../../src/commands';
-import { PersonalSessionService, type WebConversation } from '../../../src/web/service';
+import { PersonalSessionService, type WebConversation, type WebSession } from '../../../src/web/service';
 import { cleanDissolvedChat } from '../../../src/bot/group-cleanup';
 import { BridgeConsoleService } from '../../../src/web/console';
 import { AuxiliaryGroups } from '../../../src/bot/auxiliary-groups';
@@ -1395,6 +1395,40 @@ it('removes only confirmed closed shared groups with archived sources and persis
   expect(h.bindings.get('oc_group')?.nativeId).toBe('native'); expect(h.provider.archive).not.toHaveBeenCalled();
   const stored = JSON.parse(await readFile(join(h.dir, 'managed-groups.json'), 'utf8'));
   expect(JSON.stringify(stored.groups)).not.toContain('oc_shared');
+});
+
+
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('automatically reads source history when creating a fresh %s Web copy, returns recent sessions and omits read-button cards', async tool => {
+  const h = await harness(tool); await h.replies.stop();
+  h.native.cwd = h.dir; h.workspaces.setCwd('oc_group', h.dir);
+  h.catalog.upsertActive({ ...h.catalog.entries().find(row => row.scopeId === 'oc_group')!, cwdRealpath: h.dir });
+  h.channel.rawClient.im.v1.chat.create = vi.fn(async () => ({ code: 0, data: { chat_id: 'oc_copy' } })) as any;
+  const history = join(h.dir, 'source-history.jsonl'); await writeFile(history, 'source history');
+  h.controls.toolRegistry!.get(tool).sessions!.historyPath = async () => history;
+  const submit = vi.fn(async (msg: NormalizedMessage) => { await h.inbox.receive(msg.chatId, msg); });
+  h.controls.submitMessage = submit;
+  const id = (await h.service.list())[0]!.id;
+  const menu = flatten((await h.service.control(id, 'fork')).elements);
+  const create = menu.find(e => e.kind === 'button' && e.command === 'fork.to')!;
+  if (create.kind !== 'button') throw Error('missing create');
+  const values = { new_session_name: 'AA-web-2' };
+  vi.mocked(h.channel.rawClient.im.v1.chat.get).mockImplementation(async ({ path }: any) => ({ code: 0,
+    data: { name: path.chat_id === 'oc_copy' ? values.new_session_name : 'AA-web', chat_mode: 'group' } } as any));
+  const response = await h.request('/api/sessions/' + id + '/control', { action: create.action, values });
+  expect(response.status).toBe(200);
+  const result = await response.json() as { sessions: WebSession[]; elements: WebControlElement[] };
+  expect(h.bindings.get('oc_copy'), JSON.stringify(result.elements)).toBeDefined();
+  const copy = result.sessions.find(row => row.scope === 'oc_copy')!;
+  expect(copy).toMatchObject({ name: values.new_session_name, online: true });
+  expect(copy.updatedAtMs).toBeGreaterThan(h.native.updatedAtMs);
+  expect(copy.updatedAtMs).toBeGreaterThanOrEqual(h.bindings.get('oc_copy')!.createdAtMs!);
+  expect(submit).toHaveBeenCalledOnce();
+  const input = submit.mock.calls[0]![0]; expect(input).toMatchObject({ chatId: 'oc_copy', content: expect.stringContaining(history), threadId: undefined });
+  expect(h.send).toHaveBeenCalledWith('oc_copy', { text: input.content }, {});
+  expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).not.toContain('fork.read');
+  expect(JSON.stringify(result.elements)).not.toContain('读取原会话内容'); expect(h.provider.fork).not.toHaveBeenCalled();
+  await h.request('/api/sessions/' + id + '/control', { action: create.action, values });
+  expect(submit).toHaveBeenCalledOnce();
 });
 
 

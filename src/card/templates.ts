@@ -158,13 +158,6 @@ export function sessionCopyCard(current: ToolId, token: string, tools: { id: Too
   };
 }
 
-export function copiedSessionCard(source: { toolId: ToolId; copyId: string }): object {
-  return { schema: '2.0', body: { elements: [
-    { tag: 'markdown', content: `当前会话从“${toolDefinition(source.toolId).label}”复制。` },
-    cardKitButton({ text: '读取原会话内容', value: { cmd: 'fork.read', arg: source.copyId }, style: 'primary' }),
-  ] } };
-}
-
 export interface TaskPanelInfo {
   agentKind: ToolId;
   chatName: string;

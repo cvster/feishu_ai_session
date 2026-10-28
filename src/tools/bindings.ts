@@ -23,6 +23,8 @@ export interface ToolBinding {
   sharedScope?: string;
   linkedSource?: LinkedSession;
   copiedFrom?: CopiedSessionSource;
+  /** Creation of a fresh group, before its native session is initialized. */
+  createdAtMs?: number;
   toolId: AgentKind;
   sourceId: string;
   name?: string;
@@ -65,6 +67,7 @@ export class ToolBindingStore {
         if (value.linkedSource && (!isToolId(value.linkedSource.toolId) ||
           ![value.linkedSource.sourceId, value.linkedSource.nativeId].every(v => typeof v === 'string' && v.length > 0) ||
           (value.linkedSource.historyPath !== undefined && (typeof value.linkedSource.historyPath !== 'string' || !value.linkedSource.historyPath)))) throw new Error('Invalid linked source');
+        if (value.createdAtMs !== undefined && (!Number.isFinite(value.createdAtMs) || value.createdAtMs < 0)) throw new Error('Invalid creation time');
         if (value.copiedFrom && (!isToolId(value.copiedFrom.toolId) ||
           ![value.copiedFrom.sourceId, value.copiedFrom.nativeId, value.copiedFrom.copyId, value.copiedFrom.name, value.copiedFrom.cwd]
             .every(v => typeof v === 'string' && v.length > 0))) throw new Error('Invalid copied source');

@@ -42,7 +42,6 @@ import {
   managedGroupsCard,
   newChatCreationCard,
   newChatWorkspaceCard,
-  copiedSessionCard,
   newSessionConfirmationCard,
   panelConfirmationCard,
   resumeCard,
@@ -942,7 +941,7 @@ async function handleNewChat(
   ctx: CommandContext,
   requestedCwd?: string,
   selectedTool?: ToolId,
-  options: { copiedFrom?: CopiedSessionSource; uuid?: string; autoReadCopiedSession?: boolean } = {},
+  options: { copiedFrom?: CopiedSessionSource; uuid?: string } = {},
 ): Promise<{ chatId: string; name: string } | undefined> {
   const toolId = selectedTool ?? ctx.controls.defaultToolId ?? ctx.controls.profileConfig.agentKind;
   const tool = ctx.controls.toolRegistry?.find(toolId);
@@ -992,7 +991,7 @@ async function handleNewChat(
   if (ctx.controls.toolBindings && tool) {
     const previousCopy = options.copiedFrom ? ctx.controls.toolBindings.get(created.chatId) : undefined;
     if (previousCopy && previousCopy.copiedFrom?.copyId !== options.copiedFrom?.copyId) throw new Error('建群返回了其他会话的群，未更改绑定。');
-    ctx.controls.toolBindings.set(created.chatId, previousCopy ?? { toolId, sourceId: tool.sourceId, name: created.name, nativeId: tool.reserveSessionId?.(), nativeCreated: false,
+    ctx.controls.toolBindings.set(created.chatId, previousCopy ?? { toolId, sourceId: tool.sourceId, name: created.name, nativeId: tool.reserveSessionId?.(), nativeCreated: false, createdAtMs: Date.now(),
       ...(options.copiedFrom ? { copiedFrom: options.copiedFrom } : {}),
       model: toolId === ctx.controls.profileConfig.agentKind ? ctx.controls.profileConfig.preferences.model ?? 'default' : 'default',
       reasoningEffort: 'high' });
@@ -1029,15 +1028,12 @@ async function handleNewChat(
   }
 
   if (options.copiedFrom) {
-    const copiedCard = await sendManagedCard(ctx.channel, created.chatId, copiedSessionCard(options.copiedFrom));
-    if (options.autoReadCopiedSession) {
-      try {
-        await readCopiedSession({ ...ctx, scope: created.chatId, chatMode: 'group', fromCardAction: true,
-          msg: { ...ctx.msg, chatId: created.chatId, chatType: 'group', threadId: undefined, messageId: copiedCard.messageId },
-        }, options.copiedFrom.copyId);
-      } catch (error) {
-        await ctx.channel.send(created.chatId, { text: `⚠️ 新会话已创建，自动读取原会话失败：${errorText(error)}。可点击“读取原会话内容”重试。` });
-      }
+    try {
+      await readCopiedSession({ ...ctx, scope: created.chatId, chatMode: 'group', fromCardAction: true,
+        msg: { ...ctx.msg, chatId: created.chatId, chatType: 'group', threadId: undefined, messageId: '' },
+      }, options.copiedFrom.copyId);
+    } catch (error) {
+      await ctx.channel.send(created.chatId, { text: `⚠️ 新会话已创建，自动读取原会话失败：${errorText(error)}。请稍后在新会话中要求读取原会话。` });
     }
   }
 
@@ -1559,7 +1555,7 @@ async function handleFork(args: string, ctx: CommandContext): Promise<void> {
       }
       if (!ctx.controls.toolBindings || !ctx.controls.toolRegistry) throw new Error('工具会话管理尚未就绪。');
       const source = await currentCopySource(ctx);
-      const created = await handleNewChat(name, ctx, source.cwd, choice.target, { copiedFrom: choice.source, uuid: choice.source.copyId, autoReadCopiedSession: action === 'same' });
+      const created = await handleNewChat(name, ctx, source.cwd, choice.target, { copiedFrom: choice.source, uuid: choice.source.copyId });
       if (created) choice.created = true;
     } finally { choice.creating = false; }
   } catch (error) { await reply(ctx, `❌ ${errorText(error)}`); }

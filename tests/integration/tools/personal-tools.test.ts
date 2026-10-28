@@ -21,7 +21,6 @@ import { startRunFlow } from '../../../src/bot/run-flow';
 import { claudeCapability } from '../../../src/agent/capability';
 import { syncAaSessionGroupsOnce } from '../../../src/bot/aa-session-groups';
 import { runCommandHandler, type Controls, type CommandContext } from '../../../src/commands';
-import { copiedSessionCard } from '../../../src/card/templates';
 
 const clean: string[] = [];
 const flushes: (() => Promise<unknown>)[] = [];
@@ -105,11 +104,14 @@ describe('personal multi-tool workflows', () => {
     expect(elements.filter(row => row.tag === 'button').every(row => row.form_action_type === 'submit' && row.name)).toBe(true);
     expect(h.groups).toHaveLength(2);
   });
-  it('creates a fresh session in the original tool from the second row without forking or copying history automatically', async () => {
+  it('creates a fresh session in the original tool from the second row and automatically reads source history without native forking', async () => {
     const h = await harness(); h.controls.profileConfig.preferences.reasoningEffort = 'high';
     await h.sync(); const source = h.groups[0]!.id;
     const fork = vi.fn(async () => { throw Error('must not call native fork'); }); h.registry.get('codex').agent.forkThread = fork;
     const before = h.bindings.get(source);
+    const history = join(h.dir, 'source.jsonl'); await writeFile(history, 'source');
+    h.registry.get('codex').sessions = { historyPath: async () => history, rename: async () => {}, archive: async () => {} };
+    const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
     await runCommandHandler('fork', '', h.context(source, 'group'));
     const value = copyButton(h, 'Codex');
     await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group'));
@@ -119,7 +121,8 @@ describe('personal multi-tool workflows', () => {
     expect(h.bindings.get(target)).toMatchObject({ toolId: 'codex', nativeCreated: false, reasoningEffort: 'high', copiedFrom: { toolId: 'codex', nativeId: 'same-uuid' } });
     expect(h.bindings.get(target)?.nativeId).not.toBe('same-uuid');
     expect(h.bindings.get(source)).toEqual(before); expect(fork).not.toHaveBeenCalled(); expect(h.runs).toEqual([]);
-    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('读取原会话内容');
+    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).not.toContain('读取原会话内容');
+    expect(submit).toHaveBeenCalledOnce(); expect(submit.mock.calls[0]![0]).toMatchObject({ chatId: target, content: expect.stringContaining(history) });
   });
   it.each([
     ['AA-同名', [], 'AA-同名-2'],
@@ -144,7 +147,7 @@ describe('personal multi-tool workflows', () => {
     await runCommandHandler('fork', '', h.context(source, 'group'));
     expect(copyElements(h).find(row => row.tag === 'input')?.default_value).toBe('AA-同名-4');
   });
-  it.each(['claude', 'kilo'] as const)('creates a fresh %s cross-tool group with default model and high reasoning and only imports history on click after restart', async targetTool => {
+  it.each(['claude', 'kilo'] as const)('creates a fresh %s cross-tool group with default model and high reasoning and automatically imports history', async targetTool => {
     const h = await harness(); h.controls.profileConfig.preferences.reasoningEffort = 'high';
     if (targetTool === 'kilo') h.registry.register({ id: 'kilo', sourceId: 'kilo-home', label: 'Kilo',
       agent: { ...h.registry.get('claude').agent, id: 'kilo' }, listSessions: async () => [] });
@@ -152,6 +155,10 @@ describe('personal multi-tool workflows', () => {
     const source = h.groups[0]!.id; const before = h.bindings.get(source);
     await runCommandHandler('fork', '', h.context(source, 'group'));
     const value = copyButton(h, targetTool === 'kilo' ? 'Kilo' : 'Claude');
+    const history = join(h.dir, 'latest-history.json'); await writeFile(history, 'latest source content');
+    const historyPath = vi.fn(async () => history);
+    h.registry.get('codex').sessions = { historyPath, rename: async () => {}, archive: async () => {} };
+    const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
     const creation = h.context(source, 'group'); creation.formValue = { new_session_name: '  AA-自定义会话  ' };
     await runCommandHandler('fork', `to ${value.arg}`, creation);
     expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
@@ -162,18 +169,14 @@ describe('personal multi-tool workflows', () => {
     expect(controlsForTool(h.controls, targetTool, target).profileConfig.preferences.reasoningEffort).toBe('high');
     expect(h.bindings.get(source)).toEqual(before); expect(h.runs).toEqual([]);
     const provenance = h.bindings.get(target)!.copiedFrom!;
-    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).toContain('当前会话从“Codex”复制');
-    expect(JSON.stringify(copiedSessionCard(provenance))).toContain('fork.read');
+    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).not.toContain('fork.read');
     const restored = new ToolBindingStore(join(h.dir, 'tools.json')); await restored.load(); h.controls.toolBindings = restored;
-    const history = join(h.dir, 'latest-history.json'); await writeFile(history, 'latest source content');
-    const historyPath = vi.fn(async () => history);
-    h.registry.get('codex').sessions = { historyPath, rename: async () => {}, archive: async () => {} };
-    const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
+    expect(submit).toHaveBeenCalledOnce();
     const ctx = h.context(target, 'group'); ctx.fromCardAction = true;
     await runCommandHandler('fork', `read ${provenance.copyId}`, ctx);
     expect(historyPath).toHaveBeenCalledWith('same-uuid');
-    expect(h.channel.send).toHaveBeenLastCalledWith(target, { text: submit.mock.calls[0]![0].content }, { replyTo: 'msg' });
-    expect(vi.mocked(h.channel.send).mock.invocationCallOrder.at(-1)).toBeLessThan(submit.mock.invocationCallOrder[0]!);
+    expect(h.channel.send).toHaveBeenLastCalledWith(target, { text: submit.mock.calls[1]![0].content }, { replyTo: 'msg' });
+    expect(vi.mocked(h.channel.send).mock.invocationCallOrder.at(-1)).toBeLessThan(submit.mock.invocationCallOrder[1]!);
     expect(submit).toHaveBeenCalledWith(expect.objectContaining({ chatId: target, messageId: 'msg', chatType: 'group', senderId: 'ou_owner', mentionedBot: true,
       content: `读取codex '${h.dir.split('/').at(-1)}/AA-同名' 的内容\n会话记录：${history}`, raw: { bridgeCallbackId: `copy-read-${provenance.copyId}` } }));
     await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group')); expect(h.groups).toHaveLength(3);
@@ -196,7 +199,8 @@ describe('personal multi-tool workflows', () => {
     const input = submit.mock.calls[0]![0];
     expect(input).toMatchObject({ chatId: target, chatType: 'group', senderId: 'ou_owner', threadId: undefined,
       content: `读取claude '${h.dir.split('/').at(-1)}/AA-同名（Claude）' 的内容\n会话记录：${history}` });
-    expect(h.channel.send).toHaveBeenCalledWith(target, { text: input.content }, { replyTo: input.messageId });
+    expect(h.channel.send).toHaveBeenCalledWith(target, { text: input.content }, {});
+    expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).not.toContain('fork.read');
     await runCommandHandler('fork', `same ${value.arg}`, ctx);
     expect(submit).toHaveBeenCalledOnce(); expect(h.groups).toHaveLength(3);
   });

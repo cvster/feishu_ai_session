@@ -139,7 +139,7 @@ export class PersonalSessionService {
       const name = group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
       // Use native activity rather than the catalog's periodically refreshed timestamp.
       // Pending bridge input should also appear immediately, before the worker lists it.
-      const activity = [row?.updatedAtMs ?? catalog?.boundAt ?? catalog?.updatedAt ?? 0,
+      const activity = [b.createdAtMs ?? 0, row?.updatedAtMs ?? catalog?.boundAt ?? catalog?.updatedAt ?? 0,
         ...this.receiptScopes(scope).flatMap(source => this.deps.controls.workerRuntimes?.get(b.toolId)?.inbox.receipts(source) ?? [])
           .map(r => Number(r.message.createTime)).filter(t => t >= (catalog?.boundAt ?? 0))];
       const updatedAtMs = Math.max(0, ...activity.filter(t => Number.isFinite(t) && t >= 0));
@@ -278,7 +278,7 @@ export class PersonalSessionService {
       }
       if (!this.deps.control) throw new WebError(503, '会话操作尚未就绪');
       const result = await this.deps.control(id, session.scope, this.owner(), action, values);
-      this.listedAt = 0; return result;
+      this.listedAt = 0; return values ? { ...result, sessions: await this.list() } : result;
     });
   }
   private runStatus(state: RunState, project: string, checkedAt?: number, key?: string) {

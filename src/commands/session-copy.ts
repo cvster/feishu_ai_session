@@ -87,7 +87,7 @@ export async function readCopiedSession(ctx: CommandContext, copyId: string): Pr
   const binding = ctx.controls.toolBindings?.get(ctx.scope);
   const source = binding?.copiedFrom;
   if (!ctx.fromCardAction || !source || source.copyId !== copyId || ctx.sessionCatalog?.isScopeArchived(ctx.scope))
-    throw new Error('读取入口已失效，请使用新群中的读取按钮。');
+    throw new Error('读取入口已失效，请在新会话中要求读取原会话。');
   const tool = ctx.controls.toolRegistry?.find(source.toolId);
   if (!tool || tool.sourceId !== source.sourceId) throw new Error('来源工具配置已变化，无法读取原会话。');
   const historyPath = await sessionOperations(tool).historyPath(source.nativeId);
@@ -95,10 +95,10 @@ export async function readCopiedSession(ctx: CommandContext, copyId: string): Pr
   await access(historyPath);
   if (!ctx.controls.submitMessage) throw new Error('消息入口暂不可用，请稍后重试。');
   const content = `读取${tool.label} '${basename(source.cwd)}/${source.name}' 的内容\n会话记录：${historyPath}`;
-  await ctx.channel.send(ctx.msg.chatId, { text: content }, {
-    replyTo: ctx.msg.messageId, ...(ctx.chatMode === 'topic' ? { replyInThread: true } : {}),
+  const sent = await ctx.channel.send(ctx.msg.chatId, { text: content }, {
+    ...(ctx.msg.messageId ? { replyTo: ctx.msg.messageId } : {}), ...(ctx.chatMode === 'topic' ? { replyInThread: true } : {}),
   });
-  await ctx.controls.submitMessage({ ...ctx.msg, content,
+  await ctx.controls.submitMessage({ ...ctx.msg, messageId: ctx.msg.messageId || sent.messageId || `copy-read-${copyId}`, content,
     chatType: ctx.chatMode === 'p2p' ? 'p2p' : 'group', rawContentType: 'card_action', raw: { bridgeCallbackId: `copy-read-${copyId}` },
     mentionedBot: true, mentionAll: false, resources: [], mentions: [], createTime: Date.now() });
 }
