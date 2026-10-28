@@ -31,6 +31,8 @@ interface ReplyDelivery extends CompletionDelivery {
   sendingSince?: number;
   finished?: boolean;
   controlsVersion?: number;
+  auxiliaryLayoutVersion?: number;
+  auxiliaryPreviousReply?: boolean;
   skipped?: boolean;
   inputMessageId?: string;
   inputSendingSince?: number;
@@ -68,6 +70,8 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
   const nativeCache = new Map<string, { at: number; value: Promise<NativeConversationSnapshot | undefined> }>();
   const refreshKeys = new Set<string>();
   const deliveryScopes = new Map<string, string>();
+  const latestSharedReplies = new Map<string, { id: string; createdAt: number }>();
+  const newerReply = (a: { id: string; createdAt: number }, b: { id: string; createdAt: number }) => a.createdAt > b.createdAt || a.createdAt === b.createdAt && a.id > b.id;
   async function nativeConversation(nativeId: string, force = false) {
     const cached = nativeCache.get(nativeId);
     if (!force && cached && Date.now() - cached.at < 15_000) return cached.value;
@@ -78,10 +82,10 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     nativeCache.set(nativeId, { at: Date.now(), value });
     return value;
   }
-  async function recoveryTurn(job: WorkerJob, delivery: ReplyDelivery | undefined, nativeId: string): Promise<NativeConversationTurn | undefined> {
-    if (!delivery?.messageId || (delivery.nativeRecovery?.finished && !refreshKeys.has(job.id) && delivery.controlsVersion === 1) || isJobActive(job) ||
+  async function recoveryTurn(job: WorkerJob, delivery: ReplyDelivery | undefined, nativeId: string, forceLayout = false): Promise<NativeConversationTurn | undefined> {
+    if (!delivery?.messageId || (delivery.nativeRecovery?.finished && !forceLayout && !refreshKeys.has(job.id) && delivery.controlsVersion === 1) || isJobActive(job) ||
       (!delivery.nativeRecovery && (job.createdAt < Date.now() - 24 * 60 * 60_000 || !['interrupted', 'unknown'].includes(job.status)))) return;
-    const snapshot = await nativeConversation(nativeId, refreshKeys.has(job.id));
+    const snapshot = await nativeConversation(nativeId, forceLayout || refreshKeys.has(job.id));
     if (!snapshot || snapshot.archived || snapshot.id !== nativeId || snapshot.cwd !== job.options.cwd) return;
     const turn = snapshot.turns.find(turn => turn.bridgeJobId === job.id &&
       (!delivery.nativeRecovery || turn.id === delivery.nativeRecovery.turnId));
@@ -98,6 +102,13 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
   const health = new PollHealth('worker-replies', 'sync-unavailable', { toolId: deps.adapter.id });
   async function sync(): Promise<void> {
     const jobs = await deps.adapter.client.list();
+    latestSharedReplies.clear();
+    for (const job of jobs) {
+      const scope = job.options.delivery?.scope, delivered = deliveries[job.id];
+      if (!scope || !delivered?.messageId || delivered.skipped || !deps.controls.auxiliary?.isAuxiliary(scope)) continue;
+      const previous = latestSharedReplies.get(scope);
+      if (!previous || newerReply(job, previous)) latestSharedReplies.set(scope, { id: job.id, createdAt: job.createdAt });
+    }
     for (const [id, cached] of nativeCache) if (Date.now() - cached.at > 60_000) nativeCache.delete(id);
     for (const job of jobs) {
       const scope = job.options.delivery?.scope;
@@ -107,7 +118,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
         !!binding && binding.toolId === deps.adapter.id && binding.sourceId === job.options.delivery?.sourceId &&
         (!nativeId || nativeId === binding.nativeId) && (isJobActive(job) || !!(deliveries[job.id]?.nativeRecovery && !deliveries[job.id]!.nativeRecovery!.finished)));
     }
-    for (const job of jobs) {
+    for (const job of [...jobs].sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))) {
       if (stopped || !job.options.delivery) continue;
       try { await publish(job); } catch (error) { log.warn('worker-replies', 'publish-failed', { toolId: deps.adapter.id, jobId: job.id, error: error instanceof Error ? error.message : String(error) }); }
       try {
@@ -150,17 +161,21 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       const run = deps.adapter.observe(job.id);
       recovered.set(job.id, { handle: deps.activeRuns.register(target.scope, run), scope: target.scope });
     }
+    const auxiliary = !mirror && deps.controls.auxiliary?.isAuxiliary(target.scope) === true;
+    const latest = latestSharedReplies.get(target.scope);
+    const auxiliaryPreviousReply = auxiliary && !!latest && newerReply(latest, job);
     const previousDelivery = deliveries[ledgerKey];
+    const layoutChanged = auxiliary && (!previousDelivery?.finished || !!previousDelivery.messageId) && (previousDelivery?.auxiliaryLayoutVersion !== 1 || previousDelivery.auxiliaryPreviousReply !== auxiliaryPreviousReply);
     const repairControls = previousDelivery?.mode === 'card' && previousDelivery.controlsVersion !== 1;
     if (previousDelivery?.skipped) return;
     deliveryScopes.set(ledgerKey, target.scope);
-    const nativeTurn = binding.nativeId ? await recoveryTurn(job, previousDelivery, binding.nativeId) : undefined;
+    const nativeTurn = binding.nativeId ? await recoveryTurn(job, previousDelivery, binding.nativeId, layoutChanged) : undefined;
     deps.controls.messageQueue?.observeReply?.(target.scope, `worker:${target.scope}:${job.id}`, job.createdAt,
       nativeTurn ? nativeTurn.state.terminal === 'running' : isJobActive(job));
     const queuedMessages = deps.controls.messageQueue?.forReply?.(target.scope, `worker:${target.scope}:${job.id}`) ?? [];
     const queueSignature = deliveryUuid(JSON.stringify(queuedMessages));
     const queueChanged = previousDelivery?.queueSignature !== queueSignature && (!!queuedMessages.length || previousDelivery?.queueSignature !== undefined);
-    const forceRefresh = refreshKeys.has(ledgerKey) || queueChanged;
+    const forceRefresh = refreshKeys.has(ledgerKey) || queueChanged || layoutChanged;
     if (previousDelivery?.nativeRecovery && !nativeTurn) return;
     if (previousDelivery?.finished && !repairControls && !nativeTurn && !forceRefresh) return;
     const snapshot = await deps.adapter.client.snapshot(job.id);
@@ -211,7 +226,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     if (deps.controls.auxiliary?.isAuxiliary(target.scope)) await deps.controls.auxiliary.trackRun(target.scope, job.id, target.replyTo, !finished, target.operatorOpenId);
     const options = deps.renderOptions?.(mirror ? { ...job, options: { ...job.options, delivery: target } } : job);
     // Completed personal cards retain the same group controls as Codex. Active stops stay bound to their job token.
-    const card = renderCard(state, { ...options, queuedMessages, showStopButton: true, ...(finished || mirror || nativeTurn ? { signCallback: undefined } : {}) });
+    const card = renderCard(state, { ...options, ...(auxiliary ? { auxiliary: true, auxiliaryPreviousReply } : {}), queuedMessages, showStopButton: true, ...(finished || mirror || nativeTurn ? { signCallback: undefined } : {}) });
     // CardKit updates own the stream window across reconnects; avoid its 10-minute streaming timeout.
     (card as { config: { streaming_mode: boolean } }).config.streaming_mode = false;
     const text = renderText(state);
@@ -245,7 +260,12 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     if (nativeTurn) delivery.nativeRecovery = { turnId: nativeTurn.id, signature: nativeSignature, finished };
     delivery.queueSignature = queueSignature;
     refreshKeys.delete(ledgerKey);
-    delivery.lastEvent = lastEvent; delivery.pushedAt = Date.now(); delivery.finished = finished; delivery.controlsVersion = 1; await save();
+    delivery.lastEvent = lastEvent; delivery.pushedAt = Date.now(); delivery.finished = finished; delivery.controlsVersion = 1;
+    if (auxiliary) {
+      delivery.auxiliaryLayoutVersion = 1; delivery.auxiliaryPreviousReply = auxiliaryPreviousReply;
+      if (delivery.messageId && (!latest || newerReply(job, latest))) latestSharedReplies.set(target.scope, { id: job.id, createdAt: job.createdAt });
+    }
+    await save();
   }
   const runNow = (): Promise<void> => {
     if (stopped) return Promise.resolve();

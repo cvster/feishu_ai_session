@@ -8,6 +8,8 @@ import { runProgress } from './run-progress';
 
 export interface RunCardRenderOptions extends RunControlIcons {
   queuedMessages?: QueuedMessage[];
+  /** A newer reply is already visible in the same shared group. */
+  auxiliaryPreviousReply?: boolean;
   signCallback?: (action: string) => string;
   /** External Codex turns have no bridge-owned RunHandle to interrupt. */
   showStopButton?: boolean;
@@ -18,7 +20,7 @@ export interface RunCardRenderOptions extends RunControlIcons {
 export function renderCard(state: RunState, options: RunCardRenderOptions = {}): object {
   // Reasoning and tool details are never included in the serialized card.
   const textBlocks = state.blocks.filter(block => block.kind === 'text');
-  const elements: object[] = options.auxiliary ? auxiliaryContent(textBlocks) :
+  const elements: object[] = options.auxiliary ? auxiliaryContent(textBlocks, options.auxiliaryPreviousReply === true) :
     textBlocks.filter(block => block.content.trim()).map(block => markdown(block.content));
   const progress = runProgress(state);
   elements.push(...progress.map(noteMd));
@@ -56,24 +58,16 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   };
 }
 
-/** Keep concise output inline; longer replies retain their full output behind a native toggle. */
-function auxiliaryContent(blocks: Array<{ kind: 'text'; content: string }>): object[] {
+/** The latest reply is always complete; only older replies over 1000 characters fold. */
+function auxiliaryContent(blocks: Array<{ kind: 'text'; content: string }>, previousReply: boolean): object[] {
   const visible = blocks.filter(block => block.content.trim());
-  const whole = visible.map(block => block.content.trim()).join('\n\n');
-  if (Array.from(whole).length <= 200 && whole.split('\n').length <= 5) return visible.map(block => markdown(block.content));
-  const answer = [...blocks].reverse().find(block => block.content.trim());
-  const content = answer?.content.trim() ?? '';
-  const long = Array.from(content).length > 200 || content.split('\n').length > 5 || /```|~~~/.test(content);
-  const elements: object[] = [];
-  if (content) {
-    elements.push(long ? {
-      tag: 'div', text: { tag: 'plain_text', content: auxiliaryPreview(content), lines: 5 },
-    } : markdown(content));
-  }
-  const details = blocks.filter(block => block.content.trim() && (block !== answer || long))
-    .map(block => markdown(block.content));
-  if (details.length) elements.push(auxiliaryDetails(details));
-  return elements;
+  const content = visible.map(block => block.content.trim()).join('\n\n');
+  if (!previousReply || Array.from(content).length <= 1000) return visible.map(block => markdown(block.content));
+  const answer = visible.at(-1)!.content.trim();
+  return [
+    { tag: 'div', text: { tag: 'plain_text', content: auxiliaryPreview(answer), lines: 5 } },
+    auxiliaryDetails(visible.map(block => markdown(block.content))),
+  ];
 }
 
 function auxiliaryDetails(elements: object[]): object {

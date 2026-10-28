@@ -305,3 +305,40 @@ it('does not mention the owner when a private auxiliary conversation finishes', 
     expect(h.reply.mock.calls.filter(([request]) => (request as any).data.msg_type === 'post')).toHaveLength(0);
   } finally { await sync.stop(); }
 });
+
+
+it('keeps the latest long shared reply expanded, folds its predecessor only after a newer card is delivered, and retains that choice after restart', async () => {
+  const h = await repliesFixture('card', true); h.finish();
+  await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('completed'));
+  const first = await h.client.snapshot(h.job.id);
+  const long = '正文'.repeat(600);
+  first.events = first.events.filter(row => row.event.type !== 'text');
+  first.events.splice(1, 0, { seq: 999, at: Date.now(), event: { type: 'text', delta: long } });
+  const next = { ...first.job, id: 'newer-shared-reply', createdAt: first.job.createdAt + 100,
+    options: { ...first.job.options, delivery: { ...first.job.options.delivery!, replyTo: 'om_next', messageIds: ['om_next'] } } };
+  let listed = [first.job];
+  vi.spyOn(h.client, 'list').mockImplementation(async () => listed);
+  vi.spyOn(h.client, 'snapshot').mockImplementation(async id => id === next.id ? { job: next, events: first.events.map(row => row.event.type === 'text'
+    ? { ...row, event: { type: 'text', delta: '最新回答：' + long } } : row) } : first);
+  let count = 0;
+  vi.mocked(h.channel.createCard).mockImplementation(async () => ({ cardId: 'card-' + ++count }));
+  h.reply.mockImplementation(async () => ({ code: 0, data: { message_id: 'message-' + count } }));
+  let publisher = await h.start();
+  try {
+    await publisher.runNow();
+    const updates = vi.mocked(h.channel.updateCardById);
+    expect(JSON.stringify(updates.mock.calls.filter(([id]) => id === 'card-1').at(-1)![1])).not.toContain('collapsible_panel');
+    listed = [first.job, next];
+    h.reply.mockRejectedValueOnce(Error('new reply unavailable'));
+    await publisher.runNow();
+    expect(JSON.stringify(updates.mock.calls.filter(([id]) => id === 'card-1').at(-1)![1])).not.toContain('collapsible_panel');
+    await publisher.runNow();
+    expect(JSON.stringify(updates.mock.calls.filter(([id]) => id === 'card-1').at(-1)![1])).toContain('collapsible_panel');
+    expect(JSON.stringify(updates.mock.calls.filter(([id]) => id === 'card-2').at(-1)![1])).not.toContain('collapsible_panel');
+    await publisher.stop(); publisher = await h.start(); await publisher.runNow();
+    expect(h.channel.createCard).toHaveBeenCalledTimes(2);
+    const ledger = JSON.parse(await readFile(h.statePath, 'utf8')).deliveries;
+    expect(ledger[first.job.id]).toMatchObject({ auxiliaryPreviousReply: true, auxiliaryLayoutVersion: 1 });
+    expect(ledger[next.id]).toMatchObject({ auxiliaryPreviousReply: false, auxiliaryLayoutVersion: 1 });
+  } finally { await publisher.stop(); await h.catalog.flush(); await h.sessions.flush(); }
+});

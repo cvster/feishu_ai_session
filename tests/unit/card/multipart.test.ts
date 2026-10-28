@@ -33,7 +33,7 @@ it('keeps fenced code readable across cards and splits nested auxiliary details 
   const lines = Array.from({ length: 4000 }, (_, i) => `const item${i} = "中文😀";\n`);
   const full = '```ts\n' + lines.join('') + '```';
   const state = reduce(initialState, { type: 'text', delta: full });
-  const cards = splitCard(renderCard(state, { auxiliary: true }));
+  const cards = splitCard(renderCard(state, { auxiliary: true, auxiliaryPreviousReply: true }));
   expect(cards.length).toBeGreaterThan(2);
   for (const part of cards) expect(cardBytes(part)).toBeLessThanOrEqual(CARD_BUDGET_BYTES);
   const code = cards.flatMap(markdowns).filter(text => text.includes('const item'));

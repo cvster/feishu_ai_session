@@ -22,9 +22,9 @@ it('shows thinking and parallel tool progress, hides all details, and keeps summ
   }
   state = reduce(state, { type: 'tool_result', id: 'b', output: 'done', isError: false });
   expect(runProgress(state)).toEqual(['🧠 思考完成', '🧰 2 个工具调用（已完成）']);
-  state = reduce(state, { type: 'text', delta: 'answer\n'.repeat(100) });
+  state = reduce(state, { type: 'text', delta: 'answer\n'.repeat(200) });
   state = reduce(state, { type: 'done', terminationReason: 'normal' });
-  const finished = renderCard(state, { auxiliary: true }) as { body: { elements: { tag: string; content?: string }[] } };
+  const finished = renderCard(state, { auxiliary: true, auxiliaryPreviousReply: true }) as { body: { elements: { tag: string; content?: string }[] } };
   expect(finished.body.elements.filter(e => e.tag === 'markdown').map(e => e.content)).toEqual(runProgress(state));
   expect(finished.body.elements.some(e => e.tag === 'collapsible_panel')).toBe(true);
 });
