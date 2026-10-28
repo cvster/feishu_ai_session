@@ -26,8 +26,8 @@ function harness(loginRequired = true, authorized = true) {
     bindings: [{ id: 'b', tool: 'Tool', groupName: '群', sessionName: '会话', kind: '个人 AI 群', cwd: '/project', issues: ['群名与会话名不一致'], canSync: true, groupState: 'active', sessionState: 'active', canDissolve: false, canArchive: false },
       { id: 'dissolve', tool: 'Tool', groupName: '待解散群', sessionName: '已归档会话', issues: [], groupState: 'active', sessionState: 'archived', canDissolve: true, canArchive: false },
       { id: 'archive', tool: 'Tool', groupName: '已解散群', sessionName: '待归档会话', issues: [], groupState: 'dissolved', sessionState: 'active', canDissolve: false, canArchive: true }],
-    sharedGroups: [{ id: 'shared', chatId: 'oc_shared', name: '<群>', kind: '共享群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, targetId: 'current', canBind: true, canLeave: true, issues: [] },
-      { id: 'private', chatId: 'oc_private', name: '私聊群', kind: '私聊群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, canBind: false, canLeave: true, issues: [] }],
+    sharedGroups: [{ id: 'shared', chatId: 'oc_shared', name: '<群>', kind: '共享群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, targetId: 'current', canBind: true, canLeave: false, sessionArchived: false, toolId: 'generic', issues: [] },
+      { id: 'private', chatId: 'oc_private', name: '私聊群', kind: '私聊群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, canBind: false, canLeave: false, sessionArchived: false, toolId: 'generic', issues: [] }],
     sharedTargets: [{ id: 'current', name: '会话', toolId: 'generic', tool: 'Tool', cwd: '/project' }, { id: 'next', name: '<新会话>', toolId: 'other', tool: 'Other', cwd: '/next' }],
     items: [{ id: 'pending', toolId: 'generic', tool: 'Tool', name: '会话', sender: 'Nick', text: '<img src=x onerror=attack()>', status: 'pending', createdAt: Date.now(), canRetry: true },
       { id: 'accepted', toolId: 'generic', tool: 'Tool', name: '会话', sender: 'Nick', text: '已提交消息', status: 'running', createdAt: Date.now(), canRetry: false }] };
@@ -60,7 +60,12 @@ it('opens shared management dialogs and submits only after confirmation with the
   expect(h.get('shared-list').text).toContain('<群>'); expect(all.filter(b => b.textContent === '换会话')).toHaveLength(1);
   await change.onclick!(); expect(h.get('shared-dialog').open).toBe(true);
   expect(h.get('shared-tool').text).toContain('Other');
-  expect(h.get('shared-project').disabled).toBe(true);
+  expect(h.get('shared-tool').value).toBe('generic');
+  expect(h.get('shared-project').value).toBe('/project');
+  expect(h.get('shared-target').value).toBe('');
+  expect(h.get('shared-project').disabled).toBe(false);
+  expect(all.some(b => b.textContent === '机器人退出群')).toBe(false);
+  expect(h.get('shared-list').text).toContain('群名：<群>');
   h.get('shared-tool').value = 'other'; h.get('shared-tool').handlers.change!();
   expect(h.get('shared-project').text).toContain('/next');
   h.get('shared-project').value = '/next'; h.get('shared-project').handlers.change!();
@@ -68,6 +73,8 @@ it('opens shared management dialogs and submits only after confirmation with the
   h.get('shared-target').value = 'next'; await h.get('shared-form').onsubmit!({ preventDefault() {} });
   expect(h.requests.find(r => r.body?.action === 'shared-bind')?.body).toEqual({ action: 'shared-bind', id: 'shared', target: 'next' });
   expect(h.get('shared-dialog').open).toBe(false);
+  h.snapshot.sharedGroups[0]!.sessionArchived = true; h.snapshot.sharedGroups[0]!.canLeave = true;
+  await h.nav[2]!.onclick!();
   const leave = buttons(h.get('shared-list')).find(b => b.textContent === '机器人退出群')!;
   await leave.onclick!(); expect(h.get('shared-submit').className).toBe('danger');
   expect(h.get('shared-description').text).toContain('未发送消息将取消');
@@ -144,4 +151,18 @@ it('shows tool support and inspection results separately from the last confirmed
   expect(text).toContain('会话确认于'); expect(text).not.toContain('未确认');
   h.get('binding-status').value = 'unsupported'; h.get('binding-status').handlers.change!();
   expect(h.get('binding-list').text).toContain('旧会话群'); expect(h.get('binding-list').text).not.toContain('离线群');
+});
+
+
+it('prefills the original tool and project even when the archived source is absent from eligible targets', async () => {
+  const h = harness(false); await h.ready();
+  h.snapshot.sharedGroups[0]!.sessionArchived = true;
+  h.snapshot.sharedTargets.splice(0, 1);
+  await h.nav[2]!.onclick!();
+  const buttons = (node: Element): Element[] => node.children.flatMap(c => [...(c.tag === 'button' ? [c] : []), ...buttons(c)]);
+  await buttons(h.get('shared-list')).find(b => b.textContent === '换会话')!.onclick!();
+  expect(h.get('shared-tool').value).toBe('generic'); expect(h.get('shared-project').value).toBe('/project');
+  expect(h.get('shared-target').children.map(e => e.value)).toEqual(['']);
+  await h.get('shared-form').onsubmit!({ preventDefault() {} });
+  expect(h.requests.some(r => r.body?.action === 'shared-bind')).toBe(false);
 });

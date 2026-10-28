@@ -23,7 +23,7 @@ export interface ConsoleItem {
   status: string; createdAt: number; updatedAt: number; retryAt?: number; reason?: string; canRetry: boolean; jobId?: string;
 }
 
-/** Read-only observations and existing maintenance paths; no provider protocols or new job writer. */
+/** Observations and existing maintenance paths; no provider protocols or new job writer. */
 export class BridgeConsoleService {
   private readonly states: ManagementStateStore;
   private sessionChecks = new Map<string, { at: number; session?: ToolSession; issue?: string; state?: 'missing' | 'unsupported' }>();
@@ -82,12 +82,13 @@ export class BridgeConsoleService {
         if (this.deps.catalog?.isChatDissolved(id)) { chats.set(id, { status: 'dissolved' }); continue; }
         try {
           const r = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: id } });
-          if (r.code === 232009) { chats.set(id, { status: 'dissolved' }); continue; }
+          if (r.code === 232009 || r.code === 232011) { chats.set(id, { status: r.code === 232009 ? 'dissolved' : 'unavailable' }); continue; }
           if (r.code || !r.data) throw new Error(r.msg || '群信息未确认');
           chats.set(id, { name: r.data.name, mode: r.data.chat_mode, status: r.data.chat_status });
         } catch (e) {
           const failure = e as { code?: number; response?: { data?: { code?: number } } };
-          chats.set(id, (failure?.response?.data?.code ?? failure?.code) === 232009 ? { status: 'dissolved' } : { error: clean(e instanceof Error ? e.message : e) });
+          const code = failure?.response?.data?.code ?? failure?.code;
+          chats.set(id, code === 232009 || code === 232011 ? { status: code === 232009 ? 'dissolved' : 'unavailable' } : { error: clean(e instanceof Error ? e.message : e) });
         }
       }
     }));
@@ -106,12 +107,14 @@ export class BridgeConsoleService {
     // the common read-only conversation endpoint (also works with older workers).
     const checkKey = (b: typeof refs[number]) => hash(['session', c.profileConfig.accounts.app.id, b.toolId, b.sourceId, b.nativeId ?? b.scope]);
     const groupKey = (scope: string) => hash(['group', c.profileConfig.accounts.app.id, scope]);
-    const checksInUse = new Set(refs.map(checkKey));
+    const sessionRefs = [...new Map([...refs, ...sharedRows.flatMap(row => row.source ? [{ scope: row.chatId, ...row.source,
+      nativeCreated: true, name: row.name, cwd: row.cwd, revision: hash([row.generation, row.source]) }] : [])].map(ref => [checkKey(ref), ref])).values()];
+    const checksInUse = new Set(sessionRefs.map(checkKey));
     for (const key of this.sessionChecks.keys()) if (!checksInUse.has(key)) this.sessionChecks.delete(key);
     let refIndex = 0;
-    await Promise.all(Array.from({ length: Math.min(4, refs.length) }, async () => {
-      while (refIndex < refs.length) {
-        const b = refs[refIndex++]!, o = this.observations.get(b.toolId), tool = c.toolRegistry?.find(b.toolId);
+    await Promise.all(Array.from({ length: Math.min(4, sessionRefs.length) }, async () => {
+      while (refIndex < sessionRefs.length) {
+        const b = sessionRefs[refIndex++]!, o = this.observations.get(b.toolId), tool = c.toolRegistry?.find(b.toolId);
         if (b.nativeCreated === false || !b.nativeId || !o?.online || !o.nativeKnown || o.sourceId !== b.sourceId ||
           o.native.some(row => row.nativeId === b.nativeId) || !o.health?.capabilities?.conversation ||
           !(tool?.agent instanceof DurableAgentAdapter)) continue;
@@ -185,10 +188,13 @@ export class BridgeConsoleService {
       o.native.filter(s => c.auxiliary?.shareable?.(o.id, o.sourceId!, s)).map(s => ({ id: this.targetId(o.id, o.sourceId!, s.nativeId),
         toolId: o.id, tool: o.label, name: s.name || s.nativeId, cwd: s.cwd, updatedAt: s.updatedAtMs })) : [])
       .sort((a, b) => Number(b.name.trimStart().startsWith('AA')) - Number(a.name.trimStart().startsWith('AA')) || b.updatedAt - a.updatedAt || a.name.localeCompare(b.name));
-    const sharedGroups = sharedRows.map(row => {
+    const inspectedSharedGroups = await Promise.all(sharedRows.map(async row => {
       const group = chats.get(row.chatId), ref = row.source, o = ref && this.observations.get(ref.toolId);
       const native = o?.sourceId === ref?.sourceId ? o?.native.find(s => s.nativeId === ref?.nativeId) : undefined;
       const binding = c.toolBindings?.get(row.chatId), connected = ['group', 'topic'].includes(group?.mode ?? '') && (!group?.status || group.status === 'normal');
+      const sessionArchived = !!(native?.archived || ref && c.toolBindings?.isArchived(ref.toolId, ref.sourceId, ref.nativeId));
+      const closed = row.status === 'archived' || !!group && !group.error && !connected;
+      if (ref && sessionArchived && closed && await c.auxiliary!.removeClosedGroup(row.chatId, row.generation, ref)) return undefined;
       const routeWorker = binding ? this.observations.get(binding.toolId) : undefined;
       const busy = items.some(i => i.scope === row.chatId && ['pending', 'queued', 'accepted', 'running'].includes(i.status));
       const issues = [group?.error && row.status !== 'archived' ? '群状态未确认' : '',
@@ -197,19 +203,20 @@ export class BridgeConsoleService {
         ref && row.status !== 'archived' && !o?.online ? 'Worker 离线' : '',
         ref && o?.online && o.sourceId !== ref.sourceId ? 'Worker 身份不匹配' : '',
         ref && o?.online && !o.nativeKnown ? '原生会话状态未确认' : '',
-        native?.archived || ref && c.toolBindings?.isArchived(ref.toolId, ref.sourceId, ref.nativeId) ? '会话已归档' : '',
+        sessionArchived ? '会话已归档' : '',
         ref && o?.nativeKnown && o.health?.capabilities?.sessionListAuthoritative && !native ? '原生会话不存在' : ''].filter(Boolean);
       return { id: this.groupId(row), chatId: row.chatId, name: group?.name ?? row.name, status: row.status,
         active: c.auxiliary!.isActive(row.chatId), kind: row.privateGroup ? '私聊群' : '共享群',
         toolId: ref?.toolId, tool: o?.label ?? ref?.toolId ?? '未选择', sessionName: native?.name ?? (binding?.nativeId === ref?.nativeId ? binding?.name : undefined) ?? ref?.nativeId ?? '尚未关联',
         associationId: ref ? this.targetId(ref.toolId, ref.sourceId, ref.nativeId) : undefined,
         targetId: row.status === 'active' && ref ? this.targetId(ref.toolId, ref.sourceId, ref.nativeId) : undefined, cwd: native?.cwd ?? row.cwd ?? '',
-        parentChatId: row.privateGroup?.parentChatId, issues, busy,
+        parentChatId: row.privateGroup?.parentChatId, issues, busy, sessionArchived,
         sessionId: ref ? personalRows.find(s => { const b = c.toolBindings?.get(s.scope); return b?.toolId === ref.toolId && b.sourceId === ref.sourceId && b.nativeId === ref.nativeId; })?.id : undefined,
         canBind: row.ownerId === owner && !row.privateGroup && ['pending', 'active'].includes(row.status) && connected && !this.deps.catalog?.isChatDissolved(row.chatId) &&
           !busy && (!binding || routeWorker?.online === true && routeWorker.jobsKnown && binding.sourceId === routeWorker.sourceId),
-        canLeave: row.ownerId === owner && row.status !== 'archived' };
-    });
+        canLeave: row.ownerId === owner && sessionArchived && row.status !== 'archived' };
+    }));
+    const sharedGroups = inspectedSharedGroups.filter((row): row is NonNullable<typeof row> => !!row);
     const allJobs = [...this.observations.values()].flatMap(o => o.jobs);
     const workers = [...ids].map(id => {
       const o = this.observations.get(id)!;
@@ -218,7 +225,7 @@ export class BridgeConsoleService {
         pending: items.filter(i => i.toolId === id && ['queued', 'pending'].includes(i.status)).length };
     });
     if (this.owner() !== owner) throw new WebError(409, '所有者已变化，请刷新');
-    await this.states.save(new Set([...refs.map(checkKey), ...refs.map(b => groupKey(b.scope))]));
+    await this.states.save(new Set([...sessionRefs.map(checkKey), ...refs.map(b => groupKey(b.scope))]));
     return { at: Date.now(), bridge: { profile: c.profile, uptimeSeconds: Math.floor(process.uptime()),
       connection: this.deps.channel.getConnectionStatus?.()?.state ?? 'unknown' },
       summary: { workers: workers.length, online: workers.filter(w => w.online).length, bindings: bindings.length,
@@ -309,7 +316,7 @@ export class BridgeConsoleService {
       if (!row || row.ownerId !== owner || this.owner() !== owner) throw new WebError(409, '共享群关联或所有者已变化，请刷新');
       try {
         if (action === 'shared-leave') {
-          if (row.status === 'archived') return { ok: true };
+          if (!snapshot.sharedGroups.find(g => g.id === id)?.canLeave) throw new WebError(409, '仅已归档会话的共享群可以从控制台退群，请刷新');
           await c.auxiliary.leave(row.chatId, owner, async () => {
             const b = c.toolBindings?.get(row.chatId);
             if (b) {

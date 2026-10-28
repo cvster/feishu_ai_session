@@ -692,3 +692,7 @@ it.each([false, true])('copies complete queue text without deleting or submittin
   if (fallback) { expect(copied).toBe(text); expect(h.body.children).toHaveLength(0); }
   else expect(h.fallbackCopy).not.toHaveBeenCalled();
 });
+
+it('opens the console in a separate browser tab', () => {
+  expect(bridgeWebPage).toContain('<a href="/console" target="_blank" rel="noopener"');
+});

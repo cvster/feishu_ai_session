@@ -254,6 +254,24 @@ export class AuxiliaryGroups {
       else await close();
     });
   }
+  /** Forget only a confirmed closed group tied to the same archived source; preserve peer routes and native history. */
+  async removeClosedGroup(chatId: string, generation: string, source: LinkedSession): Promise<boolean> {
+    return this.serial(chatId, () => this.serial(`source:${this.sourceKey(source)}`, async () => {
+      const row = this.records[chatId];
+      if (!row?.source || row.generation !== generation || this.sourceKey(row.source) !== this.sourceKey(source)) return false;
+      await this.deps.cancelPending(chatId);
+      for (const entry of this.deps.catalog?.entries().filter(e => e.scopeId === chatId && e.status === 'active') ?? [])
+        this.deps.catalog!.archiveActive(entry);
+      this.deps.bindings.removeChat(chatId);
+      this.deps.sessions.remove(chatId); this.deps.workspaces.removeCwd(chatId);
+      await Promise.all([this.deps.bindings.flush(), this.deps.catalog?.flush(), this.deps.sessions.flush(), this.deps.workspaces.flush()]);
+      delete this.records[chatId];
+      for (const [key, intent] of Object.entries(this.privateCreations)) if (intent.chatId === chatId) delete this.privateCreations[key];
+      for (const [token, choice] of this.choices) if (choice.chatId === chatId) this.choices.delete(token);
+      await this.save();
+      return true;
+    }));
+  }
   private sourceKey(source: LinkedSession): string { return sessionRefKey(source.toolId, source.sourceId, source.nativeId); }
   /** Migrate routing only: keep native FF transcripts, stable API aliases and archive state. */
   private async migrateSharedBindings(): Promise<void> {
