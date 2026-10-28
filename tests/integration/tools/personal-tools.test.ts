@@ -178,7 +178,7 @@ describe('personal multi-tool workflows', () => {
     expect(h.channel.send).toHaveBeenLastCalledWith(target, { text: submit.mock.calls[1]![0].content }, { replyTo: 'msg' });
     expect(vi.mocked(h.channel.send).mock.invocationCallOrder.at(-1)).toBeLessThan(submit.mock.invocationCallOrder[1]!);
     expect(submit).toHaveBeenCalledWith(expect.objectContaining({ chatId: target, messageId: 'msg', chatType: 'group', senderId: 'ou_owner', mentionedBot: true,
-      content: `读取codex '${h.dir.split('/').at(-1)}/AA-同名' 的内容\n会话记录：${history}`, raw: { bridgeCallbackId: `copy-read-${provenance.copyId}` } }));
+      content: `会话创建自 codex '${h.dir.split('/').at(-1)}/AA-同名'。后续问题如有需要，可读取原会话。\n原会话记录：${history}`, raw: { bridgeCallbackId: `copy-read-${provenance.copyId}` } }));
     await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group')); expect(h.groups).toHaveLength(3);
   });
   it('automatically reads source history in the new group when same-tool copy has no native fork', async () => {
@@ -198,7 +198,7 @@ describe('personal multi-tool workflows', () => {
     expect(submit).toHaveBeenCalledOnce();
     const input = submit.mock.calls[0]![0];
     expect(input).toMatchObject({ chatId: target, chatType: 'group', senderId: 'ou_owner', threadId: undefined,
-      content: `读取claude '${h.dir.split('/').at(-1)}/AA-同名（Claude）' 的内容\n会话记录：${history}` });
+      content: `会话创建自 claude '${h.dir.split('/').at(-1)}/AA-同名（Claude）'。后续问题如有需要，可读取原会话。\n原会话记录：${history}` });
     expect(h.channel.send).toHaveBeenCalledWith(target, { text: input.content }, {});
     expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).not.toContain('fork.read');
     await runCommandHandler('fork', `same ${value.arg}`, ctx);

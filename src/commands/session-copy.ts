@@ -94,7 +94,7 @@ export async function readCopiedSession(ctx: CommandContext, copyId: string): Pr
   if (!historyPath) throw new Error('原会话记录暂不可读，请稍后重试。');
   await access(historyPath);
   if (!ctx.controls.submitMessage) throw new Error('消息入口暂不可用，请稍后重试。');
-  const content = `读取${tool.label} '${basename(source.cwd)}/${source.name}' 的内容\n会话记录：${historyPath}`;
+  const content = `会话创建自 ${tool.label} '${basename(source.cwd)}/${source.name}'。后续问题如有需要，可读取原会话。\n原会话记录：${historyPath}`;
   const sent = await ctx.channel.send(ctx.msg.chatId, { text: content }, {
     ...(ctx.msg.messageId ? { replyTo: ctx.msg.messageId } : {}), ...(ctx.chatMode === 'topic' ? { replyInThread: true } : {}),
   });

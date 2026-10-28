@@ -1424,6 +1424,7 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('automatically rea
   expect(copy.updatedAtMs).toBeGreaterThanOrEqual(h.bindings.get('oc_copy')!.createdAtMs!);
   expect(submit).toHaveBeenCalledOnce();
   const input = submit.mock.calls[0]![0]; expect(input).toMatchObject({ chatId: 'oc_copy', content: expect.stringContaining(history), threadId: undefined });
+  expect(input.content).toContain('会话创建自'); expect(input.content).toContain('后续问题如有需要，可读取原会话。');
   expect(h.send).toHaveBeenCalledWith('oc_copy', { text: input.content }, {});
   expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).not.toContain('fork.read');
   expect(JSON.stringify(result.elements)).not.toContain('读取原会话内容'); expect(h.provider.fork).not.toHaveBeenCalled();
