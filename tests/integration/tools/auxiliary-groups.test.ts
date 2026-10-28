@@ -46,7 +46,8 @@ async function harness(toolId: 'codex' | 'claude' = 'claude') {
   const channel = { rawClient: { im: { v1: { chat: {
     get: vi.fn(async () => ({ code: 0, data: { name: '项目讨论', chat_mode: 'group' as const } })),
   }, chatMembers: { get: vi.fn(async () => ({ code: 0, data: { items: [{ member_id: 'ou_member' }, { member_id: 'ou_owner' }] } })), delete: leave, isInChat: vi.fn(async () => ({ code: 0, data: { is_in_chat: true } })) } } } }, getChatMode: vi.fn(async () => 'p2p'),
-    createCard: vi.fn(async (card: object) => { cards.push(card); return { cardId: `card-${cards.length}` }; }), send,
+    createCard: vi.fn(async (card: object) => { cards.push(card); return { cardId: `card-${cards.length}` }; }),
+    updateCardById: vi.fn(async (cardId: string, card: object) => { cards[Number(cardId.slice(5)) - 1] = card; }), send,
     listChats: vi.fn(async () => [{ id: 'oc_original', name: '个人工作群' }]),
   } as unknown as LarkChannel;
   const tools = new ToolRegistry(); const agent = new FakeAgentAdapter({ id: toolId, events: [] });
@@ -147,17 +148,25 @@ describe('auxiliary owner linking and lifecycle', () => {
     const h = await harness('codex'); const tool = h.tools.get('codex'); const original = (await tool.listSessions())[0]!;
     vi.mocked(tool.listSessions).mockResolvedValue([
       { ...original, name: '普通个人会话', updatedAtMs: 2 },
-      ...['AA-first', '  AA-second', 'history-a', 'history-b', 'history-c', 'history-d'].map((name, i) =>
+      ...['AA-first', '  AA-second', 'history-a', 'history-b', 'history-c', 'history-d', 'history-e', 'history-f', 'history-g', 'history-h'].map((name, i) =>
         ({ ...original, nativeId: name, name, updatedAtMs: i < 2 ? 1 : 100 + i })),
       { ...original, nativeId: 'archived-native', name: 'AA-archived', archived: true, updatedAtMs: 9999 },
     ]);
     await h.groups.joined(joined); await h.groups.action(h.event());
     const labels = () => h.cards.at(-1).body.elements.filter((e: any) => e.tag === 'button').map((e: any) => e.text.content);
     expect(labels().filter((s: string) => s.includes(' · ')).map((s: string) => s.split(' · ')[0]))
-      .toEqual(['  AA-second', 'AA-first', '普通个人会话', 'history-d', 'history-c', 'history-b']);
+      .toEqual(['  AA-second', 'AA-first', '普通个人会话', 'history-h', 'history-g', 'history-f', 'history-e', 'history-d', 'history-c', 'history-b']);
+    const sent = vi.mocked(h.channel.send).mock.calls.length;
+    const creates = vi.mocked(h.channel.createCard).mock.calls.length;
     const next = h.cards.at(-1).body.elements.find((e: any) => e.text?.content === '下一页').behaviors[0].value;
     await h.groups.action(h.event(next));
     expect(labels().filter((s: string) => s.includes(' · '))).toEqual([`history-a · ${h.cwd}`]);
+    expect(h.channel.send).toHaveBeenCalledTimes(sent); expect(h.channel.createCard).toHaveBeenCalledTimes(creates);
+    expect(h.channel.updateCardById).toHaveBeenCalled();
+    const previous = h.cards.at(-1).body.elements.find((e: any) => e.text?.content === '上一页').behaviors[0].value;
+    await h.groups.action(h.event(previous));
+    expect(labels().filter((s: string) => s.includes(' · '))).toHaveLength(10);
+    expect(h.channel.send).toHaveBeenCalledTimes(sent);
   });
   it.each(['codex', 'claude'] as const)('links %s privately directly to the original binding and inherits cwd/model', async tool => {
     const h = await harness(tool); await h.activate();

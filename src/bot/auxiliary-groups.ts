@@ -11,7 +11,7 @@ import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { resolveWorkingDirectory } from '../policy/workspace';
-import { sendManagedCard } from '../card/managed';
+import { sendManagedCard, updateManagedCard, isManaged } from '../card/managed';
 import { createBoundChat, waitForBridgeGroupCreation, renameChat } from './group';
 import { muteSessionGroup } from './group-notifications';
 import { auxiliaryBotIsMember } from './auxiliary-membership';
@@ -19,6 +19,8 @@ import { fetchKnownChatsResult } from './lark-info';
 import { auxiliaryUserIsMember } from './auxiliary-private';
 import { sessionOperations } from '../tools/session-api';
 import { log } from '../core/logger';
+
+const SHARED_SESSION_PAGE_SIZE = 10;
 
 export interface AuxiliaryGroup {
   chatId: string;
@@ -493,7 +495,7 @@ export class AuxiliaryGroups {
     return { tag: 'button', text: { tag: 'plain_text', content: label.slice(0, 100) }, type: 'default',
       behaviors: [{ type: 'callback', value: { cmd: 'auxiliary.select', token } }] };
   }
-  private async notify(row: AuxiliaryGroup, toolId?: AgentKind, page = 0): Promise<void> {
+  private async notify(row: AuxiliaryGroup, toolId?: AgentKind, page = 0, messageId?: string): Promise<void> {
     const base: Choice = { chatId: row.chatId, generation: row.generation, ownerId: row.ownerId,
       expires: Date.now() + 15 * 60_000, page, toolId };
     const buttons: object[] = [];
@@ -513,17 +515,24 @@ export class AuxiliaryGroups {
         .map(([, binding]) => binding.nativeId));
       const rank = (s: { name?: string; nativeId: string }) => s.name?.trimStart().startsWith('AA') ? 0 : personalSessions.has(s.nativeId) ? 1 : 2;
       const sessions = (await tool.listSessions()).filter(s => this.shareable(toolId, tool.sourceId, s)).sort((a, b) => rank(a) - rank(b) || b.updatedAtMs - a.updatedAtMs || a.nativeId.localeCompare(b.nativeId));
-      for (const s of sessions.slice(page * 6, page * 6 + 6)) buttons.push(this.button(`${s.name || s.nativeId.slice(0, 12)} · ${s.cwd}`, { ...base, nativeId: s.nativeId }));
+      page = Math.max(0, Math.min(page, Math.max(0, Math.ceil(sessions.length / SHARED_SESSION_PAGE_SIZE) - 1))); base.page = page;
+      for (const s of sessions.slice(page * SHARED_SESSION_PAGE_SIZE, (page + 1) * SHARED_SESSION_PAGE_SIZE)) buttons.push(this.button(`${s.name || s.nativeId.slice(0, 12)} · ${s.cwd}`, { ...base, nativeId: s.nativeId }));
       if (page > 0) buttons.push(this.button('上一页', { ...base, page: page - 1 }));
-      if ((page + 1) * 6 < sessions.length) buttons.push(this.button('下一页', { ...base, page: page + 1 }));
+      if ((page + 1) * SHARED_SESSION_PAGE_SIZE < sessions.length) buttons.push(this.button('下一页', { ...base, page: page + 1 }));
       buttons.push(this.button('返回工具选择', { ...base, toolId: undefined, page: 0 }));
       description = sessions.length
         ? `${tool.label}：AA 会话 → 其他个人工作群会话 → 其他会话；同类按最近更新排序。将继承项目目录，并直接在所选原会话中处理每次 @ 消息。${chats.ok ? '' : '\n群列表暂不可用，其他会话统一按最近更新排序。'}`
         : `${tool.label}：暂无可共享的未归档会话。`;
     } else for (const tool of this.deps.tools.all()) buttons.push(this.button(tool.label, { ...base, toolId: tool.id }));
-    await sendManagedCard(this.deps.channel, row.ownerId, { schema: '2.0',
+    const card = { schema: '2.0',
       header: { title: { tag: 'plain_text', content: `会话共享：${row.name}` } },
-      body: { elements: [{ tag: 'markdown', content: description }, ...buttons] } });
+      body: { elements: [{ tag: 'markdown', content: description }, ...buttons] } };
+    if (messageId && isManaged(messageId)) {
+      // The callback is already acknowledged; let the client release its card snapshot lock.
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (this.records[row.chatId]?.generation !== row.generation || row.status !== 'pending' || row.ownerId !== this.deps.ownerId()) return;
+      await updateManagedCard(this.deps.channel, messageId, card);
+    } else await sendManagedCard(this.deps.channel, row.ownerId, card);
     row.notified = true; await this.save();
   }
   async action(event: CardActionEvent): Promise<boolean> {
@@ -538,7 +547,7 @@ export class AuxiliaryGroups {
       const row = this.get(choice.chatId);
       if (!row || row.generation !== choice.generation || this.deps.catalog?.isChatDissolved(row.chatId)) return;
       if (row.status !== 'pending') return;
-      if (!choice.nativeId || !choice.toolId) { await this.notify(row, choice.toolId, choice.page); return; }
+      if (!choice.nativeId || !choice.toolId) { await this.notify(row, choice.toolId, choice.page, event.messageId); return; }
       await this.activate(row, choice.generation, choice.toolId, this.deps.tools.get(choice.toolId).sourceId, choice.nativeId);
       this.choices.delete(token);
     });

@@ -250,6 +250,7 @@ const RESUME_CANDIDATE_TTL_MS = 10 * 60 * 1000;
 const resumeCandidates = new Map<string, ResumeCandidate>();
 const PANEL_CANDIDATE_TTL_MS = 15 * 60 * 1000;
 const PANEL_PAGE_SIZE = 6;
+const SESSION_PAGE_SIZE = 10;
 const panelCandidates = new Map<string, PanelCandidate>();
 const pendingForks = new Set<string>();
 const unboundForks = new Map<string, { threadId: string; name: string; cwd: string }>();
@@ -705,8 +706,8 @@ async function showExistingSessionsPanel(ctx: CommandContext, page: number): Pro
     }
     history.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
   } else history = [];
-  const start = page * PANEL_PAGE_SIZE;
-  const slice = history.slice(start, start + PANEL_PAGE_SIZE);
+  const start = page * SESSION_PAGE_SIZE;
+  const slice = history.slice(start, start + SESSION_PAGE_SIZE);
   const entries: ExistingSessionCardEntry[] = slice.map((thread) => ({
     token: issuePanelCandidate(ctx, {
       kind: 'session',
@@ -722,7 +723,7 @@ async function showExistingSessionsPanel(ctx: CommandContext, page: number): Pro
     threadId: thread.threadId,
     relTime: formatRelTime(thread.updatedAtMs),
   }));
-  await showPanelCard(ctx, existingSessionsCard(entries, page, history.length > start + PANEL_PAGE_SIZE));
+  await showPanelCard(ctx, existingSessionsCard(entries, page, history.length > start + SESSION_PAGE_SIZE));
 }
 
 async function showManagedGroupsPanel(ctx: CommandContext, page: number): Promise<void> {
