@@ -424,9 +424,11 @@ describe('short group prompt', () => {
     expect(prompt.rules.permissions).toBe('除了在本机修改源码和拷贝源码，其他都允许执行；源码不包括脚本');
     expect(prompt.rules.permissions).toContain('在本机修改源码和拷贝源码');
     expect(prompt.rules.task).toContain('当前会话上下文');
+    expect(prompt.rules.reply).toContain('不描述投递、指定群聊、技能或内部操作');
+    expect(prompt.rules.delivery).toContain('正文由桥接自动回复');
     expect(prompt).not.toHaveProperty('source'); expect(prompt).not.toHaveProperty('mode');
     expect(JSON.stringify(prompt)).not.toContain('先读source');
-    expect(JSON.stringify(prompt.rules).length).toBeLessThan(560);
+    expect(JSON.stringify(prompt.rules).length).toBeLessThan(650);
   });
   it('unrestricts only authenticated owner requests and restores restrictions for members', async () => {
     const h = await harness(); await h.activate();

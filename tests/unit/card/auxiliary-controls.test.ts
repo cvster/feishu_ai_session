@@ -28,17 +28,14 @@ interface Element {
 function body(state: typeof initialState, auxiliary = true): Element[] {
   return (renderCard(state, { auxiliary }) as { body: { elements: Element[] } }).body.elements;
 }
-it('keeps a short final answer visible and folds earlier commentary and running tool output', () => {
+it('keeps short commentary and final output inline while excluding thinking and tool details', () => {
   let state = reduce(initialState, { type: 'thinking', delta: 'private source history path' });
   state = reduce(state, { type: 'text', delta: 'Earlier progress update' });
   state = reduce(state, { type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'pwd' } });
   state = reduce(state, { type: 'text', delta: '**已完成。**' });
   const elements = body(state);
-  expect(elements[0]).toMatchObject({ tag: 'markdown', content: '**已完成。**' });
-  const panel = elements.find(e => e.tag === 'collapsible_panel')!;
-  expect(panel.expanded).toBe(false);
-  expect(JSON.stringify(panel)).toContain('Earlier progress update');
-  expect(panel.elements?.some(e => e.tag === 'collapsible_panel')).toBe(false);
+  expect(elements.slice(0, 2)).toMatchObject([{ tag: 'markdown', content: 'Earlier progress update' }, { tag: 'markdown', content: '**已完成。**' }]);
+  expect(elements.some(e => e.tag === 'collapsible_panel')).toBe(false);
   expect(JSON.stringify(elements)).not.toContain('pwd');
   expect(JSON.stringify(elements)).not.toContain('private source history path');
   expect(body(state, false)[0]).toMatchObject({ tag: 'markdown', content: 'Earlier progress update' });
@@ -57,7 +54,7 @@ it('shows a bounded Unicode-safe preview while retaining a long Markdown answer 
   expect(body(state, false)[0]).toMatchObject({ tag: 'markdown', content: full });
 });
 it('folds code and multiline answers without truncating their full content', () => {
-  for (const content of ['```ts\nconst ok = true;\n```', '一\n二\n三\n四\n五\n六']) {
+  for (const content of ['```ts\n' + 'const ok = true;\n'.repeat(20) + '```', '一\n二\n三\n四\n五\n六']) {
     const elements = body(reduce(initialState, { type: 'text', delta: content }));
     expect(elements[0]!.text?.content.split('\n').length).toBeLessThanOrEqual(5);
     expect(elements.find(e => e.tag === 'collapsible_panel')).toMatchObject({ expanded: false,
@@ -68,7 +65,7 @@ it('does not add an empty details panel to a concise answer or a thinking-only u
   expect(body(reduce(initialState, { type: 'text', delta: '已完成。' })).some(e => e.tag === 'collapsible_panel')).toBe(false);
   expect(body(reduce(initialState, { type: 'thinking', delta: 'internal reasoning' })).some(e => e.tag === 'collapsible_panel')).toBe(false);
 });
-it.each(['done', 'error', 'interrupted', 'idle_timeout'] as const)('folds status and controls after %s and keeps them visible while running', terminal => {
+it.each(['done', 'error', 'interrupted', 'idle_timeout'] as const)('folds status and controls only for long output after %s', terminal => {
   for (const detailed of [false, true]) {
     let running = startRunRuntime(initialState, 1_000);
     running = reduce(running, { type: 'text', delta: detailed ? '详细回答。'.repeat(100) : '简短回答。' });
@@ -82,6 +79,13 @@ it.each(['done', 'error', 'interrupted', 'idle_timeout'] as const)('folds status
         : { type: 'error', message: 'visible failure', terminationReason: 'failed' });
     const elements = body(finished);
     const panels = elements.filter(e => e.tag === 'collapsible_panel');
+    if (!detailed) {
+      expect(panels).toHaveLength(0);
+      expect(elements.some(e => e.tag === 'column_set')).toBe(true);
+      expect(JSON.stringify(elements)).toContain('最近更新');
+      expect(callbacks(elements).map(v => v.cmd)).toEqual(['stop', 'refresh']);
+      continue;
+    }
     expect(panels).toHaveLength(1);
     expect(panels[0]!.expanded).toBe(false);
     expect(elements.some(e => e.tag === 'column_set')).toBe(false);

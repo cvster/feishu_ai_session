@@ -645,10 +645,10 @@ export function wrapAuxiliaryPrompt(message: string, ownerRequest = false,
         (context.approval ? ' 所有者已确认，仅对context.approval.action放宽，其余操作仍受限；勿复用历史确认或重复已完成动作。' : ''),
       ...(!ownerRequest ? { approval: '受限先暂停，仅输出{"type":"ff_permission_request","action":"具体命令/目标/范围","reason":"原因"}，待所有者确认。' } : {}),
       task: '沿用当前会话上下文，仅处理本次请求，不续跑历史任务。',
-      reply: '默认≤200字/5行，先结论；明确要求才详述。不提关联或内部ID/路径。',
+      reply: '默认≤200字/5行，先结论；明确要求才详述。直接回答，不描述投递、指定群聊、技能或内部操作，不提关联或内部ID/路径。',
       delivery: context.transport === 'a2a'
         ? '仅返回本次API结果，不通过飞书或其他通道发送进展、回答或文件，不沿用历史收件人。'
-        : '仅投context.chat_id，不沿用历史群ID；发文件用：lark-cli im +messages-send --as bot --chat-id <context.chat_id> --file ./文件名；成功才确认。',
+        : '正文由桥接自动回复，不调用消息工具重复发送；仅图片/文件投context.chat_id，不沿用历史群ID；发文件用：lark-cli im +messages-send --as bot --chat-id <context.chat_id> --file ./文件名；成功才确认。',
     },
     user_input: message,
   });

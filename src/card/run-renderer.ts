@@ -41,11 +41,9 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   elements.push(controlButtonRow(options.auxiliary && state.terminal !== 'running' ? { ...options, showStopButton: false } : options, state.terminal === 'done'));
   if (!options.auxiliary) elements.push(...queueFooter(options.queuedMessages ?? []));
   if (options.auxiliary && state.terminal !== 'running') {
-    const footer = elements.splice(footerStart);
     const details = elements.find(element => (element as { tag?: string }).tag === 'collapsible_panel') as
       { elements: object[] } | undefined;
-    if (details) details.elements.push(...footer);
-    else elements.push(auxiliaryDetails(footer));
+    if (details) details.elements.push(...elements.splice(footerStart));
   }
 
   return {
@@ -58,8 +56,11 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   };
 }
 
-/** One visible answer; retain earlier commentary and full output behind a native toggle. */
+/** Keep concise output inline; longer replies retain their full output behind a native toggle. */
 function auxiliaryContent(blocks: Array<{ kind: 'text'; content: string }>): object[] {
+  const visible = blocks.filter(block => block.content.trim());
+  const whole = visible.map(block => block.content.trim()).join('\n\n');
+  if (Array.from(whole).length <= 200 && whole.split('\n').length <= 5) return visible.map(block => markdown(block.content));
   const answer = [...blocks].reverse().find(block => block.content.trim());
   const content = answer?.content.trim() ?? '';
   const long = Array.from(content).length > 200 || content.split('\n').length > 5 || /```|~~~/.test(content);
