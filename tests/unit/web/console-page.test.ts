@@ -3,13 +3,15 @@ import { expect, it, vi } from 'vitest';
 import { bridgeConsolePage } from '../../../apps/bridge-web/console';
 
 class Element {
-  children: Element[] = []; textContent = ''; hidden = false; disabled = false; value = ''; className = ''; open = false;
+  children: Element[] = []; textContent = ''; hidden = false; disabled = false; private storedValue = ''; className = ''; open = false;
   dataset: Record<string, string> = {}; handlers: Record<string, () => void> = {};
   onclick?: () => Promise<void> | void;
   onsubmit?: (event: { preventDefault(): void }) => Promise<void> | void;
   constructor(readonly tag = 'div') {}
+  get value(): string { return this.tag === 'select' ? this.children.find(n => n.value === this.storedValue)?.value ?? this.children[0]?.value ?? '' : this.storedValue; }
+  set value(value: string) { this.storedValue = this.tag === 'select' && !this.children.some(n => n.value === value) ? '' : value; }
   append(...nodes: Element[]) { this.children.push(...nodes); }
-  replaceChildren(...nodes: Element[]) { this.children = nodes; }
+  replaceChildren(...nodes: Element[]) { this.children = nodes; if (this.tag === 'select') this.storedValue = nodes[0]?.value ?? ''; }
   setAttribute() {}
   addEventListener(name: string, handler: () => void) { this.handlers[name] = handler; }
   showModal() { this.open = true; } close() { this.open = false; }
@@ -17,8 +19,13 @@ class Element {
   set innerHTML(_: string) { throw Error('API payload must be rendered as text'); }
 }
 function harness(loginRequired = true, authorized = true) {
-  const nodes = new Map([...bridgeConsolePage.matchAll(/id="([^"]+)"/g)].map(m => [m[1]!, new Element()]));
+  const nodes = new Map([...bridgeConsolePage.matchAll(/<(\w+)[^>]*\bid="([^"]+)"/g)].map(m => [m[2]!, new Element(m[1])]));
   const get = (id: string) => nodes.get(id)!;
+  for (const match of bridgeConsolePage.matchAll(/<select[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/select>/g)) {
+    for (const option of match[2]!.matchAll(/<option value="([^"]*)">([^<]*)<\/option>/g)) {
+      const node = new Element('option'); node.value = option[1]!; node.textContent = option[2]!; get(match[1]!).append(node);
+    }
+  }
   const nav = ['overview', 'bindings', 'shared'].map(page => { const e = new Element('button'); e.dataset.page = page; return e; });
   const snapshot = { at: Date.now(), bridge: { connection: 'connected', uptimeSeconds: 120 },
     summary: { online: 1, workers: 1, pending: 1, active: 1, failed: 0 }, canDiscover: true, canSync: true,

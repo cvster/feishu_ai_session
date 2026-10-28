@@ -17,6 +17,10 @@ import { describeChatDeletionError, dissolveChat } from '../bot/group';
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const clean = (v: unknown) => redactDiagnosticText(String(v ?? '')).replace(/\bsk-[A-Za-z0-9_-]{12,}/g, '[REDACTED]').slice(0, 2000);
 const jobScope = (j: WorkerJob) => j.options.delivery?.scope ?? '';
+function namedSession(nativeId: string, ...names: (string | undefined)[]): string | undefined {
+  return names.map(name => name?.trim()).find(name => name && name !== nativeId &&
+    !/^[a-f0-9-]{16,}$/i.test(name) && !(name.length >= 8 && /^[a-f0-9-]+$/i.test(name) && nativeId.startsWith(name)));
+}
 interface Observation { id: AgentKind; label: string; sourceId?: string; online: boolean; checkedAt: number; error?: string; health?: HealthDetails; jobsKnown: boolean; nativeKnown: boolean; jobs: WorkerJob[]; native: ToolSession[] }
 export interface ConsoleItem {
   id: string; toolId: string; tool: string; scope: string; name: string; sender: string; text: string;
@@ -185,8 +189,14 @@ export class BridgeConsoleService {
     });
     const items = this.items();
     const sharedTargets = [...this.observations.values()].flatMap(o => o.online && o.nativeKnown && o.sourceId ?
-      o.native.filter(s => c.auxiliary?.shareable?.(o.id, o.sourceId!, s)).map(s => ({ id: this.targetId(o.id, o.sourceId!, s.nativeId),
-        toolId: o.id, tool: o.label, name: s.name || s.nativeId, cwd: s.cwd, updatedAt: s.updatedAtMs })) : [])
+      o.native.filter(s => c.auxiliary?.shareable?.(o.id, o.sourceId!, s)).flatMap(s => {
+        const personal = personalBindings.filter(([, b]) => b.toolId === o.id && b.sourceId === o.sourceId && b.nativeId === s.nativeId);
+        const name = namedSession(s.nativeId, s.name, ...personal.flatMap(([scope, b]) => [b.name, chats.get(scope)?.name]),
+          ...entries.filter(([, b]) => b.toolId === o.id && b.sourceId === o.sourceId && b.nativeId === s.nativeId).map(([, b]) => b.name));
+        // Unnamed native history must not flood the switcher with internal IDs.
+        return name ? [{ id: this.targetId(o.id, o.sourceId!, s.nativeId), toolId: o.id, tool: o.label,
+          name, cwd: s.cwd, updatedAt: s.updatedAtMs }] : [];
+      }) : [])
       .sort((a, b) => Number(b.name.trimStart().startsWith('AA')) - Number(a.name.trimStart().startsWith('AA')) || b.updatedAt - a.updatedAt || a.name.localeCompare(b.name));
     const inspectedSharedGroups = await Promise.all(sharedRows.map(async row => {
       const group = chats.get(row.chatId), ref = row.source, o = ref && this.observations.get(ref.toolId);

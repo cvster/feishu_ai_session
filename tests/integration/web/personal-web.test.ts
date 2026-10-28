@@ -932,11 +932,29 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('console manages p
   expect(h.provider.archive).not.toHaveBeenCalled(); expect(h.bindings.get('oc_group')?.nativeId).toBe('native');
 });
 
+it('offers named shared sessions, recovers binding titles and excludes unnamed or ID-only history', async () => {
+  const h = await harness('codex'); await h.replies.stop(); await managedShared(h);
+  const recovered = { ...h.native, nativeId: '12345678-1234-4234-8234-123456789abc', name: '12345678-1234-4234-8234-123456789abc' };
+  const hidden = [
+    { ...h.native, nativeId: 'empty', name: '' },
+    { ...h.native, nativeId: 'abcdef12-1234-4234-8234-123456789abc', name: 'abcdef12-1234-4234-8234-123456789abc' },
+    { ...h.native, nativeId: '1234567890abcdef1234567890abcdef', name: '1234567890abcdef1234567890abcdef' },
+    { ...h.native, nativeId: 'deadbeef-1234-4234-8234-123456789abc', name: 'deadbeef' },
+  ];
+  h.provider.list.mockResolvedValue([{ ...h.native, name: '' }, recovered, ...hidden]);
+  h.bindings.set('oc_recovered', { toolId: 'codex', sourceId: h.client.sourceId, nativeId: recovered.nativeId, name: '恢复的会话' });
+  h.bindings.set('oc_other_source', { toolId: 'codex', sourceId: '/another/account', nativeId: hidden[1]!.nativeId, name: '其他账号的名称' });
+  const snapshot = await h.consoleService.snapshot(true);
+  expect(snapshot.sharedTargets.map(t => t.name).sort()).toEqual(['AA-web', '恢复的会话'].sort());
+  expect(snapshot.sharedTargets.every(t => t.cwd === h.dir)).toBe(true);
+  expect(h.provider.rename).not.toHaveBeenCalled(); expect(h.provider.archive).not.toHaveBeenCalled();
+});
+
 it('console refuses shared switches with pending messages, late worker acceptance, unknown targets or changed owner', async () => {
   const h = await harness(); await h.replies.stop(); const groups = await managedShared(h), row = groups.get('oc_shared')!;
   await groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'native' }, async () => {});
-  const other = { ...h.native, nativeId: 'another', name: 'another' }; h.provider.list.mockResolvedValue([h.native, other]);
-  let snapshot = await h.consoleService.snapshot(true); const id = snapshot.sharedGroups[0]!.id, target = snapshot.sharedTargets.find(t => t.name === 'another')!.id;
+  const other = { ...h.native, nativeId: 'another', name: '另一个会话' }; h.provider.list.mockResolvedValue([h.native, other]);
+  let snapshot = await h.consoleService.snapshot(true); const id = snapshot.sharedGroups[0]!.id, target = snapshot.sharedTargets.find(t => t.name === other.name)!.id;
   const message = { messageId: 'shared-pending-switch', chatId: 'oc_shared', content: '原消息', createTime: Date.now(), resources: [] } as unknown as NormalizedMessage;
   await h.inbox.receive('oc_shared', message);
   expect((await h.request('/api/console/action', { action: 'shared-bind', id, target })).status).toBe(409);
