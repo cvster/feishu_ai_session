@@ -332,13 +332,13 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
   const auxiliary = ctx.controls.auxiliary;
   if (ctx.msg.chatType !== 'p2p' && auxiliary?.isAuxiliary(ctx.scope)) {
     if (raw === '退出') {
-      if (ctx.msg.senderId !== ctx.controls.botOwnerId) { await reply(ctx, '仅所有者可以退出共享群。'); return true; }
+      if (ctx.msg.senderId !== ctx.controls.botOwnerId) { await reply(ctx, '仅所有者可以退出辅助群。'); return true; }
       try { await auxiliary.leave(ctx.msg.chatId, ctx.msg.senderId, () => handleStop('', ctx, true)); }
       catch (err) { await reply(ctx, `退出尚未完成：${errorText(err)}。请再次 @我发送“退出”重试。`); }
       return true;
     }
     if (raw.startsWith('/') && !['/stop', '/refresh'].includes(raw)) {
-      await reply(ctx, '共享群只提供停止、刷新；会话共享设置请所有者私聊机器人。');
+      await reply(ctx, '辅助群只提供停止、刷新；会话共享设置请所有者私聊机器人。');
       return true;
     }
   }

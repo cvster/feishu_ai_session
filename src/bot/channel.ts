@@ -1006,7 +1006,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     const raw = msg.raw as { sender?: { sender_type?: string }; event?: { sender?: { sender_type?: string } } } | undefined;
     const senderType = raw?.sender?.sender_type ?? raw?.event?.sender?.sender_type;
     if (senderType !== 'app' && senderType !== 'bot' && msg.senderId !== channel.botIdentity?.openId)
-      await channel.send(msg.chatId, { text: '旧私聊接口已停用。请在已关联的共享群中 @我发送“私聊”，创建私聊群后提问。' }, { replyTo: msg.messageId });
+      await channel.send(msg.chatId, { text: '旧私聊接口已停用。请在已关联的辅助群中 @我发送“私聊”，创建私聊群后提问。' }, { replyTo: msg.messageId });
     return;
   }
   const auxiliaryGroup = msg.chatType !== 'p2p' ? auxiliary?.get(msg.chatId) : undefined;
@@ -1015,8 +1015,8 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     const senderType = raw?.sender?.sender_type ?? raw?.event?.sender?.sender_type;
     if (!msg.mentionedBot || msg.mentionAll || senderType === 'app' || senderType === 'bot' || msg.senderId === channel.botIdentity?.openId) return;
     if (!auxiliary!.isActive(msg.chatId) && !(msg.content.trim() === '退出' && msg.senderId === auxiliaryGroup.ownerId)) {
-      await channel.send(msg.chatId, { text: auxiliaryGroup.privateGroup ? '私聊群暂未准备完成或已失效，请回共享群重新 @我发送“私聊”，或联系所有者检查。'
-        : '共享群尚未完成关联，或正在退出。请所有者私聊发送 /aux。' }, { replyTo: msg.messageId });
+      await channel.send(msg.chatId, { text: auxiliaryGroup.privateGroup ? '私聊群暂未准备完成或已失效，请回辅助群重新 @我发送“私聊”，或联系所有者检查。'
+        : '辅助群尚未完成关联，或正在退出。请所有者私聊发送 /aux。' }, { replyTo: msg.messageId });
       return;
     }
     await auxiliary!.noteRequest(msg.chatId, msg.messageId, msg.senderId, msg);
@@ -1220,7 +1220,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   if (staleInputs.length) {
     await Promise.all([...rootControls.workerRuntimes?.values() ?? []].map(async runtime => {
       if (!runtime.inbox.receipts(scope).some(r => r.status === 'pending' && staleInputs.some(m => m.messageId === r.message.messageId))) return;
-      await runtime.inbox.recordDiagnostic(scope, staleInputs, 'shared-association-changed', '共享群关联已变化，未将旧消息提交到新会话。', false);
+      await runtime.inbox.recordDiagnostic(scope, staleInputs, 'shared-association-changed', '辅助群关联已变化，未将旧消息提交到新会话。', false);
       await runtime.inbox.reject(scope, staleInputs);
     }));
     log.info('auxiliary', 'stale-input-rejected', { scope, count: staleInputs.length });
@@ -1346,7 +1346,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     quotes,
     topicContext,
     channel.botIdentity,
-    ownerFFRequest ? [...(extraInstructions ?? []), '本次为当前飞书应用所有者本人请求，按个人工作群正常权限执行；历史共享群限制及确认要求不适用于本次请求，后续共享群请求仍按各自规则处理。'] : extraInstructions,
+    ownerFFRequest ? [...(extraInstructions ?? []), '本次为当前飞书应用所有者本人请求，按个人工作群正常权限执行；历史辅助群限制及确认要求不适用于本次请求，后续辅助群请求仍按各自规则处理。'] : extraInstructions,
     true,
   );
   if (controls.auxiliary?.isAuxiliary(scope)) await controls.auxiliaryApprovals?.remember(scope, batch, basePrompt);

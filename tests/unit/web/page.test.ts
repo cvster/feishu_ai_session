@@ -156,7 +156,7 @@ it('renders each shared sender name beside its original message as text', async 
     { senderName: 'Nick Yang', text: '问题一' }, { senderName: '<img src=x onerror=alert(1)>', text: '问题二' },
   ] });
   h.requests[0]!.resolve(conversation); await h.settle();
-  expect(h.node('messages').text).toContain('来自共享群');
+  expect(h.node('messages').text).toContain('来自辅助群');
   expect(h.node('messages').querySelectorAll('.user').map(el => el.textContent)).toEqual(['Nick Yang：\n问题一', '<img src=x onerror=alert(1)>：\n问题二']);
   expect(h.node('messages').querySelectorAll('img')).toHaveLength(0);
   expect(h.node('messages').text).toContain('共享回复');

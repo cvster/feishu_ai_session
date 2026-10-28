@@ -207,7 +207,7 @@ export class BridgeConsoleService {
         ref && o?.online && !o.nativeKnown ? '原生会话状态未确认' : '',
         ref && o?.nativeKnown && o.health?.capabilities?.sessionListAuthoritative && !native ? '原生会话不存在' : ''].filter(Boolean);
       return { id: this.groupId(row), chatId: row.chatId, name: group?.name ?? row.name, status: row.status,
-        active: c.auxiliary!.isActive(row.chatId), kind: row.privateGroup ? '私聊群' : '共享群',
+        active: c.auxiliary!.isActive(row.chatId), kind: row.privateGroup ? '私聊群' : '辅助群',
         toolId: ref?.toolId, tool: o?.label ?? ref?.toolId ?? '未选择', sessionName: native?.name ?? (binding?.nativeId === ref?.nativeId ? binding?.name : undefined) ?? ref?.nativeId ?? '尚未关联',
         associationId: ref ? this.targetId(ref.toolId, ref.sourceId, ref.nativeId) : undefined,
         targetId: row.status === 'active' && ref ? this.targetId(ref.toolId, ref.sourceId, ref.nativeId) : undefined, cwd: native?.cwd ?? row.cwd ?? '',
@@ -314,10 +314,10 @@ export class BridgeConsoleService {
     }
     if (['shared-bind', 'shared-leave'].includes(action) && id && c.auxiliary) {
       const owner = this.owner(), snapshot = await this.snapshot(true), row = c.auxiliary.groups().find(r => this.groupId(r) === id);
-      if (!row || row.ownerId !== owner || this.owner() !== owner) throw new WebError(409, '共享群关联或所有者已变化，请刷新');
+      if (!row || row.ownerId !== owner || this.owner() !== owner) throw new WebError(409, '辅助群关联或所有者已变化，请刷新');
       try {
         if (action === 'shared-leave') {
-          if (!snapshot.sharedGroups.find(g => g.id === id)?.canLeave) throw new WebError(409, '仅已归档会话的共享群可以从控制台退群，请刷新');
+          if (!snapshot.sharedGroups.find(g => g.id === id)?.canLeave) throw new WebError(409, '仅已归档会话的辅助群可以从控制台退群，请刷新');
           await c.auxiliary.leave(row.chatId, owner, async () => {
             const b = c.toolBindings?.get(row.chatId);
             if (b) {
@@ -328,7 +328,7 @@ export class BridgeConsoleService {
           }, row.generation);
         } else {
           if (!target || !snapshot.sharedTargets.some(s => s.id === target) || !snapshot.sharedGroups.find(g => g.id === id)?.canBind)
-            throw new WebError(409, '此共享群或目标会话当前不可切换，请刷新');
+            throw new WebError(409, '此辅助群或目标会话当前不可切换，请刷新');
           const o = [...this.observations.values()].find(o => o.sourceId && o.native.some(s => this.targetId(o.id, o.sourceId!, s.nativeId) === target))!;
           const native = o.native.find(s => this.targetId(o.id, o.sourceId!, s.nativeId) === target)!;
           await c.auxiliary.bindSession(row.chatId, owner, row.generation, { toolId: o.id, sourceId: o.sourceId!, nativeId: native.nativeId }, async () => {

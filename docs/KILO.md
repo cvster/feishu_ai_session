@@ -51,7 +51,7 @@ Linux 服务名为 `lark-channel-worker.kilo.my-bot.service`。其他系统使�
 ## 同步、模型和执行
 
 - VS Code 中的输入和回答通过 worker 会话快照同步到个人群；飞书任务由 worker
-  收据回复，来源标记防止重复转发。共享群不广播原生界面消息。
+  收据回复，来源标记防止重复转发。辅助群不广播原生界面消息。
 - 首次绑定建立历史基线；桥接重启继续更新原卡片。状态在
   `kilo-native-turn-sync.json`，旧 `kilo-turn-sync.json` 自动导入。
 - 群名与原生标题双向同步，初次及同时修改以群名为准。仅处理唯一绑定的活跃个人群，

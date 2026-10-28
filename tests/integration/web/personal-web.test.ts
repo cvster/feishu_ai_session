@@ -112,14 +112,14 @@ async function sharedInput(h: Awaited<ReturnType<typeof harness>>, options: { na
   const source = { toolId, sourceId: h.client.sourceId, nativeId: 'native' };
   h.bindings.set('aux_shared', { ...source, linkedSource: source, nativeCreated: true });
   h.bindings.linkAuxiliary('oc_shared', 'aux_shared');
-  const group = { chatId: 'oc_shared', name: '共享群', ownerId: 'ou_owner', source: structuredClone(source) };
+  const group = { chatId: 'oc_shared', name: '辅助群', ownerId: 'ou_owner', source: structuredClone(source) };
   const auxiliary = { isAuxiliary: (scope: string): boolean => scope === 'oc_shared', isActive: (scope: string): boolean => scope === 'oc_shared',
     get: (scope: string) => scope === 'oc_shared' ? group : undefined, trackRun: vi.fn(async () => {}) };
   h.controls.auxiliary = auxiliary as any;
   const get = vi.fn(async () => ({ code: 0, data: { items: [{ message_id: 'om_shared', sender: { id: 'ou_nick', sender_name: 'Nick Yang' } }] } }));
   (h.channel.rawClient.im.v1.message as any).get = get;
   const message: NormalizedMessage = { messageId: 'om_shared', chatId: 'oc_shared', chatType: 'group', senderId: 'ou_nick', senderName: options.name,
-    content: options.content ?? '共享群成员的问题', createTime: Date.now(), resources: [], mentions: [], mentionAll: false, mentionedBot: true, rawContentType: 'text' };
+    content: options.content ?? '辅助群成员的问题', createTime: Date.now(), resources: [], mentions: [], mentionAll: false, mentionedBot: true, rawContentType: 'text' };
   await h.inbox.receive('oc_shared', message);
   const job = await h.client.submit({ requestKey: 'shared-message-one', options: { ...h.options, prompt: 'PRIVATE-POLICY\n' + message.content,
     delivery: { ...h.options.delivery!, scope: 'oc_shared', chatId: 'oc_shared', replyTo: message.messageId, messageIds: [message.messageId], operatorOpenId: message.senderId } } });
@@ -147,7 +147,7 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('shows shared %s i
   await h.replies.runNow();
   expect(h.create).toHaveBeenCalledOnce();
   expect(h.create.mock.calls[0]![0]).toMatchObject({ data: { receive_id: 'oc_group', msg_type: 'text' } });
-  expect(JSON.parse((h.create.mock.calls[0]![0] as any).data.content).text).toBe('来自共享群\nNick Yang：\n共享群成员的问题');
+  expect(JSON.parse((h.create.mock.calls[0]![0] as any).data.content).text).toBe('来自辅助群\nNick Yang：\n辅助群成员的问题');
   const reply = vi.mocked(h.channel.rawClient.im.v1.message.reply);
   expect(reply.mock.calls.filter(([r]) => r?.data.msg_type === 'interactive').map(([r]) => r?.path.message_id).sort()).toEqual(['om_shared', 'om_web']);
   const running = (await h.service.read(id)).turns.find(t => t.id === 'job:' + shared.job.id)!;

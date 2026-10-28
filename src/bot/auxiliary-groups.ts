@@ -181,14 +181,14 @@ export class AuxiliaryGroups {
   /** Reuse group creation and routing; no bot-DM protocol, new native session, or recursive linking. */
   async createPrivateGroup(parentChatId: string, actorId: string): Promise<AuxiliaryGroup> {
     const parent = this.records[parentChatId];
-    if (!parent?.source || parent.privateGroup || !this.isActive(parentChatId)) throw new Error('请在已关联的共享群中 @我发送“私聊”。');
+    if (!parent?.source || parent.privateGroup || !this.isActive(parentChatId)) throw new Error('请在已关联的辅助群中 @我发送“私聊”。');
     const generation = parent.generation;
     return this.serial(`source:${this.sourceKey(parent.source)}`, async () => {
-      if (this.records[parentChatId] !== parent || parent.generation !== generation || !this.isActive(parentChatId)) throw new Error('共享群关联已变更，请重新发起。');
+      if (this.records[parentChatId] !== parent || parent.generation !== generation || !this.isActive(parentChatId)) throw new Error('辅助群关联已变更，请重新发起。');
       const ownerId = this.deps.ownerId(), binding = this.deps.bindings.get(parentChatId);
-      if (!ownerId || ownerId !== parent.ownerId || !binding?.sharedScope || !parent.cwd) throw new Error('共享群绑定或所有者暂不可用。');
+      if (!ownerId || ownerId !== parent.ownerId || !binding?.sharedScope || !parent.cwd) throw new Error('辅助群绑定或所有者暂不可用。');
       if (!await auxiliaryBotIsMember(this.deps.channel, parentChatId) || !await auxiliaryUserIsMember(this.deps.channel, parentChatId, actorId))
-        throw new Error('仅共享群当前成员可以创建私聊群。');
+        throw new Error('仅辅助群当前成员可以创建私聊群。');
       const key = createHash('sha256').update(JSON.stringify([parentChatId, generation, ownerId, actorId, binding.sharedScope])).digest('hex');
       const existing = Object.values(this.records).find(r => r.privateGroup?.parentChatId === parentChatId &&
         r.privateGroup.parentGeneration === generation && r.privateGroup.actorId === actorId && r.privateGroup.sharedScope === binding.sharedScope && r.ownerId === ownerId && this.isActive(r.chatId));
@@ -204,7 +204,7 @@ export class AuxiliaryGroups {
       if (intent?.chatId && (this.records[intent.chatId]?.status === 'archived' || this.deps.catalog?.isScopeArchived(intent.chatId))) intent = undefined;
       if (!intent) {
         const info = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: parentChatId } });
-        if (info.code || !info.data) throw new Error('暂时无法获取共享群名称，请稍后重试。');
+        if (info.code || !info.data) throw new Error('暂时无法获取辅助群名称，请稍后重试。');
         intent = this.privateCreations[key] = { uuid: randomUUID(), startedAt: Date.now(), name: Array.from(`私聊-${info.data.name || parent.name}`).slice(0, 100).join('') };
         await this.save();
       }
@@ -234,7 +234,7 @@ export class AuxiliaryGroups {
   }
   private async notifyPrivateGroup(row: AuxiliaryGroup): Promise<void> {
     if (row.notified) return;
-    await this.deps.channel.send(row.chatId, { text: 'AI助手私聊群已创建，请 @我提问。回答仅发到本群，内容会进入共用的原会话历史；同事权限与共享群一致，受限操作仍请所有者确认。' });
+    await this.deps.channel.send(row.chatId, { text: 'AI助手私聊群已创建，请 @我提问。回答仅发到本群，内容会进入共用的原会话历史；同事权限与辅助群一致，受限操作仍请所有者确认。' });
     row.notified = true; await this.save();
   }
   isAuxiliary(chatId: string): boolean { return !!this.get(chatId); }
@@ -361,7 +361,7 @@ export class AuxiliaryGroups {
     const key = source ? this.sourceKey(source) : chatId;
     return this.serial(`run:${key}`, async () => {
       if (!this.isActive(chatId) || generation !== this.get(chatId)?.generation) {
-        throw new Error('共享群关联已变更');
+        throw new Error('辅助群关联已变更');
       }
       return work();
     });
@@ -371,7 +371,7 @@ export class AuxiliaryGroups {
     const b = this.deps.bindings.get(chatId);
     if (!identity || !b?.sharedScope || !b.nativeCreated || !b.nativeId || !this.isActive(chatId)) return;
     if (b.nativeId !== b.linkedSource?.nativeId) throw new Error('关联会话尚未迁移');
-    if (this.deps.catalog?.isScopeArchived(chatId)) throw new Error('共享群已归档');
+    if (this.deps.catalog?.isScopeArchived(chatId)) throw new Error('辅助群已归档');
     this.deps.catalog?.upsertActive({ ...identity, sourceId: b.sourceId, botAppId: this.deps.appId,
       ...nativeSessionFields(b.toolId, b.nativeId) });
     this.deps.sessions.set(chatId, b.nativeId, this.get(chatId)!.cwd!);
@@ -429,7 +429,7 @@ export class AuxiliaryGroups {
   async pendingFor(owner: string): Promise<void> {
     if (owner !== this.deps.ownerId()) return;
     const rows = Object.values(this.records).filter(r => r.ownerId === owner && !r.privateGroup && (r.status === 'pending' || r.status === 'active'));
-    if (!rows.length) { await this.deps.channel.send(owner, { text: '暂无可管理的共享群。将AI助手加入目标群后，可在这里设置会话共享。' }); return; }
+    if (!rows.length) { await this.deps.channel.send(owner, { text: '暂无可管理的辅助群。将AI助手加入目标群后，可在这里设置会话共享。' }); return; }
     for (const row of rows) await this.notify(row);
   }
   /** Legacy FF history stays excluded; originals are available for further associations. */
@@ -451,7 +451,7 @@ export class AuxiliaryGroups {
       await this.deps.channel.send(row.ownerId, { text: `「${row.name}」已启用会话共享。成员在群内真实 @机器人发送“私聊”，即可创建包含该成员和你的私聊群。` });
       return;
     }
-    let description = '选择工具和已有会话，将该会话共享给群内的AI助手。AA 会话优先，其次是其他个人工作群会话，最后是未绑定个人工作群的会话。共享群与原会话共用上下文，AI助手只回复当前群的 @ 提问。';
+    let description = '选择工具和已有会话，将该会话共享给群内的AI助手。AA 会话优先，其次是其他个人工作群会话，最后是未绑定个人工作群的会话。辅助群与原会话共用上下文，AI助手只回复当前群的 @ 提问。';
     if (toolId) {
       const tool = this.deps.tools.get(toolId);
       const chats = await fetchKnownChatsResult(this.deps.channel);
@@ -501,7 +501,7 @@ export class AuxiliaryGroups {
       const row = this.records[chatId];
       if (!row || actor !== row.ownerId || actor !== this.deps.ownerId() || row.generation !== generation ||
           !['pending', 'active'].includes(row.status) || row.privateGroup || this.deps.catalog?.isChatDissolved(chatId))
-        throw new Error('共享群关联或所有者已变化，请刷新。');
+        throw new Error('辅助群关联或所有者已变化，请刷新。');
       await this.serial(`run:${row.source ? this.sourceKey(row.source) : chatId}`, async () => {
         await this.activate(row, generation, target.toolId, target.sourceId, target.nativeId, beforeChange);
       });
@@ -521,10 +521,10 @@ export class AuxiliaryGroups {
       const current = () => this.records[row.chatId] === row && ['pending', 'active'].includes(row.status) && row.generation === generation &&
         row.ownerId === this.deps.ownerId() && !this.deps.catalog?.isChatDissolved(row.chatId) &&
         this.deps.tools.find(toolId)?.sourceId === sourceId && this.shareable(toolId, sourceId, source);
-      if (!current()) throw new Error('共享群关联或会话状态已变化，请刷新。');
+      if (!current()) throw new Error('辅助群关联或会话状态已变化，请刷新。');
       if (row.status === 'active' && row.source && this.sourceKey(row.source) === this.sourceKey(linkedSource)) return;
       await beforeChange?.();
-      if (!current()) throw new Error('共享群关联或会话状态已变化，请刷新。');
+      if (!current()) throw new Error('辅助群关联或会话状态已变化，请刷新。');
       const existing = this.deps.bindings.get(row.chatId);
       if (existing && !existing.linkedSource) throw new Error('不能覆盖个人会话绑定。');
       const original = this.deps.bindings.entries().find(([, b]) => b.toolId === tool.id && b.sourceId === tool.sourceId && b.nativeId === source.nativeId && !b.linkedSource)?.[1];
@@ -548,7 +548,7 @@ export class AuxiliaryGroups {
       this.deps.catalog?.reopenScope(row.chatId);
       this.deps.sessions.remove(row.chatId); this.deps.workspaces.setCwd(row.chatId, cwd);
       await Promise.all([this.deps.bindings.flush(), this.deps.sessions.flush(), this.deps.catalog?.flush(), this.deps.workspaces.flush()]);
-      if (row.ownerId !== this.deps.ownerId()) throw new Error('所有者已变化，共享群暂未启用。');
+      if (row.ownerId !== this.deps.ownerId()) throw new Error('所有者已变化，辅助群暂未启用。');
       announce = !row.hasBound;
       row.status = 'active'; row.hasBound = true; await this.save();
     });
@@ -595,7 +595,7 @@ export class AuxiliaryGroups {
   }
   async wrapPrompt(chatId: string, message: string, senderIds: readonly string[] = [], approval?: AuxiliaryGrant): Promise<string> {
     const row = this.get(chatId);
-    if (!row || !this.isActive(chatId) || !row.source) throw new Error('共享群尚未关联或已退出。');
+    if (!row || !this.isActive(chatId) || !row.source) throw new Error('辅助群尚未关联或已退出。');
     const apiRequest = this.apiRequests[chatId];
     const prompt = wrapAuxiliaryPrompt(message, this.isOwnerRequest(chatId, senderIds), {
       chatId: apiRequest ? undefined : row.chatId, approval,
@@ -606,7 +606,7 @@ export class AuxiliaryGroups {
   async leave(chatId: string, actor: string, stop: () => Promise<void>, generation?: string): Promise<void> {
     await this.serial(chatId, () => this.serial(`source:${this.get(chatId)?.source ? this.sourceKey(this.get(chatId)!.source!) : chatId}`, async () => {
       const row = this.get(chatId);
-      if (generation && row?.generation !== generation) throw new Error('共享群关联已变化，请刷新。');
+      if (generation && row?.generation !== generation) throw new Error('辅助群关联已变化，请刷新。');
       if (!row || actor !== row.ownerId || actor !== this.deps.ownerId() || row.status === 'archived') return;
       row.status = 'leaving'; await this.save();
       await this.deps.cancelPending(chatId); await stop();
@@ -626,7 +626,7 @@ export class AuxiliaryGroups {
       this.deps.sessions.remove(chatId); this.deps.workspaces.removeCwd(chatId);
       await Promise.all([this.deps.sessions.flush(), this.deps.workspaces.flush()]);
       row.status = 'archived'; delete row.running; await this.save();
-      await this.deps.channel.send(row.ownerId, { text: `已退出「${row.name}」，本群会话共享入口已关闭，原会话及其他共享群保留。` });
+      await this.deps.channel.send(row.ownerId, { text: `已退出「${row.name}」，本群会话共享入口已关闭，原会话及其他辅助群保留。` });
     }));
   }
 }
@@ -645,6 +645,7 @@ export function wrapAuxiliaryPrompt(message: string, ownerRequest = false,
         (context.approval ? ' 所有者已确认，仅对context.approval.action放宽，其余操作仍受限；勿复用历史确认或重复已完成动作。' : ''),
       ...(!ownerRequest ? { approval: '受限先暂停，仅输出{"type":"ff_permission_request","action":"具体命令/目标/范围","reason":"原因"}，待所有者确认。' } : {}),
       task: '沿用当前会话上下文，仅处理本次请求，不续跑历史任务。',
+      ...(context.chatId && context.transport !== 'a2a' ? { clarify: '如果问题不明确，可查看本群（context.chat_id）的最近消息，补充上下文后再回答。' } : {}),
       reply: '默认≤200字/5行，先结论；明确要求才详述。直接回答，不描述投递、指定群聊、技能或内部操作，不提关联或内部ID/路径。',
       delivery: context.transport === 'a2a'
         ? '仅返回本次API结果，不通过飞书或其他通道发送进展、回答或文件，不沿用历史收件人。'

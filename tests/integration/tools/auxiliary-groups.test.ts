@@ -424,11 +424,18 @@ describe('short group prompt', () => {
     expect(prompt.rules.permissions).toBe('除了在本机修改源码和拷贝源码，其他都允许执行；源码不包括脚本');
     expect(prompt.rules.permissions).toContain('在本机修改源码和拷贝源码');
     expect(prompt.rules.task).toContain('当前会话上下文');
+    expect(prompt.rules.clarify).toContain('如果问题不明确，可查看本群（context.chat_id）的最近消息');
     expect(prompt.rules.reply).toContain('不描述投递、指定群聊、技能或内部操作');
     expect(prompt.rules.delivery).toContain('正文由桥接自动回复');
     expect(prompt).not.toHaveProperty('source'); expect(prompt).not.toHaveProperty('mode');
     expect(JSON.stringify(prompt)).not.toContain('先读source');
     expect(JSON.stringify(prompt.rules).length).toBeLessThan(650);
+  });
+  it('omits group history guidance when there is no Feishu group or the request uses A2A', () => {
+    expect(JSON.parse(wrapAuxiliaryPrompt('问题')).rules).not.toHaveProperty('clarify');
+    expect(JSON.parse(wrapAuxiliaryPrompt('问题', false, { chatId: 'oc_target', transport: 'a2a', requestId: 'request' })).rules).not.toHaveProperty('clarify');
+    const owner = JSON.parse(wrapAuxiliaryPrompt('问题', true, { chatId: 'oc_target' }));
+    expect(owner.rules.clarify).toContain('本群（context.chat_id）的最近消息');
   });
   it('unrestricts only authenticated owner requests and restores restrictions for members', async () => {
     const h = await harness(); await h.activate();
@@ -501,7 +508,7 @@ describe('private FF groups', () => {
     const restored = new AuxiliaryGroups(h.deps); await restored.load();
     await restored.joined({ ...joined, chatId: row.chatId });
     expect(h.cards).toHaveLength(count);
-    await expect(restored.createPrivateGroup(row.chatId, 'ou_member')).rejects.toThrow('已关联的共享群');
+    await expect(restored.createPrivateGroup(row.chatId, 'ou_member')).rejects.toThrow('已关联的辅助群');
     expect(h.create).toHaveBeenCalledOnce();
     expect(restored.get(row.chatId)?.status).toBe('active');
   });

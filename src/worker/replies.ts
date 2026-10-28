@@ -215,7 +215,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
         delivery.inputSendingSince ??= Date.now(); await save();
         if (!active()) return;
         delivery.inputMessageId = await sendDeliveryMessage(deps.channel, { chatId: target.chatId }, 'text',
-          JSON.stringify({ text: `来自共享群\n${mirror.input}` }), deliveryUuid(`${messageKey}:input`));
+          JSON.stringify({ text: `来自辅助群\n${mirror.input}` }), deliveryUuid(`${messageKey}:input`));
         await save();
       }
       target.replyTo = delivery.inputMessageId;
