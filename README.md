@@ -35,7 +35,7 @@
 - [Zcode 接入与工具扩展](docs/ZCODE.md)：本机模型账号、独立 worker、可选桌面远控配对、支持范围及架构说明。
 - [Kilo 接入与使用](docs/KILO.md)：VS Code 插件或独立 CLI 模式、动态模型及推理档位、独立 worker 和会话操作。
 - [DeepSeek Harness 接入](docs/DSH.md)：官方 DSH CLI 安装、原生模型配置、独立 worker、AA 工作群、会话共享和会话操作。
-- [飞书统一权限清单](docs/FEISHU_PERMISSIONS.md)：当前应用全部权限、事件订阅与验收步骤；运行 `node tools/update-feishu-permissions.mjs` 实时刷新。
+- [飞书统一权限申请清单](docs/FEISHU_PERMISSIONS.md)：以参考机器人的全部权限为依据，供安装者为自己的应用申请；包含事件订阅与验收步骤。
 - [回复卡片与群消息](docs/CARD_DELIVERY.md)：去除思考和工具详情、超长分卡、个人群无需 @及完成提醒。
 - [详细配置与排错](README.zh.md)：权限模式、访问控制、会话与日志等进阶说明。
 - [多服务目录说明](docs/MONOREPO.md)：飞书桥接、共享 Codex core 与独立 Web 服务的边界。

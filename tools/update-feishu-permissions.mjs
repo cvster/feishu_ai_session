@@ -9,7 +9,7 @@ const { values: args } = parseArgs({ options: {
 } });
 if (args.help) {
   console.log(`用法：node tools/update-feishu-permissions.mjs [--profile <lark-cli配置名>] [--check]
-读取当前 lark-cli 应用的全部权限，更新 docs/FEISHU_PERMISSIONS.md 中的统一表。
+供维护者读取参考机器人的全部权限，写入 docs/FEISHU_PERMISSIONS.md，供安装者申请。
 --profile 指定 lark-cli 的应用配置，不是桥接 profile；省略时使用当前 CLI 配置。
 --check 只读比对，不修改文件；清单有变化时退出码为 1。
 只调用 whoami 和应用信息 GET，不申请权限、不发起 OAuth、不切换配置。`);
@@ -59,7 +59,7 @@ const cell = value => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace
   .replace(/\|/g, '&#124;').replace(/[\r\n]+/g, ' ');
 const date = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(new Date());
 const block = [start, '',
-  `核对日期：${date}。当前应用：${cell(app.app_name)}（\`${app.app_id}\`）。共 **${rows.length} 项**，其中 ${count('tenant')} 项支持应用 / 机器人身份，${count('user')} 项支持用户身份；每个权限标识仅列一次。`, '',
+  `核对日期：${date}。清单来源（参考机器人）：${cell(app.app_name)}（\`${app.app_id}\`）。共 **${rows.length} 项**，其中 ${count('tenant')} 项支持应用 / 机器人身份，${count('user')} 项支持用户身份；每个权限标识仅列一次。`, '',
   '| 权限标识 | 后台名称 | 支持身份 |', '| --- | --- | --- |',
   ...rows.map(item => `| \`${item.scope}\` | ${cell(item.description)} | ${[item.token_types.includes('tenant') && '应用 / 机器人', item.token_types.includes('user') && '用户'].filter(Boolean).join('、')} |`),
   '', end].join('\n');

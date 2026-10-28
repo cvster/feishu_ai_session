@@ -1,43 +1,24 @@
-# 飞书权限与事件配置
+# 飞书权限申请清单
 
-适用于本仓库的 Codex、Claude、Zcode、Kilo 和 Dsh 飞书桥接。所有权限只维护下方一张统一表，每个 scope 一行，不再拆分常规、扩展、应用或用户清单。身份保留为表内字段，供调用时核对。
+本清单供其他人安装 Codex、Claude、Zcode、Kilo 和 Dsh 飞书桥接时，为自己的飞书应用申请权限。清单取自已配置的参考机器人 Lennox-AI助手，完整列出其 245 项权限，供复现相同能力。
 
-## 获取和更新全部权限
+所有权限统一在下方一张表中，每个 scope 一行。安装者在自己的飞书开发者后台，按表中的权限标识搜索、申请并发布；无需访问参考机器人的账号或执行权限采集命令。
 
-在仓库根目录执行：
+## 安装时如何申请
 
-```bash
-node tools/update-feishu-permissions.mjs
-```
+1. 在[飞书开发者后台](https://open.feishu.cn/app)创建或打开自己的应用，启用机器人能力。
+2. 按统一表申请权限。要复现参考机器人的完整能力，请逐项申请；表中的“支持身份”用于选择应用 / 机器人或用户身份，同一个 scope 支持两者时按所需身份分别开通。
+3. 配置下文列出的事件和卡片回调，使用长连接；设置应用可用范围，覆盖实际使用人员。
+4. 按租户要求完成审批，创建并发布应用版本，再进行下文的验收。
+5. 使用用户身份的功能，还需要实际使用者完成 OAuth 授权，并具备目标资源的访问权。
 
-脚本先通过 `lark-cli whoami --as bot` 确定当前应用，再以机器人身份调用[获取应用信息](https://open.feishu.cn/document/server-docs/application-v6/application/get)，读取全部 `scopes`，去重、排序并刷新统一表。只修改自动生成区域，保留配置说明；查询失败、身份不匹配或返回不完整时保留原清单。需要已开通并发布 `application:application:self_manage`。
+“应用 / 机器人”对应 `tenant_access_token`，“用户”对应 `user_access_token`。支持用户身份的权限不会自动成为机器人身份权限；后台开通用户 scope 也不等于用户已完成授权。参考机器人的 App ID 只标注清单来源，安装者应使用自己的 App ID 和凭据。
 
-显式指定应用，或只读检查清单是否最新：
-
-```bash
-node tools/update-feishu-permissions.mjs --profile cli_aa36351590381bcd
-node tools/update-feishu-permissions.mjs --check
-```
-
-`--profile` 是 **lark-cli 配置名**，不是桥接的 `lennox-codex` 等 profile，不会切换全局配置。省略时沿用当前 CLI 配置和 `LARKSUITE_CLI_CONFIG_DIR` 环境。可先执行 `lark-cli whoami --as bot` 核对 App ID。`--check` 不修改文件，有变化时退出码为 1。
-
-也可将 `<AppID>` 替换为当前应用 ID，直接读取原始数据：
-
-```bash
-lark-cli api GET /open-apis/application/v6/applications/<AppID> \
-  --as bot --params '{"lang":"zh_cn","user_id_type":"open_id"}' \
-  --jq '.data.app | {app_id,app_name,scopes}'
-```
-
-当前安装版本的 `lark-cli auth scopes --json` 只返回 `userScopes`，不能作为全部权限来源。`auth status` 是用户登录和授权状态，也不能代替应用完整清单。
-
-表内“应用 / 机器人”对应 `tenant_access_token`，“用户”对应 `user_access_token`。应用已开通用户身份 scope 不代表具体用户已经完成 OAuth；权限清单也不代替资源共享、数据范围、审批及发布状态。刷新命令只读应用信息并更新本地文档，不开通权限、不发起 OAuth。后台变更权限并发布后，再运行一次刷新命令。
-
-## 统一权限清单
+## 统一权限申请清单
 
 <!-- feishu-permissions:start -->
 
-核对日期：2026-10-28。当前应用：Lennox-AI助手（`cli_aa36351590381bcd`）。共 **245 项**，其中 118 项支持应用 / 机器人身份，225 项支持用户身份；每个权限标识仅列一次。
+核对日期：2026-10-28。清单来源（参考机器人）：Lennox-AI助手（`cli_aa36351590381bcd`）。共 **245 项**，其中 118 项支持应用 / 机器人身份，225 项支持用户身份；每个权限标识仅列一次。
 
 | 权限标识 | 后台名称 | 支持身份 |
 | --- | --- | --- |
@@ -399,3 +380,34 @@ lark-cli api GET /open-apis/application/v6/applications/<AppID> \
 ## 会话共享的受限操作确认
 
 确认使用现有机器人消息与 CardKit 交互能力：发送机器人消息、`cardkit:card:write`、`card.action.trigger` 回调，以及识别应用所有者的应用信息权限。辅助群及私聊群的卡片使用真实所有者 open_id 的 @；A2A API 调用的确认卡发到所有者私聊。无需另申请原生飞书审批权限。确认只能对会话共享提示词规则中的具体操作放宽，平台缺失 scope、账号授权或系统文件权限仍需实际开通。
+
+## 维护者：从参考机器人刷新申请清单
+
+本节仅供仓库维护者更新安装申请清单。以已配置完整权限的参考机器人作为来源，在仓库根目录执行：
+
+```bash
+node tools/update-feishu-permissions.mjs
+```
+
+脚本先通过 `lark-cli whoami --as bot` 确定当前应用，再以机器人身份调用[获取应用信息](https://open.feishu.cn/document/server-docs/application-v6/application/get)，读取全部 `scopes`，去重、排序并刷新统一表。只修改自动生成区域，保留配置说明；查询失败、身份不匹配或返回不完整时保留原清单。需要已开通并发布 `application:application:self_manage`。
+
+显式指定应用，或只读检查清单是否最新：
+
+```bash
+node tools/update-feishu-permissions.mjs --profile cli_aa36351590381bcd
+node tools/update-feishu-permissions.mjs --check
+```
+
+`--profile` 是 **lark-cli 配置名**，不是桥接的 `lennox-codex` 等 profile，不会切换全局配置。省略时沿用当前 CLI 配置和 `LARKSUITE_CLI_CONFIG_DIR` 环境。可先执行 `lark-cli whoami --as bot` 核对 App ID。`--check` 不修改文件，有变化时退出码为 1。
+
+也可将 `<AppID>` 替换为当前应用 ID，直接读取原始数据：
+
+```bash
+lark-cli api GET /open-apis/application/v6/applications/<AppID> \
+  --as bot --params '{"lang":"zh_cn","user_id_type":"open_id"}' \
+  --jq '.data.app | {app_id,app_name,scopes}'
+```
+
+当前安装版本的 `lark-cli auth scopes --json` 只返回 `userScopes`，不能作为全部权限来源。`auth status` 是用户登录和授权状态，也不能代替应用完整清单。
+
+表内“应用 / 机器人”对应 `tenant_access_token`，“用户”对应 `user_access_token`。应用已开通用户身份 scope 不代表具体用户已经完成 OAuth；权限清单也不代替资源共享、数据范围、审批及发布状态。刷新命令只读应用信息并更新本地文档，不开通权限、不发起 OAuth。参考机器人权限变更后，维护者可重新读取并提交清单。不要以新安装、尚未申请权限的空应用覆盖这份参考清单。
