@@ -68,6 +68,13 @@ export class PersonalSessionService {
     if (c.ownerRefreshState !== 'ok' || !c.botOwnerId) throw new WebError(503, '暂时无法确认当前所有者，请稍后重试');
     return c.botOwnerId;
   }
+  settings() { this.owner(); return this.deps.controls.auxiliary?.prefixSettings() ?? { sharedSessionPrefix: false }; }
+  async updateSettings(enabled: boolean) {
+    const owner = this.owner(), auxiliary = this.deps.controls.auxiliary;
+    if (!auxiliary) throw new WebError(503, '会话共享管理尚未就绪');
+    const settings = await auxiliary.setPrefixSettings(enabled, owner);
+    this.listedAt = 0; return { ...settings, sessions: await this.list() };
+  }
   ownerIdentity(): string { return this.owner(); }
   private identity(scope: string, b: { toolId: string; sourceId: string; nativeId?: string }) {
     return hash(JSON.stringify([this.deps.controls.profile, this.deps.controls.profileConfig.accounts.app.id, scope, b.toolId, b.sourceId, b.nativeId]));

@@ -96,6 +96,14 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     }
     const token = cookie(req), bearer = req.headers.authorization?.match(/^Bearer ([^\s]+)$/i)?.[1];
     await authenticate(token, local, bearer);
+    if (url.pathname === '/api/settings') {
+      if (req.method === 'GET') { respond(res, 200, options.service.settings()); return; }
+      if (req.method === 'POST') {
+        const input = await body(req);
+        if (typeof input.sharedSessionPrefix !== 'boolean') throw new WebError(400, '设置值无效');
+        respond(res, 200, await options.service.updateSettings(input.sharedSessionPrefix)); return;
+      }
+    }
     if (url.pathname.startsWith('/api/console')) {
       const console = options.consoleService;
       if (!console) throw new WebError(503, '控制台尚未就绪');

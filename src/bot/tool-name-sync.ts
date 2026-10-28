@@ -51,6 +51,7 @@ export async function startToolNameSync(options: {
     if (stopped) return Promise.resolve();
     if (running) return running;
     running = (async () => {
+      await controls.auxiliary?.syncSharedPrefix(tool.id);
       const entries = ownedEntries().filter(row => exclusive(row.scopeId, (row.sessionId ?? row.threadId)!));
       if (!entries.length || !await options.ready() || stopped) return;
       const wanted = new Set(entries.map(row => row.sessionId ?? row.threadId));

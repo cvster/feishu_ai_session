@@ -1453,3 +1453,20 @@ it('shows actual shared group and native session states without exposing archive
   group = (await h.consoleService.snapshot(true)).sharedGroups[0]!;
   expect(group.groupState).toBeUndefined(); expect(group.sessionState).toBeUndefined();
 });
+
+
+it('stores the optional shared-session prefix via authenticated Web settings and renames the shared source through its worker', async () => {
+  const h = await harness(); await h.replies.stop(); const groups = await managedShared(h), group = groups.get('oc_shared')!;
+  await groups.bindSession(group.chatId, group.ownerId, group.generation, { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'native' }, async () => {});
+  expect(await (await h.request('/api/settings')).json()).toEqual({ sharedSessionPrefix: false });
+  expect((await h.request('/api/settings', { sharedSessionPrefix: 'true' })).status).toBe(400);
+  const response = await h.request('/api/settings', { sharedSessionPrefix: true });
+  expect(response.status).toBe(200); expect((await response.json() as { sharedSessionPrefix: boolean }).sharedSessionPrefix).toBe(true);
+  expect(h.native.name).toBe('FF-web');
+  expect(h.bindings.get('oc_group')!.name).toBe('FF-web');
+  expect(groups.isActive('oc_shared')).toBe(true);
+  expect((await h.consoleService.snapshot(true)).sharedTargets.some(row => row.name === 'FF-web')).toBe(true);
+  await h.request('/api/settings', { sharedSessionPrefix: false }); expect(h.native.name).toBe('FF-web');
+  expect(JSON.parse(await readFile(join(h.dir, 'managed-groups.json'), 'utf8')).sharedSessionPrefix).toBe(false);
+  expect((await h.request('/api/settings', { sharedSessionPrefix: true }, { Origin: 'http://evil.test' })).status).toBe(403);
+});

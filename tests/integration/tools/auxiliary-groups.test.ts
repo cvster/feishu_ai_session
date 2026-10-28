@@ -699,3 +699,48 @@ it('does not consume the first-binding announcement when routing fails, includin
   expect(h.send.mock.calls.filter(([chat]) => chat === 'oc_aux')).toHaveLength(1);
   expect(restored.get('oc_aux')?.hasBound).toBe(true);
 });
+
+
+it.each(['AA-电机检测', 'AF-电机检测', 'FF-电机检测'] as const)('persists optional shared-prefix naming for %s, renames the original and its personal group, and keeps it shareable', async original => {
+  const h = await harness(); await h.activate(); await h.activate('oc_aux_2');
+  const tool = h.tools.get('claude');
+  let name = original as string;
+  vi.mocked(tool.listSessions).mockImplementation(async () => [{ nativeId: sourceId, name, cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 }]);
+  const rename = vi.fn(async (_id: string, value: string) => { name = value; });
+  tool.sessions = { historyPath: async () => h.history, rename, archive: async () => {} };
+  const groupRename = vi.fn(async () => ({ code: 0 }));
+  h.channel.rawClient.im.v1.chat.update = groupRename as any;
+  h.bindings.set('oc_original', { ...h.bindings.get('oc_original')!, name });
+  expect(h.groups.prefixSettings()).toEqual({ sharedSessionPrefix: false });
+  await h.groups.syncSharedPrefix('claude'); expect(rename).not.toHaveBeenCalled();
+  await h.groups.setPrefixSettings(true, 'ou_owner');
+  const expected = original.startsWith('AA-') ? original.replace(/^AA-/, 'FF-') : original.startsWith('FF-') ? original : 'FF-' + original;
+  expect(name).toBe(expected); expect(h.bindings.get('oc_original')!.name).toBe(expected);
+  if (original.startsWith('FF-')) expect(groupRename).not.toHaveBeenCalled();
+  else expect(groupRename).toHaveBeenCalledWith({ path: { chat_id: 'oc_original' }, data: { name: expected } });
+  expect(h.groups.shareable('claude', h.home, (await tool.listSessions())[0]!)).toBe(true);
+  expect(h.groups.isActive('oc_aux')).toBe(true); expect(h.groups.isActive('oc_aux_2')).toBe(true);
+  expect(rename).toHaveBeenCalledTimes(original.startsWith('FF-') ? 0 : 1);
+  const restored = new AuxiliaryGroups(h.deps); await restored.load();
+  expect(restored.prefixSettings()).toEqual({ sharedSessionPrefix: true });
+  await restored.setPrefixSettings(false, 'ou_owner'); await restored.syncSharedPrefix('claude'); expect(name).toBe(expected);
+  await expect(restored.setPrefixSettings(true, 'ou_other')).rejects.toThrow('所有者');
+});
+
+
+it('applies the enabled prefix to later shared sessions, deduplicates peers and retries rename failures without touching closed groups', async () => {
+  const h = await harness(); const tool = h.tools.get('claude');
+  let name = 'AA-后续'; const session = () => ({ nativeId: sourceId, name, cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 });
+  vi.mocked(tool.listSessions).mockImplementation(async () => [session()]);
+  const rename = vi.fn(async (_id: string, value: string) => { name = value; });
+  tool.sessions = { historyPath: async () => h.history, rename, archive: async () => {} };
+  h.channel.rawClient.im.v1.chat.update = vi.fn(async () => ({ code: 0 })) as any;
+  await h.groups.setPrefixSettings(true, 'ou_owner'); expect(rename).not.toHaveBeenCalled();
+  await h.activate(); await h.activate('oc_aux_2');
+  rename.mockRejectedValueOnce(Error('worker busy'));
+  await h.groups.syncSharedPrefix('claude'); expect(name).toBe('AA-后续');
+  await h.groups.syncSharedPrefix('claude'); expect(name).toBe('FF-后续'); expect(rename).toHaveBeenCalledTimes(2);
+  name = '再改名'; await h.groups.syncSharedPrefix('claude'); expect(name).toBe('FF-再改名');
+  await h.groups.closeDissolvedChat('oc_aux'); await h.groups.closeDissolvedChat('oc_aux_2');
+  name = '已关闭'; await h.groups.syncSharedPrefix('claude'); expect(name).toBe('已关闭');
+});

@@ -89,6 +89,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
     window: browserWindow, URL,
     fetch: async (path: string, options?: { body?: string }) => {
       if (path === '/api/access') return response({ loginRequired: false });
+      if (path === '/api/settings' && !options?.body) return response({ sharedSessionPrefix: false });
       if (path === '/api/sessions' && !options?.body) return response(rows);
       // Deliberately allow a response after abort to check the selection guard.
       return new Promise((resolve, reject) => requests.push({ id: path.split('/').at(-1)!, path, data: options?.body ? JSON.parse(options.body) : undefined, resolve: value => resolve(response(value)), reject }));
@@ -699,4 +700,18 @@ it.each([false, true])('copies complete queue text without deleting or submittin
 
 it('opens the console in a separate browser tab', () => {
   expect(bridgeWebPage).toContain('<a href="/console" target="_blank" rel="noopener"');
+});
+
+
+it('defaults shared prefix naming off and saves it to the bridge instead of browser-only preferences', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  h.node('settings').onclick!(); await h.settle();
+  expect(h.node('shared-session-prefix').checked).toBe(false);
+  h.node('shared-session-prefix').checked = true;
+  const saving = h.node('settings-form').onsubmit!({ preventDefault() {} });
+  expect(h.requests.at(-1)).toMatchObject({ path: '/api/settings', data: { sharedSessionPrefix: true } });
+  expect(h.node('shared-session-prefix').disabled).toBe(true);
+  h.requests.at(-1)!.resolve({ sharedSessionPrefix: true, sessions: h.rows }); await saving;
+  expect(h.node('settings-dialog').open).toBe(false); expect(h.node('shared-session-prefix').disabled).toBe(false);
+  expect(JSON.parse(h.storage.get('bridge-web-preferences')!)).not.toHaveProperty('sharedSessionPrefix');
 });

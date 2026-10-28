@@ -12,11 +12,13 @@ import type { WorkspaceStore } from '../workspace/store';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { resolveWorkingDirectory } from '../policy/workspace';
 import { sendManagedCard } from '../card/managed';
-import { createBoundChat, waitForBridgeGroupCreation } from './group';
+import { createBoundChat, waitForBridgeGroupCreation, renameChat } from './group';
 import { muteSessionGroup } from './group-notifications';
 import { auxiliaryBotIsMember } from './auxiliary-membership';
 import { fetchKnownChatsResult } from './lark-info';
 import { auxiliaryUserIsMember } from './auxiliary-private';
+import { sessionOperations } from '../tools/session-api';
+import { log } from '../core/logger';
 
 export interface AuxiliaryGroup {
   chatId: string;
@@ -65,6 +67,7 @@ export interface AuxiliaryGrant { id: string; action: string; ownerId: string }
 /** Owner-selected group aliases of existing native conversations. */
 export class AuxiliaryGroups {
   private records: Record<string, AuxiliaryGroup> = {};
+  private sharedSessionPrefix = false;
   private privateCreations: Record<string, { uuid: string; startedAt: number; name: string; chatId?: string }> = {};
   private apiRequests: Record<string, AuxiliaryApiRequest> = {};
   private choices = new Map<string, Choice>();
@@ -114,6 +117,8 @@ export class AuxiliaryGroups {
           throw new Error('Invalid private group creations');
         this.privateCreations = raw.privateCreations;
       }
+      if (raw.sharedSessionPrefix !== undefined && typeof raw.sharedSessionPrefix !== 'boolean') throw new Error('Invalid shared prefix setting');
+      this.sharedSessionPrefix = raw.sharedSessionPrefix === true;
       for (const row of Object.values(this.records)) {
         // Older linked groups already received their activation announcement.
         row.hasBound ??= !!row.source;
@@ -239,8 +244,53 @@ export class AuxiliaryGroups {
   }
   isAuxiliary(chatId: string): boolean { return !!this.get(chatId); }
   groups(): AuxiliaryGroup[] { return this.groupIds().flatMap(id => this.records[id] ? [structuredClone(this.records[id]!)] : []); }
+  prefixSettings() { return { sharedSessionPrefix: this.sharedSessionPrefix }; }
+  async setPrefixSettings(enabled: boolean, owner: string) {
+    if (owner !== this.deps.ownerId()) throw new Error('所有者已变化，请刷新');
+    this.sharedSessionPrefix = enabled; await this.save();
+    if (enabled) await Promise.all(this.deps.tools.all().map(tool => this.syncSharedPrefix(tool.id)));
+    return this.prefixSettings();
+  }
+  /** Persistent naming policy; use common worker rename operations for every tool. */
+  async syncSharedPrefix(toolId: AgentKind): Promise<void> {
+    if (!this.sharedSessionPrefix) return;
+    await this.serial(`prefix:${toolId}`, async () => {
+      const tool = this.deps.tools.find(toolId);
+      if (!this.sharedSessionPrefix || !tool?.sessions?.rename) return;
+      const groups = Object.values(this.records).filter(row => row.source?.toolId === toolId && row.source.sourceId === tool.sourceId &&
+        row.status === 'active' && this.isActive(row.chatId));
+      if (!groups.length) return;
+      let sessions: ToolSession[];
+      try { sessions = await tool.listSessions(); }
+      catch (error) { log.warn('auxiliary', 'prefix-list-failed', { toolId, error: String(error) }); return; }
+      for (const id of new Set(groups.map(row => row.source!.nativeId))) {
+        const session = sessions.find(row => row.nativeId === id);
+        if (!session || session.archived || !session.name) continue;
+        const name = session.name.startsWith('FF-') ? session.name :
+          session.name.startsWith('AA-') ? `FF-${session.name.slice(3)}` : `FF-${session.name}`;
+        if (name.length > 100) { log.warn('auxiliary', 'prefix-name-too-long', { toolId }); continue; }
+        try {
+          const relevant = groups.filter(row => row.source!.nativeId === id);
+          if (!(await Promise.all(relevant.map(row => auxiliaryBotIsMember(this.deps.channel, row.chatId).catch(() => false)))).some(Boolean)) continue;
+          if (!this.sharedSessionPrefix || this.deps.tools.find(toolId) !== tool || !relevant.some(row =>
+            row.source?.toolId === toolId && row.source.sourceId === tool.sourceId && row.source.nativeId === id && this.isActive(row.chatId))) continue;
+          const personal = this.deps.bindings.activePersonalBindings().filter(([, b]) => b.toolId === toolId && b.sourceId === tool.sourceId && b.nativeId === id);
+          // Change the personal group first, so ordinary bidirectional sync also repairs a worker rename failure.
+          for (const [scope, binding] of personal) if (binding.name !== name) {
+            await renameChat(this.deps.channel, scope, name);
+            this.deps.bindings.set(scope, { ...binding, name });
+          }
+          if (session.name !== name) await sessionOperations(tool).rename(id, name);
+          await this.deps.bindings.flush();
+        } catch (error) { log.warn('auxiliary', 'prefix-rename-failed', { toolId, error: String(error) }); }
+      }
+    });
+  }
+  private isSharedSource(toolId: AgentKind, sourceId: string, nativeId: string): boolean {
+    return Object.values(this.records).some(row => row.source?.toolId === toolId && row.source.sourceId === sourceId && row.source.nativeId === nativeId);
+  }
   shareable(toolId: AgentKind, sourceId: string, session: ToolSession): boolean {
-    return !session.archived && !session.name?.startsWith('FF-') && !this.isAuxiliaryNative(toolId, sourceId, session.nativeId) &&
+    return !session.archived && (!session.name?.startsWith('FF-') || this.isSharedSource(toolId, sourceId, session.nativeId)) && !this.isAuxiliaryNative(toolId, sourceId, session.nativeId) &&
       !this.deps.bindings.isArchived(toolId, sourceId, session.nativeId) && !this.deps.catalog?.isThreadArchived(session.nativeId);
   }
   groupIds(): string[] { return Object.keys(this.records).filter(id => id.startsWith('oc_') && !id.includes(':')); }
@@ -384,7 +434,7 @@ export class AuxiliaryGroups {
     return next;
   }
   private save(): Promise<void> {
-    const text = JSON.stringify({ version: 1, appId: this.deps.appId, groups: this.records, legacySources: this.legacySources, privateCreations: this.privateCreations, apiRequests: this.apiRequests }, null, 2);
+    const text = JSON.stringify({ version: 1, appId: this.deps.appId, groups: this.records, sharedSessionPrefix: this.sharedSessionPrefix, legacySources: this.legacySources, privateCreations: this.privateCreations, apiRequests: this.apiRequests }, null, 2);
     this.saving = this.saving.catch(() => {}).then(() => writeFileAtomic(this.deps.path, text + '\n', { mode: 0o600 }));
     return this.saving;
   }
@@ -462,8 +512,7 @@ export class AuxiliaryGroups {
           binding.toolId === toolId && binding.sourceId === tool.sourceId)
         .map(([, binding]) => binding.nativeId));
       const rank = (s: { name?: string; nativeId: string }) => s.name?.trimStart().startsWith('AA') ? 0 : personalSessions.has(s.nativeId) ? 1 : 2;
-      const sessions = (await tool.listSessions()).filter(s => !s.archived && !s.name?.startsWith('FF-') && !this.isAuxiliaryNative(toolId, tool.sourceId, s.nativeId) &&
-        !this.deps.bindings.isArchived(toolId, tool.sourceId, s.nativeId)).sort((a, b) => rank(a) - rank(b) || b.updatedAtMs - a.updatedAtMs || a.nativeId.localeCompare(b.nativeId));
+      const sessions = (await tool.listSessions()).filter(s => this.shareable(toolId, tool.sourceId, s)).sort((a, b) => rank(a) - rank(b) || b.updatedAtMs - a.updatedAtMs || a.nativeId.localeCompare(b.nativeId));
       for (const s of sessions.slice(page * 6, page * 6 + 6)) buttons.push(this.button(`${s.name || s.nativeId.slice(0, 12)} · ${s.cwd}`, { ...base, nativeId: s.nativeId }));
       if (page > 0) buttons.push(this.button('上一页', { ...base, page: page - 1 }));
       if ((page + 1) * 6 < sessions.length) buttons.push(this.button('下一页', { ...base, page: page + 1 }));
