@@ -77,6 +77,8 @@ export class PendingQueue {
     return Array.from(this.map, ([scope, entry]) => ({ scope, messages: [...entry.messages] }));
   }
 
+  isBlocked(scope: string): boolean { return this.blocked.has(scope); }
+
   /** Pause the debounce timer; pushed messages keep accumulating. */
   block(scope: string): void {
     if (this.blocked.has(scope)) return;

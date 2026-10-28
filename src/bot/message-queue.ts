@@ -10,7 +10,7 @@ import { deliveryUuid, type CardPart } from '../card/multipart';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { log } from '../core/logger';
 
-export interface QueuedMessage { id: string; text: string; senderName: string; createdAtMs: number }
+export interface QueuedMessage { id: string; text: string; senderName: string; createdAtMs: number; messageId?: string; requestIds?: string[] }
 export interface MessageQueue {
   list(scope: string): QueuedMessage[];
   remove(scope: string, id: string, actor: string): Promise<boolean>;
@@ -41,7 +41,7 @@ export function createMessageQueue(controls: Controls, pending: PendingQueue, ca
         .sort((a, b) => b[1].createdAtMs - a[1].createdAtMs || b[0].localeCompare(a[0]));
       return candidates[0]?.[0] === id ? this.list(scope) : [];
     },
-    list: scope => entries(scope).map(e => ({ id: e.id, text: e.message.content || '[附件消息]', senderName: e.message.senderName ?? '用户', createdAtMs: Number(e.message.createTime) })),
+    list: scope => entries(scope).map(e => ({ id: e.id, messageId: e.message.messageId, text: e.message.content || '[附件消息]', senderName: e.message.senderName ?? '用户', createdAtMs: Number(e.message.createTime) })),
     async remove(scope, id, actor) {
       let entry = entries(scope).find(e => e.id === id);
       if (!entry) return false;

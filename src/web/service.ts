@@ -27,7 +27,7 @@ export interface WebSession {
 }
 export interface WebTurn { id: string; input: string; inputMessages?: { senderName: string; text: string }[]; answer: string; answerSections?: WebAnswerSection[]; requestIds?: string[]; progress?: string[]; statusText?: string; statusColor?: string; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
 export interface WebConversation { session: WebSession; turns: WebTurn[]; queuedMessages?: QueuedMessage[]; confirmedRequestIds?: string[]; notice?: string }
-interface Receipt { fingerprint: string; sessionId: string; owner: string; createdAt: number; messageId?: string; enqueued?: boolean }
+interface Receipt { fingerprint: string; sessionId: string; owner: string; createdAt: number; messageId?: string; enqueued?: boolean; scope?: string; queued?: boolean }
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
 const answer = (s: RunState) => s.blocks.flatMap(b => b.kind === 'text' ? [b.content] : []).join('\n\n');
 
@@ -46,7 +46,7 @@ export class PersonalSessionService {
   private jobs = new Map<string, { cursor: number; state: RunState; turnId?: string; nativeId?: string; updatedAt?: number }>();
   constructor(private readonly deps: {
     controls: Controls; catalog?: SessionCatalog; channel: LarkChannel; path: string;
-    enqueue(msg: NormalizedMessage): Promise<void>;
+    enqueue(msg: NormalizedMessage): Promise<void | { queued: boolean }>;
     control?(id: string, scope: string, owner: string, action: string, values?: unknown): Promise<WebControlResult>;
     create?(owner: string, toolId: string, cwd: string, name: string): Promise<{ scope?: string } & WebControlResult>;
     cwdFor?(scope: string): string | undefined;
@@ -192,6 +192,18 @@ export class PersonalSessionService {
       return { favorite };
     });
   }
+  private queuedFor(scope: string, requests?: Map<string, string[]>): QueuedMessage[] {
+    const byMessage = requests ?? new Map(Object.entries(this.receipts).filter(([, receipt]) => receipt.scope === scope && receipt.messageId)
+      .map(([id, receipt]) => [receipt.messageId!, [id]]));
+    return (this.deps.controls.messageQueue?.list(scope) ?? []).flatMap(item => {
+      const ids = item.messageId ? byMessage.get(item.messageId) : undefined;
+      if (ids?.some(id => this.receipts[id]?.queued === false)) return [];
+      return [{ ...item, ...(ids?.length ? { requestIds: ids } : {}) }];
+    });
+  }
+  private sendResult(scope: string, requestId: string, receipt: Receipt) {
+    return { requestId, status: receipt.queued === false ? 'submitted' : 'queued', queuedMessages: this.queuedFor(scope) };
+  }
   async send(id: string, requestId: string, text: string) {
     if (!/^[\w-]{16,120}$/.test(requestId) || !text.trim() || text.length > 16_000) throw new WebError(400, '需要唯一请求 ID 和 1–16000 字文本');
     return this.serial('send:' + requestId, async () => {
@@ -200,13 +212,13 @@ export class PersonalSessionService {
       if (old && old.fingerprint !== fingerprint) throw new WebError(409, '同一请求 ID 的内容或会话已变化');
       if (old?.enqueued) {
         const { session } = await this.resolve(id); this.assertBinding(id, session.scope);
-        return { requestId, status: 'queued', queuedMessages: this.deps.controls.messageQueue?.list(session.scope) ?? [] };
+        return this.sendResult(session.scope, requestId, old);
       }
       const { session } = await this.resolve(id, true);
       if (!session.canSend) throw new WebError(503, '此会话不可发送');
       if (await this.deps.channel.getChatMode(session.scope) !== 'group') throw new WebError(409, '群已转为话题模式');
-      const receipt = this.receipts[requestId] ??= { fingerprint, sessionId: id, owner, createdAt: Date.now() };
-      if (receipt.enqueued) return { requestId, status: 'queued', queuedMessages: this.deps.controls.messageQueue?.list(session.scope) ?? [] };
+      const receipt = this.receipts[requestId] ??= { fingerprint, sessionId: id, scope: session.scope, owner, createdAt: Date.now(), queued: this.conversations.get(id)?.turns.some(turn => ['running', 'accepted', 'waiting_input', 'submitted'].includes(turn.status)) ?? false };
+      if (receipt.enqueued) return this.sendResult(session.scope, requestId, receipt);
       await this.save(); this.assertBinding(id, session.scope);
       if (!receipt.messageId) {
         if (Date.now() - receipt.createdAt > 55 * 60_000) throw new WebError(409, '发送结果未确认且已超过去重窗口，请检查群消息');
@@ -217,10 +229,11 @@ export class PersonalSessionService {
         receipt.messageId = response.data.message_id; await this.save();
       }
       this.assertBinding(id, session.scope);
-      await this.deps.enqueue({ messageId: receipt.messageId, chatId: session.scope, chatType: 'group', senderId: owner,
+      const disposition = await this.deps.enqueue({ messageId: receipt.messageId, chatId: session.scope, chatType: 'group', senderId: owner,
         createTime: receipt.createdAt, content: text, resources: [], mentions: [], mentionAll: false, mentionedBot: true, rawContentType: 'text' });
+      if (disposition) receipt.queued = disposition.queued;
       receipt.enqueued = true; await this.save();
-      return { requestId, status: 'queued', queuedMessages: this.deps.controls.messageQueue?.list(session.scope) ?? [] };
+      return this.sendResult(session.scope, requestId, receipt);
     });
   }
   async removeQueuedMessage(id: string, messageId: string) {
@@ -231,7 +244,7 @@ export class PersonalSessionService {
     const queue = this.deps.controls.messageQueue;
     if (!queue || !await queue.remove(session.scope, messageId, owner))
       throw new WebError(409, '消息已开始处理或已移除，未停止当前任务');
-    return { removed: true, queuedMessages: queue.list(session.scope) };
+    return { removed: true, queuedMessages: this.queuedFor(session.scope) };
   }
   async rename(id: string, name: string) {
     name = name.trim(); if (!name || name.length > 100 || /[\u0000-\u001f]/.test(name)) throw new WebError(400, '名称需为 1–100 字');
@@ -310,18 +323,18 @@ export class PersonalSessionService {
   }
   async read(id: string): Promise<WebConversation> {
     const { session, b, client } = await this.resolve(id);
-    const queuedMessages = this.deps.controls.messageQueue?.list(session.scope) ?? [];
     const owner = this.owner(), requests = new Map<string, string[]>(), confirmedRequestIds: string[] = [];
     // Messages sent before the first run created the native session were recorded under its pending identity.
     const ids = new Set([id, this.identity(session.scope, { ...b, nativeId: undefined })]);
-    for (const [requestId, receipt] of Object.entries(this.receipts)) if (ids.has(receipt.sessionId) && receipt.owner === owner && receipt.messageId) {
+    for (const [requestId, receipt] of Object.entries(this.receipts)) if ((receipt.scope === session.scope || ids.has(receipt.sessionId)) && receipt.owner === owner && receipt.messageId) {
       const ids = requests.get(receipt.messageId) ?? []; ids.push(requestId); requests.set(receipt.messageId, ids);
       if (receipt.enqueued) confirmedRequestIds.push(requestId);
     }
+    const queuedMessages = this.queuedFor(session.scope, requests);
     const runtime = this.deps.controls.workerRuntimes?.get(b.toolId);
     const receipts = this.receiptScopes(session.scope).flatMap(scope => runtime?.inbox.receipts(scope) ?? []);
     const turns: WebTurn[] = receipts.filter(r => r.status === 'pending' || r.status === 'rejected' || r.status === 'cancelled').map(r => ({ id: 'receipt:' + r.message.messageId,
-      input: r.message.content, answer: '', requestIds: requests.get(r.message.messageId), status: r.status === 'pending' ? 'queued' : r.status, createdAtMs: Number(r.message.createTime), origin: 'bridge' }));
+      input: r.message.content, answer: '', requestIds: requests.get(r.message.messageId), status: r.status === 'pending' ? requests.get(r.message.messageId)?.some(id => this.receipts[id]?.queued === false) ? 'submitted' : 'queued' : r.status, createdAtMs: Number(r.message.createTime), origin: 'bridge' }));
     for (const turn of turns) {
       const receipt = receipts.find(r => 'receipt:' + r.message.messageId === turn.id)!;
       if (receipt.scope !== session.scope) turn.inputMessages = [{ senderName: await feishuSenderName(this.deps.channel, receipt.message), text: receipt.message.content }];

@@ -1471,3 +1471,23 @@ it('stores the optional shared-session prefix via authenticated Web settings and
   expect(JSON.parse(await readFile(join(h.dir, 'managed-groups.json'), 'utf8')).sharedSessionPrefix).toBe(false);
   expect((await h.request('/api/settings', { sharedSessionPrefix: true }, { Origin: 'http://evil.test' })).status).toBe(403);
 });
+
+
+it('distinguishes idle submission from a blocked queue and preserves Web request identity across restart', async () => {
+  const h = await harness(); await h.replies.stop(); h.pending.block('oc_group');
+  const session = (await h.service.list())[0]!;
+  const busy = await h.service.send(session.id, 'busy-request-123456', '确实排队');
+  expect(busy.status).toBe('queued'); expect(busy.queuedMessages[0]!.requestIds).toEqual(['busy-request-123456']);
+  await h.service.removeQueuedMessage(session.id, busy.queuedMessages[0]!.id);
+  h.pending.unblock('oc_group');
+  h.create.mockResolvedValueOnce({ code: 0, data: { message_id: 'om_idle' } });
+  h.enqueue.mockImplementationOnce(async msg => { await h.inbox.receive(msg.chatId, msg); return { queued: false }; });
+  const idle = await h.service.send(session.id, 'idle-request-123456', '直接提交');
+  expect(idle).toMatchObject({ status: 'submitted', queuedMessages: [] });
+  const restored = h.makeService(); await restored.load();
+  const view = await restored.read(session.id);
+  expect(view.turns.find(t => t.input === '直接提交')).toMatchObject({ status: 'submitted', requestIds: ['idle-request-123456'] });
+  expect(view.queuedMessages).toEqual([]);
+  const repeated = await restored.send(session.id, 'idle-request-123456', '直接提交');
+  expect(repeated.status).toBe('submitted'); expect(h.enqueue).toHaveBeenCalledTimes(2);
+});

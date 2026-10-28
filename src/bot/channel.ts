@@ -833,7 +833,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           sessionCatalog?.isScopeArchived(msg.chatId)) throw new WebError(409, '会话绑定已失效');
         const scoped = controlsForTool(controls, binding.toolId, msg.chatId);
         if (!canUseGroup(scoped.profileConfig, scoped, msg.chatId, msg.senderId).ok) throw new WebError(403, '此群不在允许响应的范围内');
-        await enqueuePersonalInput({ agent: tool.agent, controls: scoped, activeRuns, pending, scope: msg.chatId, msg });
+        return enqueuePersonalInput({ agent: tool.agent, controls: scoped, activeRuns, pending, scope: msg.chatId, msg });
       },
     });
     try {

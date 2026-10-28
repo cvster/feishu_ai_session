@@ -354,12 +354,13 @@ it('shows a sending bubble and clears the composer before HTTP completes, then r
   expect(h.node('input').value).toBe(''); expect(h.node('send').disabled).toBe(true);
   expect(h.node('messages').querySelectorAll('.user').filter(e => e.text === '立即显示的消息')).toHaveLength(1);
   expect(h.node('messages').querySelector('.sending')!.text).toBe('发送中…');
-  expect(h.node('messages').scrollTop).toBe(h.node('messages').scrollHeight - h.node('messages').clientHeight);
+  expect(h.node('messages').scrollTop).toBe(200);
   const requestId = h.requests[1]!.data.requestId;
-  h.requests[1]!.resolve({ requestId, status: 'queued', queuedMessages: [{ id: 'a'.repeat(48), text: '立即显示的消息' }] }); await submit;
-  expect(h.node('queued-messages').text).toContain('立即显示的消息');
+  h.requests[1]!.resolve({ requestId, status: 'submitted', queuedMessages: [] }); await submit;
+  expect(h.node('queued-messages').hidden).toBe(true);
+  expect(h.node('messages').querySelector('.submitted')!.text).toContain('已提交');
   expect(h.node('messages').querySelectorAll('.queued')).toHaveLength(0);
-  expect(h.node('messages').text).not.toContain('立即显示的消息');
+  expect(h.node('messages').text).toContain('立即显示的消息');
   expect(h.node('send').disabled).toBe(false); expect(h.node('send').textContent).toBe('发送');
   const view = h.conversation(0);
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...view, turns: [...view.turns, {
@@ -374,7 +375,7 @@ it('deduplicates by request identity for identical inputs and when a batch confi
   h.requests[0]!.resolve(history); await h.settle();
   h.node('input').value = 'same'; const first = h.node('composer').onsubmit!({ preventDefault() {} });
   expect(h.node('messages').querySelectorAll('.user').filter(e => e.text === 'same')).toHaveLength(2);
-  const firstId = h.requests[1]!.data.requestId; h.requests[1]!.resolve({ status: 'queued' }); await first;
+  const firstId = h.requests[1]!.data.requestId; h.requests[1]!.resolve({ status: 'submitted' }); await first;
   h.node('input').value = 'same'; const second = h.node('composer').onsubmit!({ preventDefault() {} });
   const secondId = h.requests[2]!.data.requestId;
   expect(firstId).not.toBe(secondId); expect(h.node('messages').querySelectorAll('.user')).toHaveLength(2);
@@ -533,7 +534,7 @@ it.each(['turn', 'receipt'] as const)('clears a lost acknowledgement only after 
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: empty });
   expect(h.node('send').textContent).toBe('重试');
   const confirmation = source === 'turn' ? { turns: [{ id: 'job:confirmed', input: '迟到的确认', answer: '', status: 'running', requestIds: [requestId], createdAtMs: Date.now() }] } :
-    { confirmedRequestIds: [requestId], queuedMessages: [{ id: 'a'.repeat(48), text: '迟到的确认' }] };
+    { confirmedRequestIds: [requestId], queuedMessages: [{ id: 'a'.repeat(48), text: '迟到的确认', requestIds: [requestId] }] };
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...empty, ...confirmation } });
   expect(h.node('send').textContent).toBe('发送'); expect(h.node('message-error').textContent).toBe('');
   expect(h.node('messages').text).not.toContain('发送未确认'); expect(h.storage.has('bridge-web-draft:' + h.rows[0]!.id)).toBe(false);
@@ -714,4 +715,36 @@ it('defaults shared prefix naming off and saves it to the bridge instead of brow
   h.requests.at(-1)!.resolve({ sharedSessionPrefix: true, sessions: h.rows }); await saving;
   expect(h.node('settings-dialog').open).toBe(false); expect(h.node('shared-session-prefix').disabled).toBe(false);
   expect(JSON.parse(h.storage.get('bridge-web-preferences')!)).not.toHaveProperty('sharedSessionPrefix');
+});
+
+
+it('renders busy sends only in the queue from the first frame, merges receipt ids and moves once into history at execution', async () => {
+  const h = harness(); await h.ready(); const view = h.conversation(0, '正在回复', 1); view.turns[0]!.status = 'running';
+  h.requests[0]!.resolve(view); await h.settle();
+  h.node('input').value = '下一条消息'; const send = h.node('composer').onsubmit!({ preventDefault() {} });
+  const requestId = h.requests[1]!.data.requestId;
+  expect(h.node('messages').text).not.toContain('下一条消息');
+  expect(h.node('queued-messages').text).toContain('下一条消息'); expect(h.node('queued-messages').text).toContain('发送中');
+  const queue = [{ id: 'a'.repeat(48), text: '下一条消息', requestIds: [requestId] }];
+  h.requests[1]!.resolve({ requestId, status: 'queued', queuedMessages: queue }); await send;
+  expect(h.node('queued-messages').querySelectorAll('.queue-row')).toHaveLength(1);
+  expect(h.node('messages').text).not.toContain('下一条消息');
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...view, confirmedRequestIds: [requestId], queuedMessages: queue } });
+  expect(h.node('queued-messages').querySelectorAll('.queue-row')).toHaveLength(1);
+  const next = { id: 'job:next', input: '下一条消息', answer: '', status: 'running', requestIds: [requestId], createdAtMs: Date.now() };
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...view, turns: [...view.turns, next], queuedMessages: [] } });
+  expect(h.node('queued-messages').hidden).toBe(true);
+  expect(h.node('messages').querySelectorAll('.user').filter(e => e.text === '下一条消息')).toHaveLength(1);
+});
+
+it('keeps an idle submitted message in history while only its receipt is known, then merges the executing turn without queue flicker', async () => {
+  const h = harness(); await h.ready(); const view = h.conversation(0, '', 0); h.requests[0]!.resolve(view); await h.settle();
+  h.node('input').value = '保持原位置'; const send = h.node('composer').onsubmit!({ preventDefault() {} });
+  const requestId = h.requests[1]!.data.requestId;
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...view, confirmedRequestIds: [requestId], queuedMessages: [] } });
+  expect(h.node('messages').text).toContain('保持原位置'); expect(h.node('queued-messages').hidden).toBe(true);
+  h.requests[1]!.resolve({ requestId, status: 'submitted', queuedMessages: [] }); await send;
+  expect(h.node('messages').querySelector('.submitted')!.text).toContain('已提交');
+  h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...view, turns: [{ id: 'receipt:next', input: '保持原位置', answer: '', status: 'submitted', requestIds: [requestId], createdAtMs: Date.now() }] } });
+  expect(h.node('messages').querySelectorAll('.user')).toHaveLength(1); expect(h.node('queued-messages').hidden).toBe(true);
 });
