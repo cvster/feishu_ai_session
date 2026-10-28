@@ -105,7 +105,7 @@ export class BridgeConsoleService {
       nativeId: r.nativeId, nativeCreated: true, name: r.name, cwd: r.cwd, revision: hash(r) });
     // Roster omission is not archival. Query exact missing identities through
     // the common read-only conversation endpoint (also works with older workers).
-    const checkKey = (b: typeof refs[number]) => hash(['session', c.profileConfig.accounts.app.id, b.toolId, b.sourceId, b.nativeId ?? b.scope]);
+    const checkKey = (b: Pick<typeof refs[number], 'toolId' | 'sourceId' | 'nativeId' | 'scope'>) => hash(['session', c.profileConfig.accounts.app.id, b.toolId, b.sourceId, b.nativeId ?? b.scope]);
     const groupKey = (scope: string) => hash(['group', c.profileConfig.accounts.app.id, scope]);
     const sessionRefs = [...new Map([...refs, ...sharedRows.flatMap(row => row.source ? [{ scope: row.chatId, ...row.source,
       nativeCreated: true, name: row.name, cwd: row.cwd, revision: hash([row.generation, row.source]) }] : [])].map(ref => [checkKey(ref), ref])).values()];
@@ -193,24 +193,25 @@ export class BridgeConsoleService {
       const native = o?.sourceId === ref?.sourceId ? o?.native.find(s => s.nativeId === ref?.nativeId) : undefined;
       const binding = c.toolBindings?.get(row.chatId), connected = ['group', 'topic'].includes(group?.mode ?? '') && (!group?.status || group.status === 'normal');
       const sessionArchived = !!(native?.archived || ref && c.toolBindings?.isArchived(ref.toolId, ref.sourceId, ref.nativeId));
+      const groupState: GroupState | undefined = ['dissolved', 'dissolved_save'].includes(group?.status ?? '') ? 'dissolved' : connected ? 'active' : undefined;
+      const sessionState: SessionState | undefined = native ? native.archived ? 'archived' : 'active' : sessionArchived ? 'archived' :
+        ref && o?.online && o.nativeKnown && o.sourceId === ref.sourceId ? this.sessionChecks.get(checkKey({ ...ref, scope: row.chatId }))?.state : undefined;
       const closed = row.status === 'archived' || !!group && !group.error && !connected;
       if (ref && sessionArchived && closed && await c.auxiliary!.removeClosedGroup(row.chatId, row.generation, ref)) return undefined;
       const routeWorker = binding ? this.observations.get(binding.toolId) : undefined;
       const busy = items.some(i => i.scope === row.chatId && ['pending', 'queued', 'accepted', 'running'].includes(i.status));
       const issues = [group?.error && row.status !== 'archived' ? '群状态未确认' : '',
-        row.status === 'active' && this.deps.catalog?.isScopeArchived(row.chatId) ? '本群入口已归档' : '',
         !connected && !group?.error && row.status !== 'archived' ? '机器人不在群内或群已关闭' : '',
         ref && row.status !== 'archived' && !o?.online ? 'Worker 离线' : '',
         ref && o?.online && o.sourceId !== ref.sourceId ? 'Worker 身份不匹配' : '',
         ref && o?.online && !o.nativeKnown ? '原生会话状态未确认' : '',
-        sessionArchived ? '会话已归档' : '',
         ref && o?.nativeKnown && o.health?.capabilities?.sessionListAuthoritative && !native ? '原生会话不存在' : ''].filter(Boolean);
       return { id: this.groupId(row), chatId: row.chatId, name: group?.name ?? row.name, status: row.status,
         active: c.auxiliary!.isActive(row.chatId), kind: row.privateGroup ? '私聊群' : '共享群',
         toolId: ref?.toolId, tool: o?.label ?? ref?.toolId ?? '未选择', sessionName: native?.name ?? (binding?.nativeId === ref?.nativeId ? binding?.name : undefined) ?? ref?.nativeId ?? '尚未关联',
         associationId: ref ? this.targetId(ref.toolId, ref.sourceId, ref.nativeId) : undefined,
         targetId: row.status === 'active' && ref ? this.targetId(ref.toolId, ref.sourceId, ref.nativeId) : undefined, cwd: native?.cwd ?? row.cwd ?? '',
-        parentChatId: row.privateGroup?.parentChatId, issues, busy, sessionArchived,
+        parentChatId: row.privateGroup?.parentChatId, issues, busy, sessionArchived, groupState, sessionState,
         sessionId: ref ? personalRows.find(s => { const b = c.toolBindings?.get(s.scope); return b?.toolId === ref.toolId && b.sourceId === ref.sourceId && b.nativeId === ref.nativeId; })?.id : undefined,
         canBind: row.ownerId === owner && !row.privateGroup && ['pending', 'active'].includes(row.status) && connected && !this.deps.catalog?.isChatDissolved(row.chatId) &&
           !busy && (!binding || routeWorker?.online === true && routeWorker.jobsKnown && binding.sourceId === routeWorker.sourceId),

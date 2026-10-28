@@ -26,8 +26,8 @@ function harness(loginRequired = true, authorized = true) {
     bindings: [{ id: 'b', tool: 'Tool', groupName: '群', sessionName: '会话', kind: '个人 AI 群', cwd: '/project', issues: ['群名与会话名不一致'], canSync: true, groupState: 'active', sessionState: 'active', canDissolve: false, canArchive: false },
       { id: 'dissolve', tool: 'Tool', groupName: '待解散群', sessionName: '已归档会话', issues: [], groupState: 'active', sessionState: 'archived', canDissolve: true, canArchive: false },
       { id: 'archive', tool: 'Tool', groupName: '已解散群', sessionName: '待归档会话', issues: [], groupState: 'dissolved', sessionState: 'active', canDissolve: false, canArchive: true }],
-    sharedGroups: [{ id: 'shared', chatId: 'oc_shared', name: '<群>', kind: '共享群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, targetId: 'current', canBind: true, canLeave: false, sessionArchived: false, toolId: 'generic', issues: [] },
-      { id: 'private', chatId: 'oc_private', name: '私聊群', kind: '私聊群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, canBind: false, canLeave: false, sessionArchived: false, toolId: 'generic', issues: [] }],
+    sharedGroups: [{ id: 'shared', chatId: 'oc_shared', name: '<群>', kind: '共享群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, targetId: 'current', canBind: true, canLeave: false, sessionArchived: false, groupState: 'active' as string | undefined, sessionState: 'active' as string | undefined, toolId: 'generic', issues: [] },
+      { id: 'private', chatId: 'oc_private', name: '私聊群', kind: '私聊群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, canBind: false, canLeave: false, sessionArchived: false, groupState: 'active' as string | undefined, sessionState: 'active' as string | undefined, toolId: 'generic', issues: [] }],
     sharedTargets: [{ id: 'current', name: '会话', toolId: 'generic', tool: 'Tool', cwd: '/project' }, { id: 'next', name: '<新会话>', toolId: 'other', tool: 'Other', cwd: '/next' }],
     items: [{ id: 'pending', toolId: 'generic', tool: 'Tool', name: '会话', sender: 'Nick', text: '<img src=x onerror=attack()>', status: 'pending', createdAt: Date.now(), canRetry: true },
       { id: 'accepted', toolId: 'generic', tool: 'Tool', name: '会话', sender: 'Nick', text: '已提交消息', status: 'running', createdAt: Date.now(), canRetry: false }] };
@@ -165,4 +165,28 @@ it('prefills the original tool and project even when the archived source is abse
   expect(h.get('shared-target').children.map(e => e.value)).toEqual(['']);
   await h.get('shared-form').onsubmit!({ preventDefault() {} });
   expect(h.requests.some(r => r.body?.action === 'shared-bind')).toBe(false);
+});
+
+
+it('shows group dissolution and native archival instead of shared entrance lifecycle states', async () => {
+  const h = harness(false); await h.ready();
+  h.snapshot.sharedGroups[0]!.active = false;
+  h.snapshot.sharedGroups[0]!.status = 'archived';
+  h.snapshot.sharedGroups[1]!.groupState = 'dissolved';
+  h.snapshot.sharedGroups[1]!.sessionState = 'archived';
+  await h.nav[2]!.onclick!();
+  const text = h.get('shared-list').text;
+  for (const label of ['群：未解散', '群：已解散', '会话：正常', '会话：已归档']) expect(text).toContain(label);
+  for (const label of ['本群入口已归档', '关联不可用', '已启用', '已退出 / 已关闭']) expect(text).not.toContain(label);
+  h.get('shared-status').value = 'active'; h.get('shared-status').handlers.change!();
+  expect(h.get('shared-list').text).toContain('群名：<群>'); expect(h.get('shared-list').text).not.toContain('群名：私聊群');
+  h.get('shared-status').value = 'dissolved'; h.get('shared-status').handlers.change!();
+  expect(h.get('shared-list').text).toContain('群名：私聊群'); expect(h.get('shared-list').text).not.toContain('群名：<群>');
+  h.get('shared-status').value = 'session-archived'; h.get('shared-status').handlers.change!();
+  expect(h.get('shared-list').text).toContain('群名：私聊群'); expect(h.get('shared-list').text).not.toContain('群名：<群>');
+  h.get('shared-status').value = 'session-active'; h.get('shared-status').handlers.change!();
+  expect(h.get('shared-list').text).toContain('群名：<群>'); expect(h.get('shared-list').text).not.toContain('群名：私聊群');
+  h.snapshot.sharedGroups[0]!.groupState = undefined; h.snapshot.sharedGroups[0]!.sessionState = undefined;
+  h.get('shared-status').value = ''; h.get('shared-status').handlers.change!();
+  expect(h.get('shared-list').text).toContain('群：尚未检查'); expect(h.get('shared-list').text).toContain('会话：尚未检查');
 });

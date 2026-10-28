@@ -1396,3 +1396,26 @@ it('removes only confirmed closed shared groups with archived sources and persis
   const stored = JSON.parse(await readFile(join(h.dir, 'managed-groups.json'), 'utf8'));
   expect(JSON.stringify(stored.groups)).not.toContain('oc_shared');
 });
+
+
+it('shows actual shared group and native session states without exposing archived entrance markers', async () => {
+  const h = await harness(); await h.replies.stop(); const groups = await managedShared(h), row = groups.get('oc_shared')!;
+  await groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'native' }, async () => {});
+  h.catalog.archiveScope('oc_shared', 'native');
+  let group = (await h.consoleService.snapshot(true)).sharedGroups[0]!;
+  expect(group).toMatchObject({ groupState: 'active', sessionState: 'active', sessionArchived: false });
+  expect(group.issues).not.toContain('本群入口已归档');
+  expect(h.catalog.isScopeArchived('oc_shared')).toBe(true);
+  h.native.archived = true;
+  group = (await h.consoleService.snapshot(true)).sharedGroups[0]!;
+  expect(group).toMatchObject({ groupState: 'active', sessionState: 'archived' });
+  h.native.archived = false;
+  vi.mocked(h.channel.rawClient.im.v1.chat.get).mockImplementation(async ({ path }: any) => path.chat_id === 'oc_shared'
+    ? { code: 232009 } as any : { code: 0, data: { name: '个人群', chat_mode: 'group' } } as any);
+  group = (await h.consoleService.snapshot(true)).sharedGroups[0]!;
+  expect(group).toMatchObject({ groupState: 'dissolved', sessionState: 'active' });
+  vi.mocked(h.channel.rawClient.im.v1.chat.get).mockRejectedValue(Error('network unavailable'));
+  vi.spyOn(h.client, 'health').mockRejectedValue(Error('worker offline'));
+  group = (await h.consoleService.snapshot(true)).sharedGroups[0]!;
+  expect(group.groupState).toBeUndefined(); expect(group.sessionState).toBeUndefined();
+});
