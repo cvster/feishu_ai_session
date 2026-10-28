@@ -8,7 +8,7 @@
 
 1. 安装 Node 24（含 npm）和 Git，执行第 2 节的安装命令。只安装实际用的工具；Codex/Claude 可由脚本补装，Kilo/Zcode/Dsh 按各自接入文档配置。
 2. 登录所选工具，按第 4 节创建 profile 并运行 `setup`；完成第 7 节飞书权限、事件和应用发布。
-3. 启动所选 worker；Codex 先确认已有共享 writer，只有没有 writer 的新机器才按第 6 节启动 daemon。
+3. 启动所选 worker；Codex 先安装最新版桌面 App，只保留桌面 App 的 app-server 作为执行端，让 CLI、VS Code 插件及 Codex worker 全部连接它，具体见第 6 节。
 4. 前台运行桥接验证真实收发，再切换后台。以下以 Codex 为例；Claude 把 `--tool codex` 和 `--agents codex` 换为 `claude`：
 
    ```bash
@@ -38,7 +38,7 @@
 | Claude Code | >=2.1.261，并通过能力检查 | Claude 用户选择；检查 stream-json、权限、会话名等参数 |
 | 飞书 CLI | >=1.0.97 | 文件发送、profile 应用身份和后续 CLI 操作 |
 | 工具 worker | 本仓库自带，按工具独立启动 | 所有工具包含 Codex 都通过 worker 接入 |
-| Codex writer | 与 CLI 兼容的常驻公开 app-server/桌面执行端 | 只使用 Claude 时不需要；历史读取进程不承担执行 |
+| Codex writer | 最新版 Codex 桌面 App 的共享 app-server | CLI、VS Code 插件和 worker 共用此执行端；只使用 Claude 时不需要 |
 
 CLI 版本号是本项目的支持基线，不是声称这些功能在上游首次出现的版本。高于基线仍要通过命令能力、认证及运行检查。账号额度、模型可用性不能靠版本或离线检查证明；首次真实任务再验收。
 
@@ -149,16 +149,11 @@ Linux/macOS 执行 `chmod 600`，Windows 限制到当前用户可读写。文件
 
 ### Codex
 
-CLI 安装和登录后，还需有兼容的队列执行 writer。可使用已经运行的公开桌面共享端点，或按当前 Codex 官方帮助管理独立 daemon：
+推荐安装并登录 **最新版 Codex 桌面 App**，只保留桌面 App 的 app-server 作为会话执行端；其他所有入口，包括 Codex CLI、VS Code 插件及 Codex worker，都使用这个 app-server。更新各客户端至支持共享连接的版本，并配置为连接桌面 App 实际提供的共享端点。
 
-```bash
-codex app-server daemon --help
-# 新机器且没有现有 writer 时，确认账号目录后启动（已有 writer 不重启）
-codex app-server daemon start
-codex app-server daemon version
-```
+桌面 App 启动后，在 `runtime.env` 中设置 `CODEX_QUEUE_REMOTE` 指向该端点，具体示例见下文。默认发现位置为 `CODEX_HOME/app-server-control/app-server-control.sock`，但必须确认它属于桌面正在使用的实例。CLI 和 VS Code 插件按各自版本支持的共享连接配置使用同一端点；`CODEX_QUEUE_REMOTE` 是本桥接 worker 的配置，不会自动替其他客户端完成配置。
 
-按所装版本的帮助配置并启动，或在 `runtime.env` 设置 `CODEX_QUEUE_REMOTE` 指向现有公开端点。默认发现 `CODEX_HOME/app-server-control/app-server-control.sock`。不要将另一进程私有连接地址当成公开共享端点；不要为日常桥接更新停止/重启现有 writer。版本和目录必须与登录账号、历史所在目录一致。doctor 只连公开端点做握手/只读 account/read，不提交任务、不读任务列表、不启动新 writer。
+迁移时先正常结束其他独立执行端上的任务，再停用它们的 app-server/daemon 及自动启动配置，保留桌面 App 的执行端。不要另起独立 daemon，也不要在日常桥接更新中停止或重启桌面 app-server。历史读取进程不承担执行，不能用它恢复或修改会话。doctor 只连公开端点做握手/只读 account/read，不提交任务、不读任务列表、不启动新 writer。
 
 #### 提示“另一个 writer 占用”怎么办
 
@@ -168,8 +163,8 @@ codex app-server daemon version
 
 **推荐处理：**
 
-1. 保留原桌面/终端及其任务，先核对 worker 的 `options.binaryPath`、服务 OS 用户、`CODEX_HOME` 和 `CODEX_QUEUE_REMOTE`。使用下节的只读命令确认 CLI 能力与 daemon 来源；不要再启动一个 daemon 来“抢回”会话。
-2. 桌面和群需要共用会话时，让 worker 指向桌面实际使用且允许共享访问的公开 writer 端点。按下节配置 `CODEX_QUEUE_REMOTE`，不可使用猜测的 socket 或桌面私有连接。当前桥接通过原生队列提交；修改设置也在同一个共享 writer 中进行，不能通过独立 reader 的 `thread/resume` 强行抢占。
+1. **安装最新版 Codex 桌面 App，只保留桌面 App 的 app-server。** 正常结束其他独立执行端上的任务后，停用 CLI、VS Code 插件或独立 daemon 另起的执行服务及其自动启动配置，避免再次竞争同一会话。保留会话历史和运行数据。
+2. **所有工具共用桌面 app-server。** 将 CLI、VS Code 插件、Codex worker 及其他会话客户端都配置为连接桌面实际提供的共享端点。worker 按下节配置 `CODEX_QUEUE_REMOTE`，其他客户端按其支持的配置接入；核对 CLI 路径、运行用户和 `CODEX_HOME`。消息提交、模型设置、停止及交互都走同一个 writer，不能通过独立 reader 的 `thread/resume` 强行抢占。
 3. **如果改的是 worker 的环境、CLI 路径或配置，需要单独重新启动 Codex worker 才能加载。** 仅重启桥接不会刷新正在运行的 worker 环境。在自己安排的维护窗口执行：
 
    ```bash
@@ -180,7 +175,7 @@ codex app-server daemon version
    ```
 
    worker 停止可能中断其任务，不能作为普通桥接部署的固定步骤。以上命令不停止桌面或共享 writer。
-4. 如果当前工具版本无法提供共享端点，就在原执行端继续该会话；需要切换执行端时，先在原端正常结束/退出，再安排由目标端接管。不要自动杀掉所有 Codex 进程，或删除 socket、锁文件、SQLite、会话历史、提交收据和队列账本。
+4. 某个客户端不支持共享连接时，先更新到支持的版本并完成配置，再用它操作原会话。不要为绕过连接问题重新启动独立 writer，或删除 socket、锁文件、SQLite、会话历史、提交收据和队列账本。
 5. 恢复后先检查原消息有没有被接收/执行，再重试未执行的请求，避免重复任务。在专用测试会话验证群与桌面双向消息、停止和交互；doctor 连接通过不能独自证明桌面共用 writer。
 
 此处是本项目队列实现的排错说明。公开协议与传输以 [OpenAI 官方 app-server 文档](https://learn.chatgpt.com/docs/app-server) 和安装版本的 `--help` 为准；官方通用 app-server 文档并未保证每个桌面版本都开放相同的共享 writer 接入方式。
@@ -191,7 +186,7 @@ codex app-server daemon version
 
 常见现象：飞书输入已执行，但桌面会话不实时刷新，重新打开后才看到历史；桌面正在执行，桥接却显示找不到活跃轮次、停止按钮无法停止桌面任务，或桌面交互问题无法在飞书回答。若旧 CLI 不支持所需队列/共享连接能力，也可能直接提交失败。单独启动一个 daemon 并不保证桌面会连接它。
 
-按以下顺序排查和处理：
+按以下顺序核对桌面 App 与所有客户端是否已共用执行端：
 
 1. **确认真正使用的 CLI。** 终端执行下面的只读检查，同时核对 `workers/codex/config.json` 的 `options.binaryPath`、worker 服务 PATH 和运行 OS 用户。Windows 用 `where.exe codex`，不要只看当前终端能运行哪个版本。
 
@@ -206,18 +201,18 @@ codex app-server daemon version
 
 2. **统一安装来源与账号目录。** 将 Codex worker 的 `options.binaryPath` 指向已验证兼容的 CLI 的绝对路径；桌面与 worker 使用相同账号和预期的 `CODEX_HOME`。升级 CLI 后检查后台仍引用的旧路径。不同版本号不一定有问题，最终以协议能力和实际连接为准。
 
-3. **连接桌面实际使用的公开共享 writer。** 按所装桌面版本支持的方式启用共享连接，在桥接的 `runtime.env` 中指定该公开端点，例如：
+3. **将所有客户端连接到桌面 app-server。** 在最新版桌面 App 中按该版本支持的方式启用共享连接；CLI、VS Code 插件按各自配置连接同一端点，Codex worker 在 profile 的 `runtime.env` 中指定，例如：
 
    ```text
    CODEX_HOME='/absolute/path/to/.codex'
    CODEX_QUEUE_REMOTE='unix:///absolute/path/to/.codex/app-server-control/app-server-control.sock'
    ```
 
-   路径须替换为本机真实值；仅当该 socket 确实属于桌面使用的共享 writer 时，这个配置才解决运行时不同步。端点格式见 [官方 app-server 传输说明](https://learn.chatgpt.com/docs/app-server)。若旧桌面只提供自己的私有连接，先升级到兼容版本并按该版本支持的共享方式配置；不能只靠修改桥接端点强行接入私有连接，也不要猜测桌面启动参数。暂时使用独立 daemon 时，飞书可独立执行，但不应把桌面实时同步视为已验收。
+   路径须替换为本机真实值；仅当该 socket 确实属于桌面使用的共享 writer 时，这个配置才解决运行时不同步。端点格式见 [官方 app-server 传输说明](https://learn.chatgpt.com/docs/app-server)。若旧桌面只提供自己的私有连接，先升级到兼容版本并按该版本支持的共享方式配置；不能只靠修改桥接端点强行接入私有连接，也不要猜测桌面启动参数。其他客户端也必须实际连接该端点，不能只统一账号和历史目录。
 
 4. **加载配置并验收。** 如果修改了 worker 的环境或 CLI 路径，按上节在维护窗口单独重新启动 Codex worker；只改桥接配置时仅重启桥接。然后执行 `node bin/lark-channel-bridge.mjs doctor --profile my-bot --agents codex --runtime --network` 检查公开端点，再在同一个个人工作群和桌面会话分别发送一条测试消息，确认双向显示、停止与交互都作用于同一会话。doctor 通过只证明连接与认证，不证明桌面已共用该实例。确需升级/重启桌面或 writer 时，另行安排维护；日常桥接部署不要连带重启它们，也不要删除会话、队列或回复账本来修复连接问题。
 
-Codex writer 准备好后，还必须启动 **Codex worker**（daemon 不是 worker）：
+桌面 App 的共享 app-server 准备好后，还必须启动 **Codex worker**（worker 是连接它的适配服务，不是另一个执行 writer）：
 
 ```bash
 node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool codex
@@ -349,7 +344,7 @@ Node >=20.12（推荐 24）、npm、Git 和 tar 需已安装，用户 systemd �
 | 版本达标但能力失败 | PATH 指向了其他 CLI/不兼容发行版；按 doctor 的具体命令修复 |
 | 前台正常后台失败 | 核对 runtime.env、服务 Node 路径、CLI 路径及运行 OS 用户 |
 | Claude worker 身份不匹配 | 同一 profile/app 和 CLAUDE_CONFIG_DIR，不能跨用户读取别人的 worker |
-| Codex 提示另一个 writer 占用 | 按第 6 节专门排查，连接原共享 writer；不杀进程、不删账本 |
+| Codex 提示另一个 writer 占用 | 按第 6 节安装最新版桌面 App，所有客户端共用桌面 app-server；保留历史与账本 |
 | Claude 提示该会话正在另一个进程运行 | 该 session ID 已由原终端占用；在原终端结束该会话后再重发。同目录的其他会话不再拦截，见下文 |
 | Codex 只有历史没有执行 | 核对真实 writer、公开端点及目录；不是重装 npm 依赖能解决 |
 | 飞书能执行但 Codex 桌面不刷新，停止/交互无法作用于桌面任务 | 排查旧 CLI 或不同 app-server；见第 6 节“旧版 CLI 与桌面 App 未共用 app-server” |

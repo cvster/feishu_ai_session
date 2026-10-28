@@ -153,7 +153,7 @@ node bin/lark-channel-bridge.mjs profile create my-bot \
 
 ### 启动 worker 与桥接
 
-每个使用的工具都需启动 worker；只启动实际使用的工具。Codex 还需要可用的公开共享 writer，先按[安装指引](docs/INSTALL.md#codex)核对现有执行端，日常部署不另起 writer。桥接自动扫描 `profiles/<profile>/workers/*/endpoint.json`，从健康接口读取工具和能力；只用 Kilo 时无需安装 Codex。配置放在对应 worker 的 `config.json`。详见 [统一接口](docs/WORKER_API.md) 和 [迁移步骤](docs/WORKER_MIGRATION.md)。
+每个使用的工具都需启动 worker；只启动实际使用的工具。Codex 推荐安装最新版桌面 App，只保留桌面 App 的 app-server 作为执行端，CLI、VS Code 插件和 worker 全部连接它，配置见[安装指引](docs/INSTALL.md#codex)；日常部署不另起 writer。桥接自动扫描 `profiles/<profile>/workers/*/endpoint.json`，从健康接口读取工具和能力；只用 Kilo 时无需安装 Codex。配置放在对应 worker 的 `config.json`。详见 [统一接口](docs/WORKER_API.md) 和 [迁移步骤](docs/WORKER_MIGRATION.md)。
 
 ```bash
 node bin/lark-channel-bridge.mjs worker start --profile my-bot --tool codex
