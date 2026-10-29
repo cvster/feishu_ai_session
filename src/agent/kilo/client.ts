@@ -1,13 +1,11 @@
 import { request as httpRequest, type ClientRequest } from 'node:http';
 import { StringDecoder } from 'node:string_decoder';
-import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createInterface } from 'node:readline';
-import { spawnProcess, mergeProcessEnv } from '../../platform/spawn';
-import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
 import { findKiloEditorServer, type KiloEditorServer, type KiloClientMode } from './editor-server';
+import { acquireKiloStandaloneServer, type KiloStandaloneLease } from './standalone-server';
+import type { LarkChannelEnvContext } from '../lark-channel-env';
 
 export interface KiloOptions { binary?: string; args?: readonly string[]; dataHome?: string; editorSync?: boolean; client?: KiloClientMode; larkChannel?: LarkChannelEnvContext }
 export function kiloStorageDir(options: KiloOptions = {}): string {
@@ -40,8 +38,8 @@ export function kiloSessionId(id: string): string {
 
 /** Prefers the matching editor backend for realtime UI events; never owns or stops that process. */
 export class KiloClient {
-  private child?: ReturnType<typeof spawnProcess>;
-  private authorization = `Basic ${Buffer.from(`kilo:${randomBytes(32).toString('hex')}`).toString('base64')}`;
+  private authorization = '';
+  private lease?: KiloStandaloneLease;
   private readonly ready: Promise<string>;
   private readonly streams = new Set<ClientRequest>();
   private closed = false;
@@ -65,27 +63,13 @@ export class KiloClient {
     if (editor && editor.client !== (this.mode === 'app' ? 'desktop' : 'vscode')) throw new Error('Kilo 后端与配置模式不匹配，不处理 Kilo App 与插件的跨模式会话');
     if (editor) { this.attached = editor; this.authorization = editor.authorization; return editor.url; }
     if (this.mode === 'app') throw new Error('Kilo App 后端未启动；未切换到 VS Code 或 CLI');
-    this.child = spawnProcess(command.binary, [...command.args, 'serve', '--hostname', '127.0.0.1', '--port', '0'], {
-      cwd, env: mergeProcessEnv(process.env, { ...buildLarkChannelEnv(options.larkChannel),
-        KILO_SERVER_USERNAME: 'kilo', KILO_SERVER_PASSWORD: Buffer.from(this.authorization.slice(6), 'base64').toString().slice(5),
-        ...(options.dataHome ? { XDG_DATA_HOME: resolve(options.dataHome) } : {}),
-      }), stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    this.child.stderr!.on('data', () => {}); // Native diagnostics may contain provider secrets; never forward them.
-    const lines = createInterface({ input: this.child.stdout! });
-    const ready = new Promise<string>((resolveReady, reject) => {
-      const timer = setTimeout(() => { reject(new Error('Kilo 服务启动超时')); void this.close(); }, 30_000);
-      const finish = (error?: Error, url?: string) => { clearTimeout(timer); error ? reject(error) : resolveReady(url!); };
-      lines.on('line', line => {
-        const match = /server listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(line);
-        if (match) finish(undefined, match[1]);
-      });
-      this.child!.once('error', () => finish(new Error('Kilo 服务无法启动，请检查可执行文件')));
-      this.child!.once('close', () => finish(new Error('Kilo 服务已退出')));
-    });
-    this.child.once('error', () => this.exit());
-    this.child.once('close', () => { lines.close(); this.exit(); });
-    return ready;
+    // Share one standalone backend per binary/database instead of spawning one per session.
+    const lease = await acquireKiloStandaloneServer(options, cwd, command);
+    if (this.closed) { lease.release(); throw new Error('Kilo 连接已关闭'); }
+    this.lease = lease;
+    this.authorization = lease.authorization;
+    void lease.exited.then(() => this.exit());
+    return lease.url;
   }
   async sessionCreationMetadata(): Promise<Record<string, unknown> | undefined> {
     await this.ready;
@@ -166,10 +150,7 @@ export class KiloClient {
   async close(): Promise<void> {
     if (this.closed) return; this.closed = true;
     for (const req of this.streams) req.destroy();
-    if (!this.child) { this.exit(); return; }
-    this.child.kill('SIGTERM');
-    const child = this.child;
-    const timer = setTimeout(() => child.kill('SIGKILL'), 5000); timer.unref();
-    await this.exited; clearTimeout(timer);
+    this.lease?.release();
+    this.exit();
   }
 }

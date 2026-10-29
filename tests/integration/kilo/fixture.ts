@@ -3,11 +3,18 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach } from 'vitest';
 import { KiloAdapter } from '../../../src/agent/kilo/adapter';
+import { closeKiloStandaloneServers } from '../../../src/agent/kilo/standalone-server';
+// Standalone backends are shared per process; release them as soon as the last lease is gone so
+// every test starts from a clean engine instead of inheriting the previous one.
+process.env.LARK_CHANNEL_KILO_IDLE_MS = '0';
 const roots: string[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+afterEach(async () => {
+  closeKiloStandaloneServers();
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
 export async function fixture(kind = 'normal') {
   const root = await mkdtemp(join(tmpdir(), 'kilo-protocol-')); roots.push(root);
-  const path = join(root, 'cli.cjs'), calls = join(root, 'calls.jsonl'), state = join(root, 'state.json');
+  const path = join(root, 'cli.cjs'), calls = join(root, 'calls.jsonl'), state = join(root, 'state.json'), spawned = join(root, 'spawned.jsonl');
   const seeded: any = { sessions: { ses_source: { id: 'ses_source', title: 'AA-Kilo', directory: root,
     time: { created: 1, updated: 2 }, model: { providerID: 'original', id: 'model/path', variant: 'native-level' } } }, messages: {},
     config: { model: 'other/model' }, providers: { connected: ['original', 'other'], default: { original: 'model/path', other: 'model' }, all: [
@@ -29,6 +36,7 @@ export async function fixture(kind = 'normal') {
   await writeFile(path, `
     const fs = require('node:fs'), http = require('node:http');
     if (process.argv.includes('--version')) { console.log('7.8.8'); process.exit(); }
+    fs.appendFileSync(${JSON.stringify(spawned)}, JSON.stringify({ pid: process.pid, at: Date.now() })+'\\n');
     const statePath = ${JSON.stringify(state)}, callsPath = ${JSON.stringify(calls)}, kind = ${JSON.stringify(kind)};
     const load = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
     const save = value => fs.writeFileSync(statePath, JSON.stringify(value));
@@ -113,6 +121,7 @@ export async function fixture(kind = 'normal') {
   const options = { binary: process.execPath, args: [path], dataHome: join(root, 'data') };
   const agent = new KiloAdapter(options);
   const read = async () => (await readFile(calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const spawns = async (): Promise<{ pid: number; at: number }[]> => (await readFile(spawned, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
   const update = async (change: (value: any) => void) => { const value = JSON.parse(await readFile(state, 'utf8')); change(value); await writeFile(state, JSON.stringify(value)); };
-  return { root, agent, options, read, update };
+  return { root, agent, options, read, spawns, update };
 }
