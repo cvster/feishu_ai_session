@@ -147,6 +147,8 @@ export class BridgeConsoleService {
         }
       }
     }));
+    const forgottenChats = new Set<string>();
+    const closedPersonal: string[] = [];
     const bindings = refs.flatMap(b => {
       const o = this.observations.get(b.toolId), group = chats.get(b.scope);
       const native = o?.sourceId === b.sourceId && o.nativeKnown ? o.native.find(r => r.nativeId === b.nativeId) : undefined;
@@ -171,8 +173,12 @@ export class BridgeConsoleService {
         !o?.online ? 'Worker 离线' : !sameWorker ? 'Worker 身份不匹配' : !o.nativeKnown ? '原生会话列表读取失败' :
         probe?.issue ?? (!o.health?.capabilities?.conversation ? 'Worker 不支持会话状态读取' : '尚未检查');
       const sessionInspection: StateInspection = { result, attemptedAt: now, checkedAt: sessionEvidence?.checkedAt, ...(reason ? { reason } : {}) };
-      // Hide only pairs with confirmed closed states; a failed read never creates either state.
-      if (sessionState === 'archived' && groupState === 'dissolved') return [];
+      // Forget the relationship only after both closures are confirmed. Failed
+      // probes retain the last evidence but cannot trigger permanent cleanup.
+      if (sessionState === 'archived' && groupState === 'dissolved') {
+        if (groupNow === 'dissolved' && sessionNow === 'archived') closedPersonal.push(b.scope);
+        return [];
+      }
       const issues = [groupInspection.result !== 'ok' ? groupInspection.reason : '', sessionInspection.reason,
         groupNow === 'active' && sessionNow === 'active' && native?.name && group?.name && native.name !== group.name ? '群名与会话名不一致' : ''].filter((v): v is string => !!v);
       const verified = groupInspection.result === 'ok' && sessionInspection.result === 'ok';
@@ -187,6 +193,13 @@ export class BridgeConsoleService {
         canSync: verified && !!this.deps.syncNames && groupState === 'active' && sessionState === 'active' && o?.online === true && o.nativeKnown && !!native &&
           o.sourceId === b.sourceId && o.health?.capabilities?.nativeSessionNames === true }];
     });
+    for (const chatId of closedPersonal) {
+      if (!this.deps.cleanDissolvedGroup) continue;
+      await this.deps.cleanDissolvedGroup(chatId);
+      this.deps.catalog?.unlinkChat(chatId);
+      await this.deps.catalog?.flush();
+      forgottenChats.add(chatId);
+    }
     const items = this.items();
     const sharedTargets = [...this.observations.values()].flatMap(o => o.online && o.nativeKnown && o.sourceId ?
       o.native.filter(s => c.auxiliary?.shareable?.(o.id, o.sourceId!, s)).flatMap(s => {
@@ -206,8 +219,11 @@ export class BridgeConsoleService {
       const groupState: GroupState | undefined = ['dissolved', 'dissolved_save'].includes(group?.status ?? '') ? 'dissolved' : connected ? 'active' : undefined;
       const sessionState: SessionState | undefined = native ? native.archived ? 'archived' : 'active' : sessionArchived ? 'archived' :
         ref && o?.online && o.nativeKnown && o.sourceId === ref.sourceId ? this.sessionChecks.get(checkKey({ ...ref, scope: row.chatId }))?.state : undefined;
-      const closed = row.status === 'archived' || !!group && !group.error && !connected;
-      if (ref && sessionArchived && closed && await c.auxiliary!.removeClosedGroup(row.chatId, row.generation, ref)) return undefined;
+      const closed = row.status === 'archived' || ['dissolved', 'dissolved_save', 'unavailable'].includes(group?.status ?? '');
+      if (ref && sessionArchived && closed && await c.auxiliary!.removeClosedGroup(row.chatId, row.generation, ref)) {
+        forgottenChats.add(row.chatId);
+        return undefined;
+      }
       const routeWorker = binding ? this.observations.get(binding.toolId) : undefined;
       const busy = items.some(i => i.scope === row.chatId && ['pending', 'queued', 'accepted', 'running'].includes(i.status));
       const issues = [group?.error && row.status !== 'archived' ? '群状态未确认' : '',
@@ -236,7 +252,11 @@ export class BridgeConsoleService {
         pending: items.filter(i => i.toolId === id && ['queued', 'pending'].includes(i.status)).length };
     });
     if (this.owner() !== owner) throw new WebError(409, '所有者已变化，请刷新');
-    await this.states.save(new Set([...sessionRefs.map(checkKey), ...refs.map(b => groupKey(b.scope))]));
+    const retainedRefs = [...refs, ...sharedRows.flatMap(row => row.source ? [{ scope: row.chatId, ...row.source }] : [])]
+      .filter(b => !forgottenChats.has(b.scope));
+    const retainedChecks = new Set(retainedRefs.map(checkKey));
+    for (const key of this.sessionChecks.keys()) if (!retainedChecks.has(key)) this.sessionChecks.delete(key);
+    await this.states.save(new Set([...retainedChecks, ...retainedRefs.map(b => groupKey(b.scope))]));
     return { at: Date.now(), bridge: { profile: c.profile, uptimeSeconds: Math.floor(process.uptime()),
       connection: this.deps.channel.getConnectionStatus?.()?.state ?? 'unknown' },
       summary: { workers: workers.length, online: workers.filter(w => w.online).length, bindings: bindings.length,
@@ -314,6 +334,8 @@ export class BridgeConsoleService {
             this.deps.catalog?.archiveNativeSession(current.toolId, current.nativeId!, current.sourceId, true);
             await Promise.all([c.toolBindings!.flush(), this.deps.catalog?.flush()]);
           }
+          this.deps.catalog?.unlinkChat(current.chatId);
+          await this.deps.catalog?.flush();
         } catch (e) {
           if (e instanceof WebError) throw e;
           throw new WebError(409, clean(action === 'personal-dissolve' ? describeChatDeletionError(e) : e instanceof Error ? e.message : e));
@@ -336,6 +358,7 @@ export class BridgeConsoleService {
               await replies.stopScope(row.chatId);
             }
           }, row.generation);
+          if (row.source) await c.auxiliary.removeClosedGroup(row.chatId, row.generation, row.source);
         } else {
           if (!target || !snapshot.sharedTargets.some(s => s.id === target) || !snapshot.sharedGroups.find(g => g.id === id)?.canBind)
             throw new WebError(409, '此辅助群或目标会话当前不可切换，请刷新');

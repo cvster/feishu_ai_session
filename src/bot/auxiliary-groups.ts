@@ -311,11 +311,16 @@ export class AuxiliaryGroups {
     return this.serial(chatId, () => this.serial(`source:${this.sourceKey(source)}`, async () => {
       const row = this.records[chatId];
       if (!row?.source || row.generation !== generation || this.sourceKey(row.source) !== this.sourceKey(source)) return false;
-      await this.deps.cancelPending(chatId);
-      for (const entry of this.deps.catalog?.entries().filter(e => e.scopeId === chatId && e.status === 'active') ?? [])
-        this.deps.catalog!.archiveActive(entry);
+      const belongs = (scope: string) => scope === chatId || scope.startsWith(`${chatId}:`);
+      const scopes = new Set([chatId, ...this.deps.bindings.entries().map(([scope]) => scope).filter(belongs),
+        ...(this.deps.catalog?.entries().map(e => e.scopeId).filter(belongs) ?? []),
+        ...this.deps.sessions.scopeIds().filter(belongs), ...Object.keys(this.deps.workspaces.listCwds()).filter(belongs)]);
+      for (const scope of scopes) {
+        await this.deps.cancelPending(scope);
+        this.deps.sessions.remove(scope); this.deps.workspaces.removeCwd(scope);
+      }
+      this.deps.catalog?.unlinkChat(chatId);
       this.deps.bindings.removeChat(chatId);
-      this.deps.sessions.remove(chatId); this.deps.workspaces.removeCwd(chatId);
       await Promise.all([this.deps.bindings.flush(), this.deps.catalog?.flush(), this.deps.sessions.flush(), this.deps.workspaces.flush()]);
       delete this.records[chatId];
       for (const [key, intent] of Object.entries(this.privateCreations)) if (intent.chatId === chatId) delete this.privateCreations[key];

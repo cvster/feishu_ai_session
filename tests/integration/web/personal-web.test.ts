@@ -925,7 +925,7 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('console manages p
   expect(current).toMatchObject({ canLeave: true, sessionArchived: true });
   const stop = vi.fn(async () => false); h.controls.workerRuntimes!.get(tool)!.replies = { runNow: async () => {}, stopScope: stop };
   expect((await h.request('/api/console/action', { action: 'shared-leave', id: current.id })).status).toBe(200);
-  expect(stop).toHaveBeenCalledWith('oc_shared'); expect(groups.get('oc_shared')!.status).toBe('archived');
+  expect(stop).toHaveBeenCalledWith('oc_shared'); expect(groups.get('oc_shared')).toBeUndefined();
   expect((await h.consoleService.snapshot(true)).sharedGroups).toEqual([]);
   expect(groups.get('oc_shared')).toBeUndefined();
   expect(vi.mocked(h.channel.rawClient.im.v1.chatMembers.delete)).toHaveBeenCalledWith({ path: { chat_id: 'oc_shared' }, params: { member_id_type: 'app_id' }, data: { id_list: ['cli_test'] } });
@@ -983,7 +983,7 @@ it('console keeps shared leave failures recoverable and rejects cross-site or un
   expect((await h.request('/api/console/action', { action: 'shared-leave', id })).status).toBe(409);
   expect(groups.get('oc_shared')?.status).toBe('leaving');
   expect((await h.request('/api/console/action', { action: 'shared-leave', id })).status).toBe(200);
-  expect(groups.get('oc_shared')?.status).toBe('archived'); expect(h.provider.archive).not.toHaveBeenCalled();
+  expect(groups.get('oc_shared')).toBeUndefined(); expect(h.provider.archive).not.toHaveBeenCalled();
 });
 
 it('console preserves historical missing or unknown receipts without counting them as active work or replaying them during a switch', async () => {
@@ -1007,7 +1007,7 @@ it('console preserves historical missing or unknown receipts without counting th
 });
 
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('AI group management reconciles both sides of %s through the same interfaces and retains dissolved associations', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('AI group management forgets archived and dissolved %s relationships permanently', async tool => {
   const h = await harness(tool); await h.replies.stop();
   let row = (await h.consoleService.snapshot(true)).bindings[0]!;
   expect(row).toMatchObject({ groupState: 'active', sessionState: 'active', canDissolve: false, canArchive: false });
@@ -1020,17 +1020,16 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('AI group manageme
   expect(deletion).toHaveBeenCalledTimes(1); expect(h.bindings.get('oc_group')).toBeUndefined();
   h.catalog.gc({ now: Date.now() + 100 * 86400_000 }); await h.catalog.flush();
   const restored = new SessionCatalog(join(h.dir, 'catalog.json')); await restored.load();
-  expect(restored.dissolvedPersonalGroups()).toHaveLength(1);
+  expect(restored.dissolvedPersonalGroups()).toHaveLength(0);
+  expect(restored.entries().filter(r => r.scopeId === 'oc_group')).toEqual([]);
+  expect(restored.isChatDissolved('oc_group')).toBe(true);
+  expect(restored.isAutoGroupSuppressed(tool, h.client.sourceId, 'native')).toBe(true);
   row = (await h.consoleService.snapshot(true)).bindings[0]!;
   expect(row).toBeUndefined();
   h.native.archived = false;
-  row = (await h.consoleService.snapshot(true)).bindings[0]!;
-  expect(row).toMatchObject({ groupState: 'dissolved', sessionState: 'active', canDissolve: false, canArchive: true });
-  expect((await h.request('/api/console/action', { action: 'personal-archive', id: row.id })).status).toBe(200);
-  expect(h.provider.archive).toHaveBeenCalledWith('native');
-  expect((await h.consoleService.snapshot(true)).bindings).toHaveLength(0);
-  expect((await h.request('/api/console/action', { action: 'personal-archive', id: row.id })).status).toBe(409);
-  expect(h.provider.archive).toHaveBeenCalledTimes(1); expect(h.calls).toHaveLength(0);
+  expect((await h.makeConsole().snapshot(true)).bindings).toHaveLength(0);
+  expect(h.provider.archive).not.toHaveBeenCalled(); expect(h.calls).toHaveLength(0);
+  expect(JSON.parse(await readFile(join(h.dir, 'management-state.json'), 'utf8')).records).toEqual({});
 });
 
 it('AI group management excludes shared, private and topic routes and shows one row for each last personal binding', async () => {
@@ -1040,6 +1039,47 @@ it('AI group management excludes shared, private and topic routes and shows one 
   const snapshot = await h.consoleService.snapshot(true);
   expect(snapshot.bindings.map(b => b.scope)).toEqual(['oc_group']);
   expect(snapshot.sharedGroups.map(g => g.chatId)).toContain('oc_shared');
+});
+
+it('purges historical and topic relationships of an externally closed AI group while preserving shared peers', async () => {
+  const h = await harness(); await h.replies.stop();
+  const original = h.catalog.entries().find(r => r.scopeId === 'oc_group')!;
+  h.catalog.upsertActive({ ...original, sessionId: 'previous', policyFingerprint: 'previous' });
+  h.catalog.upsertActive({ ...original, policyFingerprint: 'latest' });
+  h.catalog.upsertActive({ ...original, scopeId: 'oc_group:topic' });
+  const source = { toolId: 'kilo' as const, sourceId: h.client.sourceId, nativeId: 'native' };
+  h.bindings.set('oc_peer', { ...source, linkedSource: source });
+  h.catalog.upsertActive({ ...original, scopeId: 'oc_peer' });
+  vi.mocked(h.channel.rawClient.im.v1.chat.get).mockImplementation(async ({ path }: any) =>
+    path.chat_id === 'oc_group' ? { code: 232009 } : { code: 0, data: { chat_mode: 'group' } } as any);
+  // A dissolved group with an active session still needs its last relationship.
+  expect((await h.consoleService.snapshot(true)).bindings.find(r => r.scope === 'oc_group')?.sessionState).toBe('active');
+  h.native.archived = true;
+  const snapshot = await h.consoleService.snapshot(true);
+  expect(snapshot.bindings).toEqual([]);
+  expect(h.bindings.get('oc_group')).toBeUndefined();
+  expect(h.catalog.entries().some(r => r.scopeId.split(':')[0] === 'oc_group')).toBe(false);
+  expect(h.catalog.entries().find(r => r.scopeId === 'oc_peer')).toBeDefined();
+  expect(h.bindings.get('oc_peer')?.nativeId).toBe('native');
+  const restored = new SessionCatalog(join(h.dir, 'catalog.json')); await restored.load();
+  expect(restored.dissolvedPersonalGroups()).toEqual([]);
+  expect(restored.isChatDissolved('oc_group')).toBe(true);
+  expect(h.provider.archive).not.toHaveBeenCalled();
+});
+
+it('retains closed AI group history until archival can be freshly verified', async () => {
+  const h = await harness(); await h.replies.stop();
+  h.native.archived = true;
+  await h.consoleService.snapshot(true);
+  await cleanDissolvedChat({ channel: h.channel, controls: h.controls, catalog: h.catalog, sessions: h.sessions,
+    workspaces: h.workspaces, cancelPending: async () => {} }, 'oc_group');
+  const health = vi.spyOn(h.client, 'health').mockRejectedValue(Error('offline'));
+  expect((await h.consoleService.snapshot(true)).bindings).toEqual([]);
+  expect(h.catalog.dissolvedPersonalGroups()).toHaveLength(1);
+  health.mockRestore();
+  await h.consoleService.snapshot(true);
+  expect(h.catalog.dissolvedPersonalGroups()).toEqual([]);
+  expect(h.catalog.entries().filter(r => r.scopeId === 'oc_group')).toEqual([]);
 });
 
 it.each(['permission', 'network', 'missing-data', 'worker', 'identity'] as const)('AI group actions fail closed for %s state instead of treating uncertainty as dissolution', async failure => {
@@ -1094,7 +1134,8 @@ it('archives a proven dissolved chat before scanning without enqueueing a notifi
   const row = (await h.consoleService.snapshot(true)).bindings[0]!;
   expect((await h.request('/api/console/action', { action: 'personal-archive', id: row.id })).status).toBe(200);
   expect(h.catalog.pendingArchiveNotifications()).toHaveLength(0); expect(h.catalog.isChatDissolved('oc_group')).toBe(true);
-  expect(h.catalog.dissolvedPersonalGroups()).toHaveLength(1); expect(h.bindings.get('oc_group')).toBeUndefined();
+  expect(h.catalog.dissolvedPersonalGroups()).toHaveLength(0); expect(h.bindings.get('oc_group')).toBeUndefined();
+  expect(h.catalog.entries().filter(r => r.scopeId === 'oc_group')).toEqual([]);
 });
 
 
@@ -1393,6 +1434,11 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('opens %s settings
 it('removes only confirmed closed shared groups with archived sources and persists cleanup without removing peer groups', async () => {
   const h = await harness(); await h.replies.stop(); const groups = await managedShared(h), row = groups.get('oc_shared')!;
   await groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'native' }, async () => {});
+  const original = h.catalog.entries().find(r => r.scopeId === 'oc_group')!;
+  h.catalog.upsertActive({ ...original, scopeId: 'oc_shared', sessionId: 'previous' });
+  await groups.prepareScope('oc_shared', { ...original, scopeId: 'oc_shared' });
+  h.catalog.upsertActive({ ...original, scopeId: 'oc_shared:topic' });
+  h.sessions.set('oc_shared:topic', 'native', h.dir); h.workspaces.setCwd('oc_shared:topic', h.dir);
   const chatGet = vi.mocked(h.channel.rawClient.im.v1.chat.get);
   chatGet.mockImplementation(async ({ path }: any) => path.chat_id === 'oc_shared'
     ? { code: 0, data: { name: '机器人已退出', chat_status: 'normal' } } as any
@@ -1406,13 +1452,22 @@ it('removes only confirmed closed shared groups with archived sources and persis
   expect((await h.consoleService.snapshot(true)).sharedGroups).toHaveLength(1);
   expect(groups.get('oc_shared')).toBeDefined();
   chatGet.mockImplementation(async ({ path }: any) => path.chat_id === 'oc_shared'
+    ? { code: 0, data: { name: '群状态不完整', chat_status: 'normal' } } as any
+    : { code: 0, data: { name: '个人群', chat_mode: 'group' } } as any);
+  expect((await h.consoleService.snapshot(true)).sharedGroups).toHaveLength(1);
+  expect(h.catalog.entries().some(r => r.scopeId === 'oc_shared')).toBe(true);
+  chatGet.mockImplementation(async ({ path }: any) => path.chat_id === 'oc_shared'
     ? { code: 232011 } as any : { code: 0, data: { name: '个人群', chat_mode: 'group' } } as any);
   const snapshot = await h.consoleService.snapshot(true);
   expect(snapshot.sharedGroups).toEqual([]); expect(snapshot.summary.sharedGroups).toBe(0);
   expect(groups.get('oc_shared')).toBeUndefined(); expect(h.bindings.get('oc_shared')).toBeUndefined();
+  expect(h.catalog.entries().filter(r => r.scopeId.split(':')[0] === 'oc_shared')).toEqual([]);
+  expect(h.sessions.getRaw('oc_shared:topic')).toBeUndefined(); expect(h.workspaces.cwdFor('oc_shared:topic')).toBeUndefined();
   expect(h.bindings.get('oc_group')?.nativeId).toBe('native'); expect(h.provider.archive).not.toHaveBeenCalled();
   const stored = JSON.parse(await readFile(join(h.dir, 'managed-groups.json'), 'utf8'));
   expect(JSON.stringify(stored.groups)).not.toContain('oc_shared');
+  const restored = new SessionCatalog(join(h.dir, 'catalog.json')); await restored.load();
+  expect(restored.entries().filter(r => r.scopeId.split(':')[0] === 'oc_shared')).toEqual([]);
 });
 
 

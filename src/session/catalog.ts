@@ -64,7 +64,7 @@ export interface SessionArchiveNotification {
   sendingAt?: number;
 }
 
-/** A closed chat retains its last personal relationship independently of route-history GC. */
+/** A dissolved chat retains its last relationship until native archival is also confirmed. */
 export interface DissolvedPersonalGroup {
   chatId: string; agentId: CatalogAgentId; sourceId: string; nativeId: string;
   name?: string; cwd?: string; botAppId?: string; boundAt?: number;
