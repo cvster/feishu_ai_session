@@ -6,6 +6,7 @@ import { resolveReasoningEffort } from '../models';
 import { checkAgentAvailability } from '../preflight';
 import { KiloClient, KiloHttpError, kiloCommand, kiloSessionId, type KiloOptions } from './client';
 import { listKiloModels, readKiloModels, splitKiloModel } from './models';
+import { waitForKiloSessionIdle } from './session-status';
 
 export function kiloPermissions(mode: AgentRunOptions['accessMode'] | AgentRunOptions['sandbox']) {
   const rule = (permission: string, action: 'allow' | 'ask' | 'deny') => ({ permission, pattern: '*', action });
@@ -102,12 +103,18 @@ export class KiloAdapter implements AgentAdapter {
     };
     const task = (async () => {
       try {
-        let info = opts.sessionId ? await client.request('GET', `/session/${kiloSessionId(opts.sessionId)}`, undefined, opts.cwd) : undefined;
-        if (info && (info.id !== opts.sessionId || resolve(info.directory) !== resolve(opts.cwd!))) throw new Error('Kilo 原会话或工作目录不匹配');
-        if (info?.time?.archived) throw new Error('Kilo 会话已归档');
+        const requireSession = (value: any) => {
+          if (value.id !== opts.sessionId || resolve(value.directory) !== resolve(opts.cwd!)) throw new Error('Kilo 原会话或工作目录不匹配');
+          if (value.time?.archived) throw new Error('Kilo 会话已归档');
+          return value;
+        };
+        let info = opts.sessionId ? requireSession(await client.request('GET', `/session/${kiloSessionId(opts.sessionId)}`, undefined, opts.cwd)) : undefined;
         if (info) {
-          const statuses = await client.request('GET', '/session/status', undefined, opts.cwd);
-          if (statuses[info.id] && statuses[info.id].type !== 'idle') throw new Error('Kilo 会话正在运行，请先在原入口停止');
+          // Another entry may still be running this session: queue behind that turn instead of
+          // failing, and ignore status entries left behind by turns that already ended.
+          await waitForKiloSessionIdle(client, info.id, opts.cwd, () => stopping);
+          if (stopping) { push({ type: 'done', sessionId: info.id, terminationReason: 'interrupted' }); return; }
+          info = requireSession(await client.request('GET', `/session/${kiloSessionId(info.id)}`, undefined, opts.cwd));
         }
         const { options, selected, variant: defaultVariant } = await readKiloModels(client, opts.cwd);
         let model = opts.model ?? (info?.model?.providerID && info.model.id ? `${info.model.providerID}/${info.model.id}` : undefined);

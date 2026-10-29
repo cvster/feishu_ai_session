@@ -63,7 +63,9 @@ Linux 服务名为 `lark-channel-worker.kilo.my-bot.service`。其他系统使�
 - 原生权限和交互弹窗未转接飞书，不自动同意；受限操作的所有者确认卡继续沿用
   会话共享业务逻辑。权限约束不是操作系统沙箱。
 - 共享 VS Code 后端的工具、MCP 和 CLI 环境由 VS Code 管理；独立 worker 环境需要
-  `editorSync: false`。连接关闭不终止编辑器。原生界面与飞书并发写同一会话仍需避免。
+  `editorSync: false`。连接关闭不终止编辑器。原生界面或另一入口正在跑同一会话时，
+  飞书输入排队等那一轮结束再提交，不会直接失败；只把「状态非 idle 且原生最后一条
+  消息未完成」判为运行中，已结束却残留的状态条目不阻塞输入。
 - 桥接重启脱离观察，worker 继续任务；worker/主机重启不保证保活，未知收据不重跑。
 
 [统一接口](WORKER_API.md) · [迁移步骤](WORKER_MIGRATION.md) ·

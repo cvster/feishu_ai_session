@@ -47,12 +47,51 @@ it('passes arbitrary native reasoning levels with the explicitly chosen model', 
   try { expect((await reader.read('ses_source')).turns.at(-1)?.state.execution).toEqual({ model: 'other/model', reasoningEffort: 'high' }); }
   finally { await reader.close(); }
 });
-it.each(['busy', 'interaction', 'disconnect', 'rejected'])('reports %s without resubmission or automatic native approval', async kind => {
+it.each(['interaction', 'disconnect', 'rejected'])('reports %s without resubmission or automatic native approval', async kind => {
   const h = await fixture(kind); const events = await collect(h, { sessionId: 'ses_source' });
   expect(events.at(-1)?.type).toBe('error');
-  const calls = await h.read(); expect(calls.filter(c => c.path.endsWith('/prompt_async')).length).toBe(kind === 'busy' ? 0 : 1);
+  const calls = await h.read(); expect(calls.filter(c => c.path.endsWith('/prompt_async')).length).toBe(1);
   expect(calls.some(c => c.path.includes('/reply'))).toBe(false);
-  if (kind === 'busy') expect(calls.some(c => c.method === 'PATCH')).toBe(false);
+});
+
+it('queues behind a turn another entry is still running instead of failing', async () => {
+  const h = await fixture('busy'); const run = h.agent.run({ runId: 'queued', cwd: h.root, prompt: '排队', sessionId: 'ses_source' });
+  const events: AgentEvent[] = []; let polls = 0;
+  setTimeout(() => void run.stop(), 1500);
+  for await (const event of run.events) events.push(event);
+  expect(await run.waitForExit(3000)).toBe(true);
+  expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'interrupted' });
+  const calls = await h.read(); polls = calls.filter(c => c.path === '/session/status').length;
+  expect(polls).toBeGreaterThan(1); // it waited and re-checked instead of failing outright
+  expect(calls.some(c => c.path.endsWith('/prompt_async'))).toBe(false);
+  expect(calls.some(c => c.path.endsWith('/abort'))).toBe(false);
+});
+
+it('submits once the turn running elsewhere has ended', async () => {
+  const h = await fixture('queued'); const events = await collect(h, { sessionId: 'ses_source' });
+  expect(events.filter(e => e.type === 'text').map(e => e.delta).join('')).toBe('KILO_READY');
+  expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'normal' });
+  const calls = await h.read();
+  expect(calls.filter(c => c.path === '/session/status').length).toBeGreaterThan(1);
+  expect(calls.filter(c => c.path.endsWith('/prompt_async'))).toHaveLength(1);
+});
+
+it('does not wait for a turn that died mid-flight and never moved again', async () => {
+  const h = await fixture('abandoned'); const events = await collect(h, { sessionId: 'ses_source' });
+  expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'normal' });
+  const calls = await h.read();
+  expect(calls.filter(c => c.path === '/session/status')).toHaveLength(1);
+  expect(calls.filter(c => c.path.endsWith('/prompt_async'))).toHaveLength(1);
+});
+
+it('ignores a busy status left behind by a turn that already finished', async () => {
+  const h = await fixture('stale-busy'); const started = Date.now();
+  const events = await collect(h, { sessionId: 'ses_source' });
+  expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'normal' });
+  expect(Date.now() - started).toBeLessThan(4000); // no queueing on a stale entry
+  const calls = await h.read();
+  expect(calls.filter(c => c.path === '/session/status')).toHaveLength(1);
+  expect(calls.filter(c => c.path.endsWith('/prompt_async'))).toHaveLength(1);
 });
 it('stops only its own run and never sends a second prompt', async () => {
   const h = await fixture('wait'); const run = h.agent.run({ runId: 'stop', cwd: h.root, prompt: 'wait', sessionId: 'ses_source' });
@@ -130,6 +169,13 @@ it('reads source snapshots, renames, copies, and archives through the native API
   const copy = await sessions.fork('ses_source'); expect(copy).toMatchObject({ nativeId: 'ses_copy', cwd: h.root });
   await sessions.archive('ses_copy'); expect((await sessions.listSessions()).find(s => s.nativeId === 'ses_copy')?.archived).toBe(true);
   expect((await h.read()).some(c => c.path.endsWith('/prompt_async'))).toBe(false);
+});
+
+it('refuses to copy a session whose turn is really running, but copies one with a stale status entry', async () => {
+  const busy = await fixture('busy');
+  await expect(new KiloSessionProvider(busy.options, join(busy.root, 'history')).fork('ses_source')).rejects.toThrow('请先停止当前 Kilo 任务');
+  const stale = await fixture('stale-busy');
+  expect(await new KiloSessionProvider(stale.options, join(stale.root, 'history')).fork('ses_source')).toMatchObject({ nativeId: 'ses_copy' });
 });
 
 it('leaves native implicit default variants to Kilo instead of treating them as deleted explicit choices', async () => {

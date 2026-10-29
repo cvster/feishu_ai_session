@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ToolSession, ToolSessionOperations } from './types';
 import { KiloClient, kiloSessionId, type KiloOptions } from '../agent/kilo/client';
+import { kiloStatusRunning } from '../agent/kilo/session-status';
 import { writeFileAtomic } from '../platform/atomic-write';
 
 /** Read native history through the API; never sends a prompt to the source conversation. */
@@ -51,7 +52,8 @@ export class KiloSessionProvider implements ToolSessionOperations {
       const source = await client.request('GET', `/session/${kiloSessionId(id)}`);
       if (source.id !== id || source.time.archived) throw new Error('Kilo 原会话不存在或已归档');
       const statuses = await client.request('GET', '/session/status', undefined, source.directory);
-      if (statuses[id] && statuses[id].type !== 'idle') throw new Error('请先停止当前 Kilo 任务，再复制会话');
+      const rows = await client.request('GET', `/session/${id}/message`, undefined, source.directory);
+      if (kiloStatusRunning(rows, statuses?.[id])) throw new Error('请先停止当前 Kilo 任务，再复制会话');
       const result = await client.request('POST', `/session/${id}/fork`, {}, source.directory);
       const nativeId = kiloSessionId(result.id);
       if (nativeId === id || result.directory !== source.directory) throw new Error('Kilo 返回了不匹配的复制会话');

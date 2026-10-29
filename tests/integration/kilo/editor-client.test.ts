@@ -49,11 +49,14 @@ it('stops only its submitted session on an attached editor and preserves the edi
   expect((await h.read()).find(c => c.path.endsWith('/abort'))).toMatchObject({ path: '/session/ses_source/abort', query: { scope: 'session' } });
   expect(h.child.killed).toBe(false);
 });
-it('rejects an editor-busy session without prompting it or spawning a second server', async () => {
-  const h = await editor('busy'); const run = h.agent.run({ runId: 'busy', cwd: h.root, sessionId: 'ses_source', prompt: 'must not run' });
-  const events = []; for await (const e of run.events) events.push(e);
-  expect(events.at(-1)).toMatchObject({ type: 'error' }); expect(await run.waitForExit(3000)).toBe(true);
-  expect((await h.read()).some(c => c.path.endsWith('/prompt_async'))).toBe(false); expect(h.child.killed).toBe(false);
+it('queues on the attached editor while another turn runs, without prompting it or spawning a second server', async () => {
+  const h = await editor('busy'); const run = h.agent.run({ runId: 'busy', cwd: h.root, sessionId: 'ses_source', prompt: 'must not run yet' });
+  const events = []; setTimeout(() => void run.stop(), 1500);
+  for await (const e of run.events) events.push(e);
+  expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'interrupted' }); expect(await run.waitForExit(3000)).toBe(true);
+  const calls = await h.read();
+  expect(calls.filter(c => c.path === '/session/status').length).toBeGreaterThan(1);
+  expect(calls.some(c => c.path.endsWith('/prompt_async'))).toBe(false); expect(h.child.killed).toBe(false);
 });
 it('does not fall back to another server after editor discovery fails', async () => {
   discovery.find.mockRejectedValue(Error('editor unavailable'));

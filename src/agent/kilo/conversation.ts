@@ -1,6 +1,7 @@
 import type { NativeConversationReader, NativeConversationSnapshot, NativeConversationTurn } from '../native-conversation';
 import { initialState, projectNameFromCwd, reduce, startRunRuntime } from '../../card/run-state';
 import { KiloClient, kiloSessionId, type KiloOptions } from './client';
+import { kiloStatusRunning } from './session-status';
 import { resolve } from 'node:path';
 
 // Supported native text-part metadata stays outside the model prompt. Do not
@@ -92,7 +93,7 @@ export class KiloNativeConversationReader implements KiloConversationReader {
       const rows = await client.request('GET', `/session/${id}/message`, undefined, info.directory);
       const statuses = await client.request('GET', '/session/status', undefined, info.directory);
       if (!Array.isArray(rows)) throw new Error('Kilo 原生消息格式不兼容');
-      return projectKiloConversation(info, rows, !!statuses[id] && statuses[id].type !== 'idle');
+      return projectKiloConversation(info, rows, kiloStatusRunning(rows, statuses?.[id]));
     } catch (error) {
       this.clients.delete(id); await client.close(); throw error;
     }
