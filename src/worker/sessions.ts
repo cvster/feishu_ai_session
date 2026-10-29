@@ -6,6 +6,8 @@ import type { ToolSessionOperations } from '../tools/types';
 import { ClaudeSessionProvider } from '../tools/claude-sessions';
 import { KiloSessionProvider } from '../tools/kilo-sessions';
 import { DshSessionProvider } from '../tools/dsh-sessions';
+import { PiSessionProvider } from '../tools/pi-sessions';
+import { PiNativeConversationReader } from '../agent/pi/conversation';
 import { ZcodeSessionProvider } from '../tools/zcode-sessions';
 import { nativeSessionOperations } from '../tools/session-operations';
 import type { WorkerSessionHistory, WorkerSessionService } from './protocol';
@@ -42,6 +44,11 @@ export function createWorkerSessions(input: {
       dataHome: profile.kilo?.dataHome, editorSync: profile.kilo?.editorSync, client: profile.kilo?.client }, join(profileDir, 'kilo-sessions'));
     reader = new KiloNativeConversationReader({ binary: profile.kilo?.binaryPath, args: profile.kilo?.args, dataHome: profile.kilo?.dataHome, editorSync: profile.kilo?.editorSync, client: profile.kilo?.client });
     provider = sessions; list = () => sessions.listSessions();
+  } else if (toolId === 'pi') {
+    const options = { binary: profile.pi?.binaryPath, args: profile.pi?.args, agentDir: profile.pi?.agentDir };
+    const sessions = new PiSessionProvider(options);
+    reader = new PiNativeConversationReader(options);
+    provider = sessions; list = () => sessions.listSessions(); nativeArchive = false;
   } else if (toolId === 'dsh') {
     const sessions = new DshSessionProvider({ binary: profile.dsh?.binaryPath, args: profile.dsh?.args,
       homeDir: profile.dsh?.homeDir }, join(profileDir, 'dsh-sessions'));

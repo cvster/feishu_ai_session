@@ -9,7 +9,7 @@ import { createDefaultProfileConfig } from '../../../src/config/profile-schema.j
 import { createRuntimeProfileConfig } from '../../../src/runtime/profile-runtime.js';
 
 describe('start runtime agent factory', () => {
-  it.each(['claude', 'codex', 'kilo', 'zcode', 'dsh', 'custom'])('constructs only a worker transport for %s', toolId => {
+  it.each(['claude', 'codex', 'kilo', 'zcode', 'dsh', 'pi', 'custom'])('constructs only a worker transport for %s', toolId => {
     const agent = createRuntimeAgent(createDefaultProfileConfig({ agentKind: toolId, accounts: appAccount() }), { profileDir: tmpdir() });
     expect(agent.id).toBe(toolId);
     expect((agent as import('../../../src/worker/adapter').DurableAgentAdapter).client.stateDir).toBe(join(tmpdir(), 'workers', toolId));

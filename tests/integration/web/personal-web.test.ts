@@ -36,7 +36,7 @@ import { RUN_BUTTON_IMAGES, COMPLETED_STOP_IMAGE } from '../../../src/card/run-b
 import { WorkerApiError } from '../../../src/worker/tool-api';
 import type { WebConfig } from '../../../src/web/config';
 
-async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}, authoritative = false) {
+async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}, authoritative = false) {
   const native = { nativeId: 'native', name: 'AA-web', cwd: '/project', createdAtMs: 1, updatedAtMs: 2, archived: false };
   const conversation = { id: 'native', name: native.name, cwd: native.cwd, archived: false, turns: [{ id: 'desktop-1', input: '来自桌面', bridge: false,
     createdAtMs: 10, state: reduce(reduce(initialState, { type: 'text', delta: '原生回答' }), { type: 'done', terminationReason: 'normal' }) }] };
@@ -140,7 +140,7 @@ async function managedShared(h: Awaited<ReturnType<typeof harness>>) {
   return groups;
 }
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('shows shared %s inputs and Feishu names in the personal group and Web even when native history omits them', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('shows shared %s inputs and Feishu names in the personal group and Web even when native history omits them', async tool => {
   const h = await harness(tool), shared = await sharedInput(h);
   const id = (await h.service.list())[0]!.id;
   expect((await h.service.list())[0]!.updatedAtMs).toBe(shared.message.createTime);
@@ -260,7 +260,7 @@ it.each(['private', 'inactive', 'owner', 'rebound', 'source', 'archived', 'legac
   else expect((await h.service.read(id)).turns.some(t => t.input === shared.message.content)).toBe(false);
 });
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('replays %s history once and keeps one reply writer when a task refreshes the binding', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('replays %s history once and keeps one reply writer when a task refreshes the binding', async tool => {
   const h = await harness(tool), original = h.catalog.entries()[0]!;
   h.catalog.upsertActive({ ...original, now: Date.now(), recentTurnReplayCount: 3 });
   const boundAt = h.catalog.entries()[0]!.boundAt;
@@ -335,7 +335,7 @@ it.each(['codex', 'zcode', 'kilo'] as const)('syncs Web/group/native messages th
 
 });
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('uses live group names for %s sidebar even with stale bindings and unavailable native name sync', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('uses live group names for %s sidebar even with stale bindings and unavailable native name sync', async tool => {
   const h = await harness(tool);
   const bindings = h.bindings;
   const original = bindings.get('oc_group')!;
@@ -473,7 +473,7 @@ it('renames the group even when its worker is offline', async () => {
   expect(h.provider.list).not.toHaveBeenCalled();
 });
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('ignores a failed Web %s native rename and leaves its normal sync poll to finish it', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('ignores a failed Web %s native rename and leaves its normal sync poll to finish it', async tool => {
   const h = await harness(tool), id = (await h.service.list())[0]!.id;
   const nativeRename = h.provider.rename.mockRejectedValueOnce(Error('native unavailable'));
   const attempts = vi.spyOn(h.controls.toolRegistry!.get(tool).sessions!, 'rename');
@@ -654,7 +654,7 @@ it('uses saved effort when opening settings and reads the native effort only on 
   expect(native).not.toHaveBeenCalled();
 });
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs Web controls through existing %s handlers: stop, settings save/preview, refresh, copy menu and confirmed archive', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('runs Web controls through existing %s handlers: stop, settings save/preview, refresh, copy menu and confirmed archive', async tool => {
   const h = await harness(tool), id = (await h.service.list())[0]!.id;
   const act = async (action: string, values?: Record<string, string>) => { const r = await h.request('/api/sessions/' + id + '/control', { action, values }); expect(r.status).toBe(200); return r.json() as Promise<{ elements: WebControlElement[]; conversation: { session: { id: string } } }>; };
   await h.service.send(id, 'control-stop-request-01', 'work'); await vi.waitFor(() => expect(h.calls).toHaveLength(1));
@@ -693,7 +693,7 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs Web controls
 });
 
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('archives and dissolves a Web-confirmed %s group through the common worker interface', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('archives and dissolves a Web-confirmed %s group through the common worker interface', async tool => {
   const h = await harness(tool), id = (await h.service.list())[0]!.id;
   h.workspaces.setCwd('oc_group', h.dir);
   vi.mocked(h.channel.rawClient.im.v1.chat.delete).mockImplementation(async () => {
@@ -730,7 +730,7 @@ it('offers the next unused copy name in Web, including unbound and archived nati
   expect(h.provider.fork).not.toHaveBeenCalled();
 });
 
-it.each(['codex', 'zcode', 'kilo', 'dsh'] as const)('copies through the %s worker with the chosen name, binds one new group, and does not fork twice on retry', async tool => {
+it.each(['codex', 'zcode', 'kilo', 'dsh', 'pi'] as const)('copies through the %s worker with the chosen name, binds one new group, and does not fork twice on retry', async tool => {
   const h = await harness(tool), id = (await h.service.list())[0]!.id;
   h.native.cwd = h.dir; h.workspaces.setCwd('oc_group', h.dir);
   const chatCreate = vi.fn(async () => ({ code: 0, data: { chat_id: 'oc_copy' } }));
@@ -802,7 +802,7 @@ it('publishes favorite changes to other Web clients via SSE without submitting a
 });
 
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('preserves visible %s answer boundaries and Markdown without exposing tool details', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('preserves visible %s answer boundaries and Markdown without exposing tool details', async tool => {
   const h = await harness(tool), id = (await h.service.list())[0]!.id;
   const state = { ...initialState, terminal: 'done' as const, footer: null, blocks: [
     { kind: 'text' as const, content: '先检查配置。', streaming: false },
@@ -900,7 +900,7 @@ it('console keeps pending messages visible but forbids retry when worker receipt
   expect(h.calls).toHaveLength(0);
 });
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('console manages pending and active %s shared groups through owner selection without creating a native session', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('console manages pending and active %s shared groups through owner selection without creating a native session', async tool => {
   const h = await harness(tool); await h.replies.stop(); const groups = await managedShared(h);
   const before = await h.consoleService.snapshot(true), group = before.sharedGroups[0]!, target = before.sharedTargets[0]!;
   expect(group).toMatchObject({ status: 'pending', canBind: true, canLeave: false, sessionName: '尚未关联', associationId: undefined });
@@ -1007,7 +1007,7 @@ it('console preserves historical missing or unknown receipts without counting th
 });
 
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('AI group management forgets archived and dissolved %s relationships permanently', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('AI group management forgets archived and dissolved %s relationships permanently', async tool => {
   const h = await harness(tool); await h.replies.stop();
   let row = (await h.consoleService.snapshot(true)).bindings[0]!;
   expect(row).toMatchObject({ groupState: 'active', sessionState: 'active', canDissolve: false, canArchive: false });
@@ -1180,7 +1180,7 @@ it('updates native reply queue rows after the controls without sending a separat
   } finally { await mirror.stop(); }
 });
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('shows new %s project groups before their first message, including reserved native ids', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('shows new %s project groups before their first message, including reserved native ids', async tool => {
   const h = await harness(tool, '127.0.0.1', {}, true); await h.login();
   const chatCreate = vi.fn(async () => ({ code: 0, data: { chat_id: 'oc_new' } }));
   h.channel.rawClient.im.v1.chat.create = chatCreate as any;
@@ -1306,7 +1306,7 @@ it('returns durable send confirmations across restart and native read failures w
   expect(h.create).toHaveBeenCalledOnce(); expect(h.calls).toHaveLength(0);
 });
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('loads inline %s settings and refreshes models through authenticated common commands', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('loads inline %s settings and refreshes models through authenticated common commands', async tool => {
   const h = await harness(tool, '127.0.0.2', { trustedNetworks: [] }); const id = (await h.service.list())[0]!.id;
   expect((await h.request('/api/sessions/' + id + '/settings')).status).toBe(401); await h.login();
   const response = await h.request('/api/sessions/' + id + '/settings'); expect(response.status).toBe(200);
@@ -1333,7 +1333,7 @@ it('serves exact Feishu control PNGs from same-origin URLs under the existing im
   expect((await h.request('/assets/run-controls/unknown.png')).status).toBe(404);
 });
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('opens the fixed %s archive menu without worker reads and revalidates confirmation', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('opens the fixed %s archive menu without worker reads and revalidates confirmation', async tool => {
   const h = await harness(tool), id = (await h.service.list())[0]!.id;
   const health = vi.spyOn(h.client, 'health').mockRejectedValue(Error('worker offline'));
   const models = vi.spyOn(h.client, 'models').mockRejectedValue(Error('worker offline'));
@@ -1409,7 +1409,7 @@ it.each(['expiry', 'owner', 'password', 'access'] as const)('rejects a persisted
   } finally { clock?.mockRestore(); }
 });
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('opens %s settings from persistent models without worker reads, including when offline', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('opens %s settings from persistent models without worker reads, including when offline', async tool => {
   const h = await harness(tool), id = (await h.service.list())[0]!.id;
   const models = vi.spyOn(h.client, 'models').mockResolvedValue([{ value: 'provider/first', label: 'First' }]);
   const open = flatten((await h.service.control(id, 'config')).elements);
@@ -1471,7 +1471,7 @@ it('removes only confirmed closed shared groups with archived sources and persis
 });
 
 
-it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('automatically reads source history when creating a fresh %s Web copy, returns recent sessions and omits read-button cards', async tool => {
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('automatically reads source history when creating a fresh %s Web copy, returns recent sessions and omits read-button cards', async tool => {
   const h = await harness(tool); await h.replies.stop();
   h.native.cwd = h.dir; h.workspaces.setCwd('oc_group', h.dir);
   h.catalog.upsertActive({ ...h.catalog.entries().find(row => row.scopeId === 'oc_group')!, cwdRealpath: h.dir });

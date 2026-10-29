@@ -30,6 +30,7 @@ import { runA2A, type A2AOptions } from './commands/a2a';
 import { runDoctor } from '../setup/checks';
 import { runSetup } from './commands/setup';
 import { runZcodePair } from './commands/zcode-remote';
+import { runPiImport } from './commands/pi';
 
 const program = new Command();
 
@@ -39,7 +40,7 @@ program
   .version(pkg.version, '-v, --version');
 
 program.command('doctor').description('Read-only installation/runtime checks; never runs model tasks or restarts services')
-  .option('--agents <selection>', 'auto, codex, claude, zcode, kilo, dsh, or both', 'auto')
+  .option('--agents <selection>', 'auto, codex, claude, zcode, kilo, dsh, pi, or both', 'auto')
   .option('--profile <name>', 'profile to check').option('-c, --config <path>', 'config path')
   .option('--workspace <path>', 'project directory').option('--runtime', 'require login, configuration and selected execution services')
   .option('--network', 'verify Feishu credentials/owner over the network (no messages)').option('--json', 'structured, redacted result')
@@ -49,6 +50,10 @@ program.command('setup').description('Bind lark-cli for an existing profile, wit
   .requiredOption('--profile <name>', 'existing profile name').option('-c, --config <path>', 'config path')
   .action(runSetup);
 
+program.command('pi-import-zcode').description('Explicitly copy current Zcode providers/models into Pi private configuration')
+  .option('--profile <name>', 'existing profile name').option('-c, --config <path>', 'config path')
+  .option('--agent-dir <path>', 'Pi agent config directory').action(runPiImport);
+
 // === process-level commands (work directly on bridge processes) ===
 
 program
@@ -56,7 +61,7 @@ program
   .description('Run the bridge in the foreground (was `start` in older versions)')
   .option('-c, --config <path>', 'path to config file')
   .option('--profile <name>', 'profile name to run')
-  .option('--agent <kind>', 'agent kind for a new profile (claude, codex, zcode, kilo or dsh)')
+  .option('--agent <kind>', 'agent kind for a new profile (claude, codex, zcode, kilo, dsh or pi)')
   .option('--workspace <path>', 'initial working directory for first-run profile bootstrap')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
   .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')
@@ -80,7 +85,7 @@ program
   .description('Migrate legacy bridge config/state into the current profile layout')
   .option('-c, --config <path>', 'path to config file')
   .option('--profile <name>', 'target profile name for legacy v1 config migration')
-  .option('--agent <kind>', 'agent kind for legacy v1 profile migration (claude, codex, zcode, kilo or dsh)')
+  .option('--agent <kind>', 'agent kind for legacy v1 profile migration (claude, codex, zcode, kilo, dsh or pi)')
   .action(async (opts: { config?: string; profile?: string; agent?: string }) => {
     await runMigrate(opts);
   });
@@ -117,12 +122,12 @@ for (const action of ['configure', 'list', 'enable', 'disable', 'alias', 'grant'
 }
 worker.command('run').description('Run a worker in the foreground under an independent supervisor')
   .option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
-  .option('--tool <kind>', 'worker tool (codex, claude, zcode, kilo or dsh; defaults to profile tool)')
+  .option('--tool <kind>', 'worker tool (codex, claude, zcode, kilo, dsh or pi; defaults to profile tool)')
   .action(runWorker);
 for (const action of ['start', 'stop', 'status'] as const) {
   worker.command(action).description(action === 'stop' ? 'Stop the worker and its active tasks of the selected tool' : `${action} the independent worker (does not restart the bridge)`)
     .option('--profile <name>', 'profile name').option('-c, --config <path>', 'config path')
-    .option('--tool <kind>', 'worker tool (codex, claude, zcode, kilo or dsh; defaults to profile tool)')
+    .option('--tool <kind>', 'worker tool (codex, claude, zcode, kilo, dsh or pi; defaults to profile tool)')
     .action(options => workerService(action, options));
 }
 
@@ -136,7 +141,7 @@ profile
 profile
   .command('create <name>')
   .description('Create a profile from QR registration or existing app credentials')
-  .option('--agent <kind>', 'agent kind (claude, codex, zcode, kilo or dsh)')
+  .option('--agent <kind>', 'agent kind (claude, codex, zcode, kilo, dsh or pi)')
   .option('--workspace <path>', 'initial working directory for this profile')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
   .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')
@@ -208,7 +213,7 @@ program
   .command('start')
   .description('Install (if needed) and start the bridge as an OS-managed daemon')
   .option('--profile <name>', 'profile name (defaults to active profile)')
-  .option('--agent <kind>', 'agent kind for first-run profile bootstrap (claude, codex, zcode, kilo or dsh)')
+  .option('--agent <kind>', 'agent kind for first-run profile bootstrap (claude, codex, zcode, kilo, dsh or pi)')
   .option('--workspace <path>', 'initial working directory for first-run profile bootstrap')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
   .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')

@@ -6,7 +6,7 @@
 
 推荐直接在有项目代码和工具登录信息的机器上，以日常使用工具的 OS 用户部署。无需 Docker、Redis 或数据库；桥接内置轻量网页，与桥接同进程。`apps/web-app` 是另一套独立网页，不是安装本项目的前置依赖。
 
-1. 安装 Node 24（含 npm）和 Git，执行第 2 节的安装命令。只安装实际用的工具；Codex/Claude 可由脚本补装，Kilo/Zcode/Dsh 按各自接入文档配置。
+1. 安装 Node 24（含 npm）和 Git，执行第 2 节的安装命令。只安装实际用的工具；Codex/Claude/Pi 可由脚本补装，Kilo/Zcode/Dsh 按各自接入文档配置。
 2. 登录所选工具，按第 4 节创建 profile 并运行 `setup`；完成第 7 节飞书权限、事件和应用发布。
 3. 启动所选 worker；Codex 先安装最新版桌面 App，只保留桌面 App 的 app-server 作为执行端，让 CLI、VS Code 插件及 Codex worker 全部连接它，具体见第 6 节。
 4. 前台运行桥接验证真实收发，再切换后台。以下以 Codex 为例；Claude 把 `--tool codex` 和 `--agents codex` 换为 `claude`：
@@ -27,7 +27,7 @@
 
 ## 1. 选择工具和系统
 
-安装实际使用的工具即可：Codex、Claude、Kilo、ZCode 或 DSH。只用 Kilo 无需安装 Codex。一个 profile 的 `agentKind` 是默认工具；安装两个时，同一机器人创建个人工作群可分别选择 Codex 或 Claude，群创建后工具固定。`--agents both` 会检查两者；只选一个，不要求另一个存在。
+安装实际使用的工具即可：Codex、Claude、Kilo、ZCode、DSH 或 Pi（见 [Pi 接入](PI.md)）。只用 Kilo 无需安装 Codex。一个 profile 的 `agentKind` 是默认工具；安装两个时，同一机器人创建个人工作群可分别选择 Codex 或 Claude，群创建后工具固定。`--agents both` 会检查两者；只选一个，不要求另一个存在。
 
 | 依赖 | 本项目基线/验证版本 | 用途 |
 |---|---|---|

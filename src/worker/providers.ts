@@ -7,6 +7,8 @@ import { CodexAdapter } from '../agent/codex/adapter';
 import { KiloAdapter } from '../agent/kilo/adapter';
 import { ZcodeAdapter } from '../agent/zcode/adapter';
 import { DshAdapter } from '../agent/dsh/adapter';
+import { PiAdapter } from '../agent/pi/adapter';
+import { piStorageDir } from '../agent/pi/client';
 import { kiloStorageDir } from '../agent/kilo/client';
 import { zcodeStorageDir } from '../agent/zcode/client';
 import { dshStorageDir } from '../agent/dsh/client';
@@ -35,11 +37,13 @@ export async function createWorkerProvider(profileDir: string, toolId: string, p
     sourceId = zcodeStorageDir(options); agent = new ZcodeAdapter({ ...options, binary: options.binaryPath, larkChannel });
   } else if (toolId === 'dsh') {
     sourceId = dshStorageDir(options); agent = new DshAdapter({ ...options, binary: options.binaryPath, larkChannel });
+  } else if (toolId === 'pi') {
+    sourceId = piStorageDir(options); agent = new PiAdapter({ ...options, binary: options.binaryPath, larkChannel });
   } else throw new Error(`No built-in provider for ${toolId}; external workers register through their own endpoint.json`);
   const selected = { ...profile, [toolId]: options };
   const sessions = createWorkerSessions({ toolId, sourceId, profileDir: stateDir, profile: selected, agent });
   const manifest: WorkerManifest = { label: agent.displayName, nativeField: toolId === 'codex' ? 'threadId' : 'sessionId',
-    sessionKind: toolId === 'codex' ? 'codex-thread' : `${toolId}-session`, historyFormat: ['codex', 'claude'].includes(toolId) ? 'jsonl' : 'json',
-    nativeHistory: toolId === 'claude' };
+    sessionKind: toolId === 'codex' ? 'codex-thread' : `${toolId}-session`, historyFormat: ['codex', 'claude', 'pi'].includes(toolId) ? 'jsonl' : 'json',
+    nativeHistory: ['claude', 'pi'].includes(toolId) };
   return { stateDir, sourceId, agent, sessions, manifest, maxConcurrent: toolId === 'zcode' && options.remoteControlFile ? 1 : undefined };
 }

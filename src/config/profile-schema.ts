@@ -92,6 +92,7 @@ export interface ProfileConfig {
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
   dsh?: { binaryPath: string; args?: string[]; homeDir?: string };
+  pi?: { binaryPath: string; args?: string[]; agentDir?: string };
   kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean; client?: 'vscode' | 'app' };
   zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string; remoteControlFile?: string };
   attachments: AttachmentConfig;
@@ -121,6 +122,7 @@ export interface CreateDefaultProfileConfigInput {
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
   dsh?: { binaryPath: string; args?: string[]; homeDir?: string };
+  pi?: { binaryPath: string; args?: string[]; agentDir?: string };
   kilo?: { binaryPath: string; args?: string[]; dataHome?: string; editorSync?: boolean; client?: 'vscode' | 'app' };
   zcode?: { binaryPath: string; args?: string[]; dataDir?: string; modelConfigPath?: string; remoteControlFile?: string };
   secrets?: SecretsConfig;
@@ -158,6 +160,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissions?: Partial<PermissionConfig>;
     codex?: CodexConfig & { flags?: unknown };
     dsh?: { binaryPath?: unknown; args?: unknown; homeDir?: unknown };
+    pi?: { binaryPath?: unknown; args?: unknown; agentDir?: unknown };
     kilo?: { binaryPath?: unknown; args?: unknown; dataHome?: unknown; editorSync?: unknown; client?: unknown; preferredClient?: unknown };
     zcode?: { binaryPath?: unknown; args?: unknown; dataDir?: unknown; modelConfigPath?: unknown; remoteControlFile?: unknown };
     attachments?: Partial<AttachmentConfig>;
@@ -169,7 +172,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     throw new Error('profile schemaVersion must be 2');
   }
   if (!isToolId(raw.agentKind)) {
-    throw new Error('agentKind must be a registered tool (claude, codex, zcode, kilo, dsh)');
+    throw new Error('agentKind must be a registered tool (claude, codex, zcode, kilo, dsh, pi)');
   }
   const accounts = normalizeAccounts(raw.accounts);
   const preferences = normalizePreferences(raw.preferences);
@@ -199,6 +202,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissionSource,
     ...(raw.codex ? { codex: normalizeCodex(raw.codex) } : {}),
     ...(raw.dsh ? { dsh: normalizeDsh(raw.dsh) } : {}),
+    ...(raw.pi ? { pi: normalizePi(raw.pi) } : {}),
     ...(raw.kilo ? { kilo: normalizeKilo(raw.kilo) } : {}),
     ...(raw.zcode ? { zcode: normalizeZcode(raw.zcode) } : {}),
     attachments: {
@@ -380,4 +384,11 @@ function normalizeDsh(input: { binaryPath?: unknown; args?: unknown; homeDir?: u
       (input.args !== undefined && (!Array.isArray(input.args) || !input.args.every(v => typeof v === 'string'))) ||
       (input.homeDir !== undefined && (typeof input.homeDir !== 'string' || !input.homeDir.trim()))) throw new Error('Invalid dsh configuration');
   return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.homeDir ? { homeDir: input.homeDir as string } : {}) };
+}
+
+function normalizePi(input: { binaryPath?: unknown; args?: unknown; agentDir?: unknown }): NonNullable<ProfileConfig['pi']> {
+  if (typeof input.binaryPath !== 'string' || !input.binaryPath.trim() ||
+      (input.args !== undefined && (!Array.isArray(input.args) || !input.args.every(v => typeof v === 'string'))) ||
+      (input.agentDir !== undefined && (typeof input.agentDir !== 'string' || !input.agentDir.trim()))) throw new Error('Invalid pi configuration');
+  return { binaryPath: input.binaryPath, ...(input.args ? { args: input.args as string[] } : {}), ...(input.agentDir ? { agentDir: input.agentDir as string } : {}) };
 }

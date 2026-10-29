@@ -50,6 +50,7 @@ export async function detectInstalledAgents(): Promise<DetectedAgent[]> {
     { kind: 'claude', command: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude' },
     { kind: 'codex', command: process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' },
     { kind: 'dsh', command: process.env.LARK_CHANNEL_DSH_BIN ?? 'dsh' },
+    { kind: 'pi', command: process.env.LARK_CHANNEL_PI_BIN ?? 'pi' },
     { kind: 'kilo', command: process.env.LARK_CHANNEL_KILO_BIN ?? 'kilo' },
     { kind: 'zcode', command: process.env.LARK_CHANNEL_ZCODE_BIN ?? 'zcode' },
   ];

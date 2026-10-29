@@ -46,7 +46,7 @@ async function workerContext(options: WorkerOptions) {
   const selected = config?.profiles[profile];
   if (!selected) throw new Error(`profile not found: ${profile}`);
   const toolId = options.tool ?? selected.agentKind;
-  if (!isToolId(toolId) || !['claude', 'codex', 'zcode', 'kilo', 'dsh'].includes(toolId)) throw new Error('worker --tool 仅支持注册为 worker 的工具：codex、claude、zcode、kilo、dsh');
+  if (!isToolId(toolId) || !['claude', 'codex', 'zcode', 'kilo', 'dsh', 'pi'].includes(toolId)) throw new Error('worker --tool 仅支持注册为 worker 的工具：codex、claude、zcode、kilo、dsh、pi');
   return { paths, selected, toolId, stateDir: join(paths.profileDir, 'workers', toolId) };
 }
 export async function runWorker(options: WorkerOptions): Promise<void> {

@@ -1,4 +1,5 @@
 import { dshCommand, dshStorageDir } from '../agent/dsh/client';
+import { piCommand, piStorageDir } from '../agent/pi/client';
 import { kiloCommand, kiloStorageDir } from '../agent/kilo/client';
 import { zcodeStorageDir } from '../agent/zcode/client';
 import { zcodeCommand } from '../agent/zcode/client';
@@ -61,7 +62,7 @@ export async function checkTool(kind: 'codex' | 'claude', binary: string, run: P
 }
 export async function collectChecks(options: DoctorOptions, run: Probe = probe): Promise<Check[]> {
   const rows: Check[] = [], requested = options.agents ?? 'auto';
-  if (!['auto', 'codex', 'claude', 'zcode', 'kilo', 'dsh', 'both'].includes(requested)) throw new Error('--agents 仅支持 auto、codex、claude、zcode、kilo、dsh、both');
+  if (!['auto', 'codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi', 'both'].includes(requested)) throw new Error('--agents 仅支持 auto、codex、claude、zcode、kilo、dsh、pi、both');
   const rootDir = options.config ? dirname(resolve(options.config)) : undefined;
   const profile = options.profile ?? await readActiveProfile(rootDir);
   if (profile) await loadRuntimeEnv(profile, rootDir);
@@ -69,7 +70,7 @@ export async function collectChecks(options: DoctorOptions, run: Probe = probe):
   const root = await loadRootConfig(paths.configFile);
   let selected = profile ? root?.profiles[profile] : undefined;
   let configuredCodexRemote: string | undefined;
-  if (selected) for (const toolId of ['codex', 'kilo', 'zcode', 'dsh'] as const) {
+  if (selected) for (const toolId of ['codex', 'kilo', 'zcode', 'dsh', 'pi'] as const) {
     const config = await readWorkerConfig(paths.profileDir, toolId);
     if (config) selected = { ...selected, [toolId]: config.options };
     if (toolId === 'codex' && typeof config?.options.appServerRemote === 'string') configuredCodexRemote = config.options.appServerRemote;
@@ -97,11 +98,26 @@ export async function collectChecks(options: DoctorOptions, run: Probe = probe):
   rows.push({ id: 'lark-cli', status: lark.ok && larkVersion && atLeast(larkVersion, SUPPORTED.lark) ? 'pass' : 'fail', detail: `飞书 CLI ${larkVersion ?? '缺失'}；基线 >= ${SUPPORTED.lark}`, fix: `npm install -g @larksuite/cli@${SUPPORTED.lark}` });
   const codexBinary = resolveCodexBinary(selected?.codex?.binaryPath ?? process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex');
   const claudeBinary = typeof claudeConfig?.options.binaryPath === 'string' ? claudeConfig.options.binaryPath : process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude';
-  const available = { codex: await run(codexBinary, ['--version']), claude: await run(claudeBinary, ['--version']) };
+  const piBinary = piCommand({ binary: selected?.pi?.binaryPath }).binary;
+  const available = { codex: await run(codexBinary, ['--version']), claude: await run(claudeBinary, ['--version']), pi: await run(piBinary, ['--version']) };
   const kinds: ToolId[] = requested === 'both' ? ['codex', 'claude'] : requested !== 'auto' ? [requested as ToolId] :
-    selected ? [selected.agentKind] : (['codex', 'claude'] as const).filter(kind => available[kind].ok);
-  if (!kinds.length) rows.push({ id: 'agents', status: 'fail', detail: '至少需要 Codex 或 Claude 之一', fix: '运行安装脚本 --agents codex、claude 或 both' });
+    selected ? [selected.agentKind] : (['codex', 'claude', 'pi'] as const).filter(kind => available[kind].ok);
+  if (!kinds.length) rows.push({ id: 'agents', status: 'fail', detail: '至少需要 Codex、Claude 或 Pi 之一', fix: '运行安装脚本 --agents codex、claude、pi 或 both' });
   for (const kind of kinds) {
+    if (kind === 'pi') {
+      const command = piCommand({ binary: selected?.pi?.binaryPath, args: selected?.pi?.args });
+      const version = await run(command.binary, [...command.args, '--version']);
+      const help = await run(command.binary, [...command.args, '--help']);
+      rows.push({ id: 'pi.capabilities', status: version.ok && atLeast(versionOf(version.output) ?? '0.0.0', '1.4.0') && help.ok &&
+        ['--mode', '--session-id', '--thinking'].every(flag => help.output.includes(flag)) ? 'pass' : 'fail', detail: 'Pi >=1.4.0 与原生 RPC 入口检查（不启动任务）', fix: '见 docs/PI.md' });
+      rows.push({ id: 'pi.auth', status: 'warn', detail: '请在 Pi 配置模型账号；目录读取不证明凭据和额度可用', fix: '见 docs/PI.md' });
+      if (options.runtime && selected) {
+        try { await new WorkerClient(join(paths.profileDir, workerStateDirName('pi')), piStorageDir({ agentDir: selected.pi?.agentDir }), selected.accounts.app.id, 'pi').health();
+          rows.push({ id: 'pi.worker', status: 'pass', detail: 'Pi worker 身份和来源匹配' }); }
+        catch { rows.push({ id: 'pi.worker', status: 'fail', detail: 'Pi worker 未就绪', fix: `worker start --tool pi --profile ${profile}` }); }
+      }
+      continue;
+    }
     if (kind === 'dsh') {
       const command = dshCommand({ binary: selected?.dsh?.binaryPath, args: selected?.dsh?.args });
       const version = await run(command.binary, [...command.args, '--version']);

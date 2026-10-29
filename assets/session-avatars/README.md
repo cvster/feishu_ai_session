@@ -9,3 +9,5 @@ ZCode uses its official 512×512 application icon, matching the locally installe
 Kilo uses the official extension's `assets/icons/kilo-dark.svg` (included as `kilo.svg`, under `LICENSE.kilo`), rendered to an opaque RGB 512×512 PNG with a yellow background and black mark. Do not copy `kilo-dark.png` from the extension: its white pixels and transparent cutouts become an all-white avatar on Feishu's white background. Regenerate the embedded Kilo base64 entry whenever this PNG changes.
 
 DeepSeek Harness uses the official `FishLogo` path from `@deepseek-ai/dsh-client-ui-primitives`, under `LICENSE.dsh`. The adjacent `dsh.svg` adds an opaque blue background and a DSH label, then renders to 512×512 RGB PNG for the embedded map.
+
+Pi uses its official mark from https://pi.dev/logo-auto.svg, under the Pi project MIT license (`LICENSE.pi`), rendered on white at 512×512.

@@ -8,7 +8,7 @@ import { messageRequestId } from './identity';
 /** Compatibility import only. Never launch a native tool, send an input, or overwrite canonical worker configuration. */
 export async function migrateWorkerConfiguration(profileDir: string, profile: ProfileConfig): Promise<ProfileConfig> {
   const raw = profile as unknown as Record<string, unknown>;
-  const ids = ['codex', 'claude', 'kilo', 'zcode', 'dsh'].filter(id => raw[id] || id === profile.agentKind);
+  const ids = ['codex', 'claude', 'kilo', 'zcode', 'dsh', 'pi'].filter(id => raw[id] || id === profile.agentKind);
   const migrated = ids.some(id => raw[id]);
   if (!migrated) return profile;
   for (const id of ids) await loadWorkerConfig(profileDir, id, profile);
@@ -17,7 +17,7 @@ export async function migrateWorkerConfiguration(profileDir: string, profile: Pr
   if (!await stat(backup).catch(error => { if (error.code === 'ENOENT') return; throw error; }))
     await writeFileAtomic(backup, JSON.stringify(profile), { mode: 0o600 });
   const next = { ...profile };
-  for (const id of ['codex', 'claude', 'kilo', 'zcode', 'dsh']) delete (next as unknown as Record<string, unknown>)[id];
+  for (const id of ['codex', 'claude', 'kilo', 'zcode', 'dsh', 'pi']) delete (next as unknown as Record<string, unknown>)[id];
   return next;
 }
 

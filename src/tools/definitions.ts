@@ -3,6 +3,7 @@ export const TOOL_DEFINITIONS = {
   codex: { label: 'Codex', backend: 'worker', nativeField: 'threadId', fork: true, reasoning: true, sessionKind: 'codex-thread', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
   claude: { label: 'Claude', backend: 'worker', nativeField: 'sessionId', fork: false, reasoning: true, sessionKind: 'claude-session', promptInjection: 'none', nativeHistory: true, legacyMarkers: ['__claude_cb'] },
   dsh: { label: 'Dsh', backend: 'worker', nativeField: 'sessionId', fork: true, reasoning: true, sessionKind: 'dsh-session', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
+  pi: { label: 'Pi', backend: 'worker', nativeField: 'sessionId', fork: true, reasoning: true, sessionKind: 'pi-session', promptInjection: 'none', nativeHistory: true, legacyMarkers: [] },
   kilo: { label: 'Kilo', backend: 'worker', nativeField: 'sessionId', fork: true, reasoning: true, sessionKind: 'kilo-session', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
   zcode: { label: 'Zcode', backend: 'worker', nativeField: 'sessionId', fork: true, reasoning: true, sessionKind: 'zcode-session', promptInjection: 'none', nativeHistory: false, legacyMarkers: [] },
 } as const;

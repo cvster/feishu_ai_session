@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { parseArgs } from 'node:util';
 import { ensurePnpm, npmCommand, PNPM_VERSION } from './lib/package-manager.mjs';
 
-export const VERSIONS = { pnpm: PNPM_VERSION, codex: '0.159.2', claude: '2.1.261', lark: '1.0.97' };
+export const VERSIONS = { pnpm: PNPM_VERSION, codex: '0.159.2', claude: '2.1.261', pi: '1.4.0', lark: '1.0.97' };
 export function envLine(name, value) {
   if (/[\r\n]/.test(value)) throw new Error(`${name} 包含换行，请手动配置 runtime.env`);
   // Node dotenv does not JSON-decode backslashes. Single quotes preserve Windows paths.
@@ -19,7 +19,7 @@ export function installerArgs(args) {
     workspace: { type: 'string' }, configure: { type: 'boolean' }, start: { type: 'boolean' },
     'install-clis': { type: 'boolean' }, 'skip-tests': { type: 'boolean' }, help: { type: 'boolean' },
   } });
-  if (!['auto', 'codex', 'claude', 'both'].includes(values.agents)) throw new Error('--agents 只能为 auto、codex、claude、both');
+  if (!['auto', 'codex', 'claude', 'pi', 'both'].includes(values.agents)) throw new Error('--agents 只能为 auto、codex、claude、pi、both');
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(values.profile)) throw new Error('profile 名称无效');
   if (values.start && !values.configure) throw new Error('--start 需同时提供 --configure；不会启动或重启已有服务');
   if (values.configure && !values.workspace) throw new Error('--configure 需要 --workspace 本机项目目录');
@@ -27,8 +27,8 @@ export function installerArgs(args) {
 }
 export async function install(args = process.argv.slice(2)) {
   const opts = installerArgs(args);
-  if (opts.help) { console.log(`用法：node tools/install.mjs --agents codex|claude|both [选项]
-  --agents auto      自动使用已安装的 Codex/Claude；一个都没有时需明确选择
+  if (opts.help) { console.log(`用法：node tools/install.mjs --agents codex|claude|pi|both [选项]
+  --agents auto      自动使用已安装的 Codex/Claude/Pi；一个都没有时需明确选择
   --install-clis     在用户工具目录安装缺失/过旧的 CLI，不覆盖原安装
   --configure       构建后创建新 profile（需要扫码/交互输入应用凭据）
   --profile my-bot   新 profile 名称
@@ -58,10 +58,10 @@ Node.js >=20.12（推荐24）和 Git 需预装。默认不登录、不启动模�
   runPnpm(['install', '--frozen-lockfile']);
   const crossSpawn = require('cross-spawn');
   const has = command => crossSpawn.sync(command, ['--version'], { stdio: 'ignore', timeout: 10_000, env: process.env }).status === 0;
-  let kinds = opts.agents === 'both' ? ['codex', 'claude'] : opts.agents !== 'auto' ? [opts.agents] : ['codex', 'claude'].filter(has);
-  if (!kinds.length) throw new Error('未发现编程助手。请指定 --agents codex、claude 或 both；如需脚本安装 CLI，再加 --install-clis');
-  const packages = { codex: `@openai/codex@${VERSIONS.codex}`, claude: `@anthropic-ai/claude-code@${VERSIONS.claude}`, 'lark-cli': `@larksuite/cli@${VERSIONS.lark}` };
-  const minimums = { codex: VERSIONS.codex, claude: VERSIONS.claude, 'lark-cli': VERSIONS.lark };
+  let kinds = opts.agents === 'both' ? ['codex', 'claude'] : opts.agents !== 'auto' ? [opts.agents] : ['codex', 'claude', 'pi'].filter(has);
+  if (!kinds.length) throw new Error('未发现编程助手。请指定 --agents codex、claude、pi 或 both；如需脚本安装 CLI，再加 --install-clis');
+  const packages = { codex: `@openai/codex@${VERSIONS.codex}`, claude: `@anthropic-ai/claude-code@${VERSIONS.claude}`, pi: `@earendil-works/pi-coding-agent@${VERSIONS.pi}`, 'lark-cli': `@larksuite/cli@${VERSIONS.lark}` };
+  const minimums = { codex: VERSIONS.codex, claude: VERSIONS.claude, pi: VERSIONS.pi, 'lark-cli': VERSIONS.lark };
   const missing = [...kinds, 'lark-cli'].filter(kind => {
     const result = crossSpawn.sync(kind, ['--version'], { encoding: 'utf8', timeout: 10_000, env: process.env });
     const version = /\b(\d+)\.(\d+)\.(\d+)/.exec(`${result.stdout ?? ''}${result.stderr ?? ''}`);
@@ -76,7 +76,7 @@ Node.js >=20.12（推荐24）和 Git 需预装。默认不登录、不启动模�
   if (!opts['skip-tests']) runPnpm(['test']);
   runPnpm(['build']);
   const cli = argv => invoke(process.execPath, ['bin/lark-channel-bridge.mjs', ...argv]);
-  const selection = kinds.length === 2 ? 'both' : kinds[0];
+  const selection = opts.agents === 'both' ? 'both' : kinds.length === 1 ? kinds[0] : 'auto';
   cli(['doctor', '--agents', selection, ...(opts.workspace ? ['--workspace', resolve(opts.workspace)] : [])]);
   console.log(`\n工具目录：${tools}\n以后手动运行前，把 ${cliPaths[0]} 加入 PATH（不要将 Node/npm 的环境变量值复制给别人）。`);
   if (!opts.configure) { console.log('安装和构建完成。下一步按 docs/INSTALL.md 登录所选 CLI、创建 profile 和配置飞书。'); return; }
