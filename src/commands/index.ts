@@ -2816,7 +2816,7 @@ async function showConfigForm(ctx: CommandContext,
     admins: access.admins,
     knownChats: ctx.controls.knownChats ?? [],
   });
-  if (updateForm && ctx.fromCardAction) {
+  if (updateForm && ctx.fromCardAction && isManaged(ctx.msg.messageId)) {
     await updateManagedCard(ctx.channel, ctx.msg.messageId, card);
     return;
   }

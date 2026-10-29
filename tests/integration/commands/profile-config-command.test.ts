@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import type { NormalizedMessage } from '@larksuite/channel';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActiveRuns } from '../../../src/bot/active-runs';
-import { isManaged, sendManagedCard } from '../../../src/card/managed';
+import { forgetManagedCard, isManaged, sendManagedCard } from '../../../src/card/managed';
 import { tryHandleCommand, type CommandContext, type Controls } from '../../../src/commands/index';
 import { resolveAppPaths } from '../../../src/config/app-paths';
 import { getSecret, listSecretIds } from '../../../src/config/keystore';
@@ -18,6 +18,7 @@ import { SessionStore } from '../../../src/session/store';
 import { WorkspaceStore } from '../../../src/workspace/store';
 import { FakeAgentAdapter } from '../../helpers/fake-agent';
 import { createFakeChannel } from '../../helpers/fake-channel';
+import { modelCachePath } from '../../../src/agent/model-cache';
 
 vi.mock('../../../src/utils/feishu-auth', () => ({
   validateAppCredentials: vi.fn(async () => ({
@@ -195,13 +196,13 @@ describe('profile-aware account and config commands', () => {
     expect(cleared.profiles.claude?.preferences.model).toBeUndefined();
   });
 
-  it('marks a removed selection and preserves it when saving unrelated preferences', async () => {
+  it('retains a selection absent from cached models when saving unrelated preferences', async () => {
     vi.useFakeTimers();
     const h = await createHarness({ preferences: { model: 'claude-fable-5-1', showToolCalls: false,
       cotMessages: 'brief', maxConcurrentRuns: 7, messageReply: 'text', messageReplyMigrated: true } });
     await h.command('/config');
     const card = JSON.stringify(h.channel.sent.at(-1)?.content);
-    expect(card).toContain('已选模型已不在工具列表中');
+    expect(card).toContain('当前选择 · claude-fable-5-1');
     expect(card).toContain('claude-fable-5-1');
     expect(card).toContain('reasoning_effort');
     await h.command('/config submit', { max_concurrent_runs: '8' });
@@ -241,7 +242,7 @@ describe('profile-aware account and config commands', () => {
     await h.command('/config models 1', draft, { chatMode, messageId: form.messageId });
     const refreshed = JSON.stringify(update.mock.calls[0]?.[1]);
     expect(refreshed).toContain('New model 85');
-    expect(refreshed).toContain('config.models.0');
+    expect(refreshed).toContain('config.models.1');
     expect(refreshed).toContain('"initial_option":"new-85"');
     expect(refreshed).toContain('"initial_option":"ultra"');
     expect(refreshed).toContain('"initial_option":"text"');
@@ -253,6 +254,19 @@ describe('profile-aware account and config commands', () => {
     expect(isManaged(form.messageId)).toBe(true);
     const root = JSON.parse(await readFile(join(h.rootDir, 'config.json'), 'utf8')) as RootConfig;
     expect(root.profiles.claude?.preferences.model).toBeUndefined();
+  });
+
+  it('opens a refreshed settings card when a bridge restart has lost the original card mapping', async () => {
+    const h = await createHarness();
+    const send = vi.spyOn(h.channel, 'send'), update = vi.spyOn(h.channel, 'updateCardById');
+    await h.command('/config', undefined, { chatMode: 'group' });
+    const form = await send.mock.results[0]!.value;
+    forgetManagedCard(form.messageId);
+    h.nativeModels.push({ value: 'new-provider/new-model', label: 'Newly configured model' });
+    await h.command('/config models 0', undefined, { chatMode: 'group', messageId: form.messageId });
+    expect(update).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('Newly configured model');
   });
 
   it('rejects a forged reasoning level before saving any preferences', async () => {
@@ -276,6 +290,7 @@ describe('profile-aware account and config commands', () => {
     const update = vi.spyOn(h.channel, 'updateCardById');
     await h.command('/config preview', { model: 'future-model', reasoning_effort: 'high', message_reply: 'text', max_concurrent_runs: '8' }, { messageId });
     await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(update).toHaveBeenCalled());
     const preview = JSON.stringify(update.mock.calls.at(-1)?.[1]);
     expect(preview).not.toContain('future-level'); expect(preview).toContain('"initial_option":"text"');
     expect(preview).toContain('"default_value":"8"');
@@ -463,6 +478,8 @@ async function createHarness(options: {
 
   const nativeModels = ['default', 'claude-opus-4-8', 'claude-opus-5-5', 'claude-sonnet-5'].map(value => ({ value, label: value, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'].map(value => ({ value, label: value })) }));
   const agent = Object.assign(new FakeAgentAdapter(), { listModels: vi.fn(async () => nativeModels) });
+  // Production warms the persistent catalogue before settings are opened.
+  await writeJson(modelCachePath(appPaths.profileDir, profileConfig.accounts.app.id, agent.id), { version: 1, options: nativeModels });
   return {
     rootDir,
     channel, nativeModels, agent,

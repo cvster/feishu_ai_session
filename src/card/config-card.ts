@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { modelLabel, normalizeReasoningEffort, reasoningOptions, supportedModels, type ModelOption } from '../agent/models';
 import type { KnownChat } from '../bot/lark-info';
 import type { AgentKind, LarkCliIdentityPreset } from '../config/profile-schema';
@@ -52,6 +53,9 @@ function collapsedPanel(title: string, elements: object[]): object {
 
 /** Compact form: model and effort are primary; shared preferences stay folded. */
 export function configFormCard(opts: ConfigFormOpts): object {
+  // The SDK deduplicates by message/operator/button value. Each new rendering
+  // needs a distinct value so later refreshes are accepted on the same card.
+  const revision = randomUUID();
   const select = (name: string, value: string, options: Array<{ value: string; label: string }>) => ({
     tag: 'select_static', name, initial_option: value,
     options: options.map(option => ({ text: { tag: 'plain_text', content: option.label }, value: option.value })),
@@ -60,7 +64,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
   const button = (name: string, text: string, cmd: string, submit = false) => ({
     tag: 'button', name, text: { tag: 'plain_text', content: text },
     ...(submit ? { type: 'primary', form_action_type: 'submit' } : {}),
-    behaviors: [{ type: 'callback', value: { cmd } }],
+    behaviors: [{ type: 'callback', value: { revision, cmd } }],
   });
   const allModels = [...(opts.modelOptions ?? supportedModels(opts.agentKind))];
   if (!allModels.some(model => model.value === opts.model)) allModels.push({ value: opts.model, label: `未验证 · ${opts.model}` });
