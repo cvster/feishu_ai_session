@@ -13,7 +13,6 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { resolveWorkingDirectory } from '../policy/workspace';
 import { sendManagedCard, updateManagedCard, isManaged } from '../card/managed';
 import { createBoundChat, waitForBridgeGroupCreation, renameChat } from './group';
-import { muteSessionGroup } from './group-notifications';
 import { auxiliaryBotIsMember } from './auxiliary-membership';
 import { fetchKnownChatsResult } from './lark-info';
 import { auxiliaryUserIsMember } from './auxiliary-private';
@@ -615,7 +614,6 @@ export class AuxiliaryGroups {
       announce = !row.hasBound;
       row.status = 'active'; row.hasBound = true; await this.save();
     });
-    await muteSessionGroup(this.deps.channel, row.chatId);
     if (!announce) return;
     await this.deps.channel.send(row.ownerId, { text: `已将 ${tool.label} 会话「${source.name || source.nativeId}」共享给「${row.name}」中的AI助手。` });
     await this.deps.channel.send(row.chatId, { text: '会话共享已启用，AI助手已就绪，请 @我提问。需要私聊时，在本群 @我发送“私聊”，我会拉你和所有者创建私聊群。' });

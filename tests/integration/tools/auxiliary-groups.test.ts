@@ -87,7 +87,7 @@ describe('auxiliary owner linking and lifecycle', () => {
     h.catalog.markChatDissolved('oc_aux', []); await h.catalog.flush();
     await reloaded.joined(joined); expect(reloaded.get('oc_aux')?.status).toBe('archived');
   });
-  it('mutes the owner of an externally named FF group only after successful association', async () => {
+  it('associates an externally named FF group without muting the owner', async () => {
     const h = await harness();
     const run = vi.fn(async (args: string[], _data?: unknown): Promise<unknown> => args[0] === 'auth'
       ? { appId: 'cli_bot', identities: { user: { available: true, openId: 'ou_owner' } } }
@@ -95,13 +95,12 @@ describe('auxiliary owner linking and lifecycle', () => {
     configureGroupNotifications(h.channel, { appId: 'cli_bot', ownerId: () => 'ou_owner' }, run);
     await h.groups.joined(joined);
     await h.groups.action(h.event());
-    expect(run).not.toHaveBeenCalled();
     await h.groups.action(h.event());
     expect(h.groups.get('oc_aux')?.status).toBe('active');
-    expect(run).toHaveBeenLastCalledWith(
-      ['im', 'chat.user_setting', 'batch_update', '--as', 'user', '--data', '-'],
-      { chat_settings: [{ chat_id: 'oc_aux', is_muted: true }] },
-    );
+    expect(run).not.toHaveBeenCalled();
+    const sent = h.send.mock.calls.map(([chatId, body]: any[]) => [chatId, body?.text]);
+    expect(sent).toContainEqual(['ou_owner', expect.stringContaining('共享给「项目讨论」')]);
+    expect(sent).toContainEqual(['oc_aux', expect.stringContaining('会话共享已启用')]);
   });
   it.each(['codex', 'claude'] as const)('binds %s groups straight to the original without creating a native conversation', async toolId => {
     const h = await harness(toolId); await h.activate(); await h.activate('oc_aux_2');
