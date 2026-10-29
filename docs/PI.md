@@ -33,7 +33,7 @@ npm install -g @earendil-works/pi-coding-agent@1.4.0
 node bin/lark-channel-bridge.mjs pi-import-zcode --profile <profile>
 ```
 
-此命令从当前 Zcode Worker 的模型配置读取已启用供应商，按原供应商 ID 导入 Pi，映射 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages API，并复制当前默认模型。凭据和请求头作为字面值保存，避免触发 Pi 的命令或环境变量展开；输出只包含数量与路径。保留其他 Pi 供应商和设置，导入文件权限为 `600`。这是一次性导入；之后改 Zcode 配置，需要再次执行导入。自动发现、刷新模型和执行任务都不会再次复制凭据。
+此命令从当前 Zcode Worker 的模型配置读取已启用供应商，以 Zcode 的供应商名称作为 Pi 的供应商 ID 导入（例如 `gaoliu`、`tars-dev`、`tars-point`），以便 Pi 终端和桥接显示一致；名称不能用于 `provider/model` 选择或重名时保留原 ID。随后映射 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages API，并复制当前默认模型。凭据和请求头作为字面值保存，避免触发 Pi 的命令或环境变量展开；输出只包含数量与路径。保留其他 Pi 供应商和设置，导入文件权限为 `600`。旧版本导入的 `new-provider` 等标识会同时迁移：更新默认模型、模型范围、按模型保存的推理档位和桥接中的已保存选择；已有会话通过追加原生 `model_change` 记录选择同一个模型的新标识，原有消息、分支和历史文件内容保留。迁移中先保留新旧供应商，完成会话和设置迁移后再移除旧标识，重复导入不会重复追加记录。已经打开的 Pi 终端需要退出重开。这是一次性导入；之后改 Zcode 配置，需要再次执行导入。自动发现、刷新模型和执行任务都不会再次复制凭据。
 
 ## 启动与使用
 
@@ -44,7 +44,7 @@ node bin/lark-channel-bridge.mjs doctor --agents pi --profile <profile> --runtim
 
 非 Linux 环境使用 `worker run --tool pi` 并由独立进程管理器托管。桥接重新发现 Worker 后，新建 AI 会话群、网页新建会话和辅助群关联列表会提供 **Pi**。已有其他工具的会话群继续使用原工具；为 Pi 创建新群或将辅助群关联到已有 Pi 会话。
 
-支持新建和按精确 ID 续聊、流式文字、推理阶段与工具计数、停止本次任务、原生模型目录及各模型推理档位、图片输入、原生会话名称、JSONL 历史读取和原生 `clone` 复制。无历史的新群在首次提问后出现在 Pi 原生会话列表中。模型身份保留 `provider/model`，同名模型不合并；显式选择失效时拒绝执行，不切换供应商。刷新模型使用临时无持久会话的 Pi 进程，不发送提示词，不改原生会话、默认模型或配置。
+支持新建和按精确 ID 续聊、流式文字、推理阶段与工具计数、停止本次任务、原生模型目录及各模型推理档位、图片输入、原生会话名称、JSONL 历史读取和原生 `clone` 复制。无历史的新群在首次提问后出现在 Pi 原生会话列表中。Pi 终端的模型菜单直接显示供应商 ID，导入时采用 Zcode 的名称作为 ID，桥接的模型菜单也显示该名称。模型身份为 `provider/model`，同名模型不合并；显式选择失效时拒绝执行，不切换供应商。刷新模型使用临时无持久会话的 Pi 进程，不发送提示词，不改原生会话、默认模型或配置。
 
 ## 边界
 

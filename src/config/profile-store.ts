@@ -60,6 +60,7 @@ type StoredProfileConfig = Pick<
   | 'dsh'
   | 'kilo'
   | 'zcode'
+  | 'pi'
   | 'attachments'
   | 'comments'
   | 'larkCli'
@@ -100,6 +101,7 @@ function serializeProfileConfig(profile: ProfileConfig): StoredProfileConfig {
     ...(profile.dsh ? { dsh: profile.dsh } : {}),
     ...(profile.kilo ? { kilo: profile.kilo } : {}),
     ...(profile.zcode ? { zcode: profile.zcode } : {}),
+    ...(profile.pi ? { pi: profile.pi } : {}),
     attachments: profile.attachments,
     comments: {},
     larkCli: profile.larkCli,

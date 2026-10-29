@@ -51,5 +51,12 @@ it.skipIf(!process.env.PI_NATIVE_BIN)('uses actual Pi RPC, model discovery, resu
     const copy=await provider.fork(id);expect(copy.nativeId).not.toBe(id);expect(copy.cwd).toBe(cwd);
     expect((await new PiNativeConversationReader(options).read(copy.nativeId)).turns).toHaveLength(2);
     expect(requests).toHaveLength(2);expect(requests.every(r=>r.model==='test-model')).toBe(true);
+    const renamed=JSON.parse(await readFile(zcode,'utf8'));renamed.provider.fixture.name='gaoliu';await writeFile(zcode,JSON.stringify(renamed));
+    expect((await importZcodeToPi({modelConfigPath:zcode},{agentDir})).migratedSessions).toBe(2);
+    const refreshed=await adapter.listModels({cwd});
+    expect(refreshed.map(m=>m.value)).toContain('gaoliu/test-model');expect(refreshed.map(m=>m.value)).not.toContain('fixture/test-model');
+    expect((await run({sessionId:id,prompt:'after provider rename',model:'gaoliu/test-model'})).at(-1)).toMatchObject({type:'done',sessionId:id});
+    const continued=await new PiNativeConversationReader(options).read(id);
+    expect(continued.turns).toHaveLength(3);expect(continued.settings?.model).toBe('gaoliu/test-model');expect(requests).toHaveLength(3);
   } finally { server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));await rm(root,{recursive:true,force:true}); }
 },30_000);
