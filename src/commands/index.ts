@@ -569,10 +569,11 @@ async function handlePanel(args: string, ctx: CommandContext): Promise<void> {
   if (action === 'session-archive') {
     const target = panelCandidate(ctx, arg, 'session');
     if (!target) return reply(ctx, '此会话操作已过期，请刷新“现有会话”后重试。');
+    const deletes = ctx.controls.toolRegistry?.find(target.toolId ?? ctx.controls.profileConfig.agentKind)?.sessions?.archiveEffect === 'delete';
     await showPanelCard(ctx, panelConfirmationCard({
       title: '确认归档会话',
-      description: '会话会从活动列表移入归档，但完整对话记录仍然保留。',
-      confirmText: '确认归档（保留记录）',
+      description: deletes ? '归档会删除 Pi 原生会话及全部历史，Pi /resume 中也将不再显示；不能通过桥接恢复。' : '会话会从活动列表移入归档，但完整对话记录仍然保留。',
+      confirmText: deletes ? '确认归档并删除历史' : '确认归档（保留记录）',
       confirmCmd: 'panel.session-archive-confirm',
       token: arg,
       backCmd: 'panel.sessions',
@@ -591,6 +592,7 @@ async function handlePanel(args: string, ctx: CommandContext): Promise<void> {
       name: target.name,
       cwd: target.cwd,
       threadId: target.threadId,
+      archiveEffect: ctx.controls.toolRegistry?.find(target.toolId ?? ctx.controls.profileConfig.agentKind)?.sessions?.archiveEffect,
     }));
     return;
   }
@@ -602,6 +604,7 @@ async function handlePanel(args: string, ctx: CommandContext): Promise<void> {
       archiveCmd: 'panel.group-finish-confirm',
       dissolveCmd: 'panel.group-finish-dissolve',
       token: arg,
+      archiveEffect: ctx.controls.toolRegistry?.find(target.toolId ?? ctx.controls.profileConfig.agentKind)?.sessions?.archiveEffect,
     }));
     return;
   }
@@ -893,7 +896,7 @@ async function archivePanelSession(ctx: CommandContext, token: string): Promise<
   for (const row of ctx.sessionCatalog?.entries() ?? []) if (row.agentId === toolId && (row.sessionId ?? row.threadId) === target.threadId && (!row.sourceId || row.sourceId === tool.sourceId)) ctx.sessionCatalog?.archiveScope(row.scopeId, target.threadId);
   await Promise.all([ctx.controls.toolBindings.flush(), ctx.sessionCatalog?.flush()]);
   await ctx.controls.sessionArchiveNotifications?.flush();
-  panelCandidates.delete(token); await reply(ctx, `✓ ${tool.label} 会话已归档，历史保留。`);
+  panelCandidates.delete(token); await reply(ctx, `✓ ${tool.label} 会话已归档，` + (tool.sessions?.archiveEffect === 'delete' ? '原生会话及历史已删除。' : '历史保留。'));
 }
 
 function usesArchiveNotification(ctx: CommandContext, scope: string, nativeId?: string): boolean {
@@ -925,10 +928,11 @@ async function finishPanelGroup(ctx: CommandContext, token: string, dissolve = f
   await archiveGroupInput(ctx, target.chatId, nativeId ?? `pending-${toolId}`);
   panelCandidates.delete(token);
   const notice = `✓ 已归档工作群「${target.name}」，后续消息不再响应。` +
-    (dissolve ? '正在解散群，原生会话历史保留。' : '群和会话历史已保留。');
+    (tool?.sessions?.archiveEffect === 'delete' ? `Pi 原生会话及历史已删除，${dissolve ? '正在解散群。' : '群已保留。'}` :
+      dissolve ? '正在解散群，原生会话历史保留。' : '群和会话历史已保留。');
   if (notified) await ctx.controls.sessionArchiveNotifications!.flush();
   else await ctx.channel.send(target.chatId, { text: notice });
-  if (dissolve) await dissolveArchivedGroup(ctx, target.chatId);
+  if (dissolve) await dissolveArchivedGroup(ctx, target.chatId, tool?.sessions?.archiveEffect);
   else if (ctx.msg.chatId !== target.chatId) await reply(ctx, notice);
 }
 
@@ -1765,7 +1769,7 @@ async function canDissolveGroup(ctx: CommandContext): Promise<boolean> {
 }
 
 /** Called only after native/local archival succeeded. Never send into a deleted group. */
-async function dissolveArchivedGroup(ctx: CommandContext, chatId: string): Promise<void> {
+async function dissolveArchivedGroup(ctx: CommandContext, chatId: string, archiveEffect?: 'delete'): Promise<void> {
   try { await dissolveChat(ctx.groupChannel ?? ctx.channel, chatId); }
   catch (error) {
     await reply(ctx, `会话已归档，解散群失败：${describeChatDeletionError(error)}`);
@@ -1783,7 +1787,7 @@ async function dissolveArchivedGroup(ctx: CommandContext, chatId: string): Promi
     if (ctx.fromWeb || ctx.msg.chatId !== chatId) await reply(ctx, '会话已归档，群已解散。群关联清理尚未完成，将由后台检查重试。');
     return;
   }
-  if (ctx.fromWeb || ctx.msg.chatId !== chatId) await reply(ctx, '✓ 会话已归档并解散群，原生会话历史已保留。');
+  if (ctx.fromWeb || ctx.msg.chatId !== chatId) await reply(ctx, '✓ 会话已归档并解散群，' + (archiveEffect === 'delete' ? 'Pi 原生会话及历史已删除。' : '原生会话历史已保留。'));
 }
 
 async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
@@ -1804,7 +1808,9 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
     await sendManagedCard(
       ctx.channel,
       ctx.msg.chatId,
-      finishTaskConfirmationCard(ctx.controls.profileConfig.agentKind),
+      finishTaskConfirmationCard(ctx.controls.profileConfig.agentKind, {
+        archiveEffect: ctx.controls.toolRegistry?.find(ctx.controls.profileConfig.agentKind)?.sessions?.archiveEffect,
+      }),
       commandReplyOptions(ctx),
     );
     return;
@@ -1847,8 +1853,9 @@ async function handleFinish(args: string, ctx: CommandContext): Promise<void> {
   if (notified)
     await ctx.controls.sessionArchiveNotifications!.flush();
   else await reply(ctx, `✓ 当前 ${toolName} 会话已归档，后续消息不再响应。` +
-    (dissolve ? '正在解散群，原生会话历史保留。' : '群和会话历史已保留。'));
-  if (dissolve) await dissolveArchivedGroup(ctx, ctx.msg.chatId);
+    (tool?.sessions?.archiveEffect === 'delete' ? `Pi 原生会话及历史已删除，${dissolve ? '正在解散群。' : '群已保留。'}` :
+      dissolve ? '正在解散群，原生会话历史保留。' : '群和会话历史已保留。'));
+  if (dissolve) await dissolveArchivedGroup(ctx, ctx.msg.chatId, tool?.sessions?.archiveEffect);
 }
 
 async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {

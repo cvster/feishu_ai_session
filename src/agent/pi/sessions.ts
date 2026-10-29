@@ -1,7 +1,11 @@
 import { constants } from 'node:fs';
-import { readdir, open } from 'node:fs/promises';
+import { readdir, open, unlink } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { piSessionId, piStorageDir, type PiOptions } from './client';
+
+const execFileAsync = promisify(execFile);
 
 export interface PiSessionFile { path: string; header: any; entries: any[]; name?: string; createdAtMs: number; updatedAtMs: number }
 export class PiSessionFiles {
@@ -47,6 +51,16 @@ export class PiSessionFiles {
     const matches = (await this.list()).filter(row => row.header.id === id);
     if (matches.length !== 1) throw Error('Pi 会话不存在或身份不明确');
     return matches[0]!;
+  }
+  /** Match Pi's /resume deletion: trash if available, otherwise unlink the exact file. */
+  async delete(id: string): Promise<void> {
+    piSessionId(id);
+    const file = (await this.list()).find(row => row.header.id === id);
+    if (!file) return; // A retry after a lost receipt must not recreate the session.
+    await execFileAsync('trash', [file.path], { timeout: 5000, maxBuffer: 4096, windowsHide: true }).catch(() => {});
+    try { await unlink(file.path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw Error('Pi 会话删除失败，未完成归档'); }
+    if ((await this.list()).some(row => row.header.id === id)) throw Error('Pi 会话删除后仍存在，未完成归档');
   }
 }
 

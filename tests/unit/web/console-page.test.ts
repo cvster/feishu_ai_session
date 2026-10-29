@@ -107,6 +107,17 @@ it('shows only the mismatch management buttons and requires confirmation before 
   expect(h.requests.find(r => r.body?.action === 'personal-archive')?.body).toEqual({ action: 'personal-archive', id: 'archive' });
 });
 
+it('warns about deleting Pi history in the archive dialog', async () => {
+  const h = harness(false); await h.ready();
+  Object.assign(h.snapshot.bindings.find(b => b.id === 'archive')!, {archiveEffect:'delete'});
+  await h.nav[1]!.onclick!();
+  const buttons = (node: Element): Element[] => node.children.flatMap(c => [...(c.tag === 'button' ? [c] : []), ...buttons(c)]);
+  await buttons(h.get('binding-list')).find(b => b.textContent === '归档会话')!.onclick!();
+  expect(h.get('group-description').textContent).toContain('归档会删除');
+  expect(h.get('group-description').textContent).not.toContain('历史仍保留');
+  expect(h.requests.some(r => r.body?.action === 'personal-archive')).toBe(false);
+});
+
 it('cascades tools, full project paths and session choices without retaining a hidden target', async () => {
   const h = harness(false); await h.ready();
   h.snapshot.sharedTargets.push({ id: 'third', name: '同名项目会话', toolId: 'other', tool: 'Other', cwd: '/else/next' },

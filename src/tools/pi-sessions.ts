@@ -4,7 +4,8 @@ import type { ToolSession, ToolSessionOperations } from './types';
 
 export class PiSessionProvider implements ToolSessionOperations {
   readonly historyMode = 'file';
-  readonly nativeArchive = false;
+  readonly nativeArchive = true;
+  readonly archiveEffect = 'delete';
   private files: PiSessionFiles;
   constructor(private options: PiOptions) { this.files = new PiSessionFiles(options); }
   async listSessions(): Promise<ToolSession[]> {
@@ -24,7 +25,7 @@ export class PiSessionProvider implements ToolSessionOperations {
     await this.withSession(id, async client => { await client.request('set_session_name', { name });
       if ((await client.request('get_state'))?.sessionName !== name) throw Error('Pi 会话名称回读不匹配'); });
   }
-  async archive(_id: string): Promise<void> { throw Error('Pi 不提供原生归档；可通过桥接归档入口，原生历史保留'); }
+  async archive(id: string): Promise<void> { await this.files.delete(id); }
   async fork(id: string) {
     return this.withSession(id, async (client, file) => {
       const result = await client.request('clone');

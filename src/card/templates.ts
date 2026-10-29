@@ -252,7 +252,7 @@ export function newSessionConfirmationCard(agentKind: ToolId = 'codex'): object 
 
 /** Destructive confirmation shown before archiving the session and dissolving the group. */
 export function finishTaskConfirmationCard(agentKind: ToolId = 'codex', options: {
-  title?: string; archiveCmd?: string; dissolveCmd?: string; token?: string;
+  title?: string; archiveCmd?: string; dissolveCmd?: string; token?: string; archiveEffect?: 'delete';
 } = {}): object {
   const toolName = toolDefinition(agentKind).label;
   return {
@@ -262,7 +262,9 @@ export function finishTaskConfirmationCard(agentKind: ToolId = 'codex', options:
       elements: [
         {
           tag: 'markdown',
-          content:
+          content: options.archiveEffect === 'delete' ?
+            `归档会删除 ${toolName} 原生会话及全部历史，Pi /resume 中也将不再显示。本群后续消息不再响应，群保留。\n\n` +
+            '删除优先移入系统回收站；回收站工具不可用时直接删除。“归档并解散群”还会解散本群。此操作不能通过桥接恢复。' :
             `归档后停止当前 ${toolName} 会话，本群后续消息不再响应，保留群和会话历史。\n\n` +
             '“归档并解散群”还会解散本群，保留原生会话历史。群聊解散后无法恢复。',
         },
@@ -288,6 +290,7 @@ export interface ManagedGroupCardEntry {
   name: string;
   cwd?: string;
   threadId?: string;
+  archiveEffect?: 'delete';
 }
 
 export interface ExistingSessionCardEntry {
@@ -376,7 +379,8 @@ export function managedGroupDetailCard(entry: ManagedGroupCardEntry): object {
             `👥 **${escapeMd(entry.name)}**\n\n` +
             `🔗 会话：${entry.threadId ? `\`${entry.threadId}\`` : '尚未建立'}\n` +
             `📁 目录：\`${escapeCode(entry.cwd ?? '(未设置)')}\`\n\n` +
-            '归档后本群不再响应，原生会话历史保留；如需解散群，请自行在飞书中操作。',
+            (entry.archiveEffect === 'delete' ? '归档会删除 Pi 原生会话及全部历史，本群后续消息不再响应。' :
+              '归档后本群不再响应，原生会话历史保留；如需解散群，请自行在飞书中操作。'),
         },
         { tag: 'hr' },
         cardKitButtonRow([

@@ -48,7 +48,7 @@ export function createWorkerSessions(input: {
     const options = { binary: profile.pi?.binaryPath, args: profile.pi?.args, agentDir: profile.pi?.agentDir };
     const sessions = new PiSessionProvider(options);
     reader = new PiNativeConversationReader(options);
-    provider = sessions; list = () => sessions.listSessions(); nativeArchive = false;
+    provider = sessions; list = () => sessions.listSessions();
   } else if (toolId === 'dsh') {
     const sessions = new DshSessionProvider({ binary: profile.dsh?.binaryPath, args: profile.dsh?.args,
       homeDir: profile.dsh?.homeDir }, join(profileDir, 'dsh-sessions'));
@@ -67,12 +67,13 @@ export function createWorkerSessions(input: {
     throw new Error(`No built-in session provider for ${toolId}`);
   }
   return { list,
-    ...(toolId === 'kilo' ? { listAuthoritative: true } : {}),
+    ...(['kilo', 'pi'].includes(toolId) ? { listAuthoritative: true } : {}),
     nativeNames: toolId !== 'zcode' || !!profile.zcode?.remoteControlFile,
     ...(reader ? { conversation: (id: string) => reader!.read(id), close: () => reader!.close() } : {}),
     history: id => exportWorkerHistory(provider, id),
     rename: (id, name) => provider.rename(id, name),
     ...(nativeArchive ? { archive: (id: string) => provider.archive(id) } : {}),
+    ...(provider.archiveEffect ? { archiveEffect: provider.archiveEffect } : {}),
     ...(provider.fork ? { fork: (id: string) => provider.fork!(id) } : {}),
   };
 }

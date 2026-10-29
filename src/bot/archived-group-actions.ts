@@ -47,9 +47,11 @@ export async function handleArchivedGroupAction(input: {
     return;
   }
   if (value.cmd === 'archive-group.confirm') {
+    const binding = controls.toolBindings?.get(chatId);
+    const deleted = binding && controls.toolRegistry?.find(binding.toolId)?.sessions?.archiveEffect === 'delete';
     await sendManagedCard(channel, chatId, {
       schema: '2.0', config: { summary: { content: '是否解散此群？' } }, body: { elements: [
-        { tag: 'markdown', content: '会话已归档。是否解散此群？\n\n群聊解散后无法恢复，原生会话历史仍然保留。' },
+        { tag: 'markdown', content: '会话已归档。是否解散此群？\n\n群聊解散后无法恢复。' + (deleted ? '' : '原生会话历史仍然保留。') },
         { tag: 'button', text: { tag: 'plain_text', content: '确认解散群' }, type: 'danger',
           behaviors: [{ type: 'callback', value: { cmd: 'archive-group.dissolve', arg: value.arg } }] },
       ] },

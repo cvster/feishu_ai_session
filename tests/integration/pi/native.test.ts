@@ -1,8 +1,10 @@
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, readFile, rm, writeFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { realpath } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { PiAdapter } from '../../../src/agent/pi/adapter';
 import { PiNativeConversationReader } from '../../../src/agent/pi/conversation';
 import { PiSessionProvider } from '../../../src/tools/pi-sessions';
@@ -58,5 +60,12 @@ it.skipIf(!process.env.PI_NATIVE_BIN)('uses actual Pi RPC, model discovery, resu
     expect((await run({sessionId:id,prompt:'after provider rename',model:'gaoliu/test-model'})).at(-1)).toMatchObject({type:'done',sessionId:id});
     const continued=await new PiNativeConversationReader(options).read(id);
     expect(continued.turns).toHaveLength(3);expect(continued.settings?.model).toBe('gaoliu/test-model');expect(requests).toHaveLength(3);
-  } finally { server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));await rm(root,{recursive:true,force:true}); }
+    const {SessionManager}=await import(pathToFileURL(join(dirname(await realpath(process.env.PI_NATIVE_BIN!)),'../core/session-manager.js')).href);
+    const sessionDir=dirname(await provider.historyPath(id));
+    expect((await SessionManager.listAll(sessionDir)).map((s:any)=>s.id)).toContain(id);
+    vi.stubEnv('PATH',root);await provider.archive(id);await provider.archive(id);
+    expect((await SessionManager.listAll(sessionDir)).map((s:any)=>s.id)).toEqual([copy.nativeId]);
+    await expect(new PiNativeConversationReader(options).read(id)).rejects.toThrow('不存在');
+    expect((await new PiNativeConversationReader(options).read(copy.nativeId)).turns).toHaveLength(2);
+  } finally { vi.unstubAllEnvs();server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));await rm(root,{recursive:true,force:true}); }
 },30_000);

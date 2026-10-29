@@ -20,7 +20,8 @@ export function workerCapabilities(api: Pick<WorkerToolApi, 'agent' | 'sessions'
     models: typeof api.agent.listModels === 'function', reasoningMapping: true,
     sessions: { list: !!api.sessions, history: !!api.sessions,
       rename: !!api.sessions?.rename || typeof api.agent.renameSession === 'function',
-      archive: !!api.sessions?.archive, fork: !!api.sessions?.fork },
+      archive: !!api.sessions?.archive, fork: !!api.sessions?.fork,
+      ...(api.sessions?.archive && api.sessions.archiveEffect ? { archiveEffect: api.sessions.archiveEffect } : {}) },
     nativeTurnStop: typeof api.agent.stopNativeTurn === 'function' &&
       (!('desktopRemoteEnabled' in api.agent) || api.agent.desktopRemoteEnabled === true),
     ...(api.sessions?.listAuthoritative ? { sessionListAuthoritative: true } : {}),

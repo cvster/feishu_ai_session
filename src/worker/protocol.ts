@@ -9,7 +9,7 @@ export interface WorkerCapabilities {
   jobs: { submit: true; read: true; stop: true; eventCursor: true };
   models: boolean;
   reasoningMapping?: boolean;
-  sessions: { list: boolean; history: boolean; rename: boolean; archive: boolean; fork: boolean };
+  sessions: { list: boolean; history: boolean; rename: boolean; archive: boolean; fork: boolean; archiveEffect?: 'delete' };
   nativeTurnStop: boolean;
   conversation?: boolean;
   questions?: boolean;
@@ -53,6 +53,7 @@ export interface WorkerSessionService {
   history(nativeId: string): Promise<WorkerSessionHistory | undefined>;
   rename?(nativeId: string, name: string, cwd?: string): Promise<void>;
   archive?(nativeId: string): Promise<void>;
+  archiveEffect?: 'delete';
   fork?(nativeId: string): Promise<{ nativeId: string; name: string; cwd: string }>;
   conversation?(nativeId: string): Promise<NativeConversationSnapshot>;
   questions?(nativeId: string): Promise<WorkerQuestion[]>;

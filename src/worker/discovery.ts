@@ -48,6 +48,7 @@ export function workerTool(worker: DiscoveredWorker): AgentTool {
   return { id: health.toolId, sourceId: health.sourceId, label: manifest.label, agent,
     listSessions: () => client.listSessions(),
     sessions: { nativeArchive: capabilities.sessions.archive, historyMode: manifest.historyFormat === 'json' ? 'snapshot' : 'file',
+      ...(capabilities.sessions.archiveEffect ? { archiveEffect: capabilities.sessions.archiveEffect } : {}),
       async historyPath(id) {
         const history = await client.sessionHistory(id);
         if (history.nativeId !== id || !['json', 'jsonl'].includes(history.format) || typeof history.content !== 'string' || Buffer.byteLength(history.content) > 32 * 1024 * 1024)
@@ -58,7 +59,15 @@ export function workerTool(worker: DiscoveredWorker): AgentTool {
         await pruneHistoryCopies(root, path); return path;
       },
       rename: (id, name) => client.renameSession(id, name),
-      archive: async id => { if (capabilities.sessions.archive) await client.archiveSession(id); },
+      archive: async id => {
+        if (!capabilities.sessions.archive) return;
+        await client.archiveSession(id);
+        if (capabilities.sessions.archiveEffect === 'delete') {
+          const { createHash } = await import('node:crypto');
+          const name = createHash('sha256').update(id).digest('hex');
+          for (const extension of ['json', 'jsonl']) await rm(join(directory, 'bridge-history', `${name}.${extension}`), { force: true });
+        }
+      },
       ...(capabilities.sessions.fork ? { fork: (id: string) => client.forkSession(id) } : {}),
     } };
 }

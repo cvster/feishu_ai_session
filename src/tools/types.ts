@@ -16,6 +16,8 @@ export interface ToolSessionOperations {
   readonly historyMode?: 'file' | 'snapshot';
   /** False when archive only affects the bridge catalog, not native storage. */
   readonly nativeArchive?: boolean;
+  /** Some tools implement the bridge archive action by deleting native history. */
+  readonly archiveEffect?: 'delete';
   historyPath(nativeId: string): Promise<string | undefined>;
   rename(nativeId: string, name: string): Promise<void>;
   archive(nativeId: string): Promise<void>;

@@ -16,7 +16,7 @@ import { discoverWorkers, workerTool } from '../../../src/worker/discovery';
 import { WorkerClient } from '../../../src/worker/client';
 
 const roots: string[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+afterEach(async () => { vi.unstubAllEnvs(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function harness(mode?: string) {
   const root = await mkdtemp(join(tmpdir(), 'bridge-pi-')); roots.push(root);
   const options = { binary: process.execPath, args: [fileURLToPath(new URL('./fixture.cjs', import.meta.url)), ...(mode ? [`--fixture-mode=${mode}`] : [])], agentDir: root };
@@ -55,10 +55,28 @@ it('resumes one exact session and exposes read-only history, rename and native c
   expect(snapshot.turns[1]?.state.terminal).toBe('done');
   expect(await readFile((await h.provider.historyPath(id))!,'utf8')).toContain('raw');
   const copy=await h.provider.fork(id);expect(copy.nativeId).not.toBe(id);expect(copy.cwd).toBe(h.root);
-  expect(h.provider.nativeArchive).toBe(false);await expect(h.provider.archive(id)).rejects.toThrow('不提供原生归档');
+  expect(h.provider).toMatchObject({nativeArchive:true,archiveEffect:'delete'});
+  vi.stubEnv('PATH',h.root); // Force native unlink fallback without touching the user's trash.
+  await h.provider.archive(id);await h.provider.archive(id);
+  expect((await h.provider.listSessions()).map(s=>s.nativeId)).toEqual([copy.nativeId]);
+  await expect(reader.read(id)).rejects.toThrow('不存在');
+  expect((await reader.read(copy.nativeId)).turns).toHaveLength(2);
 });
 it.each(['read-only','workspace'])('rejects %s permissions without launching an unrestricted process',async accessMode=>{
   const h=await harness(),events=await h.collect({accessMode});expect(events.at(-1)).toMatchObject({type:'error',submissionStatus:'rejected'});expect(await h.requests()).toEqual([]);
+});
+it('uses the native trash command for the exact session and refuses ambiguous or path-like identities',async()=>{
+  const h=await harness(),events=await h.collect(),id=events.find(e=>e.type==='system')?.sessionId!;
+  const path=await h.provider.historyPath(id),before=await readFile(path,'utf8');
+  await writeFile(join(h.root,'trash'),`#!${process.execPath}\nconst fs=require('node:fs');fs.renameSync(process.argv[2],process.argv[2]+'.trashed');`,{mode:0o700});
+  vi.stubEnv('PATH',h.root);
+  const duplicate=join(h.root,'sessions','duplicate.jsonl');await writeFile(duplicate,before);
+  await expect(h.provider.archive(id)).rejects.toThrow('重复会话 ID');
+  expect(await readFile(path,'utf8')).toBe(before);await rm(duplicate);
+  await expect(h.provider.archive('../models.json')).rejects.toThrow('ID');
+  await h.provider.archive(id);
+  expect(await readFile(path+'.trashed','utf8')).toBe(before);expect(await h.provider.listSessions()).toEqual([]);
+  await expect(readFile(path)).rejects.toMatchObject({code:'ENOENT'});
 });
 it.each([{model:'missing/model'},{reasoningEffort:'ultra'}])('rejects unavailable native selections before prompt: %j',async extra=>{
   const h=await harness(),events=await h.collect(extra);
@@ -109,11 +127,34 @@ it('registers Pi through the real worker factory and common authenticated discov
     const discovered=await discoverWorkers(join(h.root,'profile'),'app');expect(discovered).toHaveLength(1);
     const tool=workerTool(discovered[0]!);expect(tool).toMatchObject({id:'pi',label:'Pi',sourceId:h.root});
     const client=new WorkerClient(built.stateDir,h.root,'app','pi');
-    const health=await client.health();expect(health.capabilities?.sessions).toMatchObject({list:true,history:true,rename:true,fork:true,archive:false});
+    const health=await client.health();expect(health.capabilities?.sessions).toMatchObject({list:true,history:true,rename:true,fork:true,archive:true,archiveEffect:'delete'});
+    expect(health.capabilities?.sessionListAuthoritative).toBe(true);
+    expect(tool.sessions?.archiveEffect).toBe('delete');
     expect((await client.models(h.root)).some(m=>m.value==='tars/model/one')).toBe(true);
     const job=await client.submit({requestKey:'pi-worker-message',options:{runId:'input',cwd:h.root,prompt:'worker question',initialSessionId:'pi-worker-native',accessMode:'full',model:'tars/model/one'}});
     await vi.waitFor(async()=>expect((await client.snapshot(job.id)).job.status).toBe('completed'),{timeout:5000});
     expect((await tool.listSessions()).map(s=>s.nativeId)).toContain('pi-worker-native');
     expect((await client.conversation('pi-worker-native')).turns[0]?.input).toBe('worker question');
+    const exported=await tool.sessions!.historyPath('pi-worker-native');expect(exported).toBeTruthy();
+    vi.stubEnv('PATH',h.root);
+    await tool.sessions!.archive('pi-worker-native');await client.archiveSession('pi-worker-native');
+    expect(await client.listSessions()).toEqual([]);
+    await expect(readFile(exported!)).rejects.toMatchObject({code:'ENOENT'});
+  }finally{await server.close();}
+});
+
+it('rejects deletion while the worker owns a running session, then deletes after that run stops',async()=>{
+  const h=await harness('wait');
+  const profile=createDefaultProfileConfig({agentKind:'pi',accounts:{app:{id:'app',secret:'fixture',tenant:'feishu'}},
+    pi:{binaryPath:process.execPath,args:h.options.args,agentDir:h.root}});
+  const built=await createWorkerProvider(join(h.root,'profile'),'pi',profile,{}),server=await startWorkerServer({...built,botAppId:'app'});
+  const client=new WorkerClient(built.stateDir,h.root,'app','pi');
+  try{
+    const job=await client.submit({requestKey:'busy-pi-delete',options:{runId:'busy',cwd:h.root,prompt:'wait',initialSessionId:'busy-native',accessMode:'full'}});
+    await vi.waitFor(async()=>expect((await client.snapshot(job.id)).job.status).toBe('running'));
+    await expect(client.archiveSession('busy-native')).rejects.toMatchObject({status:429,code:'busy'});
+    await client.stop(job.id);
+    await vi.waitFor(async()=>expect((await client.snapshot(job.id)).job.status).toBe('interrupted'));
+    vi.stubEnv('PATH',h.root);await client.archiveSession('busy-native');expect(await client.listSessions()).toEqual([]);
   }finally{await server.close();}
 });

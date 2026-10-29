@@ -121,7 +121,8 @@ export class BridgeConsoleService {
         const b = sessionRefs[refIndex++]!, o = this.observations.get(b.toolId), tool = c.toolRegistry?.find(b.toolId);
         if (b.nativeCreated === false || !b.nativeId || !o?.online || !o.nativeKnown || o.sourceId !== b.sourceId ||
           o.native.some(row => row.nativeId === b.nativeId) || !o.health?.capabilities?.conversation ||
-          !(tool?.agent instanceof DurableAgentAdapter)) continue;
+          !(tool?.agent instanceof DurableAgentAdapter) ||
+          o.health?.capabilities?.sessionListAuthoritative && o.health.capabilities.sessions.archiveEffect === 'delete') continue;
         const key = checkKey(b), cached = this.sessionChecks.get(key);
         if (!force && cached && Date.now() - cached.at < 60_000) {
           if (cached.session) o.native.push(cached.session);
@@ -162,7 +163,8 @@ export class BridgeConsoleService {
       const pending = !b.nativeId || b.nativeCreated === false;
       const sameWorker = o?.sourceId === b.sourceId;
       const sessionNow: SessionState | undefined = pending ? 'pending' : native ? native.archived ? 'archived' : 'active' :
-        o?.online && o.nativeKnown && sameWorker ? probe?.state : undefined;
+        o?.online && o.nativeKnown && sameWorker ?
+          o.health?.capabilities?.sessionListAuthoritative && o.health.capabilities.sessions.archiveEffect === 'delete' ? 'archived' : probe?.state : undefined;
       let sessionEvidence = sessionNow ? this.states.confirm(checkKey(b), sessionNow, native && probe?.session === native ? probe.at : now) : this.states.get(checkKey(b));
       // A confirmed archival receipt is durable evidence, but not a fresh check for destructive actions.
       if (!sessionEvidence && b.nativeId && c.toolBindings?.isArchived(b.toolId, b.sourceId, b.nativeId))
@@ -183,6 +185,7 @@ export class BridgeConsoleService {
         groupNow === 'active' && sessionNow === 'active' && native?.name && group?.name && native.name !== group.name ? '群名与会话名不一致' : ''].filter((v): v is string => !!v);
       const verified = groupInspection.result === 'ok' && sessionInspection.result === 'ok';
       return [{ id: hash([c.profile, c.profileConfig.accounts.app.id, b.revision]), scope: b.scope, chatId: b.scope, toolId: b.toolId, sourceId: b.sourceId, tool: o?.label ?? b.toolId,
+        archiveEffect: o?.health?.capabilities?.sessions.archiveEffect,
         kind: '个人 AI 群', nativeId: b.nativeId, groupName: group?.name ?? b.name ?? native?.name ?? b.scope,
         sessionName: native?.name ?? b.name ?? b.nativeId ?? '尚未创建', cwd: personalRows.find(s => s.scope === b.scope)?.cwd ?? b.cwd ?? native?.cwd ?? '', issues, groupState, sessionState, groupInspection, sessionInspection,
         sessionId: groupState === 'active' && sessionState === 'active' ? personalRows.find(s => s.scope === b.scope)?.id : undefined,

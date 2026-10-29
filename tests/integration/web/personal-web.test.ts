@@ -36,12 +36,12 @@ import { RUN_BUTTON_IMAGES, COMPLETED_STOP_IMAGE } from '../../../src/card/run-b
 import { WorkerApiError } from '../../../src/worker/tool-api';
 import type { WebConfig } from '../../../src/web/config';
 
-async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}, authoritative = false) {
+async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}, authoritative = false, archiveEffect?: 'delete') {
   const native = { nativeId: 'native', name: 'AA-web', cwd: '/project', createdAtMs: 1, updatedAtMs: 2, archived: false };
   const conversation = { id: 'native', name: native.name, cwd: native.cwd, archived: false, turns: [{ id: 'desktop-1', input: '来自桌面', bridge: false,
     createdAtMs: 10, state: reduce(reduce(initialState, { type: 'text', delta: '原生回答' }), { type: 'done', terminationReason: 'normal' }) }] };
   const copies: typeof native[] = [];
-  const provider = { listAuthoritative: authoritative, list: vi.fn(async () => [native, ...copies]), nativeNames: true, conversation: vi.fn(async () => conversation),
+  const provider = { archiveEffect, listAuthoritative: authoritative, list: vi.fn(async () => archiveEffect === 'delete' && native.archived ? copies : [native, ...copies]), nativeNames: true, conversation: vi.fn(async () => conversation),
     history: async () => undefined, rename: vi.fn(async (id: string, name: string) => { const session = [native, ...copies].find(row => row.nativeId === id); if (!session) throw Error('missing session'); session.name = name; }), archive: vi.fn(async () => { native.archived = true; }),
     fork: vi.fn(async () => { const copy = { ...native, nativeId: 'native-fork', name: 'AA-web（分叉）' }; copies.push(copy); return copy; }) };
   const h = await fixture(tool, provider);
@@ -57,7 +57,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi
   bindings.set('oc_group', { toolId: tool, sourceId: h.client.sourceId, nativeId: 'native', name: 'AA-web' });
   catalog.upsertActive({ scopeId: 'oc_group', agentId: tool, cwdRealpath: native.cwd, sourceId: h.client.sourceId, botAppId: 'cli_test', policyFingerprint: 'fp', sessionId: tool === 'codex' ? undefined : 'native', threadId: tool === 'codex' ? 'native' : undefined });
   const registry = new ToolRegistry(); registry.register({ id: tool, sourceId: h.client.sourceId, label: 'Tool from manifest', agent: h.adapter,
-    listSessions: () => h.client.listSessions(), sessions: { historyPath: async () => undefined, rename: (id, name) => h.client.renameSession(id, name), nativeArchive: true, archive: id => h.client.archiveSession(id), fork: id => h.client.forkSession(id) } });
+    listSessions: () => h.client.listSessions(), sessions: { archiveEffect, historyPath: async () => undefined, rename: (id, name) => h.client.renameSession(id, name), nativeArchive: true, archive: id => h.client.archiveSession(id), fork: id => h.client.forkSession(id) } });
   controls.toolRegistry = registry;
   controls.configPath = join(h.dir, 'config.json');
   controls.refreshOwner = async () => {};
@@ -1331,6 +1331,19 @@ it('serves exact Feishu control PNGs from same-origin URLs under the existing im
     expect(Buffer.from(await response.arrayBuffer()).equals(Buffer.from(encoded, 'base64'))).toBe(true);
   }
   expect((await h.request('/assets/run-controls/unknown.png')).status).toBe(404);
+});
+
+it('warns that Pi archive deletes history and confirms deletion through the worker before closing the route', async () => {
+  const h = await harness('pi', '127.0.0.1', {}, true, 'delete'), id = (await h.service.list())[0]!.id;
+  const confirmation = await h.service.control(id, 'finish');
+  expect(JSON.stringify(confirmation)).toContain('归档会删除');expect(JSON.stringify(confirmation)).not.toContain('历史保留');
+  const archive = flatten(confirmation.elements).find(e => e.kind === 'button' && e.text === '归档')!;
+  if (archive.kind !== 'button') throw Error('archive');
+  await h.service.control(id, archive.action);
+  expect(h.provider.archive).toHaveBeenCalledWith('native');expect(await h.client.listSessions()).toEqual([]);
+  expect(h.bindings.isArchived('pi', h.client.sourceId, 'native')).toBe(true);
+  const snapshot = await h.consoleService.snapshot(true);
+  expect(snapshot.bindings[0]).toMatchObject({sessionState:'archived',archiveEffect:'delete',canDissolve:true});
 });
 
 it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('opens the fixed %s archive menu without worker reads and revalidates confirmation', async tool => {

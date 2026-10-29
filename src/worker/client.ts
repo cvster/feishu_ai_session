@@ -22,6 +22,7 @@ export function validWorkerHealth(value: unknown, botAppId: string): value is Wo
     !!c.jobs && ['submit', 'read', 'stop', 'eventCursor'].every(key => c.jobs[key as keyof typeof c.jobs] === true) &&
     typeof c.models === 'boolean' && typeof c.nativeTurnStop === 'boolean' && !!c.sessions &&
     ['list', 'history', 'rename', 'archive', 'fork'].every(key => typeof c.sessions[key as keyof typeof c.sessions] === 'boolean') &&
+    (c.sessions.archiveEffect === undefined || c.sessions.archiveEffect === 'delete' && c.sessions.archive === true) &&
     ['conversation', 'questions', 'nativeSessionNames', 'sessionListAuthoritative', 'reasoningMapping'].every(key => c[key as 'conversation'] === undefined || typeof c[key as 'conversation'] === 'boolean') &&
     !!m && typeof m.label === 'string' && !!m.label.trim() && m.label.length <= 100 && !/[\u0000-\u001f]/.test(m.label) &&
     ['threadId', 'sessionId'].includes(m.nativeField) && typeof m.sessionKind === 'string' && !!m.sessionKind.trim() && m.sessionKind.length <= 100 &&
