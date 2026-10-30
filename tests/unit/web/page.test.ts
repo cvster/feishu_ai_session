@@ -791,28 +791,28 @@ it('keeps an idle submitted message in history while only its receipt is known, 
   expect(h.node('messages').querySelectorAll('.user')).toHaveLength(1); expect(h.node('queued-messages').hidden).toBe(true);
 });
 
-it('names the page 飞书AI助手 and keeps the session header off desktop screens', () => {
+it('names the page 飞书AI助手 with a plain sidebar brand and keeps session details off the sidebar', () => {
   expect(bridgeWebPage).toContain('<title>飞书AI助手</title>');
-  expect(bridgeWebPage).toContain('@media(min-width:601px){header{display:none}}');
-  expect(bridgeWebPage).toContain('@media(max-width:600px){#sidebar-resizer,#composer-resizer,#session-info{display:none}');
+  expect(bridgeWebPage).toContain('<strong>飞书AI助手</strong>');
+  expect(bridgeWebPage).not.toContain('FEISHU BRIDGE');
+  expect(bridgeWebPage).not.toContain('session-info');
+  expect(bridgeWebPage).toContain('@media(min-width:601px){header{height:64px;padding:10px 32px}}');
+  expect(bridgeWebPage).toContain('@media(max-width:600px){#sidebar-resizer,#composer-resizer{display:none}');
 });
 
-it('shows the current session name, tool, project and group link in the sidebar', async () => {
+it('shows the current session name, tool, project and group link in the right header', async () => {
   const h = harness(); await h.ready();
-  expect(h.node('session-info').hidden).toBe(false);
-  expect(h.node('info-title').textContent).toBe(h.rows[0]!.name);
-  expect(h.node('info-subtitle').textContent).toBe('Tool / /project');
-  expect((h.node('info-group') as any).href).toBe('https://applink.feishu.cn/client/chat/open?openChatId=oc_a');
-  expect(h.node('info-group').hidden).toBe(false);
+  expect(h.node('title').textContent).toBe(h.rows[0]!.name);
+  expect(h.node('subtitle').textContent).toBe('Tool / /project');
+  expect((h.node('group') as any).href).toBe('https://applink.feishu.cn/client/chat/open?openChatId=oc_a');
+  expect(h.node('group').hidden).toBe(false);
   h.requests[0]!.resolve(h.conversation(0)); await h.settle();
   h.choose(1); h.requests[1]!.resolve(h.conversation(1)); await h.settle();
-  expect(h.node('info-title').textContent).toBe(h.rows[1]!.name);
-  expect(h.node('info-subtitle').textContent).toBe('Other / /project');
-  expect((h.node('info-group') as any).href).toContain('oc_b');
+  expect(h.node('title').textContent).toBe(h.rows[1]!.name);
+  expect(h.node('subtitle').textContent).toBe('Other / /project');
+  expect((h.node('group') as any).href).toContain('oc_b');
   h.rows[1]!.online = false; h.streams.at(-1)!.emit('snapshot', { sessions: h.rows });
-  expect(h.node('info-subtitle').textContent).toBe('Other / /project · Worker 离线');
-  h.streams.at(-1)!.emit('auth', {});
-  expect(h.node('session-info').hidden).toBe(true);
+  expect(h.node('subtitle').textContent).toBe('Other / /project · Worker 离线');
 });
 
 it('clamps and persists composer height from the drag handle, keyboard and double click', async () => {
