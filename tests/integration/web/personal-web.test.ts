@@ -1630,3 +1630,45 @@ it('distinguishes idle submission from a blocked queue and preserves Web request
   const repeated = await restored.send(session.id, 'idle-request-123456', '直接提交');
   expect(repeated.status).toBe('submitted'); expect(h.enqueue).toHaveBeenCalledTimes(2);
 });
+
+it('keeps a group renamed while an older listing was still reading it, even with a frozen clock', async () => {
+  const h = await harness('kilo'), id = (await h.service.list())[0]!.id;
+  let release!: (value: unknown) => void;
+  const slow = new Promise(resolve => { release = resolve; });
+  let stalled = true;
+  vi.mocked(h.channel.rawClient.im.v1.chat.get).mockImplementation((async () => {
+    // The first read belongs to a listing that started before the rename.
+    if (stalled) { stalled = false; return slow; }
+    return { code: 0, data: { name: 'AA-旧名', chat_mode: 'group' } };
+  }) as any);
+  const now = vi.spyOn(Date, 'now').mockReturnValue(1_900_000_000_000);
+  try {
+    const restarted = h.makeService(); await restarted.load(); const listing = restarted.list();
+    await vi.waitFor(() => expect(stalled).toBe(false));
+    await restarted.rename(id, 'AA-新名');
+    release({ code: 0, data: { name: 'AA-旧名', chat_mode: 'group' } });
+    const stale = await listing; expect(stale.find(row => row.id === id)).toMatchObject({ name: 'AA-新名' });
+    // The same clock tick produced both writes, so only a monotonic order can decide.
+    expect((await restarted.list()).find(row => row.id === id)).toMatchObject({ name: 'AA-新名', online: true });
+    expect(h.channel.rawClient.im.v1.chat.update).toHaveBeenCalledOnce();
+  } finally { now.mockRestore(); }
+});
+
+it('returns a native fork in the control response instead of waiting for the next listing', async () => {
+  const h = await harness('kilo'), id = (await h.service.list())[0]!.id;
+  h.native.cwd = h.dir; h.workspaces.setCwd('oc_group', h.dir);
+  h.channel.rawClient.im.v1.chat.create = vi.fn(async () => ({ code: 0, data: { chat_id: 'oc_copy' } })) as any;
+  configureGroupNotifications(h.channel, { appId: 'cli_test', ownerId: () => 'ou_owner' },
+    vi.fn(async (args: string[]) => args[0] === 'auth' ? { appId: 'cli_test', identities: { user: { available: true, openId: 'ou_owner' } } } : { ok: true, identity: 'user', data: { invalid_ids: [] } }));
+  const menu = flatten((await h.service.control(id, 'fork')).elements);
+  const fork = menu.find(e => e.kind === 'button')!; if (fork.kind !== 'button') throw Error('copy');
+  const result = (await h.service.control(id, fork.action, { new_session_name: 'AA-web自定义副本' })) as { sessions?: WebSession[] };
+  expect(result.sessions?.find(row => row.scope === 'oc_copy')).toMatchObject({ online: true, canSend: true, name: 'AA-web自定义副本' });
+});
+
+it('stops a send as soon as the targeted read sees a native archive', async () => {
+  const h = await harness('kilo'), id = (await h.service.list())[0]!.id;
+  h.native.archived = true;
+  await expect(h.service.send(id, 'archived-send-0001', '还在吗')).rejects.toMatchObject({ status: 404 });
+  expect(h.enqueue).not.toHaveBeenCalled();
+});

@@ -7,7 +7,8 @@ import type { Controls } from '../commands';
 import type { SessionCatalog } from '../session/catalog';
 import { DurableAgentAdapter } from '../worker/adapter';
 import type { WorkerCapabilities } from '../worker/protocol';
-import type { ToolSession } from '../tools/types';
+import type { AgentKind } from '../config/profile-schema';
+import type { AgentTool, ToolSession } from '../tools/types';
 import { sessionOperations } from '../tools/session-api';
 import { log } from '../core/logger';
 import { initialState, reduce, startRunRuntime, updateRunRuntime, type RunState } from '../card/run-state';
@@ -31,6 +32,8 @@ export interface WebConversation { session: WebSession; turns: WebTurn[]; queued
 interface Receipt { fingerprint: string; sessionId: string; owner: string; createdAt: number; messageId?: string; enqueued?: boolean; scope?: string; queued?: boolean }
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
 const answer = (s: RunState) => s.blocks.flatMap(b => b.kind === 'text' ? [b.content] : []).join('\n\n');
+interface ToolSnapshot { label: string; sourceId: string; rows: ToolSession[]; capabilities?: WorkerCapabilities; online: boolean; listed: boolean; seq: number }
+interface GroupSnapshot { mode: string; name?: string; bindingName?: string; seq: number }
 
 /** Personal bindings, queue and native worker snapshots are the only sources of truth. */
 export class PersonalSessionService {
@@ -38,10 +41,12 @@ export class PersonalSessionService {
   private receipts: Record<string, Receipt> = {};
   private favorites: Record<string, string> = {};
   private operations = new Map<string, Promise<unknown>>();
-  private metadata = new Map<string, { label: string; sourceId: string; rows: ToolSession[]; capabilities?: WorkerCapabilities; online: boolean; listed: boolean }>();
+  private metadata = new Map<string, ToolSnapshot>();
   private listedAt = 0;
   private conversations = new Map<string, WebConversation>();
-  private groups = new Map<string, { mode: string; name?: string; bindingName?: string }>();
+  private groups = new Map<string, GroupSnapshot>();
+  /** Monotonic counter: a read that started earlier can never overwrite a newer fact. */
+  private observations = 0;
   private listing?: Promise<void>;
   private terminalClocks = new Map<string, { signature: string; checkedAt: number }>();
   private jobs = new Map<string, { cursor: number; state: RunState; turnId?: string; nativeId?: string; updatedAt?: number }>();
@@ -74,7 +79,7 @@ export class PersonalSessionService {
     const owner = this.owner(), auxiliary = this.deps.controls.auxiliary;
     if (!auxiliary) throw new WebError(503, '会话共享管理尚未就绪');
     const settings = await auxiliary.setPrefixSettings(enabled, owner);
-    this.listedAt = 0; return { ...settings, sessions: await this.list() };
+    return { ...settings, sessions: await this.list() };
   }
   ownerIdentity(): string { return this.owner(); }
   private identity(scope: string, b: { toolId: string; sourceId: string; nativeId?: string }) {
@@ -94,38 +99,67 @@ export class PersonalSessionService {
     return [...active, ...(tools?.entries() ?? []).filter(([scope, b]) => !scopes.has(scope) && b.nativeCreated === false &&
       isPersonalWorkgroup(scope, b) && !this.deps.catalog?.isScopeArchived(scope))];
   }
-  private async refresh(force = false) {
+  private setTool(id: string, seq: number, snapshot: Omit<ToolSnapshot, 'seq'>) {
+    if ((this.metadata.get(id)?.seq ?? -1) < seq) this.metadata.set(id, { ...snapshot, seq });
+  }
+  private setGroup(scope: string, seq: number, snapshot: Omit<GroupSnapshot, 'seq'>) {
+    if ((this.groups.get(scope)?.seq ?? -1) < seq) this.groups.set(scope, { ...snapshot, seq });
+  }
+  /** Read one worker's state; a stale failure keeps the rows but never the online claim. */
+  private async readTool(tool: AgentTool) {
+    const seq = ++this.observations, previous = this.metadata.get(tool.id);
+    try {
+      if (!(tool.agent instanceof DurableAgentAdapter)) throw new Error('Worker required');
+      const health = await tool.agent.client.health();
+      const rows = health.capabilities?.sessions.list ? await tool.listSessions() : [];
+      this.setTool(tool.id, seq, { label: tool.label, sourceId: tool.sourceId, rows, capabilities: health.capabilities, online: true, listed: health.capabilities?.sessions.list === true });
+    } catch { this.setTool(tool.id, seq, { label: tool.label, sourceId: tool.sourceId, rows: previous?.sourceId === tool.sourceId ? previous.rows : [], capabilities: previous?.capabilities, online: false, listed: previous?.sourceId === tool.sourceId && previous.listed === true }); }
+  }
+  /**
+   * Read mode and the actual group title in one request, independently of worker
+   * name synchronization and old binding labels. A failure only clears the mode.
+   */
+  private async readGroup(scope: string, binding: ToolBinding) {
+    const seq = ++this.observations, previous = this.groups.get(scope);
+    try {
+      const result = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: scope } });
+      const data = result.data;
+      if (result.code || !data || !['group', 'topic', 'p2p'].includes(data.chat_mode ?? '')) throw new Error('群信息未确认');
+      this.setGroup(scope, seq, { mode: data.chat_mode!, name: data.name?.trim() || undefined, bindingName: binding.name });
+    } catch { this.setGroup(scope, seq, { ...previous, mode: 'unavailable', bindingName: binding.name }); }
+  }
+  /** Record what a mutation already knows, so no read started earlier can undo it. */
+  private writeThroughGroup(scope: string, mode: string, name?: string, bindingName?: string) {
+    const previous = this.groups.get(scope);
+    this.setGroup(scope, ++this.observations, { mode, name: name ?? previous?.name, bindingName: bindingName ?? previous?.bindingName });
+  }
+  private async refresh() {
     if (this.listing) return this.listing;
-    if (!force && Date.now() - this.listedAt < 15_000) return;
+    if (Date.now() - this.listedAt < 15_000) return;
+    this.listedAt = Date.now();
     this.listing = (async () => {
+      // Everything read before this sequence number is older than any later write-through.
+      const startedAt = ++this.observations;
       const tools = this.deps.controls.toolRegistry?.all() ?? [];
       const present = new Set<string>(tools.map(t => t.id));
-      for (const [id, m] of this.metadata) if (!present.has(id)) m.online = false;
-      await Promise.all(tools.map(async tool => {
-        const previous = this.metadata.get(tool.id);
-        try {
-          if (!(tool.agent instanceof DurableAgentAdapter)) throw new Error('Worker required');
-          const health = await tool.agent.client.health();
-          const rows = health.capabilities?.sessions.list ? await tool.listSessions() : [];
-          this.metadata.set(tool.id, { label: tool.label, sourceId: tool.sourceId, rows, capabilities: health.capabilities, online: true, listed: health.capabilities?.sessions.list === true });
-        } catch { this.metadata.set(tool.id, { label: tool.label, sourceId: tool.sourceId, rows: previous?.sourceId === tool.sourceId ? previous.rows : [], capabilities: previous?.capabilities, online: false, listed: previous?.sourceId === tool.sourceId && previous.listed === true }); }
-      }));
+      for (const [id, snapshot] of this.metadata) if (!present.has(id) && snapshot.seq < startedAt) snapshot.online = false;
+      await Promise.all(tools.map(tool => this.readTool(tool)));
       const bindings = this.bindings();
       const scopes = new Set(bindings.map(([scope]) => scope));
-      for (const scope of this.groups.keys()) if (!scopes.has(scope)) this.groups.delete(scope);
-      await Promise.all(bindings.map(async ([scope, binding]) => {
-        try {
-          // Read mode and the actual group title in one request, independently
-          // of worker name synchronization and old binding labels.
-          const result = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: scope } });
-          const data = result.data;
-          if (result.code || !data || !['group', 'topic', 'p2p'].includes(data.chat_mode ?? '')) throw new Error('群信息未确认');
-          this.groups.set(scope, { mode: data.chat_mode!, name: data.name?.trim() || undefined, bindingName: binding.name });
-        } catch { this.groups.set(scope, { ...this.groups.get(scope), mode: 'unavailable', bindingName: binding.name }); }
-      }));
-      this.listedAt = Date.now();
+      for (const [scope, snapshot] of this.groups) if (!scopes.has(scope) && snapshot.seq < startedAt) this.groups.delete(scope);
+      await Promise.all(bindings.map(([scope, binding]) => this.readGroup(scope, binding)));
     })().finally(() => { this.listing = undefined; });
     return this.listing;
+  }
+  private async refreshTool(toolId: AgentKind) {
+    const tool = this.deps.controls.toolRegistry?.find(toolId);
+    if (tool) await this.readTool(tool);
+  }
+  /** Re-read only one session's tool and group; used where stale facts would be unsafe. */
+  private async refreshSession(toolId: AgentKind, scope: string) {
+    const tool = this.deps.controls.toolRegistry?.find(toolId);
+    const binding = this.bindings().find(([bound]) => bound === scope)?.[1];
+    await Promise.all([tool && this.readTool(tool), binding && this.readGroup(scope, binding)]);
   }
   async list(): Promise<WebSession[]> {
     this.owner(); await this.refresh(); const owner = this.owner();
@@ -160,7 +194,13 @@ export class PersonalSessionService {
     });
   }
   private async resolve(id: string, write = false) {
-    this.owner(); if (write) await this.refresh(true);
+    this.owner();
+    // Only this session's own facts need to be fresh; a full refresh here made every
+    // send and every control wait for unrelated workers and groups.
+    if (write) {
+      const entry = this.bindings().find(([scope, b]) => this.identity(scope, b) === id);
+      if (entry) await this.refreshSession(entry[1].toolId, entry[0]);
+    }
     const session = (await this.list()).find(s => s.id === id);
     if (!session) throw new WebError(404, '会话已归档、群已失效或绑定已变化');
     const b = this.deps.controls.toolBindings!.get(session.scope)!;
@@ -260,13 +300,13 @@ export class PersonalSessionService {
     this.assertBinding(id, scope);
     await renameChat(this.deps.channel, scope, name);
     this.assertBinding(id, scope);
-    this.groups.set(scope, { mode: 'group', name, bindingName: this.deps.controls.toolBindings?.get(scope)?.name });
+    this.writeThroughGroup(scope, 'group', name, this.deps.controls.toolBindings?.get(scope)?.name);
     const tool = this.deps.controls.toolRegistry?.find(binding.toolId);
     if (tool?.sourceId === binding.sourceId && binding.nativeId) {
       try { await sessionOperations(tool).rename(binding.nativeId, name); }
       catch (err) { log.warn('web', 'native-name-update-failed', { toolId: binding.toolId, err: err instanceof Error ? err.message : String(err) }); }
     }
-    this.listedAt = 0; return { name };
+    return { name };
   }
   /** Create a personal AI group in an existing project; its session starts with the first message. */
   async create(toolId: string, cwd: string, name: string) {
@@ -278,9 +318,11 @@ export class PersonalSessionService {
     return this.serial('create', async () => {
       const result = await this.deps.create!(owner, toolId, cwd, name);
       if (!result.scope) return { elements: result.elements };
-      this.listedAt = 0;
-      const session = (await this.list()).find(row => row.scope === result.scope);
-      return { elements: result.elements, ...(session ? { session } : {}) };
+      const scope = result.scope;
+      // This call just created the group, so its mode is a fact rather than a guess.
+      this.writeThroughGroup(scope, 'group', undefined, this.deps.controls.toolBindings?.get(scope)?.name);
+      const session = (await this.list()).find(row => row.scope === scope);
+      return { elements: result.elements, scope, ...(session ? { session } : {}) };
     });
   }
   async control(id: string, action: string, values?: unknown) {
@@ -298,9 +340,25 @@ export class PersonalSessionService {
         return { conversation: await this.read(id), elements: [] };
       }
       if (!this.deps.control) throw new WebError(503, '会话操作尚未就绪');
+      const before = new Set(this.bindings().map(([scope]) => scope));
       const result = await this.deps.control(id, session.scope, this.owner(), action, values);
-      this.listedAt = 0; return values ? { ...result, sessions: await this.list() } : result;
+      await this.noteCreatedGroups(before);
+      return values ? { ...result, sessions: await this.list() } : result;
     });
+  }
+  /**
+   * A control card can create a group. Record the facts we already know instead of
+   * re-reading everything; a native fork additionally needs its tool's session list.
+   */
+  private async noteCreatedGroups(before: Set<string>) {
+    const bindings = this.deps.controls.toolBindings, tools = new Set<AgentKind>();
+    for (const bound of this.bindings()) {
+      if (before.has(bound[0])) continue;
+      const binding = bindings?.get(bound[0]);
+      this.writeThroughGroup(bound[0], 'group', undefined, binding?.name);
+      if (binding && binding.nativeCreated !== false) tools.add(binding.toolId);
+    }
+    await Promise.all([...tools].map(toolId => this.refreshTool(toolId)));
   }
   private runStatus(state: RunState, project: string, checkedAt?: number, key?: string) {
     const view: RunState = { ...state, projectName: state.projectName ?? project };
