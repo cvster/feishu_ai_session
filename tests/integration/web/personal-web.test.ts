@@ -1554,6 +1554,24 @@ it('falls back to the native turn text when a bridge-sent job has no matching re
 });
 
 
+it('keeps a native turn that only a bridge follow-up answer marked as bridge', async () => {
+  const h = await harness('pi'); await h.replies.stop();
+  await h.inbox.receive('oc_group', { messageId: 'om_first', chatId: 'oc_group', chatType: 'group', senderId: 'ou_owner', content: '旧的群内提问',
+    resources: [], mentions: [], mentionedBot: true, mentionAll: false, createTime: Date.now() } as unknown as NormalizedMessage);
+  await h.client.submit({ requestKey: 'first-turn', options: { ...h.options, sessionId: 'native', threadId: undefined, prompt: 'bridge policy prompt',
+    delivery: { ...h.options.delivery!, messageIds: ['om_first'] } } });
+  // Codex flags a whole turn as bridge when the bridge submits an answer inside it, even though the
+  // prompt came from the desktop; the Web must still show the turn's own text instead of dropping it.
+  h.conversation.turns.push({ id: 'answered-native', input: '桌面提问', bridge: true, createdAtMs: Date.now() + 1000,
+    state: reduce(initialState, { type: 'text', delta: '桌面回答' }) } as unknown as (typeof h.conversation.turns)[number]);
+  const id = (await h.service.list())[0]!.id;
+  const view = await h.service.read(id);
+  expect(view.turns.some(turn => turn.id === 'native:answered-native' && turn.input === '桌面提问' && turn.answer === '桌面回答')).toBe(true);
+  expect(JSON.stringify(view.turns)).not.toContain('bridge policy prompt');
+  h.finish();
+});
+
+
 it('shows actual shared group and native session states without exposing archived entrance markers', async () => {
   const h = await harness(); await h.replies.stop(); const groups = await managedShared(h), row = groups.get('oc_shared')!;
   await groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'native' }, async () => {});

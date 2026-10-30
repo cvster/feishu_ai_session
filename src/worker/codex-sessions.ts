@@ -24,9 +24,14 @@ export function createCodexWorkerSessions(options: CodexThreadReaderOptions, sou
     const parsed = JSON.parse(text); legacyRecords = parsed.records ?? [];
   }).catch(error => { if (error.code !== 'ENOENT') throw error; });
   const legacyFor = (id: string, turn: import('../session/codex-thread-reader').CodexThreadTurn) => legacyRecords.find(record => record.threadId === id &&
-    !['rejected', 'cancelled'].includes(record.status) && (record.turnId === turn.id || (!!record.clientUserMessageId && turn.items.some(item => item.type === 'userMessage' && item.clientId === record.clientUserMessageId)) ||
+    !['rejected', 'cancelled'].includes(record.status) && (record.turnId === turn.id || (!!record.clientUserMessageId && promptItem(turn)?.clientId === record.clientUserMessageId) ||
       (record.transport === 'cli' && record.prompt?.trim() === externalUserText(turn) && !record.knownTurnIds?.includes(turn.id) && (turn.startedAtMs ?? 0) >= record.createdAtMs - 5000)));
-  const isBridge = (id: string, turn: import('../session/codex-thread-reader').CodexThreadTurn) => !!legacyFor(id, turn) || isClaimedCodexBridgeTurn(id, turn.id, externalUserText(turn)) || turn.items.some(item => item.type === 'userMessage' && isCodexBridgeClientMessageId(item.clientId));
+  // Only the message that opened a turn proves its origin. The bridge also submits follow-up answers
+  // inside an already running turn, and those items carry a bridge client id as well, which used to
+  // mark natively started turns as bridge-owned.
+  const promptItem = (turn: import('../session/codex-thread-reader').CodexThreadTurn) => turn.items.find(item => item.type === 'userMessage');
+  const isBridge = (id: string, turn: import('../session/codex-thread-reader').CodexThreadTurn) => !!legacyFor(id, turn) ||
+    isClaimedCodexBridgeTurn(id, turn.id, externalUserText(turn)) || isCodexBridgeClientMessageId(promptItem(turn)?.clientId);
   const prompts = new Map<string, CodexInputPrompt>();
   const claimedAnswers = new Set<string>();
   let claimsSaving = Promise.resolve();

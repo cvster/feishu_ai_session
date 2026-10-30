@@ -121,3 +121,19 @@ it('automatically continues observed paused conversations without a worker job a
   await h.sessions.close!(); await vi.advanceTimersByTimeAsync(15_000);
   expect(mocks.reader.startQueuedTurn).toHaveBeenCalledOnce();
 });
+it('marks a turn as bridge-owned only by the message that opened it', async () => {
+  mocks.snapshot = { id: 'thread', status: { type: 'active' }, turns: [
+    { id: 'native-then-answer', status: 'completed', startedAtMs: 10, items: [
+      { type: 'userMessage', content: [{ type: 'text', text: '桌面提问' }] },
+      { type: 'userMessage', clientId: 'lark-channel-bridge:async:abc', content: [{ type: 'text', text: '卡片回答' }] },
+      { type: 'agentMessage', content: [{ type: 'text', text: '回答' }] },
+    ] },
+    { id: 'bridge-started', status: 'completed', startedAtMs: 20, items: [
+      { type: 'userMessage', clientId: 'lark-channel-bridge:run-1', content: [{ type: 'text', text: '群内提问' }] },
+    ] },
+  ] };
+  const h = await fixture();
+  const snapshot = await h.sessions.conversation!('thread');
+  expect(snapshot.turns.map(turn => [turn.id, turn.bridge, turn.input])).toEqual([
+    ['native-then-answer', false, '桌面提问'], ['bridge-started', true, '群内提问']]);
+});

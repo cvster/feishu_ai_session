@@ -347,7 +347,7 @@ export class PersonalSessionService {
       if ((native?.id !== undefined && native.id !== b.nativeId) || native?.archived) throw new WebError(404, '会话已归档或身份变化');
       const jobs = allJobs.filter(j => (j.options.delivery?.scope === session.scope || sharedJobPersonalScope(this.deps.controls, this.deps.catalog, j) === session.scope) &&
         j.options.delivery?.sourceId === b.sourceId && j.options.delivery.botAppId === this.deps.controls.profileConfig.accounts.app.id);
-      const linkedTurns = new Set<string>(), matchedJobTimes: number[] = [];
+      const linkedTurns = new Set<string>();
       for (const job of jobs) {
         const cacheKey = b.sourceId + ':' + job.id;
         let view = this.jobs.get(cacheKey);
@@ -360,7 +360,6 @@ export class PersonalSessionService {
         }
         view.updatedAt = job.updatedAt;
         if ((job.options.threadId ?? job.options.sessionId ?? view.nativeId) !== b.nativeId) continue;
-        matchedJobTimes.push(job.createdAt);
         if (view.turnId) linkedTurns.add(view.turnId);
         const shared = job.options.delivery!.scope !== session.scope;
         // Delivery ids keep the callback suffix that made the request unique (`om_x:callback:copy-read-…`),
@@ -394,14 +393,21 @@ export class PersonalSessionService {
           progress: runProgress({ ...state, terminal: ['running', 'accepted'].includes(job.status) ? 'running' : 'done' }),
           createdAtMs: job.createdAt, origin: 'bridge' });
       }
-      const historyBoundary = Math.min(...matchedJobTimes);
-      for (const turn of native?.turns ?? []) if (!linkedTurns.has(turn.id) && (!turn.bridge || turn.createdAtMs < historyBoundary)) turns.push({
-        id: 'native:' + turn.id, input: turn.bridge ? '' : turn.input, answer: answer(turn.state), status: turn.state.footer === 'waiting_input' ? 'waiting_input' : turn.state.terminal,
-        answerSections: this.markdown.sections(turn.state),
-        progress: runProgress(turn.state),
-        ...this.runStatus(turn.state, session.project, undefined, id + ':' + turn.id),
-        createdAtMs: turn.createdAtMs, origin: turn.bridge ? 'bridge' : 'native',
-      });
+      for (const turn of native?.turns ?? []) {
+        if (linkedTurns.has(turn.id)) continue;
+        // An unlinked turn has no job of its own: it either predates the binding or the bridge only
+        // answered a question inside a natively started turn, which some workers still flag as
+        // bridge. Its own user text is exactly what the group saw, so show it rather than silently
+        // dropping the newest turns of a session.
+        if (turn.bridge && !turn.input) continue;
+        turns.push({
+          id: 'native:' + turn.id, input: turn.input, answer: answer(turn.state), status: turn.state.footer === 'waiting_input' ? 'waiting_input' : turn.state.terminal,
+          answerSections: this.markdown.sections(turn.state),
+          progress: runProgress(turn.state),
+          ...this.runStatus(turn.state, session.project, undefined, id + ':' + turn.id),
+          createdAtMs: turn.createdAtMs, origin: turn.bridge ? 'bridge' : 'native',
+        });
+      }
       turns.sort((a, z) => a.createdAtMs - z.createdAtMs || a.id.localeCompare(z.id));
       const result = { session, turns, queuedMessages, confirmedRequestIds, ...(!session.nativeConversation ? { notice: '此 worker 尚未提供原生对话读取；当前显示桥接消息' } : {}) };
       this.assertBinding(id, session.scope);
