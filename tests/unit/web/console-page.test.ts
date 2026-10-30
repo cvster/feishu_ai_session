@@ -32,7 +32,8 @@ function harness(loginRequired = true, authorized = true) {
     workers: [{ id: 'generic', label: '<script>Tool</script>', online: true, checkedAt: Date.now(), capabilities: { jobs: { submit: true }, sessions: { archive: true } }, sessions: 2, active: 1, pending: 1 }],
     bindings: [{ id: 'b', tool: 'Tool', groupName: '群', sessionName: '会话', kind: '个人 AI 群', cwd: '/project', issues: ['群名与会话名不一致'], canSync: true, groupState: 'active', sessionState: 'active', canDissolve: false, canArchive: false },
       { id: 'dissolve', tool: 'Tool', groupName: '待解散群', sessionName: '已归档会话', issues: [], groupState: 'active', sessionState: 'archived', canDissolve: true, canArchive: false },
-      { id: 'archive', tool: 'Tool', groupName: '已解散群', sessionName: '待归档会话', issues: [], groupState: 'dissolved', sessionState: 'active', canDissolve: false, canArchive: true }],
+      { id: 'archive', tool: 'Tool', groupName: '已解散群', sessionName: '待归档会话', issues: [], groupState: 'dissolved', sessionState: 'active', canDissolve: false, canArchive: true },
+      { id: 'dissolve-live', tool: 'Tool', groupName: '会话未归档群', sessionName: '正常会话', issues: [], groupState: 'active', sessionState: 'active', canDissolve: true, canArchive: false }],
     sharedGroups: [{ id: 'shared', chatId: 'oc_shared', name: '<群>', kind: '辅助群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, targetId: 'current', canBind: true, canLeave: false, sessionArchived: false, groupState: 'active' as string | undefined, sessionState: 'active' as string | undefined, toolId: 'generic', issues: [] },
       { id: 'private', chatId: 'oc_private', name: '私聊群', kind: '私聊群', sessionName: '会话', tool: 'Tool', cwd: '/project', status: 'active', active: true, associationId: 'current' as string | undefined, canBind: false, canLeave: false, sessionArchived: false, groupState: 'active' as string | undefined, sessionState: 'active' as string | undefined, toolId: 'generic', issues: [] }],
     sharedTargets: [{ id: 'current', name: '会话', toolId: 'generic', tool: 'Tool', cwd: '/project' }, { id: 'next', name: '<新会话>', toolId: 'other', tool: 'Other', cwd: '/next' }],
@@ -91,18 +92,26 @@ it('opens shared management dialogs and submits only after confirmation with the
 });
 
 
-it('shows only the mismatch management buttons and requires confirmation before closing either side', async () => {
+it('shows only the mismatch management buttons, dissolves archived sessions directly and still confirms live ones', async () => {
   const h = harness(false); await h.ready(); await h.nav[1]!.onclick!();
   expect(bridgeConsolePage).not.toContain('诊断日志'); expect(h.get('heading').textContent).toBe('AI会话群管理');
   const buttons = (node: Element): Element[] => node.children.flatMap(c => [...(c.tag === 'button' ? [c] : []), ...buttons(c)]);
-  const controls = buttons(h.get('binding-list'));
-  expect(controls.map(b => b.textContent)).toEqual(['解散群', '归档会话']);
-  await controls[0]!.onclick!(); expect(h.get('group-dialog').open).toBe(true);
-  expect(h.get('group-description').textContent).toContain('群聊无法恢复');
-  expect(h.requests.some(r => r.body?.action === 'personal-dissolve')).toBe(false);
-  await h.get('group-form').onsubmit!({ preventDefault() {} });
+  const current = () => buttons(h.get('binding-list'));
+  expect(current().map(b => b.textContent)).toEqual(['解散群', '归档会话', '解散群']);
+  // An archived session needs no confirmation: the group is closed right away.
+  await current()[0]!.onclick!();
+  expect(h.get('group-dialog').open).toBe(false);
+  await vi.waitFor(() => expect(h.requests.filter(r => r.body?.action === 'personal-dissolve')).toHaveLength(1));
   expect(h.requests.find(r => r.body?.action === 'personal-dissolve')?.body).toEqual({ action: 'personal-dissolve', id: 'dissolve' });
-  await buttons(h.get('binding-list')).find(b => b.textContent === '归档会话')!.onclick!();
+  await new Promise(r => setTimeout(r, 20));
+  // A live session still asks first.
+  await current()[2]!.onclick!(); expect(h.get('group-dialog').open).toBe(true);
+  expect(h.get('group-description').textContent).toContain('群聊无法恢复');
+  expect(h.requests.filter(r => r.body?.action === 'personal-dissolve')).toHaveLength(1);
+  await h.get('group-form').onsubmit!({ preventDefault() {} });
+  expect(h.requests.filter(r => r.body?.action === 'personal-dissolve').map(r => r.body)).toEqual([
+    { action: 'personal-dissolve', id: 'dissolve' }, { action: 'personal-dissolve', id: 'dissolve-live' }]);
+  await current().find(b => b.textContent === '归档会话')!.onclick!();
   await h.get('group-form').onsubmit!({ preventDefault() {} });
   expect(h.requests.find(r => r.body?.action === 'personal-archive')?.body).toEqual({ action: 'personal-archive', id: 'archive' });
 });
