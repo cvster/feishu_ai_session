@@ -18,6 +18,7 @@ import { runProgress } from '../card/run-progress';
 import { WebMarkdown, type WebAnswerSection } from './markdown';
 import { renameChat } from '../bot/group';
 import { sharedPersonalScope, sharedJobPersonalScope, namedSharedMessages, feishuSenderName } from '../worker/shared-history';
+import { messageRequestId } from '../worker/identity';
 import { isPersonalWorkgroup, type ToolBinding } from '../tools/bindings';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
@@ -362,15 +363,20 @@ export class PersonalSessionService {
         matchedJobTimes.push(job.createdAt);
         if (view.turnId) linkedTurns.add(view.turnId);
         const shared = job.options.delivery!.scope !== session.scope;
+        // Delivery ids keep the callback suffix that made the request unique (`om_x:callback:copy-read-…`),
+        // while inbox receipts carry the plain Feishu message id.
         const inputs = shared ? (await namedSharedMessages(this.deps.controls, this.deps.channel, job)).map(message => ({ message })) :
-          receipts.filter(r => r.scope === session.scope && job.options.delivery?.messageIds?.includes(r.message.messageId));
+          receipts.filter(r => r.scope === session.scope && job.options.delivery?.messageIds?.some(id => id === r.message.messageId || id === messageRequestId(r.message)));
         const ids = new Set(inputs.map(r => 'receipt:' + r.message.messageId));
         for (let i = turns.length - 1; i >= 0; i--) if (ids.has(turns[i]!.id)) turns.splice(i, 1);
-        // Job prompts contain bridge policy/context. Never return them to Web.
-        if (!inputs.length) continue;
-        const status = job.status === 'running' ? (view.state.footer === 'waiting_input' ? 'waiting_input' : 'running') : job.status;
         const nativeTurn = native?.turns.find(t => t.bridgeJobId === job.id || t.id === view!.turnId);
         if (nativeTurn) linkedTurns.add(nativeTurn.id);
+        // Job prompts contain bridge policy/context. Never return them to Web; messages the bridge
+        // sent itself (copy notices, card callbacks) may carry no Feishu receipt yet, so fall back
+        // to the native turn text, which is exactly what the group saw.
+        const input = inputs.length ? inputs.map(r => r.message.content).join('\n\n') : nativeTurn?.input;
+        if (!input) continue;
+        const status = job.status === 'running' ? (view.state.footer === 'waiting_input' ? 'waiting_input' : 'running') : job.status;
         let state = shared ? view.state : nativeTurn?.state ?? view.state;
         if (shared && this.deps.controls.auxiliaryApprovals) state = await this.deps.controls.auxiliaryApprovals.review(job.options.delivery!.scope, job.id, job.options.delivery!.replyTo, state);
         if (shared && sharedJobPersonalScope(this.deps.controls, this.deps.catalog, job) !== session.scope) continue;
@@ -380,7 +386,7 @@ export class PersonalSessionService {
             ? { ...(job.options.model ? { model: job.options.model } : {}),
                 ...(job.options.reasoningEffort ? { requestedReasoningEffort: job.options.reasoningEffort } : {}),
                 ...view.state.execution, ...state.execution } : undefined };
-        turns.push({ id: 'job:' + job.id, input: inputs.map(r => r.message.content).join('\n\n'), answer: answer(state), status,
+        turns.push({ id: 'job:' + job.id, input, answer: answer(state), status,
           ...(shared ? { inputMessages: inputs.map(r => ({ senderName: r.message.senderName!, text: r.message.content })) } : {}),
           answerSections: this.markdown.sections(state),
           requestIds: inputs.flatMap(r => requests.get(r.message.messageId) ?? []),

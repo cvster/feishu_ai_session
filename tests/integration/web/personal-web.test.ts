@@ -1519,6 +1519,41 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('automatical
 });
 
 
+it('shows the copy notice the bridge sends itself when the job is keyed by the callback request id', async () => {
+  const h = await harness('pi'); await h.replies.stop();
+  const notice = "会话创建自 Codex 'ts_hmi/AA-imu驱动'。后续问题如有需要，可读取原会话。\n原会话记录：/profile/codex/bridge-history/3e0d3055.jsonl";
+  await h.inbox.receive('oc_group', { messageId: 'om_notice', chatId: 'oc_group', chatType: 'group', senderId: 'ou_owner', content: notice,
+    resources: [], mentions: [], mentionedBot: true, mentionAll: false, rawContentType: 'card_action',
+    raw: { bridgeCallbackId: 'copy-read-abc' }, createTime: Date.now() } as unknown as NormalizedMessage);
+  const job = await h.client.submit({ requestKey: 'copy-notice', options: { ...h.options, sessionId: 'native', threadId: undefined,
+    prompt: 'bridge policy prompt', delivery: { ...h.options.delivery!, messageIds: ['om_notice:callback:copy-read-abc'] } } });
+  await h.inbox.reconcile(await h.client.list());
+  h.conversation.turns.push({ id: 'copy-turn', input: notice, bridge: true, bridgeJobId: job.id, createdAtMs: Date.now(),
+    state: reduce(initialState, { type: 'text', delta: '已读取原会话' }) } as unknown as (typeof h.conversation.turns)[number]);
+  const id = (await h.service.list())[0]!.id;
+  const view = await h.service.read(id);
+  expect(view.turns.filter(turn => turn.id.startsWith('receipt:'))).toEqual([]);
+  expect(view.turns.find(turn => turn.id === 'job:' + job.id)?.input).toBe(notice);
+  expect(JSON.stringify(view.turns)).not.toContain('bridge policy prompt');
+  h.finish();
+});
+
+
+it('falls back to the native turn text when a bridge-sent job has no matching receipt', async () => {
+  const h = await harness('pi'); await h.replies.stop();
+  const notice = "会话创建自 Codex 'ts_hmi/AA-imu驱动'。后续问题如有需要，可读取原会话。";
+  const job = await h.client.submit({ requestKey: 'copy-notice-2', options: { ...h.options, sessionId: 'native', threadId: undefined,
+    prompt: 'bridge policy prompt', delivery: { ...h.options.delivery!, messageIds: ['om_missing'] } } });
+  h.conversation.turns.push({ id: 'copy-turn-2', input: notice, bridge: true, bridgeJobId: job.id, createdAtMs: Date.now(),
+    state: reduce(initialState, { type: 'text', delta: '已读取原会话' }) } as unknown as (typeof h.conversation.turns)[number]);
+  const id = (await h.service.list())[0]!.id;
+  const view = await h.service.read(id);
+  expect(view.turns.find(turn => turn.id === 'job:' + job.id)?.input).toBe(notice);
+  expect(JSON.stringify(view.turns)).not.toContain('bridge policy prompt');
+  h.finish();
+});
+
+
 it('shows actual shared group and native session states without exposing archived entrance markers', async () => {
   const h = await harness(); await h.replies.stop(); const groups = await managedShared(h), row = groups.get('oc_shared')!;
   await groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'native' }, async () => {});
