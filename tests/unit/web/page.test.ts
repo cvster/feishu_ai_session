@@ -748,3 +748,52 @@ it('keeps an idle submitted message in history while only its receipt is known, 
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...view, turns: [{ id: 'receipt:next', input: '保持原位置', answer: '', status: 'submitted', requestIds: [requestId], createdAtMs: Date.now() }] } });
   expect(h.node('messages').querySelectorAll('.user')).toHaveLength(1); expect(h.node('queued-messages').hidden).toBe(true);
 });
+
+it('names the page 飞书AI助手 and keeps the session header off desktop screens', () => {
+  expect(bridgeWebPage).toContain('<title>飞书AI助手</title>');
+  expect(bridgeWebPage).toContain('@media(min-width:601px){header{display:none}}');
+  expect(bridgeWebPage).toContain('@media(max-width:600px){#sidebar-resizer,#composer-resizer,#session-info{display:none}');
+});
+
+it('shows the current session name, tool, project and group link in the sidebar', async () => {
+  const h = harness(); await h.ready();
+  expect(h.node('session-info').hidden).toBe(false);
+  expect(h.node('info-title').textContent).toBe(h.rows[0]!.name);
+  expect(h.node('info-subtitle').textContent).toBe('Tool / /project');
+  expect((h.node('info-group') as any).href).toBe('https://applink.feishu.cn/client/chat/open?openChatId=oc_a');
+  expect(h.node('info-group').hidden).toBe(false);
+  h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  h.choose(1); h.requests[1]!.resolve(h.conversation(1)); await h.settle();
+  expect(h.node('info-title').textContent).toBe(h.rows[1]!.name);
+  expect(h.node('info-subtitle').textContent).toBe('Other / /project');
+  expect((h.node('info-group') as any).href).toContain('oc_b');
+  h.rows[1]!.online = false; h.streams.at(-1)!.emit('snapshot', { sessions: h.rows });
+  expect(h.node('info-subtitle').textContent).toBe('Other / /project · Worker 离线');
+  h.streams.at(-1)!.emit('auth', {});
+  expect(h.node('session-info').hidden).toBe(true);
+});
+
+it('clamps and persists composer height from the drag handle, keyboard and double click', async () => {
+  const h = harness(); await h.ready(); const handle = h.node('composer-resizer') as any, input = h.node('input');
+  expect(input.style.height).toBe('88px'); expect(handle.getAttribute('aria-valuenow')).toBe('88');
+  const down = (clientY = 700) => handle.onpointerdown({ button: 0, clientY, pointerId: 1, preventDefault() {} });
+  const move = (clientY: number) => handle.onpointermove({ clientY, pointerId: 1 });
+  down(); move(600); expect(input.style.height).toBe('188px');
+  handle.onpointerup({ pointerId: 1 });
+  expect(JSON.parse(h.storage.get('bridge-web-preferences')!).composerHeight).toBe(188);
+  down(600); move(-100); expect(input.style.height).toBe('600px'); handle.onpointercancel({ pointerId: 1 });
+  expect(input.style.height).toBe('188px');
+  handle.onpointerdown({ button: 0, clientY: 600, pointerId: 1, preventDefault() {} }); move(900);
+  expect(input.style.height).toBe('88px'); handle.onpointerup({ pointerId: 1 });
+  handle.onkeydown({ key: 'End', preventDefault() {} }); expect(input.style.height).toBe('600px');
+  handle.onkeydown({ key: 'ArrowDown', preventDefault() {} }); expect(input.style.height).toBe('584px');
+  expect(JSON.parse(h.storage.get('bridge-web-preferences')!).composerHeight).toBe(584);
+  handle.ondblclick(); expect(input.style.height).toBe('88px');
+  const restored = harness({ composerHeight: 240 }); await restored.ready();
+  expect(restored.node('input').style.height).toBe('240px');
+  restored.browserWindow.innerHeight = 300; const restoredHandle = restored.node('composer-resizer') as any;
+  restoredHandle.onkeydown({ key: 'End', preventDefault() {} }); expect(restored.node('input').style.height).toBe('88px');
+  restored.browserWindow.innerWidth = 500; const narrow = restored.node('composer-resizer') as any;
+  const before = restored.node('input').style.height; narrow.onpointerdown({ button: 0, clientY: 700, pointerId: 1, preventDefault() {} });
+  narrow.onpointermove({ clientY: 600, pointerId: 1 }); expect(restored.node('input').style.height).toBe(before);
+});
