@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { normalize } from 'node:path';
+import { dirname, normalize } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { QueuedMessage } from '../bot/message-queue';
 import type { Controls } from '../commands';
@@ -21,6 +21,9 @@ import { renameChat } from '../bot/group';
 import { sharedPersonalScope, sharedJobPersonalScope, namedSharedMessages, feishuSenderName } from '../worker/shared-history';
 import { messageRequestId } from '../worker/identity';
 import { isPersonalWorkgroup, type ToolBinding } from '../tools/bindings';
+import { DEFAULT_MODEL, type ModelOption } from '../agent/models';
+import { cachedModelChoices, modelCachePath } from '../agent/model-cache';
+import { parsePiModel, readPiDefaults, writePiDefaults } from '../agent/pi/settings';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
@@ -29,6 +32,8 @@ export interface WebSession {
 }
 export interface WebTurn { id: string; input: string; inputMessages?: { senderName: string; text: string }[]; answer: string; answerSections?: WebAnswerSection[]; requestIds?: string[]; progress?: string[]; statusText?: string; statusColor?: string; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
 export interface WebConversation { session: WebSession; turns: WebTurn[]; queuedMessages?: QueuedMessage[]; confirmedRequestIds?: string[]; notice?: string }
+/** A tool whose native default model can be read and written from the web. */
+export interface WebAgentDefaults { tool: AgentKind; label: string; value?: string; effective?: string; options: ModelOption[]; available: boolean; notice?: string }
 interface Receipt { fingerprint: string; sessionId: string; owner: string; createdAt: number; messageId?: string; enqueued?: boolean; scope?: string; queued?: boolean }
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
 const answer = (s: RunState) => s.blocks.flatMap(b => b.kind === 'text' ? [b.content] : []).join('\n\n');
@@ -82,6 +87,42 @@ export class PersonalSessionService {
     return { ...settings, sessions: await this.list() };
   }
   ownerIdentity(): string { return this.owner(); }
+  private defaultsTarget() {
+    const tool = this.deps.controls.toolRegistry?.find('pi');
+    if (!tool?.agent.listModels) return undefined;
+    const profile = this.deps.controls.profileConfig;
+    return { tool, settings: { agentDir: profile.pi?.agentDir },
+      cachePath: modelCachePath(dirname(this.deps.path), profile.accounts.app.id, tool.id, tool.sourceId) };
+  }
+  /** Pi keeps its default model in settings.json, which the next run reads; nothing else changes. */
+  async agentDefaults(refresh = false): Promise<{ tools: WebAgentDefaults[] }> {
+    this.owner();
+    const target = this.defaultsTarget();
+    if (!target) return { tools: [] };
+    let value: string | undefined, failure: string | undefined;
+    try { value = (await readPiDefaults(target.settings)).value; }
+    catch (error) { failure = (error as Error).message; }
+    const choices = await cachedModelChoices(target.cachePath, target.tool.agent, undefined, DEFAULT_MODEL, refresh);
+    // The panel is useless without a list, so an empty cache is filled on first open.
+    const listed = choices.available ? choices : await cachedModelChoices(target.cachePath, target.tool.agent, undefined, DEFAULT_MODEL, true);
+    const options = listed.options.filter(row => row.value !== DEFAULT_MODEL);
+    if (value && !options.some(row => row.value === value)) options.push({ value, label: `不在模型列表 · ${value}`, unavailable: true });
+    const effective = options.find(row => row.isDefault)?.value, notice = failure ?? listed.notice;
+    return { tools: [{ tool: 'pi', label: target.tool.agent.displayName, ...(value ? { value } : {}), ...(effective ? { effective } : {}),
+      options, available: listed.available, ...(notice ? { notice } : {}) }] };
+  }
+  async updateAgentDefaults(tool: string, value: string) {
+    this.owner();
+    const target = this.defaultsTarget();
+    if (!target || tool !== 'pi') throw new WebError(400, '该执行工具不支持设置默认模型');
+    if (!parsePiModel(value)) throw new WebError(400, '默认模型格式无效');
+    const { tools } = await this.agentDefaults(), row = tools[0]!;
+    // Without a freshly listed catalogue nothing can be verified, so only format is enforced.
+    if (row.available && !row.options.some(option => option.value === value)) throw new WebError(400, '模型不在可用列表中，请先刷新模型');
+    const written = await writePiDefaults(target.settings, value);
+    // A fresh Pi process reads these keys, so the written value is the effective one.
+    return { tools: [{ ...row, value: written.value, effective: written.value }] };
+  }
   private identity(scope: string, b: { toolId: string; sourceId: string; nativeId?: string }) {
     return hash(JSON.stringify([this.deps.controls.profile, this.deps.controls.profileConfig.accounts.app.id, scope, b.toolId, b.sourceId, b.nativeId]));
   }

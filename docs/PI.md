@@ -35,6 +35,10 @@ node bin/lark-channel-bridge.mjs pi-import-zcode --profile <profile>
 
 此命令从当前 Zcode Worker 的模型配置读取已启用供应商，以 Zcode 的供应商名称作为 Pi 的供应商 ID 导入（例如 `gaoliu`、`tars-dev`、`tars-point`），以便 Pi 终端和桥接显示一致；名称不能用于 `provider/model` 选择或重名时保留原 ID。随后映射 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages API，并复制当前默认模型。凭据和请求头作为字面值保存，避免触发 Pi 的命令或环境变量展开；输出只包含数量与路径。保留其他 Pi 供应商和设置，导入文件权限为 `600`。旧版本导入的 `new-provider` 等标识会同时迁移：更新默认模型、模型范围、按模型保存的推理档位和桥接中的已保存选择；已有会话通过追加原生 `model_change` 记录选择同一个模型的新标识，原有消息、分支和历史文件内容保留。迁移中先保留新旧供应商，完成会话和设置迁移后再移除旧标识，重复导入不会重复追加记录。已经打开的 Pi 终端需要退出重开。这是一次性导入；之后改 Zcode 配置，需要再次执行导入。自动发现、刷新模型和执行任务都不会再次复制凭据。
 
+### 默认模型
+
+`settings.json` 的 `defaultProvider` 与 `defaultModel` 决定 Pi 的默认模型。网页设置面板的“Pi 默认模型”直接读写这两个键：保留其它设置键，原子写入、权限 `600`，下一次 Pi 进程启动即生效，不需要重启 Worker。它只影响 Pi 新建会话；已有会话沿用自身记录的模型，绑定或会话配置里的显式选择优先于默认值。桥接不会为此改动 `models.json`、凭据或原生会话文件。
+
 ## 启动与使用
 
 ```sh

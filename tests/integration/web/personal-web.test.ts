@@ -1,6 +1,6 @@
 import { createServer, request as httpRequest } from 'node:http';
 import { join } from 'node:path';
-import { readFile, writeFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
 import { expect, it, vi } from 'vitest';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { fixture, cleanups } from '../../helpers/worker-fixture';
@@ -1609,6 +1609,28 @@ it('stores the optional shared-session prefix via authenticated Web settings and
   await h.request('/api/settings', { sharedSessionPrefix: false }); expect(h.native.name).toBe('FF-web');
   expect(JSON.parse(await readFile(join(h.dir, 'managed-groups.json'), 'utf8')).sharedSessionPrefix).toBe(false);
   expect((await h.request('/api/settings', { sharedSessionPrefix: true }, { Origin: 'http://evil.test' })).status).toBe(403);
+});
+
+it('reads and writes the Pi default model through authenticated Web endpoints and keeps other Pi settings', async () => {
+  const h = await harness('pi'); await h.replies.stop();
+  const agentDir = join(h.dir, 'pi-agent'), path = join(agentDir, 'settings.json');
+  (h.controls.profileConfig as { pi?: unknown }).pi = { binaryPath: 'pi', agentDir };
+  const empty = await (await h.request('/api/agent-defaults')).json() as { tools: Record<string, unknown>[] };
+  expect(empty.tools[0]).toMatchObject({ tool: 'pi', available: false });
+  expect(empty.tools[0]).not.toHaveProperty('value');
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(path, JSON.stringify({ defaultProvider: 'gaoliu', defaultModel: 'deepseek-v4-flash', telemetry: true }, null, 2) + '\n');
+  const state = await (await h.request('/api/agent-defaults')).json() as { tools: Record<string, unknown>[] };
+  expect(state.tools).toHaveLength(1);
+  expect(state.tools[0]).toMatchObject({ tool: 'pi', value: 'gaoliu/deepseek-v4-flash' });
+  expect(state.tools[0]).not.toHaveProperty('effective');
+  expect((await h.request('/api/agent-defaults', { tool: 'codex', value: 'a/b' })).status).toBe(400);
+  expect((await h.request('/api/agent-defaults', { tool: 'pi', value: 'broken' })).status).toBe(400);
+  expect((await h.request('/api/agent-defaults', { tool: 'pi' })).status).toBe(400);
+  const saved = await (await h.request('/api/agent-defaults', { tool: 'pi', value: 'tars-point/deepseek-v4-flash' })).json() as { tools: Record<string, unknown>[] };
+  expect(saved.tools[0]).toMatchObject({ value: 'tars-point/deepseek-v4-flash', effective: 'tars-point/deepseek-v4-flash' });
+  expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ defaultProvider: 'tars-point', defaultModel: 'deepseek-v4-flash', telemetry: true });
+  expect((await h.request('/api/agent-defaults', { tool: 'pi', value: 'tars-point/deepseek-v4-flash' }, { Origin: 'http://evil.test' })).status).toBe(403);
 });
 
 

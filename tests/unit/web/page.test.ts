@@ -55,7 +55,7 @@ class Element {
   get text(): string { return this.textContent + this.children.map(child => child.text).join(''); }
 }
 
-function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, string>, updatedAtMs?: number[]) {
+function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, string>, updatedAtMs?: number[], extra: { agentDefaults?: any } = {}) {
   const ids = [...bridgeWebPage.matchAll(/id="([^"]+)"/g)].map(match => match[1]!);
   const elements = new Map(ids.map(id => [id, new Element('div', id)]));
   const node = (id: string) => elements.get(id)!;
@@ -69,6 +69,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   })) });
   const settings = { elements: [{ kind: 'select', name: 'model', value: 'model-a', options: [{ value: 'model-a', text: 'Model A' }, { value: 'model-b', text: 'Model B' }] }, { kind: 'select', name: 'reasoning_effort', value: 'high', options: [{ value: 'high', text: '高' }, { value: 'medium', text: '中' }] }, { kind: 'button', command: 'config.submit', action: 'inline-save' }, { kind: 'button', command: 'config.models.0', action: 'inline-refresh' }] };
   const requests: { id: string; path: string; data?: any; resolve(value: unknown): void; reject(error: Error): void }[] = [];
+  const writes: { path: string; data: any }[] = [];
   class Stream {
     static all: Stream[] = [];
     listeners = new Map<string, (event: { data: string }) => void>();
@@ -90,6 +91,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
     fetch: async (path: string, options?: { body?: string }) => {
       if (path === '/api/access') return response({ loginRequired: false });
       if (path === '/api/settings' && !options?.body) return response({ sharedSessionPrefix: false });
+      if (path.startsWith('/api/agent-defaults')) { if (options?.body) { const input = JSON.parse(options.body); writes.push({ path, data: input }); return response({ tools: (extra.agentDefaults?.tools ?? []).map((tool: any) => ({ ...tool, value: input.value, effective: input.value })) }); } writes.push({ path, data: undefined }); return response(extra.agentDefaults ?? { tools: [] }); }
       if (path === '/api/sessions' && !options?.body) return response(rows);
       // Deliberately allow a response after abort to check the selection guard.
       return new Promise((resolve, reject) => requests.push({ id: path.split('/').at(-1)!, path, data: options?.body ? JSON.parse(options.body) : undefined, resolve: value => resolve(response(value)), reject }));
@@ -101,7 +103,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const menu = (index: number) => node('tree').querySelectorAll('button').find(button => button.getAttribute('aria-label') === rows[index]!.name + '的会话选项')!.onclick!({ stopPropagation() {} });
   const settle = () => new Promise<void>(resolve => setTimeout(resolve, 0));
   const snapshot = (index: number, answer?: string, count?: number) => Stream.all.at(-1)!.emit('snapshot', { sessions: rows, conversation: conversation(index, answer, count) });
-  return { node, rows, requests, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all, storage, browserWindow, settings, clipboard, fallbackCopy, body };
+  return { node, rows, requests, writes, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all, storage, browserWindow, settings, clipboard, fallbackCopy, body };
 }
 
 it.each([true, false])('opens the most recently updated session on entry when recent visibility is %s and preserves later selections', async showRecent => {
@@ -717,6 +719,46 @@ it('defaults shared prefix naming off and saves it to the bridge instead of brow
   expect(JSON.parse(h.storage.get('bridge-web-preferences')!)).not.toHaveProperty('sharedSessionPrefix');
 });
 
+
+it('saves the Pi default model to the bridge only when the selection changes', async () => {
+  const piDefaults = (value?: string) => ({ tools: [{ tool: 'pi', label: 'Pi', ...(value ? { value } : {}), effective: 'gaoliu/deepseek-v4-flash', options: [
+    { value: 'gaoliu/deepseek-v4-flash', label: 'deepseek-v4-flash (gaoliu)' },
+    { value: 'tars-point/deepseek-v4-flash', label: 'deepseek-v4-flash (tars-point)' }] }] });
+  const h = harness(undefined, 2, undefined, undefined, { agentDefaults: piDefaults('gaoliu/deepseek-v4-flash') }); await h.ready();
+  h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  h.node('settings').onclick!(); await h.settle();
+  const select = h.node('pi-default-model');
+  expect(h.node('pi-default').hidden).toBe(false);
+  expect(select.value).toBe('gaoliu/deepseek-v4-flash');
+  expect(h.node('pi-default-help').textContent).toContain('只影响 Pi 新建会话');
+  expect(select.children.map(option => option.value)).toEqual(['gaoliu/deepseek-v4-flash', 'tars-point/deepseek-v4-flash']);
+  await h.node('settings-form').onsubmit!({ preventDefault() {} });
+  expect(h.writes.filter(write => write.data)).toEqual([]);
+  h.node('settings').onclick!(); await h.settle();
+  expect(await h.node('pi-refresh').onclick!()).toBeUndefined();
+  expect(h.writes.at(-1)).toEqual({ path: '/api/agent-defaults?refresh=1', data: undefined });
+  h.node('settings').onclick!(); await h.settle();
+  h.node('pi-default-model').value = 'tars-point/deepseek-v4-flash';
+  await h.node('settings-form').onsubmit!({ preventDefault() {} });
+  expect(h.writes.filter(write => write.data).at(-1)).toEqual({ path: '/api/agent-defaults', data: { tool: 'pi', value: 'tars-point/deepseek-v4-flash' } });
+  expect(h.node('settings-dialog').open).toBe(false);
+});
+
+it('hides the Pi default model row when unsupported and marks an unset default as unselectable', async () => {
+  const unset = harness(undefined, 2, undefined, undefined, { agentDefaults: { tools: [{ tool: 'pi', label: 'Pi', effective: 'gaoliu/deepseek-v4-flash',
+    options: [{ value: 'gaoliu/deepseek-v4-flash', label: 'deepseek-v4-flash (gaoliu)' }] }] } }); await unset.ready();
+  unset.requests[0]!.resolve(unset.conversation(0)); await unset.settle();
+  unset.node('settings').onclick!(); await unset.settle();
+  const select = unset.node('pi-default-model');
+  expect(select.children[0]!.value).toBe(''); expect(select.children[0]!.disabled).toBe(true);
+  expect(select.children[0]!.textContent).toBe('未固定（当前跟随：deepseek-v4-flash (gaoliu)）');
+  expect(select.value).toBe('gaoliu/deepseek-v4-flash');
+  await unset.node('settings-form').onsubmit!({ preventDefault() {} });
+  expect(unset.writes.filter(write => write.data)).toEqual([]);
+  const none = harness(); await none.ready(); none.requests[0]!.resolve(none.conversation(0)); await none.settle();
+  none.node('settings').onclick!(); await none.settle();
+  expect(none.node('pi-default').hidden).toBe(true);
+});
 
 it('renders busy sends only in the queue from the first frame, merges receipt ids and moves once into history at execution', async () => {
   const h = harness(); await h.ready(); const view = h.conversation(0, '正在回复', 1); view.turns[0]!.status = 'running';
