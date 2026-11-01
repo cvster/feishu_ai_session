@@ -75,6 +75,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\windows-shared-app-ser
 （取自 `Get-AppxPackage OpenAI.Codex`）与 `CODEX_MCP_NODE_PATH` 不需要手动设置；
 以及 `CODEX_HOME`、`CODEX_SQLITE_HOME`。
 
+## 当前部署状态（2026-11-01）
+
+- 本机桥接已部署到 `04a3a39` 并重新连上飞书（`LarkChannelBridge.Bot.codex` 运行中）。
+- Codex worker 仍在 `bd28322`，**未重启**，也**未配置** `appServerRemote`。
+- 生产桌面未重启、未改启动方式；`shared-app-server` 未在生产端口启动。
+- 因此生产环境的 `aa-session-groups` discover / `/sessions` 仍报 `socket hang up`，
+  这是切换前的预期状态，不是新引入的故障。
+
+**剩余唯一步骤：按下面“生产切换步骤”安排一次桌面重启。** 该步骤会中断桌面当前任务，
+且项目规则禁止在常规部署中重启桌面，所以未自动执行。
+
 ## 生产切换步骤（需要一次桌面重启）
 
 以下操作会中断桌面当前正在运行的任务，应在用户确认后的维护窗口执行。**不要**在常规桥接
