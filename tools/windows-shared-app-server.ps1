@@ -38,7 +38,7 @@
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet('start', 'stop', 'restart', 'status', 'install', 'uninstall')]
+  [ValidateSet('start', 'stop', 'restart', 'status', 'check', 'register', 'install', 'uninstall')]
   [string]$Action = 'status',
   [int]$Port = 4517,
   [string]$CodexPath,
@@ -46,6 +46,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows-codex-common.ps1')
 $stateDir = Join-Path $env:USERPROFILE '.lark-channel\shared-app-server'
 $stateFile = Join-Path $stateDir 'state.json'
 $stdoutLog = Join-Path $stateDir 'stdout.log'
@@ -55,18 +56,10 @@ $taskName = 'LarkChannelBridge.SharedAppServer'
 function Resolve-CodexBinary {
   param([string]$Explicit)
   if ($Explicit) {
-    if (-not (Test-Path -LiteralPath $Explicit)) { throw "codex.exe not found: $Explicit" }
+    if (-not (Test-Path -LiteralPath $Explicit -PathType Leaf)) { throw "codex.exe not found: $Explicit" }
     return (Resolve-Path -LiteralPath $Explicit).Path
   }
-  $profileConfig = Join-Path $env:USERPROFILE '.lark-channel\profiles\codex\workers\codex\config.json'
-  if (Test-Path -LiteralPath $profileConfig) {
-    $configured = (Get-Content -LiteralPath $profileConfig -Raw | ConvertFrom-Json).options.binaryPath
-    if ($configured -and (Test-Path -LiteralPath $configured)) { return $configured }
-  }
-  $installed = Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin') -Filter codex.exe -Recurse -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  if ($installed) { return $installed.FullName }
-  throw 'Cannot locate codex.exe. Pass -CodexPath explicitly.'
+  return Resolve-WindowsCodexBinary -Configured (Get-WindowsConfiguredCodex)
 }
 
 function Read-State {
@@ -104,13 +97,28 @@ function Wait-Ready {
 }
 
 function Start-Server {
+  # Logon tasks and the desktop shortcut can start simultaneously.
+  $mutex = New-Object System.Threading.Mutex($false, "Local\LarkCodexShared-$env:USERNAME-$Port")
+  $held = $false
+  try {
+    try { $held = $mutex.WaitOne(45000) } catch [System.Threading.AbandonedMutexException] { $held = $true }
+    if (-not $held) { throw 'Another shared app-server launch is still in progress.' }
+    Start-ServerCore
+  } finally { if ($held) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
+}
+
+function Start-ServerCore {
   New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
   $existing = Read-State
   if ($existing) {
     $owned = Get-OwnedProcess -State $existing
     if ($owned) {
       if (Test-Ready -TargetPort $existing.port) {
-        [pscustomobject]@{ status = 'already-running'; pid = $owned.ProcessId; url = "ws://127.0.0.1:$($existing.port)" } | ConvertTo-Json -Compress
+        if ($existing.port -ne $Port) { throw "Shared server is on port $($existing.port), not requested port $Port. It was not restarted." }
+        $candidate = Resolve-CodexBinary -Explicit $CodexPath
+        [pscustomobject]@{ status = 'already-running'; pid = $owned.ProcessId; url = "ws://127.0.0.1:$($existing.port)";
+          codex = $existing.codexPath; discoveredCodex = $candidate; updateAvailable = $candidate -ne $existing.codexPath } | ConvertTo-Json -Compress
+        if ($candidate -ne $existing.codexPath) { Write-Warning 'A newer Codex CLI was discovered. The running shared server is preserved; the new CLI is used on its next start.' }
         return
       }
       throw "Recorded app-server pid $($owned.ProcessId) is running but not ready on port $($existing.port). Run -Action stop first."
@@ -122,6 +130,7 @@ function Start-Server {
   if ($listener) { throw "Port $Port is already in use by pid $($listener[0].OwningProcess). Choose another -Port." }
 
   $binary = Resolve-CodexBinary -Explicit $CodexPath
+  $compatibility = Test-WindowsCodexCompatibility -Binary $binary
   $resolvedHome = if ($CodexHome) { $CodexHome } else { Join-Path $env:USERPROFILE '.codex' }
   if (-not (Test-Path -LiteralPath $resolvedHome)) { throw "CODEX_HOME does not exist: $resolvedHome" }
 
@@ -153,6 +162,7 @@ function Start-Server {
     port = $Port
     url = "ws://127.0.0.1:$Port"
     codexPath = $binary
+    codexVersion = $compatibility.version
     codexHome = $resolvedHome
     startedAt = (Get-Date).ToString('o')
   }
@@ -201,6 +211,9 @@ function Show-Status {
     url = $state.url
     ready = $ready
     codex = $state.codexPath
+    codexVersion = $state.codexVersion
+    discoveredCodex = (Resolve-CodexBinary -Explicit $CodexPath)
+    updateAvailable = (Resolve-CodexBinary -Explicit $CodexPath) -ne $state.codexPath
     codexHome = $state.codexHome
     desktopConnections = $desktopConnections
     task = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty State)
@@ -231,6 +244,13 @@ switch ($Action) {
   'stop' { Stop-Server }
   'restart' { Stop-Server; Start-Server }
   'status' { Show-Status }
+  'check' {
+    $binary = Resolve-CodexBinary -Explicit $CodexPath
+    $compatibility = Test-WindowsCodexCompatibility -Binary $binary
+    [pscustomobject]@{ status = 'checked'; codex = $binary; compatibility = $compatibility;
+      ready = (Test-Ready -TargetPort $Port); url = "ws://127.0.0.1:$Port" } | ConvertTo-Json -Compress -Depth 4
+  }
+  'register' { Install-AutoStart }
   'install' { Start-Server; Install-AutoStart; Show-Status }
   'uninstall' { Uninstall-AutoStart; Show-Status }
 }

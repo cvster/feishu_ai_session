@@ -51,6 +51,9 @@ worker 侧的 bearer token 支持仍然保留并可测试，用于以后桌面�
 
 ## 启动器
 
+Windows 升级友好的稳定入口安装、路径自动发现与只读检查，见
+[Windows 升级说明](WINDOWS_UPGRADE.md)。新部署建议使用该入口，不把登录任务固定到某次 release。
+
 新增 `tools/windows-shared-app-server.ps1`（托管服务端）与
 `tools/windows-launch-desktop.ps1`（带 `CODEX_APP_SERVER_WS_URL` 启动桌面）：
 
