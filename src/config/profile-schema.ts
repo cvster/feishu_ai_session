@@ -43,6 +43,10 @@ export interface CodexConfig {
   inheritCodexHome?: boolean;
   ignoreUserConfig?: boolean;
   ignoreRules?: boolean;
+  /** Shared ws:// app-server endpoint owned by another process. */
+  appServerRemote?: string;
+  /** Environment variable holding the bearer token for a protected ws:// endpoint. */
+  appServerRemoteTokenEnv?: string;
 }
 
 export interface AttachmentConfig {

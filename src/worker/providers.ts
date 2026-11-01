@@ -26,7 +26,8 @@ export async function createWorkerProvider(profileDir: string, toolId: string, p
     sourceId = resolve(options.codexHome ?? process.env.CODEX_HOME ?? (options.inheritCodexHome !== false ? join(homedir(), '.codex') : join(profileDir, 'codex-home')));
     agent = new CodexAdapter({ binary: options.binaryPath ?? process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex', profileStateDir: stateDir,
       codexHome: sourceId, inheritCodexHome: true,
-      sandbox: profile.sandbox.defaultMode, appServerRemote: options.appServerRemote ?? process.env.CODEX_QUEUE_REMOTE, larkChannel });
+      sandbox: profile.sandbox.defaultMode, appServerRemote: options.appServerRemote ?? process.env.CODEX_QUEUE_REMOTE,
+      appServerRemoteTokenEnv: options.appServerRemoteTokenEnv, larkChannel });
   } else if (toolId === 'claude') {
     sourceId = resolve(options.configDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'));
     process.env.CLAUDE_CONFIG_DIR = sourceId;

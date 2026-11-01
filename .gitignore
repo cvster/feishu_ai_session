@@ -19,3 +19,6 @@ scripts/
 CHANGELOG.md
 tests-smoke/
 .deploy-check/
+
+# 每台机器自己的 agent 操作规则，不进仓库
+AGENTS.md

@@ -4,6 +4,10 @@
 
 ## 最短安装路线（Linux）
 
+Windows 用户请从 [Windows 完整部署、升级与回滚](WINDOWS_DEPLOYMENT.md) 开始，覆盖
+独立 release 构建、worker/桥接隐藏任务、桌面共享入口、Web/防火墙、上线验证和回滚。
+蓝色快捷方式及 CLI 路径自动发现另见 [Windows 升级与启动](WINDOWS_UPGRADE.md)。
+
 推荐直接在有项目代码和工具登录信息的机器上，以日常使用工具的 OS 用户部署。无需 Docker、Redis 或数据库；桥接内置轻量网页，与桥接同进程。`apps/web-app` 是另一套独立网页，不是安装本项目的前置依赖。
 
 1. 安装 Node 24（含 npm）和 Git，执行第 2 节的安装命令。只安装实际用的工具；Codex/Claude/Pi 可由脚本补装，Kilo/Zcode/Dsh 按各自接入文档配置。
@@ -150,6 +154,11 @@ Linux/macOS 执行 `chmod 600`，Windows 限制到当前用户可读写。文件
 ### Codex
 
 推荐安装并登录 **最新版 Codex 桌面 App**，只保留桌面 App 的 app-server 作为会话执行端；其他所有入口，包括 Codex CLI、VS Code 插件及 Codex worker，都使用这个 app-server。更新各客户端至支持共享连接的版本，并配置为连接桌面 App 实际提供的共享端点。
+
+Windows 桌面不会开放本地共享 socket（安装包启动代码明确排除 win32）。Windows 上改用
+`tools/windows-shared-app-server.ps1` 托管一个回环 WebSocket app-server：桌面通过
+`CODEX_APP_SERVER_WS_URL` 连入，worker 通过 `options.appServerRemote` 连入。步骤、限制与
+回滚见 [WINDOWS_SHARED_APP_SERVER_PHASE2.md](WINDOWS_SHARED_APP_SERVER_PHASE2.md)。
 
 桌面 App 启动后，在 `runtime.env` 中设置 `CODEX_QUEUE_REMOTE` 指向该端点，具体示例见下文。默认发现位置为 `CODEX_HOME/app-server-control/app-server-control.sock`，但必须确认它属于桌面正在使用的实例。CLI 和 VS Code 插件按各自版本支持的共享连接配置使用同一端点；`CODEX_QUEUE_REMOTE` 是本桥接 worker 的配置，不会自动替其他客户端完成配置。
 
@@ -302,6 +311,9 @@ Linux 若需退出登录后继续运行，由管理员为部署账户开启 syst
 部署产物、依赖或 Node/CLI 路径变更仍可能影响旧进程后续启动子进程或延迟加载文件。每个版本放在独立目录，保留旧目录及其依赖；避免原地删除旧 worker 使用的文件。
 
 ### 已有 profile 一键部署（Linux 用户 systemd）
+
+Windows 不支持此 systemd 命令；使用 [Windows 部署规程](WINDOWS_DEPLOYMENT.md)。
+`windows-install-launcher.ps1` 安装的是共享启动入口，不代替桥接版本产物部署。
 
 以运行桥接的同一个 OS 用户，在源码仓库中运行。首次安装、工具登录、飞书发布和服务创建先按前面的章节完成；升级不再次运行 `setup` 或 `web configure`。
 
