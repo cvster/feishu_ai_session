@@ -32,6 +32,7 @@ export function createCodexQueuedFreshRun(options: FreshQueueOptions): AgentRun 
         binary: options.binary, profileStateDir: options.profileStateDir, codexHome: home,
         inheritCodexHome: options.inheritCodexHome, env: options.env,
         ...(remote ? { sharedServer: true, passive: true, remote } : {}),
+        ...(options.remoteTokenEnv ? { remoteTokenEnv: options.remoteTokenEnv } : {}),
       });
       const threadId = await creator.createIdleThread({ ...options, name: options.sessionName, threadSource: 'user' });
       await creator?.stop();

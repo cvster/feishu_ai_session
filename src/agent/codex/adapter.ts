@@ -23,6 +23,8 @@ export interface CodexAdapterOptions {
   larkChannel?: LarkChannelEnvContext;
   /** Shared app-server endpoint used for queueing and thread mutations. */
   appServerRemote?: string;
+  /** Environment variable holding the bearer token for a protected ws:// endpoint. */
+  appServerRemoteTokenEnv?: string;
 }
 
 export class CodexAdapter implements AgentAdapter {
@@ -36,6 +38,7 @@ export class CodexAdapter implements AgentAdapter {
   private readonly sandbox: SandboxMode;
   private readonly larkChannel: LarkChannelEnvContext | undefined;
   private readonly appServerRemote: string | undefined;
+  private readonly appServerRemoteTokenEnv: string | undefined;
 
   constructor(opts: CodexAdapterOptions) {
     this.binary = opts.binary;
@@ -45,6 +48,12 @@ export class CodexAdapter implements AgentAdapter {
     this.sandbox = opts.sandbox ?? 'danger-full-access';
     this.larkChannel = opts.larkChannel;
     this.appServerRemote = opts.appServerRemote ?? process.env.CODEX_QUEUE_REMOTE;
+    // A loopback ws:// endpoint may be unauthenticated, so only pick up a token
+    // when it is actually configured (option, env name, or a token value).
+    this.appServerRemoteTokenEnv = opts.appServerRemoteTokenEnv ??
+      process.env.CODEX_QUEUE_REMOTE_TOKEN_ENV ??
+      (this.appServerRemote && /^wss?:\/\//.test(this.appServerRemote) && process.env.CODEX_QUEUE_REMOTE_TOKEN
+        ? 'CODEX_QUEUE_REMOTE_TOKEN' : undefined);
   }
 
   async isAvailable(): Promise<boolean> {
@@ -61,7 +70,8 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   listModels(options: { cwd?: string } = {}) {
-    return listCodexModels({ binary: this.binary, profileStateDir: this.profileStateDir, codexHome: this.codexHome, inheritCodexHome: this.inheritCodexHome, remote: this.appServerRemote, cwd: options.cwd });
+    return listCodexModels({ binary: this.binary, profileStateDir: this.profileStateDir, codexHome: this.codexHome, inheritCodexHome: this.inheritCodexHome, remote: this.appServerRemote,
+      ...(this.appServerRemoteTokenEnv ? { remoteTokenEnv: this.appServerRemoteTokenEnv } : {}), cwd: options.cwd });
   }
 
   async prepareRun(): Promise<void> {
@@ -86,12 +96,14 @@ export class CodexAdapter implements AgentAdapter {
       inheritCodexHome: this.inheritCodexHome,
       // The live writer also notifies Desktop; an owned reader only updates history.
       remote: this.appServerRemote ?? 'unix://',
+      ...(this.appServerRemoteTokenEnv ? { remoteTokenEnv: this.appServerRemoteTokenEnv } : {}),
     });
   }
 
   async stopNativeTurn(threadId: string, turnId: string, cwd: string): Promise<boolean> {
     const reader = new CodexThreadReader({ binary: this.binary, profileStateDir: this.profileStateDir, codexHome: this.codexHome,
-      inheritCodexHome: this.inheritCodexHome, sharedServer: true, passive: true, remote: this.appServerRemote });
+      inheritCodexHome: this.inheritCodexHome, sharedServer: true, passive: true, remote: this.appServerRemote,
+      ...(this.appServerRemoteTokenEnv ? { remoteTokenEnv: this.appServerRemoteTokenEnv } : {}) });
     try {
       const snapshot = await reader.readThread(threadId), turn = snapshot.turns.at(-1);
       if (snapshot.id !== threadId || turn?.id !== turnId || turn.status !== 'inProgress' || snapshot.status?.type !== 'active') return false;
@@ -108,6 +120,7 @@ export class CodexAdapter implements AgentAdapter {
       ...(this.codexHome ? { codexHome: this.codexHome } : {}),
       inheritCodexHome: this.inheritCodexHome,
       remote: this.appServerRemote,
+      ...(this.appServerRemoteTokenEnv ? { remoteTokenEnv: this.appServerRemoteTokenEnv } : {}),
     });
   }
 
@@ -119,6 +132,7 @@ export class CodexAdapter implements AgentAdapter {
       inheritCodexHome: this.inheritCodexHome,
       sharedServer: Boolean(this.appServerRemote),
       ...(this.appServerRemote ? { remote: this.appServerRemote } : {}),
+      ...(this.appServerRemoteTokenEnv ? { remoteTokenEnv: this.appServerRemoteTokenEnv } : {}),
       timeoutMs: 60_000,
     });
     try {
@@ -143,7 +157,9 @@ export class CodexAdapter implements AgentAdapter {
         sessionName: opts.sessionName,
         clientUserMessageId: codexBridgeClientMessageId(opts.runId),
         images: opts.images, model: opts.model, reasoningEffort: opts.reasoningEffort,
-        remote: this.appServerRemote, env: buildLarkChannelEnv(this.larkChannel),
+        remote: this.appServerRemote,
+        ...(this.appServerRemoteTokenEnv ? { remoteTokenEnv: this.appServerRemoteTokenEnv } : {}),
+        env: buildLarkChannelEnv(this.larkChannel),
       });
     }
 
@@ -162,6 +178,7 @@ export class CodexAdapter implements AgentAdapter {
       model: opts.model,
       reasoningEffort: opts.reasoningEffort,
       ...(this.appServerRemote ? { remote: this.appServerRemote } : {}),
+      ...(this.appServerRemoteTokenEnv ? { remoteTokenEnv: this.appServerRemoteTokenEnv } : {}),
       env: buildLarkChannelEnv(this.larkChannel),
     });
   }

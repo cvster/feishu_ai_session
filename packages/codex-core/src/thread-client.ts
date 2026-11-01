@@ -62,6 +62,12 @@ export interface CodexThreadReaderOptions {
   /** Connect to the writer's shared daemon, never an independent app-server. */
   sharedServer?: boolean;
   remote?: string;
+  /**
+   * Name of the environment variable holding the bearer token for a protected
+   * `ws://`/`wss://` endpoint. The token itself is never stored in options and
+   * never logged, so config files can stay shareable.
+   */
+  remoteTokenEnv?: string;
   /** A subscribed observer must never auto-approve another client's tools. */
   passive?: boolean;
   cwd?: string;
@@ -440,11 +446,18 @@ export class CodexThreadReader {
 
   private async startProcess(): Promise<void> {
     const remote = this.options.remote;
+    if (this.options.remoteTokenEnv && (!remote || !/^wss?:\/\//.test(remote))) {
+      throw new Error('Codex bearer token is only supported for ws:// or wss:// endpoints');
+    }
     if (this.options.sharedServer && remote && !/^(unix|wss?):\/\//.test(remote)) {
       throw new Error('Unsupported shared Codex endpoint');
     }
     if (this.options.sharedServer && remote && /^wss?:\/\//.test(remote)) {
-      await this.startSharedSocket(new WebSocket(remote, { handshakeTimeout: DEFAULT_TIMEOUT_MS }));
+      const headers = remoteAuthorizationHeaders(this.options);
+      await this.startSharedSocket(new WebSocket(remote, {
+        handshakeTimeout: DEFAULT_TIMEOUT_MS,
+        ...(headers ? { headers } : {}),
+      }));
       return;
     }
     const args = this.options.sharedServer
@@ -717,6 +730,29 @@ function readerEnv(options: CodexThreadReaderOptions): NodeJS.ProcessEnv {
   if (options.codexHome) overrides.CODEX_HOME = options.codexHome;
   else if (!options.inheritCodexHome) overrides.CODEX_HOME = join(options.profileStateDir, 'codex-home');
   return mergeProcessEnv(process.env, overrides);
+}
+
+/**
+ * Resolve the bearer token for a protected remote endpoint. The value is read
+ * from the process environment (or the reader's explicit env override) so the
+ * token stays out of configuration files, logs and error messages.
+ */
+export function readRemoteToken(env: NodeJS.ProcessEnv | undefined, name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Invalid remote token environment variable name');
+  let value: string | undefined;
+  for (const [key, candidate] of Object.entries(env ?? {})) {
+    if (key.toLowerCase() === name.toLowerCase()) { value = candidate; break; }
+  }
+  value ??= process.env[name];
+  value = value?.trim();
+  if (!value) throw new Error(`Remote Codex endpoint requires a bearer token in ${name}, but it is empty`);
+  return value;
+}
+
+function remoteAuthorizationHeaders(options: CodexThreadReaderOptions): Record<string, string> | undefined {
+  const token = readRemoteToken(options.env, options.remoteTokenEnv);
+  return token ? { Authorization: `Bearer ${token}` } : undefined;
 }
 
 function normalizeQueuedSubmission(input: unknown): QueuedCodexSubmission {

@@ -44,6 +44,8 @@ interface QueueRunOptions {
   reasoningEffort?: string;
   clientUserMessageId: string;
   remote?: string;
+  /** Environment variable holding the bearer token for a protected ws:// endpoint. */
+  remoteTokenEnv?: string;
   env?: NodeJS.ProcessEnv;
   /** Test/diagnostic overrides; production uses the conservative defaults. */
   pollIntervalMs?: number;
@@ -68,6 +70,7 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
     ...(options.codexHome ? { codexHome: options.codexHome } : {}),
     inheritCodexHome: options.inheritCodexHome,
     env: options.env,
+    ...(options.remoteTokenEnv ? { remoteTokenEnv: options.remoteTokenEnv } : {}),
   });
   const settingsClient = new CodexThreadReader({
     binary: options.binary,
@@ -78,6 +81,7 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
     sharedServer: true,
     passive: true,
     remote,
+    ...(options.remoteTokenEnv ? { remoteTokenEnv: options.remoteTokenEnv } : {}),
   });
   let activeChild: CodexChild | undefined;
   let selectedTurnId: string | undefined;
@@ -147,6 +151,7 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
         threadId: options.threadId,
         prompt: options.prompt,
         remote,
+        ...(options.remoteTokenEnv ? { remoteTokenEnv: options.remoteTokenEnv } : {}),
         images: options.images,
         model: options.model,
         reasoningEffort: options.reasoningEffort,
