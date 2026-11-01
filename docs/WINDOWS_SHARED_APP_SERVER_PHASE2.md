@@ -51,22 +51,25 @@ worker 侧的 bearer token 支持仍然保留并可测试，用于以后桌面�
 
 ## 启动器
 
-新增 `tools/windows-shared-app-server.ps1`：
+新增 `tools/windows-shared-app-server.ps1`（托管服务端）与
+`tools/windows-launch-desktop.ps1`（带 `CODEX_APP_SERVER_WS_URL` 启动桌面）：
 
 ```powershell
-# 启动（默认端口 4517，CODEX_HOME 默认 %USERPROFILE%\.codex）
+# 托管服务端（默认端口 4517，CODEX_HOME 默认 %USERPROFILE%\.codex）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\windows-shared-app-server.ps1 -Action start
-
-# 查看状态（会列出连接该端口的 ChatGPT.exe 进程）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\windows-shared-app-server.ps1 -Action status
-
-# 停止（只停止状态文件里记录的、命令行匹配本端点的进程树）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\windows-shared-app-server.ps1 -Action stop
-
-# 登录时自动启动（注册计划任务 LarkChannelBridge.SharedAppServer）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\windows-shared-app-server.ps1 -Action install
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\windows-shared-app-server.ps1 -Action uninstall
+
+# 带共享端点启动桌面
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\windows-launch-desktop.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\windows-launch-desktop.ps1 -Install
 ```
+
+为什么要专用桌面启动器：`Start-Process` 和系统托盘/安装器启动的进程不会继承刚写入的用户
+环境变量，只设 `[Environment]::SetEnvironmentVariable(...,'User')` 不足以让桌面连上共享端点；
+必须在该进程的环境里显式设置。`-Install` 注册 `LarkChannelBridge.Desktop` 登录任务。
 
 启动器只管理自己记录的进程；`stop` 会校验 PID 与命令行端点，不匹配则只清理状态文件，
 不会误杀桌面或桥接。状态文件位于 `%USERPROFILE%\.lark-channel\shared-app-server\state.json`。
@@ -77,16 +80,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\windows-shared-app-ser
 
 ## 当前部署状态（2026-11-01）
 
-- 本机桥接已部署到 `04a3a39` 并重新连上飞书（`LarkChannelBridge.Bot.codex` 运行中）。
-- Codex worker 仍在 `bd28322`，**未重启**，也**未配置** `appServerRemote`。
-- 生产桌面未重启、未改启动方式；`shared-app-server` 未在生产端口启动。
-- 因此生产环境的 `aa-session-groups` discover / `/sessions` 仍报 `socket hang up`，
-  这是切换前的预期状态，不是新引入的故障。
+**生产切换已完成。** 本机三端现在共用同一个执行端：
 
-**剩余唯一步骤：按下面“生产切换步骤”安排一次桌面重启。** 该步骤会中断桌面当前任务，
-且项目规则禁止在常规部署中重启桌面，所以未自动执行。
+| 组件 | 状态 |
+| --- | --- |
+| 共享 app-server | `ws://127.0.0.1:4517`（`CODEX_HOME=%USERPROFILE%\.codex`），登录自启任务 `LarkChannelBridge.SharedAppServer` |
+| Codex 桌面 | 已接入 4517；桌面进程树内无自起 app-server |
+| Codex worker | `releases/55e5db7`，`appServerRemote = ws://127.0.0.1:4517`，健康 |
+| 桥接 | `releases/55e5db7`，飞书 WebSocket 已连接 |
+| 桌面启动 | 登录自启任务 `LarkChannelBridge.Desktop`（`tools/windows-launch-desktop.ps1`） |
 
-## 生产切换步骤（需要一次桌面重启）
+验收结果（生产环境，真实模型）：
+
+- worker `/sessions` 从 `socket hang up` 变为返回完整会话列表。
+- 桥接发起的轮次写入共享端点，worker 读到该轮次且 `bridge = true`。
+- 原生客户端在共享端点发起的轮次，worker 读到 `bridge = false`、`terminal = done`。
+- 共享端点 `status` 中 `desktopConnections` 出现 `ChatGPT.exe`。
+
+一次性修复：`55e5db7` 修正了 adapter 把所有 `ws://` 端点都当成必须带 token 的问题；
+无 token 配置的回环端点现在可以直接连接。
+
+## 生产切换步骤（已完成，保留备查）
 
 以下操作会中断桌面当前正在运行的任务，应在用户确认后的维护窗口执行。**不要**在常规桥接
 部署中顺带做。
@@ -136,8 +150,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\windows-shared-app-ser
    & "$env:LOCALAPPDATA\Microsoft\WindowsApps\ChatGPT.exe"
    ```
 
-   若希望每次登录都生效，可在计划任务/快捷方式里设置用户环境变量，或把该变量写入
-   用户环境后重启桌面；`-Action install` 已托管服务端，客户端变量需自行持久化。
+   或直接使用 `tools\windows-launch-desktop.ps1 -Install`，它注册的登录任务会带好该变量。
 6. **验收（缺一不可）：**
 
    - `-Action status` 的 `desktopConnections` 中出现 `ChatGPT.exe`。
