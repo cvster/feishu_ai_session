@@ -4,6 +4,10 @@
 
 ## 最短安装路线（Linux）
 
+Windows 用户请从 [Windows 完整部署、升级与回滚](WINDOWS_DEPLOYMENT.md) 开始，覆盖
+独立 release 构建、worker/桥接隐藏任务、桌面共享入口、Web/防火墙、上线验证和回滚。
+蓝色快捷方式及 CLI 路径自动发现另见 [Windows 升级与启动](WINDOWS_UPGRADE.md)。
+
 推荐直接在有项目代码和工具登录信息的机器上，以日常使用工具的 OS 用户部署。无需 Docker、Redis 或数据库；桥接内置轻量网页，与桥接同进程。`apps/web-app` 是另一套独立网页，不是安装本项目的前置依赖。
 
 1. 安装 Node 24（含 npm）和 Git，执行第 2 节的安装命令。只安装实际用的工具；Codex/Claude/Pi 可由脚本补装，Kilo/Zcode/Dsh 按各自接入文档配置。
@@ -307,6 +311,9 @@ Linux 若需退出登录后继续运行，由管理员为部署账户开启 syst
 部署产物、依赖或 Node/CLI 路径变更仍可能影响旧进程后续启动子进程或延迟加载文件。每个版本放在独立目录，保留旧目录及其依赖；避免原地删除旧 worker 使用的文件。
 
 ### 已有 profile 一键部署（Linux 用户 systemd）
+
+Windows 不支持此 systemd 命令；使用 [Windows 部署规程](WINDOWS_DEPLOYMENT.md)。
+`windows-install-launcher.ps1` 安装的是共享启动入口，不代替桥接版本产物部署。
 
 以运行桥接的同一个 OS 用户，在源码仓库中运行。首次安装、工具登录、飞书发布和服务创建先按前面的章节完成；升级不再次运行 `setup` 或 `web configure`。
 

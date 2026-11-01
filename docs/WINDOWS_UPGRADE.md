@@ -2,6 +2,9 @@
 
 本页和 `tools/windows-*.ps1` 仅适用于 Windows；不改变 Linux 的 CLI 查找、systemd、安装或部署流程。
 
+首次部署、独立版本产物、桥接/worker 隐藏后台任务、Web、防火墙、验证和回滚，见
+[Windows 完整部署文档](WINDOWS_DEPLOYMENT.md)。本页专门说明 Codex 升级与启动入口。
+
 ## 安装稳定启动入口
 
 ```powershell
@@ -11,6 +14,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/windows-install-launch
 安装器复制启动器到 `%USERPROFILE%\.lark-channel\windows-launcher`，备份已有脚本为
 `.previous`，更新当前用户的登录任务，不启动或重启桌面、writer、worker、桥接。
 后续更新启动脚本时再次执行即可。它不修改会话、队列、密钥或 Web 访问配置。
+
+同一命令还会安装仓库内的蓝色 PNG/ICO、隐藏启动 PS1/VBS，创建“Codex 蓝色共享版”桌面
+快捷方式。已有同名快捷方式先备份为 `.previous`；原 Codex 图标不变。需要仅安装脚本时
+使用 `-NoShortcut`，不注册登录任务时使用 `-NoRegister`。`-Port` 会同步写入不含密钥的
+`launcher.json`，快捷方式不含用户名、App 版本号、仓库目录或 release 路径。
+
+Git 中包括完整启动资源；运行后生成的任务、快捷方式、日志、端点 token、个人模型配置和
+真实 `web.json` 仍属于本机状态，不应提交。此安装器部署的是 Windows 启动入口，
+不执行桥接构建/版本发布；`tools/deploy.mjs` 仍为 Linux systemd 部署程序。
 
 桌面快捷方式应调用稳定目录下的 `windows-launch-desktop.ps1`，而不是版本化 App 路径或
 某次部署的 release 目录。桌面 exe 每次通过 `Get-AppxPackage OpenAI.Codex` 查找。

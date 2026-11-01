@@ -10,7 +10,7 @@ const quote = (s: string) => `'${s.replaceAll("'", "''")}'`;
 const helper = resolve('tools/windows-codex-common.ps1');
 const desktop = resolve('tools/windows-launch-desktop.ps1');
 const ps = async (script: string) => (await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-  `$ErrorActionPreference='Stop'; . ${quote(helper)}; ${script}`], { windowsHide: true })).stdout.trim();
+  `[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; . ${quote(helper)}; ${script}`], { windowsHide: true })).stdout.trim();
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'windows-codex-upgrade-')); roots.push(root); return root;
 }
@@ -73,12 +73,24 @@ describe.skipIf(process.platform !== 'win32')('Windows upgrade-friendly launcher
   it('installs a stable bundle with backups without starting services', async () => {
     const root = await fixture();
     const installer = resolve('tools/windows-install-launcher.ps1');
-    const script = `$env:USERPROFILE=${quote(root)}; & ${quote(installer)} -NoRegister`;
+    const script = `$env:USERPROFILE=${quote(root)}; & ${quote(installer)} -NoRegister -NoShortcut`;
     expect(await ps(script)).toContain('"processesRestarted":false');
     const installed = join(root, '.lark-channel/windows-launcher/windows-codex-common.ps1');
     expect(await readFile(installed, 'utf8')).toBe(await readFile(helper, 'utf8'));
     await ps(script);
     expect(await readFile(installed + '.previous', 'utf8')).toBe(await readFile(helper, 'utf8'));
+  });
+  it('creates the blue hidden shortcut and portable port settings in an isolated desktop', async () => {
+    const root = await fixture(), desktopDir = join(root, 'desktop'); await mkdir(desktopDir);
+    const installer = resolve('tools/windows-install-launcher.ps1');
+    const result = JSON.parse(await ps(`$env:USERPROFILE=${quote(root)}; & ${quote(installer)} -NoRegister -Port 4678 -DesktopDirectory ${quote(desktopDir)}`));
+    const settings = JSON.parse(await readFile(join(result.directory, 'launcher.json'), 'utf8'));
+    expect(settings).toEqual({ version: 1, port: 4678 });
+    const shortcut = JSON.parse(await ps(`$s=(New-Object -ComObject WScript.Shell).CreateShortcut(${quote(result.shortcut)}); @{target=$s.TargetPath;args=$s.Arguments;icon=$s.IconLocation} | ConvertTo-Json -Compress`));
+    expect(shortcut.target.toLowerCase()).toContain('wscript.exe');
+    expect(shortcut.args).toContain('windows-shortcut.vbs');
+    expect(shortcut.icon).toContain('codex-blue.ico');
+    expect(await readFile(join(result.directory, 'codex-blue.ico'))).toEqual(await readFile('assets/windows/codex-blue.ico'));
   });
 });
 
