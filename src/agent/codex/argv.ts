@@ -8,6 +8,8 @@ export interface BuildCodexQueueArgsInput {
   prompt: string;
   /** Optional shared app-server endpoint, for example unix://. */
   remote?: string;
+  /** Environment variable holding the bearer token for a protected ws:// endpoint. */
+  remoteTokenEnv?: string;
   images?: readonly string[];
   model?: string;
   reasoningEffort?: string;

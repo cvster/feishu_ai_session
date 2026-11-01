@@ -151,6 +151,11 @@ Linux/macOS 执行 `chmod 600`，Windows 限制到当前用户可读写。文件
 
 推荐安装并登录 **最新版 Codex 桌面 App**，只保留桌面 App 的 app-server 作为会话执行端；其他所有入口，包括 Codex CLI、VS Code 插件及 Codex worker，都使用这个 app-server。更新各客户端至支持共享连接的版本，并配置为连接桌面 App 实际提供的共享端点。
 
+Windows 桌面不会开放本地共享 socket（安装包启动代码明确排除 win32）。Windows 上改用
+`tools/windows-shared-app-server.ps1` 托管一个回环 WebSocket app-server：桌面通过
+`CODEX_APP_SERVER_WS_URL` 连入，worker 通过 `options.appServerRemote` 连入。步骤、限制与
+回滚见 [WINDOWS_SHARED_APP_SERVER_PHASE2.md](WINDOWS_SHARED_APP_SERVER_PHASE2.md)。
+
 桌面 App 启动后，在 `runtime.env` 中设置 `CODEX_QUEUE_REMOTE` 指向该端点，具体示例见下文。默认发现位置为 `CODEX_HOME/app-server-control/app-server-control.sock`，但必须确认它属于桌面正在使用的实例。CLI 和 VS Code 插件按各自版本支持的共享连接配置使用同一端点；`CODEX_QUEUE_REMOTE` 是本桥接 worker 的配置，不会自动替其他客户端完成配置。
 
 迁移时先正常结束其他独立执行端上的任务，再停用它们的 app-server/daemon 及自动启动配置，保留桌面 App 的执行端。不要另起独立 daemon，也不要在日常桥接更新中停止或重启桌面 app-server。历史读取进程不承担执行，不能用它恢复或修改会话。doctor 只连公开端点做握手/只读 account/read，不提交任务、不读任务列表、不启动新 writer。

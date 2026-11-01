@@ -31,7 +31,9 @@ export function createWorkerSessions(input: {
   let nativeArchive = true;
   if (toolId === 'codex') return createCodexWorkerSessions({ binary: profile.codex?.binaryPath ?? process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex',
     profileStateDir: profileDir, codexHome: sourceId, inheritCodexHome: true, sharedServer: true,
-    remote: (profile.codex as unknown as { appServerRemote?: string })?.appServerRemote ?? process.env.CODEX_QUEUE_REMOTE }, sourceId, agent, profile.accounts.app.id);
+    remote: (profile.codex as unknown as { appServerRemote?: string })?.appServerRemote ?? process.env.CODEX_QUEUE_REMOTE,
+    ...(profile.codex?.appServerRemoteTokenEnv ? { remoteTokenEnv: profile.codex.appServerRemoteTokenEnv } : {}) },
+  sourceId, agent, profile.accounts.app.id);
   let reader: import('../agent/native-conversation').NativeConversationReader | undefined;
   if (toolId === 'claude') {
     reader = new ClaudeNativeConversationReader(sourceId);

@@ -45,6 +45,8 @@ export interface SetCodexThreadNameOptions {
   timeoutMs?: number;
   /** Shared app-server endpoint. `unix://` uses Codex's default control socket. */
   remote?: string;
+  /** Environment variable holding the bearer token for a protected ws:// endpoint. */
+  remoteTokenEnv?: string;
 }
 
 export type ArchiveCodexThreadOptions = Omit<SetCodexThreadNameOptions, 'name'>;
@@ -121,7 +123,7 @@ async function archiveCodexThreadThroughRemote(
 ): Promise<void> {
   const child = spawnProcess(
     options.binary,
-    ['archive', '--remote', options.remote!, options.threadId],
+    ['archive', '--remote', options.remote!, ...(options.remoteTokenEnv ? ['--remote-auth-token-env', options.remoteTokenEnv] : []), options.threadId],
     {
       env: codexProcessEnv(options),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -184,6 +186,7 @@ function createHistoryClient(options: ListCodexThreadHistoryOptions | ArchiveCod
     codexHome: options.codexHome, inheritCodexHome: options.inheritCodexHome !== false,
     timeoutMs: options.timeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS,
     sharedServer: Boolean(remote), remote, passive: true,
+    ...('remoteTokenEnv' in options && options.remoteTokenEnv ? { remoteTokenEnv: options.remoteTokenEnv } : {}),
   });
 }
 

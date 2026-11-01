@@ -39,6 +39,9 @@ worker 和本机确定性模型模拟服务完成第一阶段验证。14 项检�
 14. **预期限制检查**：当前 stock worker reader 没有 bearer-token 配置，连接受保护的
     WebSocket 被 401 拒绝。此项“通过”表示限制被成功复现，并不表示 worker 支持鉴权。
 
+> 第二阶段已完成：worker 的 bearer token 支持已补齐，桌面接入方案与切换步骤见
+> [WINDOWS_SHARED_APP_SERVER_PHASE2.md](WINDOWS_SHARED_APP_SERVER_PHASE2.md)。
+
 ## 复跑
 
 在仓库根目录用 PowerShell 执行，明确指定当前安装的 Codex CLI：
