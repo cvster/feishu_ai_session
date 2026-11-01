@@ -4,13 +4,23 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { buildCodexQueueArgs } from '../../../src/agent/codex/argv.js';
+import { CodexAdapter } from '../../../src/agent/codex/adapter.js';
 import { CodexThreadReader } from '../../../src/session/codex-thread-reader.js';
 
 /** A protected loopback endpoint that rejects handshakes without the bearer token. */
 async function protectedEndpoint(token: string) {
+  return await loopbackEndpoint((authorization) => authorization === `Bearer ${token}`);
+}
+
+/** A loopback endpoint like the launcher-managed unauthenticated shared server. */
+async function openEndpoint() {
+  return await loopbackEndpoint(() => true);
+}
+
+async function loopbackEndpoint(isAllowed: (authorization: string | undefined) => boolean) {
   const server = new WebSocketServer({
     host: '127.0.0.1', port: 0,
-    verifyClient: (info, done) => done(info.req.headers.authorization === `Bearer ${token}`, 401, 'Unauthorized'),
+    verifyClient: (info, done) => done(isAllowed(info.req.headers.authorization), 401, 'Unauthorized'),
   });
   await new Promise<void>((resolve, reject) => {
     server.once('listening', () => resolve());
@@ -64,6 +74,26 @@ describe('Codex protected WebSocket authentication', () => {
       await reader.stop();
       await endpoint.close();
     }
+  });
+
+  it('connects to an unauthenticated loopback endpoint without demanding a token', async () => {
+    const endpoint = await openEndpoint();
+    const dir = await mkdtemp(join(tmpdir(), 'codex-remote-auth-')); cleanup.push(dir);
+    const reader = new CodexThreadReader({ binary: 'codex-not-spawned', profileStateDir: dir,
+      sharedServer: true, remote: endpoint.url, env: {}, timeoutMs: 5_000 });
+    try {
+      await reader.connect();
+      await expect(reader.rpc('account/read', { refreshToken: false })).resolves.toEqual({ account: null });
+    } finally {
+      await reader.stop();
+      await endpoint.close();
+    }
+  });
+
+  it('does not infer a token requirement for a plain ws:// endpoint', () => {
+    const adapter = new CodexAdapter({ binary: 'codex-not-spawned', profileStateDir: 'unused',
+      appServerRemote: 'ws://127.0.0.1:4517' });
+    expect((adapter as unknown as { appServerRemoteTokenEnv?: string }).appServerRemoteTokenEnv).toBeUndefined();
   });
 
   it('fails closed when the token variable is missing or empty', async () => {

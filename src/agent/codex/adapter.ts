@@ -48,10 +48,12 @@ export class CodexAdapter implements AgentAdapter {
     this.sandbox = opts.sandbox ?? 'danger-full-access';
     this.larkChannel = opts.larkChannel;
     this.appServerRemote = opts.appServerRemote ?? process.env.CODEX_QUEUE_REMOTE;
-    // A protected ws:// endpoint needs a token; never default one for unix/stdio.
+    // A loopback ws:// endpoint may be unauthenticated, so only pick up a token
+    // when it is actually configured (option, env name, or a token value).
     this.appServerRemoteTokenEnv = opts.appServerRemoteTokenEnv ??
-      (this.appServerRemote && /^wss?:\/\//.test(this.appServerRemote)
-        ? process.env.CODEX_QUEUE_REMOTE_TOKEN_ENV ?? 'CODEX_QUEUE_REMOTE_TOKEN' : undefined);
+      process.env.CODEX_QUEUE_REMOTE_TOKEN_ENV ??
+      (this.appServerRemote && /^wss?:\/\//.test(this.appServerRemote) && process.env.CODEX_QUEUE_REMOTE_TOKEN
+        ? 'CODEX_QUEUE_REMOTE_TOKEN' : undefined);
   }
 
   async isAvailable(): Promise<boolean> {
