@@ -81,7 +81,7 @@ const DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES_PER_SCOPE = 20;
 const DEFAULT_MAX_ENTRIES_PER_PROFILE = 1000;
 const KEY_SEPARATOR = '\x1f';
-const CURRENT_FINGERPRINT_VERSION = 3;
+export const CURRENT_FINGERPRINT_VERSION = 3;
 
 export function sessionCatalogKey(input: SessionCatalogIdentity): string {
   return [
@@ -90,6 +90,10 @@ export function sessionCatalogKey(input: SessionCatalogIdentity): string {
     input.cwdRealpath,
     input.policyFingerprint,
   ].join(KEY_SEPARATOR);
+}
+
+function nativeArchiveKey(agentId: string, sourceId: string, nativeId: string): string {
+  return JSON.stringify([agentId, sourceId, nativeId]);
 }
 
 /** Current routes are structurally unique by scope. Policy keys identify a
@@ -144,6 +148,8 @@ export class SessionCatalog {
   private dissolvedChats = new Set<string>();
   private dissolvedPersonal = new Map<string, DissolvedPersonalGroup>();
   private suppressedAutoGroups = new Set<string>();
+  /** Native archives actually observed as archived; the only proof a route can reopen. */
+  private nativeArchived = new Set<string>();
   private archiveNotifications = new Map<string, SessionArchiveNotification>();
   private saving: Promise<void> = Promise.resolve();
   private persistenceError: unknown;
@@ -209,13 +215,14 @@ export class SessionCatalog {
       }
       this.archivedThreads = new Set(state.threads);
       this.archivedScopes = new Map(state.scopes);
-      for (const field of ['dissolvedChats', 'suppressedAutoGroups']) {
+      for (const field of ['dissolvedChats', 'suppressedAutoGroups', 'nativeArchives']) {
         if (state[field] !== undefined && (!Array.isArray(state[field]) || !state[field].every((v: unknown) => typeof v === 'string'))) {
           throw new Error('Invalid dissolved chat state');
         }
       }
       this.dissolvedChats = new Set(state.dissolvedChats ?? []);
       this.suppressedAutoGroups = new Set(state.suppressedAutoGroups ?? []);
+      this.nativeArchived = new Set(state.nativeArchives ?? []);
       if (state.dissolvedPersonal !== undefined && (!Array.isArray(state.dissolvedPersonal) ||
           !state.dissolvedPersonal.every((r: DissolvedPersonalGroup) => r && /^oc_[^:]+$/.test(r.chatId) &&
             isToolId(r.agentId) && typeof r.sourceId === 'string' && typeof r.nativeId === 'string' && !!r.nativeId &&
@@ -284,6 +291,43 @@ export class SessionCatalog {
   reopenScope(scopeId: string): void {
     if (this.isChatDissolved(scopeId.split(':')[0]!)) throw new Error('飞书群已解散，不能重新绑定。');
     if (this.archivedScopes.delete(scopeId)) this.schedulePersist();
+  }
+
+  /** Why a route was closed; native archival records the native session ID. */
+  scopeArchiveReason(scopeId: string): string | undefined { return this.archivedScopes.get(scopeId); }
+
+  /** Reopen only while the marker still records the same native session. */
+  reopenScopeForNative(scopeId: string, nativeId: string): boolean {
+    if (this.isChatDissolved(scopeId.split(':')[0]!)) return false;
+    if (this.archivedScopes.get(scopeId) !== nativeId) return false;
+    this.archivedScopes.delete(scopeId);
+    this.schedulePersist();
+    return true;
+  }
+
+  /** Inverse of the thread marker written by {@link archiveCodexThread}. */
+  unarchiveThread(threadId: string): boolean {
+    if (!this.archivedThreads.delete(threadId)) return false;
+    this.schedulePersist();
+    return true;
+  }
+
+  /**
+   * Records that a scan saw this native session archived while the bridge also
+   * considered it archived. A later scan that sees `archived: false` may only
+   * reopen routes that carry this proof, so a marker written without a native
+   * archive (tool unavailable, unsupported capability) never comes back to life.
+   */
+  noteNativeArchive(agentId: CatalogAgentId, sourceId: string, nativeId: string): void {
+    if (this.nativeArchived.has(nativeArchiveKey(agentId, sourceId, nativeId))) return;
+    this.nativeArchived.add(nativeArchiveKey(agentId, sourceId, nativeId));
+    this.schedulePersist();
+  }
+  observedNativeArchive(agentId: CatalogAgentId, sourceId: string, nativeId: string): boolean {
+    return this.nativeArchived.has(nativeArchiveKey(agentId, sourceId, nativeId));
+  }
+  clearNativeArchive(agentId: CatalogAgentId, sourceId: string, nativeId: string): void {
+    if (this.nativeArchived.delete(nativeArchiveKey(agentId, sourceId, nativeId))) this.schedulePersist();
   }
   isThreadArchived(threadId: string): boolean { return this.archivedThreads.has(threadId); }
   isChatDissolved(chatId: string): boolean { return this.dissolvedChats.has(chatId); }
@@ -596,6 +640,7 @@ export class SessionCatalog {
     await writeFileAtomic(`${this.path}.archives.json`, `${JSON.stringify({
       threads: [...this.archivedThreads], scopes: [...this.archivedScopes],
       dissolvedChats: [...this.dissolvedChats], dissolvedPersonal: [...this.dissolvedPersonal.values()], suppressedAutoGroups: [...this.suppressedAutoGroups],
+      nativeArchives: [...this.nativeArchived],
       notifications: [...this.archiveNotifications.values()],
     })}\n`);
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;

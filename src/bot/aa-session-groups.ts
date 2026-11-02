@@ -13,6 +13,7 @@ import { canUseGroup } from '../policy/access';
 import { evaluateRunPolicy } from '../policy/run-policy';
 import { resolveWorkingDirectory } from '../policy/workspace';
 import type { SessionCatalog, SessionCatalogEntry } from '../session/catalog';
+import { recoverArchivedRoutes } from '../session/archive-recovery';
 import { type CodexThreadHistoryEntry } from '../session/codex-history';
 import type { WorkspaceStore } from '../workspace/store';
 import { ensureSessionGroupAvatar } from './group-avatar';
@@ -93,6 +94,12 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
       const rows = await tool.listSessions();
       let archived = false;
       for (const row of rows) if (row.archived === true) {
+        // Evidence for the native-unarchive recovery below: the bridge only adds a
+        // route to its archive set after a real archive write, so an archived native
+        // row plus that marker proves the two agree about this session.
+        if (deps.controls.toolBindings?.isArchived(tool.id, tool.sourceId, row.nativeId)) {
+          deps.sessionCatalog.noteNativeArchive(tool.id, tool.sourceId, row.nativeId);
+        }
         const linked = deps.sessionCatalog.entries().some(e => e.status === 'active' && e.agentId === tool.id &&
           nativeSessionId(tool.id, e) === row.nativeId && (!e.sourceId || e.sourceId === tool.sourceId) &&
           (!e.botAppId || e.botAppId === deps.controls.profileConfig.accounts.app.id));
@@ -105,6 +112,15 @@ export async function syncAaSessionGroupsOnce(deps: AaSessionGroupSyncDeps): Pro
         await Promise.all([deps.sessionCatalog.flush(), deps.controls.toolBindings?.flush()]);
         await deps.controls.sessionArchiveNotifications?.flush();
       }
+      // Native un-archival is the mirror image of the archival detection above and
+      // reuses the same roster, so recovery costs no extra worker round-trip.
+      if (deps.controls.toolBindings) try { await recoverArchivedRoutes({
+        catalog: deps.sessionCatalog,
+        toolBindings: deps.controls.toolBindings,
+        appId: deps.controls.profileConfig.accounts.app.id,
+        cwdFor: scope => deps.workspaces.cwdFor(scope),
+        isAuxiliary: scope => deps.controls.auxiliary?.isAuxiliary(scope) ?? false,
+      }, tool, rows); } catch (err) { log.warn('archive-recovery', 'failed', { toolId: tool.id, error: String(err) }); }
       await syncAaToolOnce({ ...deps, toolId: tool.id, sourceId: tool.sourceId,
         controls: controlsForTool(deps.controls, tool.id),
         historyProvider: async () => rows.filter(row => !row.archived).map(row => ({

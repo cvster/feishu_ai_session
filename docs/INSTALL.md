@@ -172,6 +172,19 @@ Windows 桌面不会开放本地共享 socket（安装包启动代码明确排�
 
 迁移时先正常结束其他独立执行端上的任务，再停用它们的 app-server/daemon 及自动启动配置，保留桌面 App 的执行端。不要另起独立 daemon，也不要在日常桥接更新中停止或重启桌面 app-server。历史读取进程不承担执行，不能用它恢复或修改会话。doctor 只连公开端点做握手/只读 account/read，不提交任务、不读任务列表、不启动新 writer。
 
+#### 一次性收敛到桌面 app-server
+
+只在首次迁移或确认存在多个 writer 时做一遍；日常桥接更新不要重复执行，否则会中断正在执行的任务。
+
+1. **安装最新版 Codex 桌面 App**，并只保留桌面 App 自带的 app-server 作为执行端。
+2. **所有客户端都连接这一份 app-server**：Codex CLI、VS Code 插件、Codex worker 以及其他会话客户端，按各自支持的方式指向桌面实际提供的共享端点。
+3. **删掉其他 app-server**：旧 CLI、插件或独立 daemon 自带的那一份，连同其自动启动配置（launchd/systemd/计划任务、symlink 或包装脚本）一并停用；先确认桌面已能独立工作，再删除其可执行文件与目录。会话历史与运行数据保留不动，不要删除 VS Code 插件本身。
+4. **结束所有残留的 app-server 进程，然后重启 Codex 桌面 App**：按命令行识别（`codex app-server`，不同版本可能显示为 `codex-server`），先用任务管理器/`ps` 确认没有其他 writer 在跑（结束进程前先结束其上的任务），再重启桌面 App；确认只剩桌面这一份 writer 后，才启动或重启 Codex worker。
+
+第 3、4 步针对桌面 App 自带共享 app-server 的平台（macOS 桌面等）。**Windows 不适用**：Windows 桌面不开放共享 socket，走 `tools/windows-shared-app-server.ps1` 托管的那一份（见 [WINDOWS_SHARED_APP_SERVER_PHASE2.md](WINDOWS_SHARED_APP_SERVER_PHASE2.md)），不要删掉或结束它，否则桌面和 worker 会同时失去连接。
+
+收敛完成前不要通过重启、删除 socket 或清空账本来绕过 writer 冲突。
+
 #### 提示“另一个 writer 占用”怎么办
 
 **现象：** 恢复会话、改模型/推理档位或提交消息失败，原生错误提到 `writer`、`another writer` 或会话已被其他执行端持有（不同 Codex 版本措辞可能不同）；也可能表现为历史能读、提交失败，或飞书执行结果与桌面实时状态不一致。
@@ -180,7 +193,7 @@ Windows 桌面不会开放本地共享 socket（安装包启动代码明确排�
 
 **推荐处理：**
 
-1. **安装最新版 Codex 桌面 App，只保留桌面 App 的 app-server。** 正常结束其他独立执行端上的任务后，停用 CLI、VS Code 插件或独立 daemon 另起的执行服务及其自动启动配置，避免再次竞争同一会话。保留会话历史和运行数据。
+1. **安装最新版 Codex 桌面 App，只保留桌面 App 的 app-server。** 在维护窗口先正常结束其他独立执行端上的任务，再按本节开头的[「一次性收敛到桌面 app-server」](#一次性收敛到桌面-app-server)四步执行：停用并删除其他 app-server、结束所有残留 app-server 进程、重启桌面 App。保留会话历史和运行数据。
 2. **所有工具共用桌面 app-server。** 将 CLI、VS Code 插件、Codex worker 及其他会话客户端都配置为连接桌面实际提供的共享端点。worker 按下节配置 `CODEX_QUEUE_REMOTE`，其他客户端按其支持的配置接入；核对 CLI 路径、运行用户和 `CODEX_HOME`。消息提交、模型设置、停止及交互都走同一个 writer，不能通过独立 reader 的 `thread/resume` 强行抢占。
 3. **如果改的是 worker 的环境、CLI 路径或配置，需要单独重新启动 Codex worker 才能加载。** 仅重启桥接不会刷新正在运行的 worker 环境。在自己安排的维护窗口执行：
 

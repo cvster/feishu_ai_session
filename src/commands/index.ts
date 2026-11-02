@@ -1274,7 +1274,14 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
       ctx.activeRuns.interrupt(ctx.scope);
       ctx.sessionCatalog.upsertActive({ ...ctx.sessionCatalogIdentity, ...nativeSessionFields(toolId, nativeId),
         sourceId, rebindArchivedScope: true, botAppId: ctx.controls.profileConfig.accounts.app.id });
-      if (current && sourceId) { ctx.controls.toolBindings!.set(ctx.scope, { ...current, toolId, sourceId, nativeId, nativeCreated: true }); await ctx.controls.toolBindings!.flush(); }
+      if (current && sourceId) { ctx.controls.toolBindings!.set(ctx.scope, { ...current, toolId, sourceId, nativeId, nativeCreated: true }); }
+      // Resume clears the route markers too. The tool-level set is shared by every
+      // route of this native session, so only an exclusive personal group may
+      // clear it; otherwise one resume would reopen sessions for other groups.
+      if (sourceId && ctx.controls.toolBindings && isPersonalWorkgroup(ctx.scope, current)) {
+        ctx.controls.toolBindings.unarchive(toolId, sourceId, nativeId);
+        await ctx.controls.toolBindings.flush();
+      }
       if (toolDefinition(toolId).nativeField === 'sessionId') ctx.sessions.set(ctx.scope, nativeId, ctx.sessionCatalogIdentity.cwdRealpath);
       await reply(ctx, RESUME_APPLIED_REPLY);
       return;

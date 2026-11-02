@@ -89,8 +89,33 @@ reconciled against Codex's archived list on first observation.
 After archival, the retained group only replies that the conversation is
 archived. It does not submit tasks, reopen the conversation, or recreate its
 AA group. Stale creation cards cannot create a group for a known archived
-thread. Only an explicit resume selection of another unarchived thread clears
-the group's tombstone; late system events from the old task are ignored.
+thread. Only an explicit resume selection of another unarchived thread, or
+un-archiving the same session natively, clears the group's tombstone; late
+system events from the old task are ignored.
+
+**Native un-archival reopens the route.** The same 15-second scan that detects
+archival also detects its inverse, without a second confirmation. Recovery
+needs two independent proofs that this route closed because of a native
+archive: the tool-level archive set still holds the session (retire and
+dissolve never write it), and an earlier scan observed the native session
+archived while the bridge considered it archived. Only then is an explicit
+native `archived: false` allowed to reopen the route — archive marker, catalog
+row, tool-level set and the codex thread tombstone. A missing (`undefined`)
+native flag is treated as unknown, never as un-archived.
+
+Claude and ZCode archive catalog state only, and Pi deletes the native session,
+so those tools never auto-reopen. Retired duplicate routes (marker
+`retired:<nativeId>`), auxiliary, shared and topic-only bindings, dissolved
+groups, rows carrying a legacy policy fingerprint, routes whose recorded
+workspace no longer matches, and sessions still owned by another live group stay
+closed. A native session with two closed personal routes is ambiguous, so every
+route of it stays closed and a warning is logged instead of guessing. One scan
+reopens at most three routes per tool and stops entirely when it sees more than
+ten candidates; each reopened route then waits out a 30-minute cool-down that
+only lives in the running process. Run policy is still re-evaluated per message,
+so reopening never bypasses a tightened policy. The first sync after reopening
+may add the most recent native turns to the group as a manual recovery would;
+nothing is replayed to the agent.
 
 Archive confirmation offers two red buttons in Feishu and Web. **归档** keeps
 its group and history; **归档并解散群** archives first, then dissolves the group
