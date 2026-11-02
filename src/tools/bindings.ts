@@ -79,6 +79,7 @@ export class ToolBindingStore {
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
   }
   entries(): [string, ToolBinding][] { return Object.keys(this.bindings).map(scope => [scope, this.get(scope)!]); }
+  scopes(): string[] { return Object.keys(this.bindings); }
   get(scope: string): ToolBinding | undefined {
     const b = this.bindings[scope] ?? this.bindings[scope.split(':')[0]!];
     if (!b) return undefined;
@@ -171,7 +172,9 @@ export class ToolBindingStore {
       const owner = owners.get(key);
       if (!owner) { owners.set(key, scope); continue; }
       // Closing a duplicate bridge route preserves its group, native data and history.
-      catalog.archiveScope(scope, binding.nativeId!);
+      // The marker records why the route closed so the native-unarchive recovery
+      // in archive-recovery.ts can never resurrect a retired duplicate.
+      catalog.archiveScope(scope, `retired:${binding.nativeId!}`);
       log.warn('session', 'duplicate-personal-binding-retired', { scope, ownerScope: owner, toolId: binding.toolId });
     }
     catalog.setPersonalBindingGuard(input => {
@@ -248,6 +251,12 @@ export class ToolBindingStore {
   }
   isArchived(toolId: AgentKind, sourceId: string, nativeId: string): boolean {
     return this.archived.has(sessionRefKey(toolId, sourceId, nativeId));
+  }
+  /** Clears the tool-level archival marker; returns whether anything changed. */
+  unarchive(toolId: AgentKind, sourceId: string, nativeId: string): boolean {
+    if (!this.archived.delete(sessionRefKey(toolId, sourceId, nativeId))) return false;
+    this.persist();
+    return true;
   }
   migrate(catalog: SessionCatalog, sourceFor: (id: AgentKind) => string | undefined): void {
     const latest = new Map<string, ReturnType<SessionCatalog['entries']>[number]>();

@@ -17,7 +17,10 @@ export class KiloSessionProvider implements ToolSessionOperations {
       if (!Array.isArray(rows)) throw new Error('Kilo 会话列表格式不兼容');
       return rows.filter(row => !row.parentID && !!row.metadata?.['kilo-desktop'] === (this.options.client === 'app') && typeof row.directory === 'string').map(row => ({
         nativeId: kiloSessionId(row.id), name: row.title, cwd: row.directory,
-        createdAtMs: row.time.created, updatedAtMs: row.time.updated, archived: !!row.time.archived,
+        createdAtMs: row.time.created, updatedAtMs: row.time.updated,
+        // Kilo reports archival as a truthy stamp; keep an absent flag absent so
+        // archive recovery never reads a missing value as "not archived".
+        archived: row.time?.archived === undefined || row.time.archived === null ? undefined : !!row.time.archived,
       }));
     } finally { await client.close(); }
   }
