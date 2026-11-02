@@ -11,7 +11,19 @@ export interface ToolSession {
   archived?: boolean;
 }
 
-/** Provider-specific formats and protocols stay behind this interface. */
+/**
+ * Where the native records are, as reported by the tool that owns them.
+ * Record bytes never cross this interface: consumers only get a place to look.
+ */
+export interface SessionHistoryPointer {
+  format: 'json' | 'jsonl';
+  /** Absolute path on the host that owns the records; absent when no file backs the session. */
+  path?: string;
+  /** How to find the records when `path` is missing or has moved. Display text only. */
+  hint?: string;
+}
+
+/** Provider-side view: tools hand out their own native file, worker-internal. */
 export interface ToolSessionOperations {
   readonly historyMode?: 'file' | 'snapshot';
   /** False when archive only affects the bridge catalog, not native storage. */
@@ -19,12 +31,24 @@ export interface ToolSessionOperations {
   /** Some tools implement the bridge archive action by deleting native history. */
   readonly archiveEffect?: 'delete';
   historyPath(nativeId: string): Promise<string | undefined>;
+  /** Where this tool keeps records, for when the exported path has moved. */
+  historyHint?(nativeId: string): string | undefined;
+  rename(nativeId: string, name: string): Promise<void>;
+  archive(nativeId: string): Promise<void>;
+  fork?(nativeId: string): Promise<{ nativeId: string; name: string; cwd: string }>;
+}
+/** Bridge-side view: never touches provider files, only the reported pointer. */
+export interface BridgeSessionOperations {
+  /** False when archive only affects the bridge catalog, not native storage. */
+  readonly nativeArchive?: boolean;
+  readonly archiveEffect?: 'delete';
+  historyPointer(nativeId: string): Promise<SessionHistoryPointer | undefined>;
   rename(nativeId: string, name: string): Promise<void>;
   archive(nativeId: string): Promise<void>;
   fork?(nativeId: string): Promise<{ nativeId: string; name: string; cwd: string }>;
 }
 export interface AgentTool {
-  sessions?: ToolSessionOperations;
+  sessions?: BridgeSessionOperations;
   id: AgentKind;
   sourceId: string;
   label: string;

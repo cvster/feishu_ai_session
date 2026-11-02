@@ -57,7 +57,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi
   bindings.set('oc_group', { toolId: tool, sourceId: h.client.sourceId, nativeId: 'native', name: 'AA-web' });
   catalog.upsertActive({ scopeId: 'oc_group', agentId: tool, cwdRealpath: native.cwd, sourceId: h.client.sourceId, botAppId: 'cli_test', policyFingerprint: 'fp', sessionId: tool === 'codex' ? undefined : 'native', threadId: tool === 'codex' ? 'native' : undefined });
   const registry = new ToolRegistry(); registry.register({ id: tool, sourceId: h.client.sourceId, label: 'Tool from manifest', agent: h.adapter,
-    listSessions: () => h.client.listSessions(), sessions: { archiveEffect, historyPath: async () => undefined, rename: (id, name) => h.client.renameSession(id, name), nativeArchive: true, archive: id => h.client.archiveSession(id), fork: id => h.client.forkSession(id) } });
+    listSessions: () => h.client.listSessions(), sessions: { archiveEffect, historyPointer: async () => undefined, rename: (id, name) => h.client.renameSession(id, name), nativeArchive: true, archive: id => h.client.archiveSession(id), fork: id => h.client.forkSession(id) } });
   controls.toolRegistry = registry;
   controls.configPath = join(h.dir, 'config.json');
   controls.refreshOwner = async () => {};
@@ -1490,7 +1490,7 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('automatical
   h.catalog.upsertActive({ ...h.catalog.entries().find(row => row.scopeId === 'oc_group')!, cwdRealpath: h.dir });
   h.channel.rawClient.im.v1.chat.create = vi.fn(async () => ({ code: 0, data: { chat_id: 'oc_copy' } })) as any;
   const history = join(h.dir, 'source-history.jsonl'); await writeFile(history, 'source history');
-  h.controls.toolRegistry!.get(tool).sessions!.historyPath = async () => history;
+  h.controls.toolRegistry!.get(tool).sessions!.historyPointer = async () => ({ format: 'jsonl', path: history });
   const submit = vi.fn(async (msg: NormalizedMessage) => { await h.inbox.receive(msg.chatId, msg); });
   h.controls.submitMessage = submit;
   const id = (await h.service.list())[0]!.id;
@@ -1521,7 +1521,7 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('automatical
 
 it('shows the copy notice the bridge sends itself when the job is keyed by the callback request id', async () => {
   const h = await harness('pi'); await h.replies.stop();
-  const notice = "会话创建自 Codex 'ts_hmi/AA-imu驱动'。后续问题如有需要，可读取原会话。\n原会话记录：/profile/codex/bridge-history/3e0d3055.jsonl";
+  const notice = "会话创建自 Codex 'ts_hmi/AA-imu驱动'。后续问题如有需要，可读取原会话。\n原会话记录：/home/pc/.codex/sessions/2026/10/27/rollout-2026-10-27T10-12-44-01a17b21.jsonl";
   await h.inbox.receive('oc_group', { messageId: 'om_notice', chatId: 'oc_group', chatType: 'group', senderId: 'ou_owner', content: notice,
     resources: [], mentions: [], mentionedBot: true, mentionAll: false, rawContentType: 'card_action',
     raw: { bridgeCallbackId: 'copy-read-abc' }, createTime: Date.now() } as unknown as NormalizedMessage);

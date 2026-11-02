@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
-import { access } from 'node:fs/promises';
 import type { CommandContext } from './index';
 import type { CopiedSessionSource } from '../tools/bindings';
 import { nativeSessionId, type ToolId } from '../tools/definitions';
 import { sessionOperations } from '../tools/session-api';
+import type { SessionHistoryPointer } from '../tools/types';
+import { WorkerRequestError } from '../worker/client';
 import { sessionCopyCard } from '../card/templates';
 import { sendManagedCard } from '../card/managed';
+import { log } from '../core/logger';
 
 interface CopyChoice {
   actor: string;
@@ -83,6 +85,26 @@ export async function sessionCopyChoice(ctx: CommandContext, token: string): Pro
   return choice;
 }
 
+/**
+ * The first message of a copy: where the source came from and how to reach it.
+ * A tool that cannot name a record still yields a usable pointer, so this text
+ * never degrades to nothing.
+ */
+export function copyNotice(label: string, source: CopiedSessionSource, pointer?: SessionHistoryPointer): string {
+  const head = `会话创建自 ${label} '${basename(source.cwd)}/${source.name}'。后续问题如有需要，可读取原会话。`;
+  const missing = `原会话记录暂时无法定位（${label}，会话 ID ${source.nativeId}${source.cwd ? `，目录 ${source.cwd}` : ''}）。`;
+  const lines = [head, pointer?.path
+    ? `原会话记录：${pointer.path}（${pointer.format === 'json' ? 'JSON' : 'JSONL'}，优先按需分段读取，不要整份读入）`
+    : missing];
+  if (pointer?.hint) lines.push(`${pointer.path ? '若该路径已失效' : '可按以下方法查找'}：${pointer.hint}`);
+  return lines.join('\n');
+}
+/** A worker that never answered can be retried; a worker that answered with a permanent refusal cannot. */
+function retryable(error: unknown): boolean {
+  if (!(error instanceof WorkerRequestError)) return true;
+  return error.retryable || [429, 502, 503, 504].includes(error.status);
+}
+
 export async function readCopiedSession(ctx: CommandContext, copyId: string): Promise<void> {
   const binding = ctx.controls.toolBindings?.get(ctx.scope);
   const source = binding?.copiedFrom;
@@ -90,11 +112,15 @@ export async function readCopiedSession(ctx: CommandContext, copyId: string): Pr
     throw new Error('读取入口已失效，请在新会话中要求读取原会话。');
   const tool = ctx.controls.toolRegistry?.find(source.toolId);
   if (!tool || tool.sourceId !== source.sourceId) throw new Error('来源工具配置已变化，无法读取原会话。');
-  const historyPath = await sessionOperations(tool).historyPath(source.nativeId);
-  if (!historyPath) throw new Error('原会话记录暂不可读，请稍后重试。');
-  await access(historyPath);
+  let pointer: SessionHistoryPointer | undefined;
+  try { pointer = await sessionOperations(tool).historyPointer(source.nativeId); }
+  catch (error) {
+    if (retryable(error)) throw error;
+    // Permanent refusals still leave the new group with the source identity.
+    log.warn('session-copy', 'history-pointer-unavailable', { toolId: tool.id, error: error instanceof Error ? error.message : String(error) });
+  }
   if (!ctx.controls.submitMessage) throw new Error('消息入口暂不可用，请稍后重试。');
-  const content = `会话创建自 ${tool.label} '${basename(source.cwd)}/${source.name}'。后续问题如有需要，可读取原会话。\n原会话记录：${historyPath}`;
+  const content = copyNotice(tool.label, source, pointer);
   const sent = await ctx.channel.send(ctx.msg.chatId, { text: content }, {
     ...(ctx.msg.messageId ? { replyTo: ctx.msg.messageId } : {}), ...(ctx.chatMode === 'topic' ? { replyInThread: true } : {}),
   });

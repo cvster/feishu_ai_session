@@ -715,7 +715,7 @@ it.each(['AA-电机检测', 'AF-电机检测', 'FF-电机检测'] as const)('per
   let name = original as string;
   vi.mocked(tool.listSessions).mockImplementation(async () => [{ nativeId: sourceId, name, cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 }]);
   const rename = vi.fn(async (_id: string, value: string) => { name = value; });
-  tool.sessions = { historyPath: async () => h.history, rename, archive: async () => {} };
+  tool.sessions = { historyPointer: async () => ({ format: 'jsonl', path: h.history }), rename, archive: async () => {} };
   const groupRename = vi.fn(async () => ({ code: 0 }));
   h.channel.rawClient.im.v1.chat.update = groupRename as any;
   h.bindings.set('oc_original', { ...h.bindings.get('oc_original')!, name });
@@ -741,7 +741,7 @@ it('applies the enabled prefix to later shared sessions, deduplicates peers and 
   let name = 'AA-后续'; const session = () => ({ nativeId: sourceId, name, cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 });
   vi.mocked(tool.listSessions).mockImplementation(async () => [session()]);
   const rename = vi.fn(async (_id: string, value: string) => { name = value; });
-  tool.sessions = { historyPath: async () => h.history, rename, archive: async () => {} };
+  tool.sessions = { historyPointer: async () => ({ format: 'jsonl', path: h.history }), rename, archive: async () => {} };
   h.channel.rawClient.im.v1.chat.update = vi.fn(async () => ({ code: 0 })) as any;
   await h.groups.setPrefixSettings(true, 'ou_owner'); expect(rename).not.toHaveBeenCalled();
   await h.activate(); await h.activate('oc_aux_2');

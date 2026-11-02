@@ -344,7 +344,7 @@ describe('Bridge command contracts', () => {
     const tools = new ToolRegistry();
     const fork = vi.fn(async () => ({ nativeId: 'sess_child', name: 'AA-ZCode (1)', cwd: h.tmp.workspace }));
     tools.register({ id: 'zcode', label: 'ZCode', sourceId: 'source-zcode', agent: h.agent, listSessions: async () => [],
-      sessions: { historyPath: async () => undefined, rename: async () => {}, archive: async () => {}, fork } });
+      sessions: { historyPointer: async () => undefined, rename: async () => {}, archive: async () => {}, fork } });
     h.controls.toolRegistry = tools;
     vi.spyOn(h.channel.rawClient.im.v1.chat, 'create').mockRejectedValueOnce(new Error('temporary group failure'));
     await h.run('/fork same', { chatMode: 'group' });
@@ -634,7 +634,7 @@ describe('Bridge command contracts', () => {
 
   it.each([false, true])('sends one concise archive notification when finishing a bound personal group with a %s routed identity', async routed => {
     const h = await createHarness(), bindings = await personalTools(h);
-    if (!routed) h.controls.toolRegistry!.get('codex').sessions = { nativeArchive: true, historyPath: async () => undefined, rename: async () => {}, archive: id => h.agent.archiveThread!(id) };
+    if (!routed) h.controls.toolRegistry!.get('codex').sessions = { nativeArchive: true, historyPointer: async () => undefined, rename: async () => {}, archive: id => h.agent.archiveThread!(id) };
     const identity: SessionCatalogIdentity = { scopeId: 'oc_group', agentId: 'codex', cwdRealpath: h.tmp.workspace, policyFingerprint: 'finish' };
     h.sessionCatalog.upsertActive({ ...identity, threadId: 'native-one', sourceId: 'home', botAppId: 'app-id' });
     const notifications = startSessionArchiveNotifications({ channel: h.channel as unknown as CommandContext['channel'],
@@ -1053,9 +1053,9 @@ async function createHarness(): Promise<Harness> {
     processId: 'proc-1',
     toolRegistry: new ToolRegistry(), toolBindings,
   } satisfies Controls;
-  controls.toolRegistry.register({ id: 'claude', label: 'Claude Code', sourceId: 'claude-home', agent: { id: 'claude', displayName: 'Claude Code', isAvailable: () => agent.isAvailable(), run: options => agent.run(options) }, listSessions: async () => [], sessions: { historyPath: async () => undefined, rename: async () => {}, archive: async () => {} } });
+  controls.toolRegistry.register({ id: 'claude', label: 'Claude Code', sourceId: 'claude-home', agent: { id: 'claude', displayName: 'Claude Code', isAvailable: () => agent.isAvailable(), run: options => agent.run(options) }, listSessions: async () => [], sessions: { historyPointer: async () => undefined, rename: async () => {}, archive: async () => {} } });
   controls.toolRegistry.register({ id: 'codex', label: 'Codex', sourceId: 'home', agent: { id: 'codex', displayName: 'Codex', isAvailable: () => agent.isAvailable(), run: options => agent.run(options), forkThread: id => (agent as unknown as { forkThread(id: string): Promise<{ threadId: string; name: string; cwd: string }> }).forkThread(id) },
-    listSessions: async () => [], sessions: { nativeArchive: true, historyPath: async () => undefined, rename: async () => {}, archive: id => agent.archiveThread!(id) } });
+    listSessions: async () => [], sessions: { nativeArchive: true, historyPointer: async () => undefined, rename: async () => {}, archive: id => agent.archiveThread!(id) } });
 
   workspaces.setCwd('chat-1', workspaceRealpath);
 
@@ -1103,7 +1103,7 @@ async function personalTools(h: Harness): Promise<ToolBindingStore> {
   const registry = new ToolRegistry();
   registry.register({ id: 'codex', label: 'Codex', sourceId: 'home', agent: h.agent,
     listSessions: async () => [{ nativeId: 'native-one', name: 'AA-one', cwd: h.tmp.workspace, createdAtMs: 1, updatedAtMs: 2, archived: bindings.isArchived('codex', 'home', 'native-one') }],
-    sessions: { nativeArchive: true, historyPath: async () => undefined, rename: async () => {}, archive: id => h.agent.archiveThread!(id) } });
+    sessions: { nativeArchive: true, historyPointer: async () => undefined, rename: async () => {}, archive: id => h.agent.archiveThread!(id) } });
   h.controls.toolBindings = bindings; h.controls.toolRegistry = registry;
   return bindings;
 }

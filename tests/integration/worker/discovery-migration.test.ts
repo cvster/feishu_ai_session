@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -20,9 +21,11 @@ const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 async function profile() { const dir = await mkdtemp(join(tmpdir(), 'discover-workers-')); cleanups.push(() => rm(dir, { recursive: true, force: true })); return dir; }
 async function worker(dir: string, folder = 'arbitrary-folder', toolId = 'custom', sourceId = 'source', botAppId = 'app', manifest: Partial<WorkerManifest> = {}) {
+  const historyFile = join(dir, 'native-session.json'); await writeFile(historyFile, '{}');
   const agent: AgentAdapter = { id: toolId, displayName: 'Custom Tool', isAvailable: async () => true, run() { throw Error('No inference expected'); } };
   const server = await startWorkerServer({ stateDir: join(dir, 'workers', folder), sourceId, botAppId, agent,
-    sessions: { list: async () => [{ nativeId: 'opaque:id', cwd: dir, createdAtMs: 1, updatedAtMs: 2 }], history: async nativeId => ({ nativeId, format: 'json', content: '{}' }) },
+    sessions: { list: async () => [{ nativeId: 'opaque:id', cwd: dir, createdAtMs: 1, updatedAtMs: 2 }],
+      history: async nativeId => ({ nativeId, format: 'json', path: historyFile, hint: '快照不随原会话更新' }) },
     manifest: { label: 'Custom Tool', nativeField: 'threadId', sessionKind: 'custom-chat', historyFormat: 'json', nativeHistory: false, ...manifest } });
   cleanups.push(() => server.close()); return server;
 }
@@ -33,7 +36,25 @@ it('discovers an arbitrary worker directory and tool ID through authenticated co
   const rows = await discoverWorkers(dir, 'app'); expect(rows).toHaveLength(1);
   const tool = workerTool(rows[0]!); expect(tool.id).toBe('custom'); expect(tool.agent.displayName).toBe('Custom Tool');
   expect(nativeSessionFields(tool.id, 'opaque:id')).toEqual({ threadId: 'opaque:id' });
-  expect(await tool.listSessions()).toHaveLength(1); expect(await readFile((await tool.sessions!.historyPath('opaque:id'))!, 'utf8')).toBe('{}');
+  expect(await tool.listSessions()).toHaveLength(1);
+  // The bridge receives a pointer, never record bytes, and writes no copy of its own.
+  const pointer = await tool.sessions!.historyPointer('opaque:id');
+  expect(pointer).toMatchObject({ format: 'json', hint: '快照不随原会话更新' });
+  expect(await readFile(pointer!.path!, 'utf8')).toBe('{}');
+  expect(existsSync(join(dir, 'workers', 'arbitrary-folder', 'bridge-history'))).toBe(false);
+});
+it('degrades to a bare pointer for a worker that only ever returned record bytes', async () => {
+  const dir = await profile();
+  const agent: AgentAdapter = { id: 'legacy', displayName: 'Legacy', isAvailable: async () => true, run() { throw Error('No inference expected'); } };
+  const server = await startWorkerServer({ stateDir: join(dir, 'workers', 'legacy'), sourceId: 'source', botAppId: 'app', agent,
+    sessions: { list: async () => [{ nativeId: 'opaque:id', cwd: dir, createdAtMs: 1, updatedAtMs: 2 }],
+      history: async nativeId => ({ nativeId, format: 'json', content: '{"type":"user"}' }) as never },
+    manifest: { label: 'Legacy', nativeField: 'threadId', sessionKind: 'custom-chat', historyFormat: 'json', nativeHistory: false } });
+  cleanups.push(() => server.close());
+  const [row] = await discoverWorkers(dir, 'app');
+  // Records that never arrive are not an error: the copy still gets its identity.
+  expect(await workerTool(row!).sessions!.historyPointer('opaque:id')).toEqual({ format: 'json' });
+  expect(existsSync(join(dir, 'workers', 'legacy', 'bridge-history'))).toBe(false);
 });
 it('starts with no workers and preserves cached identities while offline', async () => {
   const dir = await profile(); expect(await loadWorkerRegistry(dir, 'app')).toEqual([]);

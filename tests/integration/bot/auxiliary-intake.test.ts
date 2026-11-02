@@ -156,13 +156,13 @@ it('routes a copied-session read through normal intake and the durable Codex sub
   const copiedFrom = { copyId: 'copy-test', toolId: 'codex' as const, sourceId, nativeId: originalId, name: '来源会话', cwd: h.cwd };
   h.controls.toolBindings!.set('oc_copy', { toolId: 'codex', sourceId, nativeCreated: false, name: '新会话', copiedFrom });
   h.workspaces.setCwd('oc_copy', h.cwd);
-  h.controls.toolRegistry!.get('codex').sessions = { historyPath: async () => h.history, rename: async () => {}, archive: async () => {} };
+  h.controls.toolRegistry!.get('codex').sessions = { historyPointer: async () => ({ format: 'jsonl', path: h.history }), rename: async () => {}, archive: async () => {} };
   const ctx = { channel: h.channel, controls: h.controls, scope: 'oc_copy', chatMode: 'group' as const, fromCardAction: true,
     msg: { messageId: 'om_provenance', chatId: 'oc_copy', chatType: 'group', senderId: 'ou_owner' },
     workspaces: h.workspaces, sessionCatalog: h.catalog } as any;
   await runCommandHandler('fork', 'read copy-test', ctx);
   await vi.waitFor(() => expect(h.submit).toHaveBeenCalledOnce(), { timeout: 3000 });
-  expect(h.submit.mock.calls[0]![0].prompt).toContain("/来源会话' 的内容");
+  expect(h.submit.mock.calls[0]![0].prompt).toContain("会话创建自 Codex '");
   expect(h.submit.mock.calls[0]![0].prompt).toContain(h.history);
   expect(h.submit.mock.calls[0]![0].threadId).not.toBe(originalId);
   expect((await h.records()).find(r => r.scope === 'oc_copy')?.replyTo).toBe('om_provenance');

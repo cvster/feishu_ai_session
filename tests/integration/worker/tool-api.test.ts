@@ -11,7 +11,7 @@ import { ZcodeAdapter } from '../../../src/agent/zcode/adapter';
 const session = { nativeId: 'opaque:id_1', name: 'AA-native', cwd: '/project', createdAtMs: 1, updatedAtMs: 2 };
 function service(): WorkerSessionService {
   return { list: vi.fn(async () => [session]),
-    history: vi.fn(async id => ({ nativeId: id, format: 'jsonl' as const, content: '{"type":"user"}\n' })),
+    history: vi.fn(async id => ({ nativeId: id, format: 'jsonl' as const, path: '/tmp/records.jsonl', hint: '按会话 ID 查找' })),
     rename: vi.fn(async () => {}), archive: vi.fn(async () => {}),
     fork: vi.fn(async () => ({ nativeId: 'copy:id', name: 'AA-copy', cwd: session.cwd })) };
 }
@@ -133,15 +133,24 @@ it('uses worker-owned configuration regardless of bridge-local provider settings
   await expect(adapter.listModels({ cwd: h.dir })).resolves.toEqual([]);
   await h.client.renameSession('native', 'new'); expect(sessions.rename).toHaveBeenCalledOnce();
 });
-it('exports bounded native history without accepting file paths or partial JSONL tails', async () => {
+it('reports where native history lives instead of carrying record bytes', async () => {
   const h = await fixture();
   const path = join(h.dir, 'records.jsonl'); await writeFile(path, '{"type":"user"}\n{"partial"');
-  const provider = { historyMode: 'file' as const, historyPath: vi.fn(async () => path), rename: async () => {}, archive: async () => {} };
-  expect(await exportWorkerHistory(provider, 'native')).toEqual({ nativeId: 'native', format: 'jsonl', content: '{"type":"user"}\n' });
-  await truncate(path, 32 * 1024 * 1024 + 1);
-  await expect(exportWorkerHistory(provider, 'native')).rejects.toMatchObject({ status: 413 });
+  const provider = { historyMode: 'file' as const, historyPath: vi.fn(async () => path), historyHint: vi.fn(() => '按会话 ID 查找'),
+    rename: async () => {}, archive: async () => {} };
+  expect(await exportWorkerHistory(provider, 'native')).toEqual({ nativeId: 'native', format: 'jsonl', path, hint: '按会话 ID 查找' });
+  // Size no longer decides whether the bridge can hand over a pointer.
+  await truncate(path, 64 * 1024 * 1024 + 1);
+  const huge = await exportWorkerHistory(provider, 'native');
+  expect(huge).toMatchObject({ nativeId: 'native', path });
+  // A 64 MiB record costs the same few hundred bytes on the wire as a tiny one.
+  expect(huge).not.toHaveProperty('content');
+  expect(JSON.stringify(huge).length).toBeLessThan(4096);
+  // lstat never follows a link, so a linked record is reported without a path.
   const link = join(h.dir, 'symlink'); await symlink(path, link);
   provider.historyPath.mockResolvedValue(link);
-  await expect(exportWorkerHistory(provider, 'native')).rejects.toThrow();
+  expect(await exportWorkerHistory(provider, 'native')).toEqual({ nativeId: 'native', format: 'jsonl', hint: '按会话 ID 查找' });
+  provider.historyPath.mockResolvedValue(join(h.dir, 'missing.jsonl'));
+  expect(await exportWorkerHistory(provider, 'native')).toMatchObject({ hint: '按会话 ID 查找' });
 });
 

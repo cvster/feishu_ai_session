@@ -1,5 +1,5 @@
 import type { AgentBotIdentity, AgentEvent, AgentRunOptions } from '../agent/types';
-import type { ToolSession } from '../tools/types';
+import type { ToolSession, SessionHistoryPointer } from '../tools/types';
 import type { NativeConversationSnapshot } from '../agent/native-conversation';
 import type { CodexInputAnswers, CodexInputRequest } from '../session/codex-user-input';
 
@@ -41,11 +41,9 @@ export interface WorkerHealth {
   kiloEditorSync?: boolean;
   kiloNativeInputOrigin?: boolean;
 }
-/** History is an export of native records, not the worker job journal. */
-export interface WorkerSessionHistory {
+/** A pointer to native records: the transport never carries record bytes. */
+export interface WorkerSessionHistory extends SessionHistoryPointer {
   nativeId: string;
-  format: 'json' | 'jsonl';
-  content: string;
 }
 export interface WorkerSessionService {
   list(): Promise<ToolSession[]>;
