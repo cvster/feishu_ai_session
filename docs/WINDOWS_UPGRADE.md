@@ -4,6 +4,7 @@
 
 首次部署、独立版本产物、桥接/worker 隐藏后台任务、Web、防火墙、验证和回滚，见
 [Windows 完整部署文档](WINDOWS_DEPLOYMENT.md)。本页专门说明 Codex 升级与启动入口。
+动手前先过一遍该页开头的 7 条硬约束；尤其不要重跑 `web configure`、不要按 node/codex 名字批量杀进程。
 
 ## 安装稳定启动入口
 

@@ -4,6 +4,18 @@
 中的 `tools/deploy.mjs`；不要在 Windows 运行该 systemd 脚本。本页使用 PowerShell，
 示例 profile 为 `codex`（当前桌面共享启动器也读取此 profile）。不涉及 SSH 或远程 pc/px。
 
+## 开始之前：7 条硬约束
+
+每条后面都有详细步骤；这 7 条是会直接搞坏运行中环境的操作，先集中列一遍。
+
+1. 用日常使用 Codex 的**同一个 Windows 用户**，不要换成 SYSTEM；**不要在 Windows 运行 `tools/deploy.mjs`**（第 1 节）。
+2. 版本产物放独立目录并用 `--prod` 安装依赖，不混用源码目录的旧 `dist`，不覆盖或删除已上线的旧 release（第 3 节）。
+3. 桌面共享启动入口只需安装一次：`tools\windows-install-launcher.ps1` 复制脚本、写蓝色图标与隐藏快捷方式、注册登录任务，**不启动、不重启任何进程**；图片是本地非官方资源，不改动已安装的 App（第 4 节）。
+4. worker 的 `config.json` 必须写 `"appServerRemote": "ws://127.0.0.1:4517"`；该执行端**仅限回环**，不得开放到局域网或 VPN；原桌面若还连着别的 writer，先由用户手动退出再点蓝色入口（第 4 节）。
+5. Windows worker 用 `worker run` 自托管，Linux 的 `worker start` 不能照搬；桥接与 worker 各注册一个计划任务，不要有两个指向同一 profile 的启动任务（第 5 节）。
+6. 升级时**不要**重跑 `web configure`（会更换 Token）；Windows 防火墙里 Node 的**阻止**规则优先于新增 allow，只加 allow 不能算成功（第 6 节）。
+7. 常规升级只切桥接：`Stop-ScheduledTask` 会留下 Node 子进程，必须按**旧 entry 绝对路径 + `run --profile codex`** 精确识别 PID 后单独 `Stop-Process`，不得按 node/codex 名字批量杀进程（第 7 节）。
+
 ## 1. 前置条件和目录
 
 - 以日常使用 Codex 的同一个 Windows 用户安装、登录和注册任务；不要换成 SYSTEM。
@@ -109,6 +121,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Release entrypoint failed' }
 安装器部署稳定脚本、蓝色图标、隐藏快捷方式和登录任务，**不会启动或重启任何进程**。
 首次点击“Codex 蓝色共享版”会先确保 `ws://127.0.0.1:4517` 就绪，再打开桌面。
 若原桌面未连接该执行端，先由用户手动退出，再点蓝色入口；常规桥接升级不顺带重启桌面。
+
+蓝色图标是本地非官方快捷方式资源，不替代已安装 App 的资源，也不改动其文件；
+OpenAI/Codex 标识归其所有者，来源说明见 `assets/windows/README.md`。
 新旧 CLI 路径自动发现及兼容边界见 [WINDOWS_UPGRADE](WINDOWS_UPGRADE.md)。
 
 首次为 `%USERPROFILE%\.lark-channel\profiles\codex\workers\codex\config.json` 配置：

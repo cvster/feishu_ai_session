@@ -2,11 +2,19 @@
 
 本指引适用于 [`cvster/feishu_ai_session`](https://github.com/cvster/feishu_ai_session)。不要用同名上游 npm 包代替本仓库构建。飞书桥接不需要 Web 子项目的 Python、nginx、数据库或前端依赖。
 
-## 最短安装路线（Linux）
+## Windows 先读这一段
 
-Windows 用户请从 [Windows 完整部署、升级与回滚](WINDOWS_DEPLOYMENT.md) 开始，覆盖
-独立 release 构建、worker/桥接隐藏任务、桌面共享入口、Web/防火墙、上线验证和回滚。
-蓝色快捷方式及 CLI 路径自动发现另见 [Windows 升级与启动](WINDOWS_UPGRADE.md)。
+README 里那条 `install.ps1` **只准备依赖和构建产物，不等于安装完成**。Windows 的完整步骤在
+[Windows 完整部署、升级与回滚](WINDOWS_DEPLOYMENT.md)，该页开头有 7 条硬约束，要点：
+
+1. 用日常使用 Codex 的同一个 Windows 用户，不要用 SYSTEM；不要在 Windows 运行 `tools/deploy.mjs`。
+2. 单独生成版本产物（`runtime\releases\<sha>` + `--prod` 安装依赖），不混用源码目录的旧 `dist`，不删除旧 release。
+3. 按第 4 节安装桌面共享启动入口（蓝色快捷方式 + 登录任务，执行端仅回环 `ws://127.0.0.1:4517`），并把 worker 的 `config.json` 指向该端点。
+4. 按第 5 节注册计划任务、按第 8 节上线验证；Web、防火墙与升级见第 6、7 节。CLI 路径自动发现及蓝色快捷方式另见 [Windows 升级与启动](WINDOWS_UPGRADE.md)。
+
+下文未特别标注的小节默认以 Linux 为例（systemd + `tools/deploy.mjs`），Windows 不要照搬。
+
+## 最短安装路线（Linux）
 
 推荐直接在有项目代码和工具登录信息的机器上，以日常使用工具的 OS 用户部署。无需 Docker、Redis 或数据库；桥接内置轻量网页，与桥接同进程。`apps/web-app` 是另一套独立网页，不是安装本项目的前置依赖。
 
@@ -313,7 +321,7 @@ Linux 若需退出登录后继续运行，由管理员为部署账户开启 syst
 ### 已有 profile 一键部署（Linux 用户 systemd）
 
 Windows 不支持此 systemd 命令；使用 [Windows 部署规程](WINDOWS_DEPLOYMENT.md)。
-`windows-install-launcher.ps1` 安装的是共享启动入口，不代替桥接版本产物部署。
+`windows-install-launcher.ps1` 安装的是共享启动入口（见该页第 4 节），不代替桥接版本产物部署。
 
 以运行桥接的同一个 OS 用户，在源码仓库中运行。首次安装、工具登录、飞书发布和服务创建先按前面的章节完成；升级不再次运行 `setup` 或 `web configure`。
 
