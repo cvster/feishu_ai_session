@@ -295,6 +295,51 @@ describe('CodexAdapter native queue mode', () => {
       { type: 'done', threadId: 'thread-existing', terminationReason: 'normal' },
     ]);
   });
+
+  it('sends image attachments through the shared writer instead of the unsupported CLI flag', async () => {
+    const fake = await createQueueCodex(); cleanup.push(fake.dir);
+    const image = join(fake.dir, 'screenshot.png');
+    await writeFile(image, 'image-bytes', 'utf8');
+    const run = createCodexQueueRun({
+      runId: 'queue-image', binary: fake.path, profileStateDir: fake.dir,
+      codexHome: fake.dir, inheritCodexHome: false, remote: 'unix://', cwd: fake.dir,
+      sandbox: 'read-only', prompt: '图片里是什么', threadId: 'thread-existing',
+      clientUserMessageId: 'lark-channel-bridge:queue-image', images: [image],
+    });
+    expect(await collect(run.events)).toEqual([
+      { type: 'system', threadId: 'thread-existing', cwd: fake.dir },
+      { type: 'system', threadId: 'thread-existing', turnId: 'turn-queued' },
+      { type: 'text', delta: 'queued response' },
+      { type: 'done', threadId: 'thread-existing', terminationReason: 'normal' },
+    ]);
+    const requests = (await readFile(join(fake.dir, 'requests.jsonl'), 'utf8')).trim().split('\n')
+      .map(line => JSON.parse(line));
+    expect(requests.filter(r => r.method === 'thread/queue/add')).toEqual([
+      expect.objectContaining({ transport: 'shared', params: expect.objectContaining({
+        threadId: 'thread-existing',
+        input: [{ type: 'text', text: '图片里是什么', text_elements: [] },
+          { type: 'localImage', path: image }],
+      }) }),
+    ]);
+  });
+
+  it('rejects images with a clear error when no shared writer is reachable', async () => {
+    const fake = await createQueueCodex(); cleanup.push(fake.dir);
+    const image = join(fake.dir, 'screenshot.png');
+    await writeFile(image, 'image-bytes', 'utf8');
+    const run = createCodexQueueRun({
+      runId: 'queue-image-unavailable', binary: fake.path, profileStateDir: fake.dir,
+      codexHome: fake.dir, inheritCodexHome: false, cwd: fake.dir, sandbox: 'read-only',
+      prompt: '图片里是什么', threadId: 'thread-existing',
+      clientUserMessageId: 'lark-channel-bridge:queue-image-unavailable', images: [image],
+    });
+    const events = await collect(run.events);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'error', terminationReason: 'failed',
+      message: expect.stringContaining('桌面共享后端') });
+    // The CLI would drop the attachments, so it must not be attempted.
+    await expect(readFile(join(fake.dir, 'state.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });
 
 async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {

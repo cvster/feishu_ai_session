@@ -20,6 +20,7 @@ import {
 } from '../../platform/spawn';
 import { spawnCodexProcess as spawnProcess } from '../../platform/codex-binary';
 import type { AgentEvent, AgentRun } from '../types';
+import { submitCodexInput } from '../../../packages/codex-core/src/submission';
 import { buildCodexQueueArgs } from './argv';
 import {
   bindCodexQueuedTurnClaim,
@@ -145,22 +146,15 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
         options.prompt,
         knownTurns,
       );
-      const queueArgs = buildCodexQueueArgs({
-        cwd: options.cwd,
-        sandbox: options.sandbox,
-        threadId: options.threadId,
-        prompt: options.prompt,
-        remote,
-        ...(options.remoteTokenEnv ? { remoteTokenEnv: options.remoteTokenEnv } : {}),
-        images: options.images,
-        model: options.model,
-        reasoningEffort: options.reasoningEffort,
-      });
-      const queued = await runQueueCommand(options, queueArgs, (child) => {
-        activeChild = child;
-      });
+      // `codex queue` rejects image attachments, but the daemon RPC it wraps
+      // accepts them and inlines them, so images take the RPC transport.
+      const queued = options.images?.length
+        ? await submitImages(settingsClient, sharedEndpointAvailable, options)
+        : await submitCli(options, remote, (child) => {
+          activeChild = child;
+        });
       activeChild = undefined;
-      if (!queued.ok) {
+      if (queued.message) {
         releaseCodexQueuedTurnClaim(options.clientUserMessageId);
         yield terminalError(queued.message);
         return;
@@ -372,6 +366,64 @@ export function createCodexQueueRun(options: QueueRunOptions): AgentRun {
       ]);
     },
   };
+}
+
+interface QueueAcceptance {
+  messageId?: string;
+  message?: string;
+}
+
+/** Text submissions stay on the proven `codex queue` CLI path. */
+async function submitCli(
+  options: QueueRunOptions,
+  remote: string | undefined,
+  onChild: (child: CodexChild) => void,
+): Promise<QueueAcceptance> {
+  const queueArgs = buildCodexQueueArgs({
+    cwd: options.cwd,
+    sandbox: options.sandbox,
+    threadId: options.threadId,
+    prompt: options.prompt,
+    remote,
+    ...(options.remoteTokenEnv ? { remoteTokenEnv: options.remoteTokenEnv } : {}),
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+  });
+  const queued = await runQueueCommand(options, queueArgs, onChild);
+  return queued.ok ? { messageId: queued.messageId } : { message: queued.message };
+}
+
+const IMAGE_TRANSPORT_UNAVAILABLE =
+  '图片消息需要 Codex 桌面共享后端（app-server），当前无法连接，请确认 Codex Desktop 正在运行后重试。';
+
+/** `codex queue --image` is unsupported, so images use the daemon RPC that
+ * `codex queue` itself wraps; it inlines each attachment as a data URL. */
+async function submitImages(
+  client: CodexThreadReader,
+  sharedEndpointAvailable: boolean,
+  options: QueueRunOptions,
+): Promise<QueueAcceptance> {
+  if (!sharedEndpointAvailable) return { message: IMAGE_TRANSPORT_UNAVAILABLE };
+  const result = await submitCodexInput({
+    submissionId: options.runId,
+    clientUserMessageId: options.clientUserMessageId,
+    threadId: options.threadId,
+    prompt: options.prompt,
+    images: options.images ?? [],
+  }, {
+    shared: client,
+    // Never fall back to the CLI: it cannot carry the attachments at all.
+    runCli: async () => ({ code: 1, stdout: '', stderr: IMAGE_TRANSPORT_UNAVAILABLE }),
+    beforeSend: async () => {},
+  });
+  if (result.status !== 'accepted') return { message: result.message };
+  if (result.continuationWarning) {
+    log.warn('agent', 'queue-continuation-unconfirmed', {
+      threadId: options.threadId,
+      message: result.continuationWarning,
+    });
+  }
+  return { messageId: result.queueId };
 }
 
 async function runQueueCommand(

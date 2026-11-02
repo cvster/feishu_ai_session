@@ -9,6 +9,14 @@ public `thread/start`, materialize it using `thread/name/set`, validate it with
 used for this idle preparation; `threadSource` remains `lark-channel-bridge`.
 The group name replaces the temporary title through existing name sync.
 
+Image attachments are one deliberate exception: `codex queue` rejects `--image`
+input, so a submission that carries images goes through the shared writer's
+`thread/queue/add` RPC that `codex queue` itself wraps. The daemon inlines each
+attachment as a data URL, so one submission is capped by the 32 MiB transport
+limit. Without a reachable shared writer the run fails with a clear error
+instead of silently dropping the attachments. Text-only submissions keep using
+the CLI entry point.
+
 ## Uniform worker boundary
 
 The bridge discovers the Codex worker through `workers/*/endpoint.json` and uses
