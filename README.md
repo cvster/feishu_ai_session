@@ -101,6 +101,8 @@ bash install.sh --agents codex --install-clis
 
 Windows 使用 `powershell -ExecutionPolicy Bypass -File .\install.ps1 --agents codex --install-clis`。脚本在用户目录准备固定 pnpm 和所选 CLI，执行依赖安装、版本/能力检查、类型检查、测试、构建；不自动登录或启动服务。Node/Git 未安装时明确提示，不通过 sudo 替换系统工具。
 
+**这条命令不等于 Windows 安装完成。** 它只准备依赖和构建产物；Windows 还要另行生成独立版本产物、注册登录计划任务，并安装桌面共享启动入口（蓝色快捷方式 + 仅回环的 `ws://127.0.0.1:4517` 执行端）。完整步骤见 [Windows 完整部署、升级与回滚](docs/WINDOWS_DEPLOYMENT.md)，请先看该页开头的硬约束清单。Windows 不要运行 `tools/deploy.mjs`；启动器图标是本地非官方资源，不改动已安装的 Codex 文件。
+
 安装后以运行服务的同一个 OS 用户登录所选工具。Codex 使用 `codex login`，Claude 使用 `claude auth login`；Kilo、Zcode、Dsh 按各自接入文档配置账号。然后创建 profile、运行 `setup` 绑定飞书 CLI，按[权限清单](docs/FEISHU_PERMISSIONS.md)配置并发布应用，再启动 worker 与桥接。检查命令：
 
 ```bash
