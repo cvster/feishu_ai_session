@@ -41,7 +41,7 @@ async function setup(privateGroup = false, toolId: 'codex' | 'claude' = 'codex')
     } } } } as unknown as LarkChannel;
   const tools = new ToolRegistry();
   tools.register({ id: toolId, label: toolId, sourceId: dir, agent: {} as any, listSessions: async () => [],
-    sessions: { historyPath: async () => source.historyPath, rename: async () => {}, archive: async () => {} } });
+    sessions: { historyPointer: async () => ({ format: 'jsonl', path: source.historyPath }), rename: async () => {}, archive: async () => {} } });
   const auxiliary = new AuxiliaryGroups({ path: groupsPath, appId: 'cli_bot', channel, bindings, tools,
     sessions: new SessionStore(join(dir, 'sessions')), workspaces: new WorkspaceStore(join(dir, 'workspaces')),
     ownerId: () => owner, refreshOwner: async () => {}, cancelPending: async () => {} }); await auxiliary.load();

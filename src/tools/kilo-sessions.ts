@@ -21,6 +21,8 @@ export class KiloSessionProvider implements ToolSessionOperations {
       }));
     } finally { await client.close(); }
   }
+  // The snapshot is frozen at export time; say so instead of implying it tracks the session.
+  historyHint(): string { return '这是从 Kilo 导出的快照（JSON，含 session 与 messages），不随原会话更新；可用 jq 分段读取。'; }
   async historyPath(id: string): Promise<string | undefined> {
     try { kiloSessionId(id); } catch { return undefined; }
     const client = new KiloClient(this.options, undefined, id);

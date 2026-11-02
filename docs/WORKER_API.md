@@ -60,7 +60,7 @@ every 10 seconds and when opening the session panel. It can start with no worker
 | GET | `/jobs/:id?after=N` | Job and normalized events after sequence N |
 | POST | `/jobs/:id/stop` | `{}` → `{ "ok": true }` |
 | GET | `/sessions` | Native IDs, titles, cwd, timestamps and archive state |
-| GET | `/sessions/:id/history` | `{ "nativeId": "...", "format": "jsonl", "content": "..." }` |
+| GET | `/sessions/:id/history` | `{ "nativeId": "...", "format": "jsonl", "path"?: "...", "hint"?: "..." }` |
 | GET | `/sessions/:id/reasoning?cwd=...` | `{effort, nativeEffort?, model?, source, notice?}`; initialized unified selection |
 | GET | `/sessions/:id/conversation` | Normalized snapshot described below |
 | GET | `/sessions/:id/questions` | Available questions with origin and delivery scope |
@@ -73,8 +73,15 @@ every 10 seconds and when opening the session panel. It can start with no worker
 Encode IDs as one URL component. IDs remain opaque to the bridge. Unsupported
 operations return HTTP 501 with `code: "unsupported-operation"`; there is no
 local native fallback. `/session-name` and `/native-turn-stop` remain wire aliases.
-History exports retain native formats, are bounded to 32 MiB, and accept no file
-path. Codex/Claude use JSONL; other built-in workers use JSON snapshots.
+History exports describe where the native records live; the records themselves
+never cross this transport. `path` is an absolute location on the worker's own
+filesystem, reported only when it resolves to a regular file (never through a
+symbolic link), and the bridge neither reads, copies nor checks its reachability.
+`hint` explains how to find the records when `path` no longer resolves, and is
+shown to the model as untrusted text — it is never interpreted as an instruction.
+Either field may be absent; a worker that has neither still answers with
+`nativeId` and `format` alone rather than failing the request. Codex/Claude use
+JSONL; other built-in workers use JSON snapshots and say so in their hint.
 
 Conversation snapshots contain `{id, name?, cwd, archived, settings?, turns}`; each turn has
 `{id, createdAtMs, bridge, input, state}`. `state` is the common run-card state.
@@ -127,8 +134,7 @@ an idle connection. Blocking native questions pause the worker idle watchdog.
 Finished jobs and their event logs are kept for 14 days after their last update,
 then pruned at worker start and at most hourly afterwards; accepted and running
 jobs are never pruned. The bridge inbox keeps settled receipts for 30 days, longer
-than job retention, so a redelivered message cannot be accepted twice. History
-copies written to `bridge-history/` for session copy expire after 3 days. The
+than job retention, so a redelivered message cannot be accepted twice. The
 bridge caches a verified `/health` for 5 seconds per endpoint token; a restarted
 worker publishes a new token and is verified again. Reply, native-turn and name
 pollers back off exponentially (up to 1 minute, name sync up to 2 minutes) while a

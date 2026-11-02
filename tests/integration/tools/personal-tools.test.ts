@@ -8,9 +8,10 @@ import type { LarkChannel } from '@larksuite/channel';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import type { AgentKind } from '../../../src/config/profile-schema';
 import type { AgentAdapter, AgentRunOptions } from '../../../src/agent/types';
-import { ToolRegistry } from '../../../src/tools/types';
+import { ToolRegistry, type SessionHistoryPointer } from '../../../src/tools/types';
 import { ToolBindingStore } from '../../../src/tools/bindings';
 import { controlsForTool, routeCommandContext } from '../../../src/tools/context';
+import { WorkerRequestError } from '../../../src/worker/client';
 import { SessionCatalog } from '../../../src/session/catalog';
 import { SessionStore } from '../../../src/session/store';
 import { WorkspaceStore } from '../../../src/workspace/store';
@@ -110,7 +111,7 @@ describe('personal multi-tool workflows', () => {
     const fork = vi.fn(async () => { throw Error('must not call native fork'); }); h.registry.get('codex').agent.forkThread = fork;
     const before = h.bindings.get(source);
     const history = join(h.dir, 'source.jsonl'); await writeFile(history, 'source');
-    h.registry.get('codex').sessions = { historyPath: async () => history, rename: async () => {}, archive: async () => {} };
+    h.registry.get('codex').sessions = { historyPointer: async () => ({ format: 'jsonl', path: history }), rename: async () => {}, archive: async () => {} };
     const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
     await runCommandHandler('fork', '', h.context(source, 'group'));
     const value = copyButton(h, 'Codex');
@@ -156,8 +157,8 @@ describe('personal multi-tool workflows', () => {
     await runCommandHandler('fork', '', h.context(source, 'group'));
     const value = copyButton(h, targetTool === 'kilo' ? 'Kilo' : 'Claude');
     const history = join(h.dir, 'latest-history.json'); await writeFile(history, 'latest source content');
-    const historyPath = vi.fn(async () => history);
-    h.registry.get('codex').sessions = { historyPath, rename: async () => {}, archive: async () => {} };
+    const historyPointer = vi.fn(async () => ({ format: 'jsonl' as const, path: history }));
+    h.registry.get('codex').sessions = { historyPointer, rename: async () => {}, archive: async () => {} };
     const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
     const creation = h.context(source, 'group'); creation.formValue = { new_session_name: '  AA-自定义会话  ' };
     await runCommandHandler('fork', `to ${value.arg}`, creation);
@@ -174,18 +175,18 @@ describe('personal multi-tool workflows', () => {
     expect(submit).toHaveBeenCalledOnce();
     const ctx = h.context(target, 'group'); ctx.fromCardAction = true;
     await runCommandHandler('fork', `read ${provenance.copyId}`, ctx);
-    expect(historyPath).toHaveBeenCalledWith('same-uuid');
+    expect(historyPointer).toHaveBeenCalledWith('same-uuid');
     expect(h.channel.send).toHaveBeenLastCalledWith(target, { text: submit.mock.calls[1]![0].content }, { replyTo: 'msg' });
     expect(vi.mocked(h.channel.send).mock.invocationCallOrder.at(-1)).toBeLessThan(submit.mock.invocationCallOrder[1]!);
     expect(submit).toHaveBeenCalledWith(expect.objectContaining({ chatId: target, messageId: 'msg', chatType: 'group', senderId: 'ou_owner', mentionedBot: true,
-      content: `会话创建自 codex '${h.dir.split('/').at(-1)}/AA-同名'。后续问题如有需要，可读取原会话。\n原会话记录：${history}`, raw: { bridgeCallbackId: `copy-read-${provenance.copyId}` } }));
+      content: `会话创建自 codex '${h.dir.split('/').at(-1)}/AA-同名'。后续问题如有需要，可读取原会话。\n原会话记录：${history}（JSONL，优先按需分段读取，不要整份读入）`, raw: { bridgeCallbackId: `copy-read-${provenance.copyId}` } }));
     await runCommandHandler('fork', `to ${value.arg}`, h.context(source, 'group')); expect(h.groups).toHaveLength(3);
   });
   it('automatically reads source history in the new group when same-tool copy has no native fork', async () => {
     const h = await harness(); await h.sync(); const group = h.groups[1]!.id;
     const history = join(h.dir, 'claude-history.jsonl'); await writeFile(history, 'source history');
-    const historyPath = vi.fn(async () => history);
-    h.registry.get('claude').sessions = { historyPath, rename: async () => {}, archive: async () => {} };
+    const historyPointer = vi.fn(async () => ({ format: 'jsonl' as const, path: history }));
+    h.registry.get('claude').sessions = { historyPointer, rename: async () => {}, archive: async () => {} };
     const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
     await runCommandHandler('fork', '', h.context(group, 'group'));
     const value = copyButton(h, 'Claude', 'fork.same');
@@ -194,31 +195,43 @@ describe('personal multi-tool workflows', () => {
     expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
     expect(h.bindings.get(target)).toMatchObject({ toolId: 'claude', nativeCreated: false, copiedFrom: { toolId: 'claude' } });
     expect(h.groups[2]!.name).toBe('AA-同名（Claude）-2');
-    expect(historyPath).toHaveBeenCalledWith('same-uuid');
+    expect(historyPointer).toHaveBeenCalledWith('same-uuid');
     expect(submit).toHaveBeenCalledOnce();
     const input = submit.mock.calls[0]![0];
     expect(input).toMatchObject({ chatId: target, chatType: 'group', senderId: 'ou_owner', threadId: undefined,
-      content: `会话创建自 claude '${h.dir.split('/').at(-1)}/AA-同名（Claude）'。后续问题如有需要，可读取原会话。\n原会话记录：${history}` });
+      content: `会话创建自 claude '${h.dir.split('/').at(-1)}/AA-同名（Claude）'。后续问题如有需要，可读取原会话。\n原会话记录：${history}（JSONL，优先按需分段读取，不要整份读入）` });
     expect(h.channel.send).toHaveBeenCalledWith(target, { text: input.content }, {});
     expect(JSON.stringify(vi.mocked(h.channel.createCard).mock.calls)).not.toContain('fork.read');
     await runCommandHandler('fork', `same ${value.arg}`, ctx);
     expect(submit).toHaveBeenCalledOnce(); expect(h.groups).toHaveLength(3);
   });
-  it('keeps the created copy and offers a read retry when automatic history read fails', async () => {
+  it('still hands the copy a usable pointer when the tool cannot locate the source history', async () => {
     const h = await harness(); await h.sync(); const group = h.groups[1]!.id;
-    const historyPath = vi.fn(async (): Promise<string | undefined> => undefined);
-    h.registry.get('claude').sessions = { historyPath, rename: async () => {}, archive: async () => {} };
+    const historyPointer = vi.fn(async (): Promise<undefined> => undefined);
+    h.registry.get('claude').sessions = { historyPointer, rename: async () => {}, archive: async () => {} };
     const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
     await runCommandHandler('fork', '', h.context(group, 'group'));
     const value = copyButton(h, 'Claude', 'fork.same');
     await runCommandHandler('fork', `same ${value.arg}`, h.context(group, 'group'));
     expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
-    expect(h.channel.send).toHaveBeenCalledWith(target, { text: expect.stringContaining('自动读取原会话失败') });
-    expect(submit).not.toHaveBeenCalled();
+    expect(submit).toHaveBeenCalledOnce();
+    expect(submit.mock.calls[0]![0].content).toContain('原会话记录暂时无法定位（claude，会话 ID same-uuid');
+    expect(h.channel.send).not.toHaveBeenCalledWith(target, { text: expect.stringContaining('暂时无法读取原会话记录') });
+  });
+  it('keeps the copy and retries when the worker never answered', async () => {
+    const h = await harness(); await h.sync(); const group = h.groups[1]!.id;
+    const historyPointer = vi.fn<(id: string) => Promise<SessionHistoryPointer>>(async () => {
+      throw new WorkerRequestError(503, 'Worker unavailable', true, 'unavailable'); });
+    h.registry.get('claude').sessions = { historyPointer, rename: async () => {}, archive: async () => {} };
+    const submit = vi.fn(async (_message: CommandContext['msg']) => {}); h.controls.submitMessage = submit;
+    await runCommandHandler('fork', '', h.context(group, 'group'));
+    const value = copyButton(h, 'Claude', 'fork.same');
     await runCommandHandler('fork', `same ${value.arg}`, h.context(group, 'group'));
-    expect(h.groups).toHaveLength(3);
+    expect(h.groups).toHaveLength(3); const target = h.groups[2]!.id;
+    expect(h.channel.send).toHaveBeenCalledWith(target, { text: expect.stringContaining('暂时无法读取原会话记录') });
+    expect(submit).not.toHaveBeenCalled();
     const history = join(h.dir, 'restored-history.jsonl'); await writeFile(history, 'restored source history');
-    historyPath.mockResolvedValue(history);
+    historyPointer.mockResolvedValue({ format: 'jsonl', path: history });
     const ctx = h.context(target, 'group'); ctx.fromCardAction = true;
     await runCommandHandler('fork', `read ${h.bindings.get(target)!.copiedFrom!.copyId}`, ctx);
     expect(submit).toHaveBeenCalledOnce(); expect(submit.mock.calls[0]![0].chatId).toBe(target);
@@ -240,7 +253,7 @@ describe('personal multi-tool workflows', () => {
     h.controls.withAaSessionGroupSyncPaused = async operation => { paused = true; try { return await operation(); } finally { paused = false; } };
     const fork = vi.fn(async () => { expect(paused).toBe(true); return { nativeId: 'copy-retry', name: 'native default', cwd: h.dir }; });
     const rename = vi.fn(async () => { expect(paused).toBe(true); }).mockRejectedValueOnce(Error('rename temporarily unavailable'));
-    h.registry.get('codex').sessions = { fork, rename, archive: async () => {}, historyPath: async () => undefined };
+    h.registry.get('codex').sessions = { fork, rename, archive: async () => {}, historyPointer: async () => undefined };
     await runCommandHandler('fork', '', h.context(group, 'group')); const value = copyButton(h, 'Codex', 'fork.same');
     const ctx = h.context(group, 'group'); ctx.formValue = { new_session_name: 'AA-重试副本' };
     await runCommandHandler('fork', `same ${value.arg}`, ctx);
@@ -267,7 +280,7 @@ describe('personal multi-tool workflows', () => {
     h.catalog.archiveScope(group, 'changed');
     await runCommandHandler('fork', `to ${value.arg}`, h.context(group, 'group')); expect(h.groups).toHaveLength(2); await h.bindings.flush();
   });
-  it('does not submit a history read when the persisted source account changes or history is unavailable', async () => {
+  it('does not submit a history read when the persisted source account changes', async () => {
     const h = await harness(); await h.sync(); const group = h.groups[0]!.id;
     await runCommandHandler('fork', '', h.context(group, 'group')); const value = copyButton(h, 'Claude');
     await runCommandHandler('fork', `to ${value.arg}`, h.context(group, 'group'));
@@ -277,9 +290,11 @@ describe('personal multi-tool workflows', () => {
     h.registry.get('codex').sourceId = 'another-account';
     await runCommandHandler('fork', `read ${source.copyId}`, ctx); expect(submit).not.toHaveBeenCalled();
     h.registry.get('codex').sourceId = source.sourceId;
-    h.registry.get('codex').sessions = { historyPath: async () => undefined, rename: async () => {}, archive: async () => {} };
-    await runCommandHandler('fork', `read ${source.copyId}`, ctx); expect(submit).not.toHaveBeenCalled();
-    await runCommandHandler('fork', 'read forged-copy', ctx); expect(submit).not.toHaveBeenCalled();
+    // A tool that answers without a pointer is a degraded answer, not a failed read.
+    h.registry.get('codex').sessions = { historyPointer: async () => undefined, rename: async () => {}, archive: async () => {} };
+    await runCommandHandler('fork', `read ${source.copyId}`, ctx); expect(submit).toHaveBeenCalledOnce();
+    expect(submit.mock.calls[0]![0].content).toContain('原会话记录暂时无法定位（codex，会话 ID same-uuid');
+    await runCommandHandler('fork', 'read forged-copy', ctx); expect(submit).toHaveBeenCalledOnce();
   });
   it('archives a pending Claude reservation before its first init event and stops a recovered worker task', async () => {
     const h = await harness(); h.registry.get('claude').reserveSessionId = () => 'same-uuid';

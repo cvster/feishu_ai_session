@@ -135,7 +135,7 @@ it('registers Pi through the real worker factory and common authenticated discov
     await vi.waitFor(async()=>expect((await client.snapshot(job.id)).job.status).toBe('completed'),{timeout:5000});
     expect((await tool.listSessions()).map(s=>s.nativeId)).toContain('pi-worker-native');
     expect((await client.conversation('pi-worker-native')).turns[0]?.input).toBe('worker question');
-    const exported=await tool.sessions!.historyPath('pi-worker-native');expect(exported).toBeTruthy();
+    const exported=(await tool.sessions!.historyPointer('pi-worker-native'))?.path;expect(exported).toBeTruthy();
     vi.stubEnv('PATH',h.root);
     await tool.sessions!.archive('pi-worker-native');await client.archiveSession('pi-worker-native');
     expect(await client.listSessions()).toEqual([]);

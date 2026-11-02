@@ -18,6 +18,8 @@ export class DshSessionProvider implements ToolSessionOperations {
       }));
     } finally { await client.close(); }
   }
+  // The snapshot is frozen at export time; say so instead of implying it tracks the session.
+  historyHint(): string { return '这是从 DSH 导出的快照（JSON，含 header 与 records），不随原会话更新；可按 records 分段读取。'; }
   async historyPath(id: string): Promise<string | undefined> {
     dshSessionId(id);
     const client = new DshClient(this.options);

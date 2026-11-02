@@ -1,28 +1,25 @@
-import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import type { ToolSessionOperations } from '../tools/types';
 import type { WorkerSessionHistory } from './protocol';
-import { WorkerApiError } from './tool-api';
+import { log } from '../core/logger';
 
-const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
-/** Export records across the transport, never an arbitrary caller-supplied file path. */
+/**
+ * Report where the native records are; the records themselves never cross this
+ * transport. A session with no readable file still answers with a hint so the
+ * bridge always has something to hand the model.
+ */
 export async function exportWorkerHistory(provider: ToolSessionOperations, nativeId: string): Promise<WorkerSessionHistory | undefined> {
-  const path = await provider.historyPath(nativeId);
-  if (!path) return;
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const stat = await file.stat();
-    if (!stat.isFile() || stat.size > MAX_HISTORY_BYTES) throw new WorkerApiError(413, 'Session history is too large', 'invalid-request');
-    // Snapshot the bounded prefix even when native JSONL is still being appended.
-    const bytes = Buffer.alloc(stat.size);
-    let length = 0;
-    while (length < bytes.length) {
-      const read = await file.read(bytes, length, bytes.length - length, null);
-      if (!read.bytesRead) break;
-      length += read.bytesRead;
-    }
-    if (provider.historyMode !== 'snapshot' && length && bytes[length - 1] !== 10) length = bytes.lastIndexOf(10, length - 1) + 1;
-    const content = bytes.subarray(0, length).toString('utf8');
-    return { nativeId, format: provider.historyMode === 'snapshot' ? 'json' : 'jsonl', content };
-  } finally { await file.close(); }
+  const format = provider.historyMode === 'snapshot' ? 'json' : 'jsonl';
+  const hint = provider.historyHint?.(nativeId);
+  const path = await provider.historyPath(nativeId).catch((error) => {
+    // Provider export failures are diagnostics, not request failures: report the
+    // hint instead of turning an oversized or unreadable session into an error.
+    log.warn('worker', 'history-export-failed', { nativeId, error: error instanceof Error ? error.message : String(error) });
+    return undefined;
+  });
+  // lstat never follows a link, so a symlink is reported without a path.
+  const info = path ? await lstat(path).catch(() => undefined) : undefined;
+  const usable = info?.isFile() ? path : undefined;
+  if (!usable && !hint) return;
+  return { nativeId, format, ...(usable ? { path: usable } : {}), ...(hint ? { hint } : {}) };
 }

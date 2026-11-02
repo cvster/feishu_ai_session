@@ -1,4 +1,4 @@
-import { readdir, readFile, lstat, rm, stat } from 'node:fs/promises';
+import { readdir, readFile, lstat } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import { probeWorker, WorkerClient, validWorkerHealth } from './client';
 import type { WorkerHealth } from './protocol';
@@ -6,6 +6,7 @@ import { DurableAgentAdapter } from './adapter';
 import { registerToolDefinition } from '../tools/definitions';
 import type { AgentTool } from '../tools/types';
 import { writeFileAtomic } from '../platform/atomic-write';
+import { historyPointerFrom } from './history-pointer';
 import { log } from '../core/logger';
 
 export interface DiscoveredWorker { directory: string; health: WorkerHealth }
@@ -27,17 +28,7 @@ export async function discoverWorkers(profileDir: string, botAppId: string, dupl
   });
 }
 
-/** Copies are handed to another agent to read later, so they expire by age rather than on first use. */
-const HISTORY_COPY_RETENTION_MS = 3 * 24 * 60 * 60_000;
-async function pruneHistoryCopies(root: string, keep: string): Promise<void> {
-  for (const name of await readdir(root)) {
-    const path = join(root, name);
-    if (path === keep || !/^[a-f0-9]{64}\.jsonl?$/.test(name)) continue;
-    const info = await stat(path).catch(() => undefined);
-    if (info && Date.now() - info.mtimeMs > HISTORY_COPY_RETENTION_MS) await rm(path, { force: true });
-  }
-}
-
+/** A worker is identified by its own metadata, never by the directory it lives in. */
 export function workerTool(worker: DiscoveredWorker): AgentTool {
   const { health, directory } = worker, manifest = health.manifest!, capabilities = health.capabilities!;
   registerToolDefinition(health.toolId, { label: manifest.label, backend: 'worker', nativeField: manifest.nativeField,
@@ -47,26 +38,13 @@ export function workerTool(worker: DiscoveredWorker): AgentTool {
   const agent = new DurableAgentAdapter(client, { displayName: manifest.label });
   return { id: health.toolId, sourceId: health.sourceId, label: manifest.label, agent,
     listSessions: () => client.listSessions(),
-    sessions: { nativeArchive: capabilities.sessions.archive, historyMode: manifest.historyFormat === 'json' ? 'snapshot' : 'file',
+    sessions: { nativeArchive: capabilities.sessions.archive,
       ...(capabilities.sessions.archiveEffect ? { archiveEffect: capabilities.sessions.archiveEffect } : {}),
-      async historyPath(id) {
-        const history = await client.sessionHistory(id);
-        if (history.nativeId !== id || !['json', 'jsonl'].includes(history.format) || typeof history.content !== 'string' || Buffer.byteLength(history.content) > 32 * 1024 * 1024)
-          throw new Error('Invalid worker history');
-        const { createHash } = await import('node:crypto');
-        const root = join(directory, 'bridge-history'), path = join(root, `${createHash('sha256').update(id).digest('hex')}.${history.format}`);
-        await writeFileAtomic(path, history.content, { mode: 0o600 });
-        await pruneHistoryCopies(root, path); return path;
-      },
+      async historyPointer(id) { return historyPointerFrom(await client.sessionHistory(id), id); },
       rename: (id, name) => client.renameSession(id, name),
       archive: async id => {
         if (!capabilities.sessions.archive) return;
         await client.archiveSession(id);
-        if (capabilities.sessions.archiveEffect === 'delete') {
-          const { createHash } = await import('node:crypto');
-          const name = createHash('sha256').update(id).digest('hex');
-          for (const extension of ['json', 'jsonl']) await rm(join(directory, 'bridge-history', `${name}.${extension}`), { force: true });
-        }
       },
       ...(capabilities.sessions.fork ? { fork: (id: string) => client.forkSession(id) } : {}),
     } };

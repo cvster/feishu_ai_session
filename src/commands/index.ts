@@ -1038,7 +1038,7 @@ async function handleNewChat(
         msg: { ...ctx.msg, chatId: created.chatId, chatType: 'group', threadId: undefined, messageId: '' },
       }, options.copiedFrom.copyId);
     } catch (error) {
-      await ctx.channel.send(created.chatId, { text: `⚠️ 新会话已创建，自动读取原会话失败：${errorText(error)}。请稍后在新会话中要求读取原会话。` });
+      await ctx.channel.send(created.chatId, { text: `⚠️ 新会话已创建，暂时无法读取原会话记录：${errorText(error)}。稍后可在新会话中让我重新定位原会话。` });
     }
   }
 

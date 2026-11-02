@@ -59,7 +59,7 @@ async function setup(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' | 'dsh' = 'co
     const historyRoot = join(root, 'projects', '-project'); await mkdir(historyRoot, { recursive: true });
     await writeFile(join(historyRoot, `${nativeId}.jsonl`), '');
   }
-  const tools = new ToolRegistry(); tools.register({ id: toolId, sourceId: root, label: toolId, agent, listSessions: async () => [], ...(['zcode', 'kilo', 'dsh'].includes(toolId) ? { sessions: { historyMode: 'snapshot' as const, historyPath: async () => history, rename: async () => {}, archive: async () => {} } } : {}) });
+  const tools = new ToolRegistry(); tools.register({ id: toolId, sourceId: root, label: toolId, agent, listSessions: async () => [], ...(['zcode', 'kilo', 'dsh'].includes(toolId) ? { sessions: { historyPointer: async () => ({ format: 'json' as const, path: history }), rename: async () => {}, archive: async () => {} } } : {}) });
   await writeFile(join(root, 'aux.json'), JSON.stringify({ version: 1, appId: 'cli_test', groups: {
     oc_group: { chatId: 'oc_group', ownerId: 'ou_owner', generation: 'g1', status: 'active', name: 'C系列讨论', cwd: root,
       source: bindings.get(shared)!.linkedSource },
