@@ -45,6 +45,68 @@ it('preserves Unicode prompt framing, deduplicates final text and waits for sett
   expect((await h.requests()).filter(r=>r.type==='prompt')).toMatchObject([{message:'raw\u2028中文\u2029'}]);
   expect(JSON.stringify(events)).not.toContain('CREDENTIAL_SECRET');
 });
+it('links each run to its own native turn id instead of the previous one',async()=>{
+  const h=await harness();const first=await h.collect();const id=first.find(e=>e.type==='system')?.sessionId!;
+  const second=await h.collect({sessionId:id});
+  const turnIds=(events:AgentEvent[])=>events.filter(e=>e.type==='system'&&e.turnId).map(e=>(e as any).turnId);
+  const [firstTurn]=turnIds(first),[secondTurn]=turnIds(second);
+  expect(firstTurn).toBeTruthy();
+  expect(secondTurn).toBeTruthy();
+  expect(secondTurn).not.toBe(firstTurn);
+  expect(second.findIndex(e=>e.type==='system'&&e.turnId)).toBeLessThan(second.findIndex(e=>e.type==='done'));
+  const snapshot=await new PiNativeConversationReader(h.options).read(id);
+  expect(snapshot.turns.find(t=>t.id===secondTurn)?.input).toBe('raw\u2028中文\u2029');
+});
+it('reports the turn id while the native run is still in flight',async()=>{
+  const h=await harness('wait'),run=h.adapter.run({runId:'live',cwd:h.root,prompt:'wait',accessMode:'full'}),events:AgentEvent[]=[];
+  for await(const event of run.events){events.push(event);if(event.type==='system'&&event.turnId)break;}
+  expect(events.at(-1)).toMatchObject({type:'system',turnId:expect.any(String)});
+  expect(events.some(e=>e.type==='done')).toBe(false);
+  await run.stop();expect(await run.waitForExit(5000)).toBe(true);
+});
+it('never links a message the user typed in Pi onto the bridge job',async()=>{  const h=await harness('extra-native');const first=await h.collect();const id=first.find(e=>e.type==='system')?.sessionId!;
+  const second=await h.collect({sessionId:id});
+  const turnId=(second.find(e=>e.type==='system'&&e.turnId) as any)?.turnId;
+  expect(turnId).toBeTruthy();
+  const snapshot=await new PiNativeConversationReader(h.options).read(id);
+  expect(snapshot.turns.find(t=>t.id===turnId)?.input).toBe('raw\u2028中文\u2029');
+  expect(snapshot.turns.some(t=>t.input==='在 Pi 原生端输入的另一条消息')).toBe(true);
+});
+it('publishes the turn id after settle when Pi stores the entry late',async()=>{
+  const h=await harness('late-write'),events=await h.collect();
+  const turnId=(events.find(e=>e.type==='system'&&e.turnId) as any)?.turnId;
+  expect(turnId).toBeTruthy();
+  expect(events.findIndex(e=>e.type==='system'&&e.turnId)).toBeLessThan(events.findIndex(e=>e.type==='done'));
+  // One read while the run was active (too early), one after it settled.
+  expect((await h.requests()).filter(r=>r.type==='get_entries')).toHaveLength(2);
+  const snapshot=await new PiNativeConversationReader(h.options).read(events.find(e=>e.type==='system')?.sessionId!);
+  expect(snapshot.turns.find(t=>t.id===turnId)?.input).toBe('raw\u2028中文\u2029');
+});
+it('reads the whole session again when the stored cursor no longer matches',async()=>{
+  const h=await harness('reject-cursor'),first=await h.collect();const id=first.find(e=>e.type==='system')?.sessionId!;
+  const second=await h.collect({sessionId:id});
+  const turnIds=(events:AgentEvent[])=>events.filter(e=>e.type==='system'&&e.turnId).map(e=>(e as any).turnId);
+  expect(turnIds(first)).toHaveLength(1);
+  expect(turnIds(second)).toHaveLength(1);
+  expect(turnIds(second)[0]).not.toBe(turnIds(first)[0]);
+});
+it('drops a cursor that answers with an empty list and reads the session again',async()=>{
+  const h=await harness('empty-cursor'),first=await h.collect();const id=first.find(e=>e.type==='system')?.sessionId!;
+  const second=await h.collect({sessionId:id});
+  const turnIds=(events:AgentEvent[])=>events.filter(e=>e.type==='system'&&e.turnId).map(e=>(e as any).turnId);
+  expect(turnIds(first)).toHaveLength(1);
+  expect(turnIds(second)).toHaveLength(1);
+  expect(turnIds(second)[0]).not.toBe(turnIds(first)[0]);
+  const reads=(await h.requests()).filter(r=>r.type==='get_entries');
+  expect(reads.at(-1)?.since).toBeUndefined();
+});
+it('accepts a prompt Pi rewrote once the run settles',async()=>{
+  const h=await harness('expand'),events=await h.collect();
+  const turnId=(events.find(e=>e.type==='system'&&e.turnId) as any)?.turnId;
+  expect(turnId).toBeTruthy();
+  const snapshot=await new PiNativeConversationReader(h.options).read(events.find(e=>e.type==='system')?.sessionId!);
+  expect(snapshot.turns.find(t=>t.id===turnId)?.input).toContain('已展开');
+});
 it('resumes one exact session and exposes read-only history, rename and native clone',async()=>{
   const h=await harness(), events=await h.collect();const id=events.find(e=>e.type==='system')?.sessionId!;
   await h.collect({sessionId:id});expect(await h.provider.listSessions()).toHaveLength(1);

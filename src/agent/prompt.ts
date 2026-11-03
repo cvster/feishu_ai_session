@@ -1,5 +1,16 @@
 export type BridgePromptSource = 'im' | 'card' | 'comment';
 
+/** Sections the bridge writes around the user's own words, never part of them. */
+export const PROMPT_CONTEXT_TAGS = [
+  'bridge_context',
+  'bridge_instructions',
+  'topic_context',
+  'quoted_messages',
+  'interactive_cards',
+  'comment_context',
+  'lark_context',
+] as const;
+
 export interface BridgePromptMention {
   openId?: string;
   name?: string;
@@ -95,13 +106,12 @@ export interface BuildCodexUserPromptInput {
 
 /** Ordinary messages stay plain; only details unavailable in the text add context. */
 export interface BuildDirectUserPromptInput extends BuildCodexUserPromptInput {
-  nativeImages?: boolean;
   sender?: Pick<BridgePromptContext, 'senderId' | 'senderName' | 'senderType' | 'botOpenId'>;
 }
 
-/** Compatibility entry point for callers using Codex native image inputs. */
+/** Compatibility entry point kept for callers that used the Codex-specific builder. */
 export function buildCodexUserPrompt(input: BuildCodexUserPromptInput): string {
-  return buildDirectUserPrompt({ ...input, nativeImages: true });
+  return buildDirectUserPrompt(input);
 }
 
 export function buildDirectUserPrompt(input: BuildDirectUserPromptInput): string {
@@ -116,9 +126,11 @@ export function buildDirectUserPrompt(input: BuildDirectUserPromptInput): string
   if (input.interactiveCards?.length) {
     context.cards = input.interactiveCards.map((card) => card.content);
   }
+  // Always keep the accepted local path, even when the worker also receives the
+  // bytes natively: providers normalize (or drop) the image so the path is the
+  // only durable way for the agent to re-read the original file on demand.
   const attachments = input.attachments
-    ?.filter((attachment) => !input.nativeImages || !isNativeCodexImage(attachment))
-    .map((attachment) => ({
+    ?.map((attachment) => ({
       path: attachment.path,
       kind: attachment.kind,
       ...(attachment.mime ? { mime: attachment.mime } : {}),
@@ -184,6 +196,3 @@ function compactConversationMessage(
   };
 }
 
-function isNativeCodexImage(attachment: BridgePromptAttachment): boolean {
-  return attachment.kind === 'image' && attachment.decision !== 'rejected';
-}

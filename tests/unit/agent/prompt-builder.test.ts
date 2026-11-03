@@ -43,13 +43,14 @@ describe('agent prompt builder', () => {
     expect(prompt.endsWith('继续处理')).toBe(true);
   });
 
-  it('does not duplicate a native Codex image in the prompt text', () => {
-    expect(buildCodexUserPrompt({
+  it('keeps a native Codex image path in the prompt text as well', () => {
+    const prompt = buildCodexUserPrompt({
       userInput: '看图',
       attachments: [{ path: 'C:/tmp/image.png', kind: 'image', decision: 'accepted' }],
-    })).toBe('看图');
+    });
+    expect(prompt).toContain('C:/tmp/image.png');
+    expect(prompt.endsWith('看图')).toBe(true);
   });
-
   it('serializes untrusted message, quote, card, and comment text without closing bridge tags', () => {
     const prompt = buildAgentPrompt({
       context: {
