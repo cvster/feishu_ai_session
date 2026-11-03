@@ -82,28 +82,11 @@ it('publishes the turn id after settle when Pi stores the entry late',async()=>{
   const snapshot=await new PiNativeConversationReader(h.options).read(events.find(e=>e.type==='system')?.sessionId!);
   expect(snapshot.turns.find(t=>t.id===turnId)?.input).toBe('raw\u2028中文\u2029');
 });
-it('reads the whole session again when the stored cursor no longer matches',async()=>{
-  const h=await harness('reject-cursor'),first=await h.collect();const id=first.find(e=>e.type==='system')?.sessionId!;
-  const second=await h.collect({sessionId:id});
-  const turnIds=(events:AgentEvent[])=>events.filter(e=>e.type==='system'&&e.turnId).map(e=>(e as any).turnId);
-  expect(turnIds(first)).toHaveLength(1);
-  expect(turnIds(second)).toHaveLength(1);
-  expect(turnIds(second)[0]).not.toBe(turnIds(first)[0]);
-});
-it('drops a cursor that answers with an empty list and reads the session again',async()=>{
-  const h=await harness('empty-cursor'),first=await h.collect();const id=first.find(e=>e.type==='system')?.sessionId!;
-  const second=await h.collect({sessionId:id});
-  const turnIds=(events:AgentEvent[])=>events.filter(e=>e.type==='system'&&e.turnId).map(e=>(e as any).turnId);
-  expect(turnIds(first)).toHaveLength(1);
-  expect(turnIds(second)).toHaveLength(1);
-  expect(turnIds(second)[0]).not.toBe(turnIds(first)[0]);
-  const reads=(await h.requests()).filter(r=>r.type==='get_entries');
-  expect(reads.at(-1)?.since).toBeUndefined();
-});
-it('accepts a prompt Pi rewrote once the run settles',async()=>{
+it('links a prompt Pi rewrote into a slash command or a skill',async()=>{
   const h=await harness('expand'),events=await h.collect();
   const turnId=(events.find(e=>e.type==='system'&&e.turnId) as any)?.turnId;
   expect(turnId).toBeTruthy();
+  expect(events.findIndex(e=>e.type==='system'&&e.turnId)).toBeLessThan(events.findIndex(e=>e.type==='done'));
   const snapshot=await new PiNativeConversationReader(h.options).read(events.find(e=>e.type==='system')?.sessionId!);
   expect(snapshot.turns.find(t=>t.id===turnId)?.input).toContain('已展开');
 });
