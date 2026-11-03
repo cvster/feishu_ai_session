@@ -11,12 +11,6 @@ import { piText } from './conversation';
 
 export class PiAdapter implements AgentAdapter {
   readonly id = 'pi'; readonly displayName = 'Pi';
-  /** Last seen session entry id per native session, used as an incremental read cursor. */
-  private readonly leafCursors = new Map<string, string>();
-  private rememberCursor(sessionId: string, leafId: string) {
-    this.leafCursors.delete(sessionId); this.leafCursors.set(sessionId, leafId);
-    while (this.leafCursors.size > 256) this.leafCursors.delete(this.leafCursors.keys().next().value as string);
-  }
   constructor(readonly options: PiOptions = {}) {}
   checkAvailability() { const c = piCommand(this.options); return checkAgentAvailability({ agentId: this.id,
     agentName: this.displayName, command: c.binary, binaryPath: c.binary, args: [...c.args, '--version'] }); }
@@ -33,68 +27,26 @@ export class PiAdapter implements AgentAdapter {
       wake?.();
     };
     let assistantText = '', assistantThinking = '', modelFailed = false;
-    const entriesSnapshot = async (since?: string): Promise<{ entries: any[]; leafId?: string } | undefined> => {
+    const entriesSnapshot = async (): Promise<{ entries: any[] } | undefined> => {
       try {
-        const data = await client?.request('get_entries', since ? { since } : {});
+        const data = await client?.request('get_entries', {});
         return Array.isArray(data?.entries) ? data : undefined;
       } catch { return undefined; }
-    };
-    // Pi stores exactly the prompt it accepted, but may also expand slash commands or
-    // skills. Only an exact or long-enough containment counts; short text never does.
-    const sameInput = (text: string | undefined) => {
-      if (!text) return false;
-      if (text === opts.prompt) return true;
-      return Math.min(text.length, opts.prompt.length) >= 32
-        && (text.includes(opts.prompt) || opts.prompt.includes(text));
     };
     let submittedAt = 0;
     /**
      * Entry id of the prompt this run submitted, or undefined when it cannot be proven.
-     * The settle pass may fall back to the first entry written after submission (Pi can
-     * rewrite a slash command or a skill); an in-flight answer never guesses.
      *
-     * A run that is stopped before the entry is readable keeps no turn id: the client is
-     * already closed by then, and the Web shows that turn as an unlinked native one.
+     * Pi runs on this host and stamps every entry, so entries older than the submit belong
+     * to earlier runs. One candidate in that window is ours, whatever Pi rewrote it into;
+     * two mean the user also typed in Pi meanwhile, and then only the exact text can tell.
+     * Called again after the run for a Pi build that stores the entry only once it settles.
      */
-    const submittedTurnId = async (settle: boolean): Promise<string | undefined> => {
-      const sid = sessionId;
-      if (!sid) return undefined;
-      const readOnce = async (since?: string) => {
-        const data = await entriesSnapshot(since);
-        if (!data) return undefined;
-        const users = data.entries.filter((entry: any) => entry?.type === 'message'
-          && entry.message?.role === 'user');
-        const stampedAt = (entry: any) => Date.parse(entry?.timestamp);
-        // Pi runs on this host, so an entry of this run is always stamped after the submit.
-        const fresh = users.filter((entry: any) => { const at = stampedAt(entry); return Number.isFinite(at) && at >= submittedAt; });
-        // An unreadable timestamp cannot prove freshness: it may confirm a text match, never
-        // stand in for freshness on its own, so the positional fallback below ignores it.
-        const unreadable = settle ? users.filter((entry: any) => !Number.isFinite(stampedAt(entry))) : [];
-        const usable = new Set<any>([...fresh, ...unreadable]);
-        const matched = users.filter((entry: any) => usable.has(entry) && sameInput(piText(entry.message?.content)));
-        return { fresh, matched, leafId: data.leafId };
-      };
-      let since = this.leafCursors.get(sid);
-      let read = await readOnce(since);
-      // A rewritten session either fails the cursor read or answers with nothing at all.
-      // Only the settle pass may pay for a second, full read.
-      if (settle && since && !read?.fresh.length) {
-        this.leafCursors.delete(sid);
-        since = undefined;
-        read = await readOnce();
-      }
-      if (!read) {
-        // Never guess from a partial view: drop the cursor so the next pass reads fully.
-        if (since) this.leafCursors.delete(sid);
-        return undefined;
-      }
-      // Several matches mean Pi wrote the prompt more than once, so an in-flight answer
-      // must stay silent; the settle pass takes the newest, which is the one just written.
-      if (!settle && read.matched.length !== 1) return undefined;
-      const chosen = read.matched.at(-1) ?? (settle ? read.fresh[0] : undefined);
-      if (!chosen) return undefined;
-      if (typeof read.leafId === 'string') this.rememberCursor(sid, read.leafId);
-      return chosen.id as string | undefined;
+    const submittedTurnId = async (): Promise<string | undefined> => {
+      const own = (await entriesSnapshot())?.entries.filter((entry: any) => entry?.type === 'message'
+        && entry.message?.role === 'user' && Date.parse(entry?.timestamp) >= submittedAt) ?? [];
+      if (own.length === 1) return own[0].id as string | undefined;
+      return own.find((entry: any) => piText(entry.message?.content) === opts.prompt)?.id as string | undefined;
     };
     const receive = (event: any) => {
       if (!sent || ended) return;
@@ -167,11 +119,11 @@ export class PiAdapter implements AgentAdapter {
         // Publish the session entry id of this prompt as early as possible: it is the
         // only durable native turn id, and the Web needs it while the run is active
         // to collapse the bridge job and the native turn into one message.
-        let turnId = await submittedTurnId(false);
+        let turnId = await submittedTurnId();
         if (turnId) push({ type: 'system', sessionId, turnId });
         const terminal = await settled;
         if (stopping) { push({ type: 'done', sessionId, terminationReason: 'interrupted' }); return; }
-        if (!turnId) { turnId = await submittedTurnId(true); if (turnId) push({ type: 'system', sessionId, turnId }); }
+        if (!turnId) { turnId = await submittedTurnId(); if (turnId) push({ type: 'system', sessionId, turnId }); }
         if (modelFailed && !stopping) push({ type: 'error', message: 'Pi 模型请求失败，请在 Pi 检查模型及账号配置', terminationReason: 'failed' });
         else push({ type: 'done', sessionId, terminationReason: stopping || terminal.aborted ? 'interrupted' : 'normal' });
       } catch (error) {

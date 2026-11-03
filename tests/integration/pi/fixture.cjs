@@ -30,15 +30,7 @@ function handle(c) {
   if (c.type === 'get_available_thinking_levels') return reply({levels:model.reasoning ? ['off','low','high'] : ['off']});
   if (c.type === 'set_session_name') { name=c.name; append({ type:'session_info',name }); return reply(); }
   if (c.type === 'clone') { header={...header,id:randomUUID(),parentSession:sessionFile};sessionFile=path.join(path.dirname(sessionFile),header.id+'.jsonl');persist();return reply({cancelled:false}); }
-  if (c.type === 'get_entries') {
-    if (!c.since) return reply({ entries, leafId: entries.at(-1)?.id ?? null });
-    // `reject-cursor` / `empty-cursor` model a session rewrite: the stored cursor is gone,
-    // once as an error and once as a silently empty answer.
-    if (mode === 'empty-cursor') return reply({ entries: [], leafId: null });
-    const index = mode === 'reject-cursor' ? -1 : entries.findIndex(e => e.id === c.since);
-    if (index < 0) { emit({ type: 'response', command: c.type, id: c.id, success: false, error: 'unknown cursor' }); return; }
-    return reply({ entries: entries.slice(index + 1), leafId: entries.at(-1)?.id ?? null });
-  }
+  if (c.type === 'get_entries') return reply({ entries, leafId: entries.at(-1)?.id ?? null });
   if (c.type === 'abort') { reply();emit({type:'agent_settled',aborted:true});return; }
   if (c.type === 'prompt') {
     append({type:'model_change',provider:model.provider,modelId:model.id});append({type:'thinking_level_change',thinkingLevel});
