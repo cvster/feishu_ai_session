@@ -1347,7 +1347,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     topicContext,
     channel.botIdentity,
     ownerFFRequest ? [...(extraInstructions ?? []), '本次为当前飞书应用所有者本人请求，按个人工作群正常权限执行；历史辅助群限制及确认要求不适用于本次请求，后续辅助群请求仍按各自规则处理。'] : extraInstructions,
-    true,
   );
   if (controls.auxiliary?.isAuxiliary(scope)) await controls.auxiliaryApprovals?.remember(scope, batch, basePrompt);
   const approval = controls.auxiliaryApprovals?.grant(scope, batch.map(message => message.messageId), batch.map(message => message.senderId));
@@ -2335,7 +2334,6 @@ function buildPrompt(
   topicContext: QuotedContext[] = [],
   botIdentity?: { openId: string; name?: string },
   extraInstructions?: string[],
-  nativeImages = false,
 ): string {
   const first = batch[0];
   if (!first) return '';
@@ -2368,7 +2366,6 @@ function buildPrompt(
 
   return buildDirectUserPrompt({
     userInput: userPart,
-    nativeImages,
     ...(batch.some(message => senderTypeOf(message) === 'bot') ? { sender: {
       senderId: first.senderId,
       ...(first.senderName ? { senderName: first.senderName } : {}),

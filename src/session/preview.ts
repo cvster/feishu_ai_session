@@ -1,8 +1,27 @@
+import { PROMPT_CONTEXT_TAGS } from '../agent/prompt';
+
 const DEFAULT_PREVIEW_MAX_CHARS = 80;
 
+/** Only bridge-shaped prompts start with a context tag; user prose never does. */
+const CONTEXT_OPEN = new RegExp(`^\\s*<(${PROMPT_CONTEXT_TAGS.join('|')})>`);
+
 export function normalizeSessionPreview(input: string, maxChars = DEFAULT_PREVIEW_MAX_CHARS): string {
-  const text = extractBridgeUserInput(input) ?? input;
+  const text = extractBridgeUserInput(input) ?? stripContextSections(input);
   return truncatePreview(text.replace(/\s+/g, ' ').trim(), maxChars);
+}
+
+/** Direct prompts append the user's words after the context block; drop everything before it. */
+function stripContextSections(input: string): string {
+  let rest = input;
+  for (;;) {
+    const open = rest.match(CONTEXT_OPEN);
+    const tag = open?.[1];
+    if (!tag) return rest;
+    const end = rest.indexOf(`</${tag}>`, open[0].length);
+    // An unterminated section means nothing but context was recorded.
+    if (end < 0) return '';
+    rest = rest.slice(end + tag.length + 3);
+  }
 }
 
 function extractBridgeUserInput(input: string): string | undefined {
@@ -14,7 +33,7 @@ function extractBridgeUserInput(input: string): string | undefined {
 }
 
 function readPromptSection(input: string, tag: string): string | undefined {
-  const match = input.match(new RegExp(`<${tag}>\\n([\\s\\S]*?)\\n</${tag}>`));
+  const match = input.match(new RegExp(`<${tag}>\\r?\\n([\\s\\S]*?)\\r?\\n</${tag}>`));
   return match?.[1];
 }
 
