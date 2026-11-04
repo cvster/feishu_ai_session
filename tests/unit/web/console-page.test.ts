@@ -195,7 +195,7 @@ it('prefills the original tool and project even when the archived source is abse
 });
 
 
-it('shows group dissolution and native archival instead of shared entrance lifecycle states', async () => {
+it('shows group and session states without shared entrance lifecycle markers', async () => {
   const h = harness(false); await h.ready();
   h.snapshot.sharedGroups[0]!.active = false;
   h.snapshot.sharedGroups[0]!.status = 'archived';
@@ -205,10 +205,10 @@ it('shows group dissolution and native archival instead of shared entrance lifec
   const text = h.get('shared-list').text;
   for (const label of ['群：未解散', '群：已解散', '会话：正常', '会话：已归档']) expect(text).toContain(label);
   for (const label of ['本群入口已归档', '关联不可用', '已启用', '已退出 / 已关闭']) expect(text).not.toContain(label);
+  // A dissolved group never reaches the page, so the filter offers no such choice.
+  expect(h.get('shared-status').children.map(e => e.value)).toEqual(['', 'active', 'session-active', 'session-archived', 'abnormal']);
   h.get('shared-status').value = 'active'; h.get('shared-status').handlers.change!();
   expect(h.get('shared-list').text).toContain('群名：<群>'); expect(h.get('shared-list').text).not.toContain('群名：私聊群');
-  h.get('shared-status').value = 'dissolved'; h.get('shared-status').handlers.change!();
-  expect(h.get('shared-list').text).toContain('群名：私聊群'); expect(h.get('shared-list').text).not.toContain('群名：<群>');
   h.get('shared-status').value = 'session-archived'; h.get('shared-status').handlers.change!();
   expect(h.get('shared-list').text).toContain('群名：私聊群'); expect(h.get('shared-list').text).not.toContain('群名：<群>');
   h.get('shared-status').value = 'session-active'; h.get('shared-status').handlers.change!();
