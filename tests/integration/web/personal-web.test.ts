@@ -1483,6 +1483,19 @@ it('removes only confirmed closed shared groups with archived sources and persis
   expect(restored.entries().filter(r => r.scopeId.split(':')[0] === 'oc_shared')).toEqual([]);
 });
 
+it('keeps a dissolved shared group off the console while its session is still live', async () => {
+  const h = await harness(); await h.replies.stop();
+  const groups = await managedShared(h), row = groups.get('oc_shared')!;
+  await groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'native' }, async () => {});
+  expect((await h.consoleService.snapshot(true)).sharedGroups.map(g => g.chatId)).toEqual(['oc_shared']);
+  await groups.closeDissolvedChat('oc_shared');
+  const snapshot = await h.consoleService.snapshot(true);
+  expect(snapshot.sharedGroups).toEqual([]); expect(snapshot.summary.sharedGroups).toBe(0);
+  // The relationship is only hidden: a live session keeps its binding and its record.
+  expect(groups.get('oc_shared')?.status).toBe('archived');
+  expect(h.bindings.get('oc_shared')).toBeDefined();
+});
+
 
 it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('automatically reads source history when creating a fresh %s Web copy, returns recent sessions and omits read-button cards', async tool => {
   const h = await harness(tool); await h.replies.stop();
@@ -1586,8 +1599,8 @@ it('shows actual shared group and native session states without exposing archive
   h.native.archived = false;
   vi.mocked(h.channel.rawClient.im.v1.chat.get).mockImplementation(async ({ path }: any) => path.chat_id === 'oc_shared'
     ? { code: 232009 } as any : { code: 0, data: { name: '个人群', chat_mode: 'group' } } as any);
-  group = (await h.consoleService.snapshot(true)).sharedGroups[0]!;
-  expect(group).toMatchObject({ groupState: 'dissolved', sessionState: 'active' });
+  // A dissolved group leaves no usable entrance, so the page drops it while its session is live.
+  expect((await h.consoleService.snapshot(true)).sharedGroups).toEqual([]);
   vi.mocked(h.channel.rawClient.im.v1.chat.get).mockRejectedValue(Error('network unavailable'));
   vi.spyOn(h.client, 'health').mockRejectedValue(Error('worker offline'));
   group = (await h.consoleService.snapshot(true)).sharedGroups[0]!;

@@ -246,7 +246,9 @@ export class BridgeConsoleService {
           !busy && (!binding || routeWorker?.online === true && routeWorker.jobsKnown && binding.sourceId === routeWorker.sourceId),
         canLeave: row.ownerId === owner && sessionArchived && row.status !== 'archived' };
     }));
-    const sharedGroups = inspectedSharedGroups.filter((row): row is NonNullable<typeof row> => !!row);
+    // A dissolved or left group keeps no usable entrance: never list it on the page.
+    const sharedGroups = inspectedSharedGroups.filter((row): row is NonNullable<typeof row> =>
+      !!row && row.status !== 'archived' && row.groupState !== 'dissolved');
     const allJobs = [...this.observations.values()].flatMap(o => o.jobs);
     const workers = [...ids].map(id => {
       const o = this.observations.get(id)!;
