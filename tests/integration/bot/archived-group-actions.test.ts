@@ -50,15 +50,11 @@ async function fixture(toolId: 'codex' | 'claude' | 'kilo' | 'zcode' | 'dsh' = '
   return { tmp, identity, controls, channel, deletion, agent, pending, catalog, sessions, workspaces, bindings, value, dispatch };
 }
 
-it.each(['codex', 'claude', 'kilo', 'zcode', 'dsh'] as const)('confirms and dissolves the archived %s group once through the ordinary callback path without touching native history', async toolId => {
+it.each(['codex', 'claude', 'kilo', 'zcode', 'dsh'] as const)('dissolves the archived %s group on the first click without a second confirmation and without touching native history', async toolId => {
   const h = await fixture(toolId);
-  await h.dispatch(); expect(h.deletion).not.toHaveBeenCalled();
-  const confirmation = (h.channel.sent.at(-1)!.content as any).card;
-  expect(confirmation.body.elements[0].content).toContain('群聊解散后无法恢复');
-  const choice = confirmation.body.elements[1].behaviors[0].value;
-  expect(choice).toEqual({ cmd: 'archive-group.dissolve', arg: h.value.arg });
   h.pending.push('oc_group', { messageId: 'queued', content: 'do not run' } as any);
-  await Promise.all([h.dispatch(choice), h.dispatch(choice)]);
+  await Promise.all([h.dispatch(), h.dispatch()]);
+  expect(h.channel.sent.filter(m => JSON.stringify(m.content).includes('是否解散此群'))).toEqual([]);
   expect(h.deletion).toHaveBeenCalledOnce(); expect(h.deletion).toHaveBeenCalledWith({ path: { chat_id: 'oc_group' } });
   expect(h.catalog.isChatDissolved('oc_group')).toBe(true);
   expect(h.catalog.isAutoGroupSuppressed(toolId, 'source', 'native')).toBe(true);
