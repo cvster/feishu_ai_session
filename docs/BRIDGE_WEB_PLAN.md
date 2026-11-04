@@ -29,7 +29,7 @@ unset BRIDGE_WEB_PASSWORD
 
 免登录判断使用 TCP 连接的真实来源地址，不信任 `X-Forwarded-For` 等代理头。通配监听不会扩大免登录网段，本机回环保留免登录，`::` 的 IPv6 回环也免登录。其他来源在登录框输入固定密码或登录 Token；程序也可通过 `Authorization: Bearer <网页登录 Token>` 访问 HTTP/SSE API。写请求仍须发送与访问地址一致的 Origin。免登录请求同样接受 Host、同源和所有者校验。配置中的 `additionalHosts` 和 `trustedNetworks` 可选，旧配置保持原有行为；通配监听不与额外监听地址组合，变更监听地址或免登录网段立即撤销现有访问，重启桥接后生效。
 
-非回环入口的登录 cookie 为 HttpOnly、SameSite=Strict，12 小时过期。登录状态保存在 profile 下的 `web-sessions.json`（权限 600，仅保存随机 cookie 的 SHA-256 摘要），正常部署和桥接重启后继续有效；密码、登录 Token 配置也保留。退出登录立即删除持久记录，重启不恢复已退出的登录。登录会话绑定 profile、配置摘要及当前机器人所有者；更换密码或 Token、禁用入口或所有者变化会撤销旧登录。Token 验证实时读取配置，轮换后旧 Bearer 请求和 SSE 也失效。配置文件在 `profiles/<profile>/web.json`，权限 600。
+非回环入口的登录 cookie 为 HttpOnly、SameSite=Strict，30 天过期。登录状态保存在 profile 下的 `web-sessions.json`（权限 600，仅保存随机 cookie 的 SHA-256 摘要），正常部署和桥接重启后继续有效；密码、登录 Token 配置也保留。退出登录立即删除持久记录，重启不恢复已退出的登录。登录会话绑定 profile、配置摘要及当前机器人所有者；更换密码或 Token、禁用入口或所有者变化会撤销旧登录。Token 验证实时读取配置，轮换后旧 Bearer 请求和 SSE 也失效。配置文件在 `profiles/<profile>/web.json`，权限 600。
 
 ```bash
 lark-channel-bridge web disable --profile <profile>

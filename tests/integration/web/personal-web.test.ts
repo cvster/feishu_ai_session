@@ -1415,7 +1415,7 @@ it.each(['expiry', 'owner', 'password', 'access'] as const)('rejects a persisted
   if (change === 'password') cfg.passwordHash = await webPasswordHash('changed-password');
   if (change === 'access') cfg.trustedNetworks = ['10.0.0.0/8'];
   await writeFile(h.configPath, JSON.stringify(cfg));
-  const clock = change === 'expiry' ? vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 13 * 60 * 60_000) : undefined;
+  const clock = change === 'expiry' ? vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31 * 24 * 60 * 60_000) : undefined;
   try {
     const next = (await startBridgeWeb({ configPath: h.configPath, service: h.service }))!; cleanups.push(() => next.close());
     expect((await h.request('/api/sessions', undefined, { Cookie: cookie })).status).toBe(401);

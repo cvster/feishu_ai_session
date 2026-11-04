@@ -18,6 +18,8 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
   try { const v = JSON.parse(Buffer.concat(chunks).toString('utf8')); if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(); return v; }
   catch { throw new WebError(400, '无效 JSON'); }
 }
+/** Signed-in browsers keep working for a month; restarts and deploys never shorten it. */
+const LOGIN_TTL_MS = 30 * 24 * 60 * 60_000;
 const respond = (res: ServerResponse, status: number, value: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); };
 
 /** Direct trusted peers or cookie auth, same-origin writes and shared snapshots across listeners. */
@@ -90,8 +92,8 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       const owner = options.service.ownerIdentity();
       failures.delete(ip);
       const token = randomBytes(32).toString('base64url');
-      await sessions.set(token, { owner, hash: sessionSignature(c), expires: Date.now() + 12 * 60 * 60_000 });
-      res.setHeader('Set-Cookie', `bridge_web=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`);
+      await sessions.set(token, { owner, hash: sessionSignature(c), expires: Date.now() + LOGIN_TTL_MS });
+      res.setHeader('Set-Cookie', `bridge_web=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${LOGIN_TTL_MS / 1000}`);
       respond(res, 200, { ok: true }); return;
     }
     const token = cookie(req), bearer = req.headers.authorization?.match(/^Bearer ([^\s]+)$/i)?.[1];
