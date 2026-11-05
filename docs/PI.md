@@ -37,7 +37,7 @@ node bin/lark-channel-bridge.mjs pi-import-zcode --profile <profile>
 
 ### 默认模型
 
-`settings.json` 的 `defaultProvider` 与 `defaultModel` 决定 Pi 的默认模型。网页设置面板的“Pi 默认模型”直接读写这两个键：保留其它设置键，原子写入、权限 `600`，下一次 Pi 进程启动即生效，不需要重启 Worker。它只影响 Pi 新建会话；已有会话沿用自身记录的模型，绑定或会话配置里的显式选择优先于默认值。桥接不会为此改动 `models.json`、凭据或原生会话文件。
+Pi 启动时使用 `settings.json` 的 `defaultProvider` 与 `defaultModel`；桥接只读取，不代写这两个键，避免改一次网页就动到 Pi 终端自己的配置。要在飞书/网页里给 Pi 指定缺省模型，用控制台的[默认模型](BRIDGE_WEB_PLAN.md#桥接控制台)页，它把值存在桥接自己的 `agent-defaults.json` 里，每轮执行时作为 `--model` 传给 Pi 进程：绑定或会话里的显式选择优先，未设置时用控制台默认值，再退回 Pi 自身默认；辅助群跟随原会话，从外部导入且没有原会话的会话保留自身模型。桥接不会为此改动 `models.json`、凭据或原生会话文件。
 
 ## 启动与使用
 

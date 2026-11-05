@@ -720,44 +720,15 @@ it('defaults shared prefix naming off and saves it to the bridge instead of brow
 });
 
 
-it('saves the Pi default model to the bridge only when the selection changes', async () => {
-  const piDefaults = (value?: string) => ({ tools: [{ tool: 'pi', label: 'Pi', ...(value ? { value } : {}), effective: 'gaoliu/deepseek-v4-flash', options: [
-    { value: 'gaoliu/deepseek-v4-flash', label: 'deepseek-v4-flash (gaoliu)' },
-    { value: 'tars-point/deepseek-v4-flash', label: 'deepseek-v4-flash (tars-point)' }] }] });
-  const h = harness(undefined, 2, undefined, undefined, { agentDefaults: piDefaults('gaoliu/deepseek-v4-flash') }); await h.ready();
-  h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+it('keeps the model default out of the session page settings and never calls the defaults API', async () => {
+  const h = harness(undefined, 2, undefined, undefined, { agentDefaults: { tools: [{ tool: 'pi', label: 'Pi', value: 'a/b', options: [{ value: 'a/b', label: 'B' }] }] } });
+  await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
   h.node('settings').onclick!(); await h.settle();
-  const select = h.node('pi-default-model');
-  expect(h.node('pi-default').hidden).toBe(false);
-  expect(select.value).toBe('gaoliu/deepseek-v4-flash');
-  expect(h.node('pi-default-help').textContent).toContain('只影响 Pi 新建会话');
-  expect(select.children.map(option => option.value)).toEqual(['gaoliu/deepseek-v4-flash', 'tars-point/deepseek-v4-flash']);
+  expect(bridgeWebPage).not.toContain('pi-default');
+  expect(h.writes).toEqual([]);
   await h.node('settings-form').onsubmit!({ preventDefault() {} });
   expect(h.writes.filter(write => write.data)).toEqual([]);
-  h.node('settings').onclick!(); await h.settle();
-  expect(await h.node('pi-refresh').onclick!()).toBeUndefined();
-  expect(h.writes.at(-1)).toEqual({ path: '/api/agent-defaults?refresh=1', data: undefined });
-  h.node('settings').onclick!(); await h.settle();
-  h.node('pi-default-model').value = 'tars-point/deepseek-v4-flash';
-  await h.node('settings-form').onsubmit!({ preventDefault() {} });
-  expect(h.writes.filter(write => write.data).at(-1)).toEqual({ path: '/api/agent-defaults', data: { tool: 'pi', value: 'tars-point/deepseek-v4-flash' } });
   expect(h.node('settings-dialog').open).toBe(false);
-});
-
-it('hides the Pi default model row when unsupported and marks an unset default as unselectable', async () => {
-  const unset = harness(undefined, 2, undefined, undefined, { agentDefaults: { tools: [{ tool: 'pi', label: 'Pi', effective: 'gaoliu/deepseek-v4-flash',
-    options: [{ value: 'gaoliu/deepseek-v4-flash', label: 'deepseek-v4-flash (gaoliu)' }] }] } }); await unset.ready();
-  unset.requests[0]!.resolve(unset.conversation(0)); await unset.settle();
-  unset.node('settings').onclick!(); await unset.settle();
-  const select = unset.node('pi-default-model');
-  expect(select.children[0]!.value).toBe(''); expect(select.children[0]!.disabled).toBe(true);
-  expect(select.children[0]!.textContent).toBe('未固定（当前跟随：deepseek-v4-flash (gaoliu)）');
-  expect(select.value).toBe('gaoliu/deepseek-v4-flash');
-  await unset.node('settings-form').onsubmit!({ preventDefault() {} });
-  expect(unset.writes.filter(write => write.data)).toEqual([]);
-  const none = harness(); await none.ready(); none.requests[0]!.resolve(none.conversation(0)); await none.settle();
-  none.node('settings').onclick!(); await none.settle();
-  expect(none.node('pi-default').hidden).toBe(true);
 });
 
 it('renders busy sends only in the queue from the first frame, merges receipt ids and moves once into history at execution', async () => {

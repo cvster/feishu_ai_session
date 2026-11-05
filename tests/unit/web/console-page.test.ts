@@ -26,7 +26,8 @@ function harness(loginRequired = true, authorized = true) {
       const node = new Element('option'); node.value = option[1]!; node.textContent = option[2]!; get(match[1]!).append(node);
     }
   }
-  const nav = ['overview', 'bindings', 'shared'].map(page => { const e = new Element('button'); e.dataset.page = page; return e; });
+  const nav = ['overview', 'bindings', 'shared', 'models'].map(page => { const e = new Element('button'); e.dataset.page = page; return e; });
+  const defaults = { tools: [{ tool: 'generic', label: '<img src=x onerror=attack()>Tool', value: 'a/b', effective: 'a/c', available: true, notice: '注意', options: [{ value: 'a/b', label: 'B' }, { value: 'a/c', label: 'C' }] }] };
   const snapshot = { at: Date.now(), bridge: { connection: 'connected', uptimeSeconds: 120 },
     summary: { online: 1, workers: 1, pending: 1, active: 1, failed: 0 }, canDiscover: true, canSync: true,
     workers: [{ id: 'generic', label: '<script>Tool</script>', online: true, checkedAt: Date.now(), capabilities: { jobs: { submit: true }, sessions: { archive: true } }, sessions: 2, active: 1, pending: 1 }],
@@ -45,12 +46,13 @@ function harness(loginRequired = true, authorized = true) {
     window: { addEventListener() {} }, location: { hash: '' }, setInterval() {}, setTimeout, clearTimeout,
     fetch: async (path: string, options: { body?: string }) => {
       const body = options.body ? JSON.parse(options.body) : undefined; requests.push({ path, body });
-      const value = path === '/api/access' ? { loginRequired } : path === '/api/console/action' ? { ok: true } : snapshot;
+      const value = path === '/api/access' ? { loginRequired } : path === '/api/console/action' ? { ok: true }
+        : path.startsWith('/api/agent-defaults') ? defaults : snapshot;
       const ok = authorized || path === '/api/access';
       return { ok, status: ok ? 200 : 401, json: async () => ok ? value : { error: '请重新登录' } };
     },
   });
-  return { get, nav, snapshot, requests, ready: async () => { await vi.waitFor(() => expect(requests.some(r => r.path === '/api/console')).toBe(true)); await new Promise(r => setTimeout(r, 0)); } };
+  return { get, nav, snapshot, defaults, requests, ready: async () => { await vi.waitFor(() => expect(requests.some(r => r.path === '/api/console')).toBe(true)); await new Promise(r => setTimeout(r, 0)); } };
 }
 
 it('reuses the existing authenticated cookie on password-protected peers and renders tool labels as text', async () => {
@@ -216,4 +218,34 @@ it('shows group and session states without shared entrance lifecycle markers', a
   h.snapshot.sharedGroups[0]!.groupState = undefined; h.snapshot.sharedGroups[0]!.sessionState = undefined;
   h.get('shared-status').value = ''; h.get('shared-status').handlers.change!();
   expect(h.get('shared-list').text).toContain('群：尚未检查'); expect(h.get('shared-list').text).toContain('会话：尚未检查');
+});
+
+const descendants = (node: Element): Element[] => node.children.flatMap(c => [c, ...descendants(c)]);
+
+it('offers a defaults page that renders labels as text and saves the chosen model', async () => {
+  const h = harness(false); await h.ready(); expect(h.nav.map(n => n.dataset.page)).toEqual(['overview', 'bindings', 'shared', 'models']);
+  await h.nav[3]!.onclick!(); await new Promise(r => setTimeout(r, 0));
+  expect(h.get('heading').textContent).toBe('默认模型'); expect(h.get('models').hidden).toBe(false); expect(h.get('overview').hidden).toBe(true);
+  const list = h.get('models-list');
+  expect(list.text).toContain('<img src=x onerror=attack()>Tool'); expect(list.text).toContain('工具当前默认：a/c'); expect(list.text).toContain('注意');
+  const select = descendants(list).find(n => n.tag === 'select')!;
+  expect(select.children.map(o => o.value)).toEqual(['default', 'a/b', 'a/c']); expect(select.value).toBe('a/b');
+  await descendants(list).find(n => n.textContent === '保存')!.onclick!();
+  expect(h.requests.at(-1)).toEqual({ path: '/api/agent-defaults', body: { tool: 'generic', value: 'a/b' } });
+  // The row is rebuilt after a save, so the select is looked up again before choosing.
+  const again = descendants(h.get('models-list')).find(n => n.tag === 'select')!;
+  again.value = 'default';
+  (again as unknown as { onchange(): void }).onchange();
+  await descendants(h.get('models-list')).find(n => n.textContent === '保存')!.onclick!();
+  expect(h.requests.at(-1)).toEqual({ path: '/api/agent-defaults', body: { tool: 'generic', value: 'default' } });
+});
+
+it('re-lists models through the POST refresh route and explains an unusable catalogue', async () => {
+  const h = harness(false); await h.ready(); await h.nav[3]!.onclick!(); await new Promise(r => setTimeout(r, 0));
+  await descendants(h.get('models-list')).find(n => n.textContent === '刷新模型')!.onclick!();
+  expect(h.requests.at(-1)).toEqual({ path: '/api/agent-defaults/refresh', body: { tool: 'generic' } });
+  h.defaults.tools[0]!.available = false; h.defaults.tools[0]!.options = [];
+  await h.nav[0]!.onclick!(); await h.nav[3]!.onclick!(); await new Promise(r => setTimeout(r, 0));
+  const list = h.get('models-list');
+  expect(list.text).toContain('暂无法读取模型列表'); expect(list.text).toContain('请先刷新模型后再保存');
 });

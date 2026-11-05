@@ -31,6 +31,9 @@ export interface StartRunFlowInput {
   attachments: AgentAttachment[];
   access: AccessDecision;
   capability: AgentCapability;
+  /** Resolved `--model` value for this run; callers compute it so the log,
+   * the switch notice and the submission can never disagree. */
+  model?: string;
   profileConfig: ProfileConfig;
   sessions: SessionStore;
   sessionCatalog?: SessionCatalog;
@@ -201,7 +204,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       policy,
       sessionId,
       threadId,
-      model: resolveModelArg(
+      model: input.model !== undefined ? input.model : resolveModelArg(
         input.profileConfig.agentKind,
         input.profileConfig.preferences.model,
       ),

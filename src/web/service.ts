@@ -21,9 +21,9 @@ import { renameChat } from '../bot/group';
 import { sharedPersonalScope, sharedJobPersonalScope, namedSharedMessages, feishuSenderName } from '../worker/shared-history';
 import { messageRequestId } from '../worker/identity';
 import { isPersonalWorkgroup, type ToolBinding } from '../tools/bindings';
-import { DEFAULT_MODEL, type ModelOption } from '../agent/models';
+import { DEFAULT_MODEL, resolveModelArg, type ModelOption } from '../agent/models';
 import { cachedModelChoices, modelCachePath } from '../agent/model-cache';
-import { parsePiModel, readPiDefaults, writePiDefaults } from '../agent/pi/settings';
+import { isStorableModel } from '../agent/defaults';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
@@ -87,41 +87,80 @@ export class PersonalSessionService {
     return { ...settings, sessions: await this.list() };
   }
   ownerIdentity(): string { return this.owner(); }
-  private defaultsTarget() {
-    const tool = this.deps.controls.toolRegistry?.find('pi');
-    if (!tool?.agent.listModels) return undefined;
-    const profile = this.deps.controls.profileConfig;
-    return { tool, settings: { agentDir: profile.pi?.agentDir },
-      cachePath: modelCachePath(dirname(this.deps.path), profile.accounts.app.id, tool.id, tool.sourceId) };
+  /** In-flight re-lists, so a double click cannot spawn two tool processes. */
+  private readonly modelRefreshes = new Map<AgentKind, Promise<WebAgentDefaults>>();
+  private defaultTools(): AgentTool[] {
+    return (this.deps.controls.toolRegistry?.all() ?? []).filter(tool => tool.agent.listModels !== undefined);
   }
-  /** Pi keeps its default model in settings.json, which the next run reads; nothing else changes. */
-  async agentDefaults(refresh = false): Promise<{ tools: WebAgentDefaults[] }> {
-    this.owner();
-    const target = this.defaultsTarget();
-    if (!target) return { tools: [] };
-    let value: string | undefined, failure: string | undefined;
-    try { value = (await readPiDefaults(target.settings)).value; }
-    catch (error) { failure = (error as Error).message; }
-    const choices = await cachedModelChoices(target.cachePath, target.tool.agent, undefined, DEFAULT_MODEL, refresh);
-    // The panel is useless without a list, so an empty cache is filled on first open.
-    const listed = choices.available ? choices : await cachedModelChoices(target.cachePath, target.tool.agent, undefined, DEFAULT_MODEL, true);
+  /** Model lists come from each tool's own cache, keyed per tool and project. */
+  private modelCache(tool: AgentTool) {
+    const profile = this.deps.controls.profileConfig;
+    return modelCachePath(dirname(this.deps.path), profile.accounts.app.id, tool.id, tool.sourceId);
+  }
+  /** One tool's model catalogue; `refresh` shells out to the tool, so callers use it sparingly. */
+  private async modelRow(tool: AgentTool, refresh: boolean): Promise<WebAgentDefaults> {
+    const store = this.deps.controls.agentDefaults, saved = store?.get(tool.id);
+    const cache = this.modelCache(tool);
+    const listed = await cachedModelChoices(cache, tool.agent, undefined, DEFAULT_MODEL, refresh);
     const options = listed.options.filter(row => row.value !== DEFAULT_MODEL);
-    if (value && !options.some(row => row.value === value)) options.push({ value, label: `不在模型列表 · ${value}`, unavailable: true });
-    const effective = options.find(row => row.isDefault)?.value, notice = failure ?? listed.notice;
-    return { tools: [{ tool: 'pi', label: target.tool.agent.displayName, ...(value ? { value } : {}), ...(effective ? { effective } : {}),
-      options, available: listed.available, ...(notice ? { notice } : {}) }] };
+    if (saved && !options.some(row => row.value === saved)) options.push({ value: saved, label: `不在模型列表 · ${saved}`, unavailable: true });
+    const effective = options.find(row => row.isDefault)?.value;
+    const notices = [store?.brokenReason ?? listed.notice].filter((text): text is string => !!text);
+    const preferred = this.deps.controls.profileConfig.agentKind === tool.id
+      ? resolveModelArg(tool.id, this.deps.controls.profileConfig.preferences.model) : undefined;
+    if (preferred) notices.push(`${tool.agent.displayName} 已有全局模型偏好 ${preferred}，未单独设置模型的会话会优先使用它`);
+    if (saved && !listed.available) notices.push('模型列表暂不可用，无法确认该值是否仍然有效');
+    return { tool: tool.id, label: tool.agent.displayName, ...(saved ? { value: saved } : {}), ...(effective ? { effective } : {}),
+      options, available: listed.available && options.length > 0, ...(notices.length ? { notice: notices.join('；') } : {}) };
+  }
+  async agentDefaults(): Promise<{ tools: WebAgentDefaults[] }> {
+    this.owner();
+    const tools = await Promise.all(this.defaultTools().map(tool => this.modelRow(tool, false)));
+    return { tools };
+  }
+  /** Explicit re-list; POST so the write guard checks the request origin. */
+  async refreshAgentModels(tool: string): Promise<{ tools: WebAgentDefaults[] }> {
+    this.owner();
+    const found = this.requireDefaultTool(tool);
+    let run = this.modelRefreshes.get(found.id);
+    if (!run) {
+      const started = this.modelRow(found, true), done = () => this.modelRefreshes.delete(found.id);
+      run = started;
+      this.modelRefreshes.set(found.id, started);
+      started.then(done, done);
+    }
+    return { tools: [await run] };
+  }
+  /** true/false when the worker says so, undefined when it cannot be asked. */
+  private async modelSupport(tool: AgentTool): Promise<boolean | undefined> {
+    const client = (tool.agent as { client?: { health(): Promise<{ capabilities?: { models?: boolean } }> } }).client;
+    if (!client) return undefined;
+    try { return (await client.health()).capabilities?.models; } catch { return undefined; }
+  }
+  private requireDefaultTool(tool: string): AgentTool {
+    const found = this.defaultTools().find(candidate => candidate.id === tool);
+    if (!found) throw new WebError(400, '该执行工具不支持设置默认模型');
+    return found;
   }
   async updateAgentDefaults(tool: string, value: string) {
     this.owner();
-    const target = this.defaultsTarget();
-    if (!target || tool !== 'pi') throw new WebError(400, '该执行工具不支持设置默认模型');
-    if (!parsePiModel(value)) throw new WebError(400, '默认模型格式无效');
-    const { tools } = await this.agentDefaults(), row = tools[0]!;
-    // Without a freshly listed catalogue nothing can be verified, so only format is enforced.
-    if (row.available && !row.options.some(option => option.value === value)) throw new WebError(400, '模型不在可用列表中，请先刷新模型');
-    const written = await writePiDefaults(target.settings, value);
-    // A fresh Pi process reads these keys, so the written value is the effective one.
-    return { tools: [{ ...row, value: written.value, effective: written.value }] };
+    const found = this.requireDefaultTool(tool), store = this.deps.controls.agentDefaults;
+    if (!store) throw new WebError(503, '默认模型设置尚未就绪');
+    if (store.brokenReason) throw new WebError(503, store.brokenReason);
+    // Clearing is always safe; a wrong stored token would break every later run,
+    // so anything else must be verified against a real catalogue first.
+    if (value === DEFAULT_MODEL) { await store.set(found.id, undefined); return { tools: [await this.modelRow(found, false)] }; }
+    const row = await this.modelRow(found, false);
+    if (!row.available) {
+      // Only the probe runs here: a failed read is either "no such capability"
+      // (the user must not be told to retry) or "cannot verify right now".
+      if (await this.modelSupport(found) === false) throw new WebError(400, '该执行工具不提供模型列表，不能设置默认模型');
+      throw new WebError(503, '暂时无法验证模型，请稍后重试');
+    }
+    if (!isStorableModel(value)) throw new WebError(400, '默认模型格式无效');
+    if (!row.options.some(option => option.value === value)) throw new WebError(400, '模型不在可用列表中，请先刷新模型');
+    await store.set(found.id, value);
+    return { tools: [await this.modelRow(found, false)] };
   }
   private identity(scope: string, b: { toolId: string; sourceId: string; nativeId?: string }) {
     return hash(JSON.stringify([this.deps.controls.profile, this.deps.controls.profileConfig.accounts.app.id, scope, b.toolId, b.sourceId, b.nativeId]));

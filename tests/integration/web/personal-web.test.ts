@@ -5,6 +5,7 @@ import { expect, it, vi } from 'vitest';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { fixture, cleanups } from '../../helpers/worker-fixture';
 import { ToolBindingStore } from '../../../src/tools/bindings';
+import { AgentDefaultStore } from '../../../src/agent/defaults';
 import { ToolRegistry } from '../../../src/tools/types';
 import { WorkerInbox } from '../../../src/worker/inbox';
 import { SessionCatalog } from '../../../src/session/catalog';
@@ -59,6 +60,8 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi
   const registry = new ToolRegistry(); registry.register({ id: tool, sourceId: h.client.sourceId, label: 'Tool from manifest', agent: h.adapter,
     listSessions: () => h.client.listSessions(), sessions: { archiveEffect, historyPointer: async () => undefined, rename: (id, name) => h.client.renameSession(id, name), nativeArchive: true, archive: id => h.client.archiveSession(id), fork: id => h.client.forkSession(id) } });
   controls.toolRegistry = registry;
+  const agentDefaults = new AgentDefaultStore(join(h.dir, 'agent-defaults.json')); await agentDefaults.load();
+  controls.agentDefaults = agentDefaults;
   controls.configPath = join(h.dir, 'config.json');
   controls.refreshOwner = async () => {};
   const rootConfig = createRootConfig('test', profile); await saveRootConfig(rootConfig, controls.configPath);
@@ -104,7 +107,7 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi
   const login = async () => { const response = await request('/api/login', { secret }); expect(response.status).toBe(200); cookie = response.headers.get('set-cookie')?.split(';')[0] ?? ''; };
   const replies = await startWorkerReplies({ adapter: h.adapter, channel, controls, catalog, sessions, activeRuns, statePath: join(h.dir, 'replies.json'), intervalMs: 60_000 }); cleanups.push(() => replies.stop());
   controls.workerRuntimes!.get(tool)!.replies = replies;
-  return { ...h, bindings, catalog, controls, sessions, pending, inbox, service, consoleService, makeService, makeConsole, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
+  return { ...h, bindings, agentDefaults, catalog, controls, sessions, pending, inbox, service, consoleService, makeService, makeConsole, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
 }
 
 async function sharedInput(h: Awaited<ReturnType<typeof harness>>, options: { name?: string; content?: string } = {}) {
@@ -1624,28 +1627,58 @@ it('stores the optional shared-session prefix via authenticated Web settings and
   expect((await h.request('/api/settings', { sharedSessionPrefix: true }, { Origin: 'http://evil.test' })).status).toBe(403);
 });
 
-it('reads and writes the Pi default model through authenticated Web endpoints and keeps other Pi settings', async () => {
-  const h = await harness('pi'); await h.replies.stop();
-  const agentDir = join(h.dir, 'pi-agent'), path = join(agentDir, 'settings.json');
-  (h.controls.profileConfig as { pi?: unknown }).pi = { binaryPath: 'pi', agentDir };
-  const empty = await (await h.request('/api/agent-defaults')).json() as { tools: Record<string, unknown>[] };
-  expect(empty.tools[0]).toMatchObject({ tool: 'pi', available: false });
-  expect(empty.tools[0]).not.toHaveProperty('value');
-  await mkdir(agentDir, { recursive: true });
-  await writeFile(path, JSON.stringify({ defaultProvider: 'gaoliu', defaultModel: 'deepseek-v4-flash', telemetry: true }, null, 2) + '\n');
-  const state = await (await h.request('/api/agent-defaults')).json() as { tools: Record<string, unknown>[] };
-  expect(state.tools).toHaveLength(1);
-  expect(state.tools[0]).toMatchObject({ tool: 'pi', value: 'gaoliu/deepseek-v4-flash' });
-  expect(state.tools[0]).not.toHaveProperty('effective');
-  expect((await h.request('/api/agent-defaults', { tool: 'codex', value: 'a/b' })).status).toBe(400);
-  expect((await h.request('/api/agent-defaults', { tool: 'pi', value: 'broken' })).status).toBe(400);
-  expect((await h.request('/api/agent-defaults', { tool: 'pi' })).status).toBe(400);
-  const saved = await (await h.request('/api/agent-defaults', { tool: 'pi', value: 'tars-point/deepseek-v4-flash' })).json() as { tools: Record<string, unknown>[] };
-  expect(saved.tools[0]).toMatchObject({ value: 'tars-point/deepseek-v4-flash', effective: 'tars-point/deepseek-v4-flash' });
-  expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ defaultProvider: 'tars-point', defaultModel: 'deepseek-v4-flash', telemetry: true });
-  expect((await h.request('/api/agent-defaults', { tool: 'pi', value: 'tars-point/deepseek-v4-flash' }, { Origin: 'http://evil.test' })).status).toBe(403);
+it('stores the console default model per tool and refuses values it cannot verify', async () => {
+  const h = await harness('kilo'); await h.replies.stop();
+  const noList = await (await h.request('/api/agent-defaults')).json() as { tools: Record<string, unknown>[] };
+  expect(noList.tools).toHaveLength(1);
+  expect(noList.tools[0]).toMatchObject({ tool: 'kilo', available: false });
+  expect(noList.tools[0]).not.toHaveProperty('value');
+  // An unverified default would be sent on every later run, so it is rejected;
+  // this worker advertises no model capability, so no retry would ever help.
+  const rejected = await h.request('/api/agent-defaults', { tool: 'kilo', value: 'a/one' });
+  expect(rejected.status).toBe(400);
+  expect(h.agentDefaults.get('kilo')).toBeUndefined();
+  const models = vi.spyOn(h.client, 'models').mockResolvedValue([{ value: 'a/one', label: 'One', isDefault: true }, { value: 'a/two', label: 'Two' }]);
+  const refreshed = await (await h.request('/api/agent-defaults/refresh', { tool: 'kilo' })).json() as { tools: Record<string, unknown>[] };
+  expect(refreshed.tools[0]).toMatchObject({ tool: 'kilo', available: true, effective: 'a/one' });
+  expect(models).toHaveBeenCalledOnce();
+  expect((await h.request('/api/agent-defaults', { tool: 'codex', value: 'a/one' })).status).toBe(400);
+  expect((await h.request('/api/agent-defaults', { tool: 'kilo', value: '-x' })).status).toBe(400);
+  expect((await h.request('/api/agent-defaults', { tool: 'kilo', value: 'a three' })).status).toBe(400);
+  expect((await h.request('/api/agent-defaults', { tool: 'kilo', value: 'missing/one' })).status).toBe(400);
+  expect((await h.request('/api/agent-defaults', { tool: 'kilo' })).status).toBe(400);
+  const saved = await (await h.request('/api/agent-defaults', { tool: 'kilo', value: 'a/two' })).json() as { tools: Record<string, unknown>[] };
+  expect(saved.tools).toHaveLength(1); expect(saved.tools[0]).toMatchObject({ value: 'a/two' });
+  expect(JSON.parse(await readFile(join(h.dir, 'agent-defaults.json'), 'utf8'))).toEqual({ version: 1, models: { kilo: 'a/two' } });
+  expect(h.agentDefaults.get('kilo')).toBe('a/two');
+  const cleared = await (await h.request('/api/agent-defaults', { tool: 'kilo', value: 'default' })).json() as { tools: Record<string, unknown>[] };
+  expect(cleared.tools[0]).not.toHaveProperty('value');
+  expect(h.agentDefaults.get('kilo')).toBeUndefined();
+  expect((await h.request('/api/agent-defaults', { tool: 'kilo', value: 'a/two' }, { Origin: 'http://evil.test' })).status).toBe(403);
+  expect((await h.request('/api/agent-defaults/refresh', { tool: 'kilo' }, { Origin: 'http://evil.test' })).status).toBe(403);
 });
 
+it('shares one re-list between two refreshes that overlap', async () => {
+  const h = await harness('kilo'); await h.replies.stop();
+  const slow = vi.spyOn(h.client, 'models').mockImplementation(async () => {
+    await new Promise(resolve => setTimeout(resolve, 20)); return [{ value: 'a/one', label: 'One' }];
+  });
+  const [first, second] = await Promise.all([
+    h.request('/api/agent-defaults/refresh', { tool: 'kilo' }),
+    h.request('/api/agent-defaults/refresh', { tool: 'kilo' })]);
+  expect(first.status).toBe(200); expect(second.status).toBe(200);
+  expect(slow).toHaveBeenCalledOnce();
+});
+
+it('refuses to save a default while the model catalogue cannot be read', async () => {
+  const h = await harness('kilo'); await h.replies.stop();
+  vi.spyOn(h.client, 'models').mockRejectedValue(new Error('worker offline'));
+  vi.spyOn(h.client, 'health').mockRejectedValue(new Error('worker offline'));
+  // A transient read failure must never be stored: it would fail every later run.
+  expect((await h.request('/api/agent-defaults', { tool: 'kilo', value: 'a/one' })).status).toBe(503);
+  expect(h.agentDefaults.get('kilo')).toBeUndefined();
+  await expect(stat(join(h.dir, 'agent-defaults.json'))).rejects.toThrow();
+});
 
 it('distinguishes idle submission from a blocked queue and preserves Web request identity across restart', async () => {
   const h = await harness(); await h.replies.stop(); h.pending.block('oc_group');

@@ -107,12 +107,17 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
       }
     }
     if (url.pathname === '/api/agent-defaults') {
-      if (req.method === 'GET') { respond(res, 200, await options.service.agentDefaults(url.searchParams.get('refresh') === '1')); return; }
+      if (req.method === 'GET') { respond(res, 200, await options.service.agentDefaults()); return; }
       if (req.method === 'POST') {
         const input = await body(req);
         if (typeof input.tool !== 'string' || typeof input.value !== 'string') throw new WebError(400, '默认模型参数无效');
         respond(res, 200, await options.service.updateAgentDefaults(input.tool, input.value)); return;
       }
+    }
+    if (url.pathname === '/api/agent-defaults/refresh' && req.method === 'POST') {
+      const input = await body(req);
+      if (typeof input.tool !== 'string') throw new WebError(400, '默认模型参数无效');
+      respond(res, 200, await options.service.refreshAgentModels(input.tool)); return;
     }
     if (url.pathname.startsWith('/api/console')) {
       const console = options.consoleService;

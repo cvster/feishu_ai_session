@@ -19,7 +19,8 @@ import { NativeSessionLocks } from '../tools/locks';
 import { sessionRefKey } from '../tools/bindings';
 import { createToolRegistry } from '../tools/runtime';
 import { ToolBindingStore } from '../tools/bindings';
-import { controlsForTool, toolForScope } from '../tools/context';
+import { AgentDefaultStore } from '../agent/defaults';
+import { controlsForTool, effectiveModel, toolForScope } from '../tools/context';
 import { resolveAppPaths } from '../config/app-paths';
 import type {
   LarkChannel,
@@ -29,7 +30,7 @@ import type {
 import { createLarkChannel } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
 import { capabilityForTool } from '../agent/capability';
-import { modelLabel, normalizeModelSelection, resolveModelArg } from '../agent/models';
+import { DEFAULT_MODEL, modelLabel } from '../agent/models';
 import {
   buildDirectUserPrompt,
   type BridgePromptInteractiveCard,
@@ -259,6 +260,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     controls.defaultToolId = controls.profileConfig.agentKind;
     controls.toolBindings = new ToolBindingStore(join(deps.appPaths.profileDir, 'tool-bindings.json'));
     await controls.toolBindings.load();
+    controls.agentDefaults = new AgentDefaultStore(join(deps.appPaths.profileDir, 'agent-defaults.json'));
+    await controls.agentDefaults.load();
     if (sessionCatalog) {
       controls.toolBindings.enforcePersonalUniqueness(sessionCatalog, controls.profileConfig.accounts.app.id, id => controls.toolRegistry!.all().find(tool => tool.id === id)?.sourceId);
       controls.toolBindings.migrate(sessionCatalog, id => controls.toolRegistry!.all().find(tool => tool.id === id)?.sourceId);
@@ -1323,18 +1326,18 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // the (now-switched) agent its model changed — otherwise it keeps echoing
   // the previously-announced model. Only fires when a prior model was seen
   // for this scope (never on the first run) and the selection actually
-  // changed. `requestedModel` (the `--model` value, or undefined for default)
-  // is reused below to log requested-vs-actual against the init event.
+  // changed. `model` (the `--model` value, or undefined for the tool default)
+  // is the single value this run uses: the scope's own choice, else the
+  // console default, and it is reused below to log requested-vs-actual.
   const agentKind = controls.profileConfig.agentKind;
-  const modelPref = controls.profileConfig.preferences.model;
-  const modelSelection = normalizeModelSelection(agentKind, modelPref);
-  const requestedModel = resolveModelArg(agentKind, modelPref);
+  const model = effectiveModel(controls, agentKind, scope);
+  const modelSelection = model ?? DEFAULT_MODEL;
   const prevModel = lastRunModelByScope.get(scope);
   const modelSwitched = prevModel !== undefined && prevModel !== modelSelection;
   lastRunModelByScope.set(scope, modelSelection);
   const extraInstructions = modelSwitched
     ? [
-        `用户刚把本会话使用的模型切换为「${modelLabel(agentKind, modelPref)}」。` +
+        `用户刚把本会话使用的模型切换为「${modelLabel(agentKind, modelSelection)}」。` +
           '之前的对话里可能提到别的模型,请以当前模型为准;若被问到你用的是什么模型,据此回答。',
       ]
     : undefined;
@@ -1399,6 +1402,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     attachments: attachments.map(toPolicyAttachment),
     access: accessDecision,
     capability,
+    model,
     profileConfig: controls.profileConfig,
     sessions,
     sessionCatalog,
@@ -1478,7 +1482,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     // an id this claude build/account doesn't recognize).
     if (evt.type === 'system' && evt.model) {
       log.info('session', 'model', {
-        requested: requestedModel ?? 'default',
+        requested: model ?? 'default',
         actual: evt.model,
       });
     }

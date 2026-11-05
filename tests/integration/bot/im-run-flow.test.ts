@@ -38,6 +38,23 @@ describe('IM run flow', () => {
     expect(h.agent.runOptions[0]?.model).toBe('provider-new-model');
   });
 
+  it('submits the model the caller resolved, and only falls back to the profile preference when no model is given', async () => {
+    const h = await createHarness({ defaultWorkspace: true });
+    Object.assign(h.agent, { listModels: async () => [{ value: 'p/console', label: 'console' }, { value: 'p/profile', label: 'profile' }] });
+    h.profileConfig.preferences.model = 'p/profile';
+    const input = { scopeId: 'chat-1', scope: { source: 'im' as const, chatId: 'chat-1', actorId: 'ou_user' }, prompt: 'hello',
+      attachments: [], access: { ok: true as const, reason: 'allowed-user' as const }, capability: claudeCapability(h.profileConfig),
+      profileConfig: h.profileConfig, sessions: h.sessions, workspaces: h.workspaces, executor: h.executor, now: 1000 };
+    expect((await startRunFlow({ ...input, model: 'p/console' })).ok).toBe(true);
+    expect(h.agent.runOptions[0]?.model).toBe('p/console');
+    const fallback = await createHarness({ defaultWorkspace: true });
+    Object.assign(fallback.agent, { listModels: async () => [{ value: 'p/profile', label: 'profile' }] });
+    fallback.profileConfig.preferences.model = 'p/profile';
+    expect((await startRunFlow({ ...input, profileConfig: fallback.profileConfig, sessions: fallback.sessions,
+      workspaces: fallback.workspaces, executor: fallback.executor })).ok).toBe(true);
+    expect(fallback.agent.runOptions[0]?.model).toBe('p/profile');
+  });
+
   it.each(['claude', 'codex', 'zcode'] as const)('rejects a removed %s model before starting a task', async kind => {
     const h = await createHarness({ defaultWorkspace: true });
     h.profileConfig.agentKind = kind; h.profileConfig.preferences.model = 'removed-model';

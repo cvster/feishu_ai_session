@@ -1,5 +1,6 @@
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
 import { canUseDm, canUseGroup } from '../policy/access';
+import { resolveModelArg } from '../agent/models';
 import type { Controls, CommandContext } from '../commands';
 import { toolProfile } from './runtime';
 import type { AgentKind } from '../config/profile-schema';
@@ -33,6 +34,18 @@ export function controlsForTool(root: Controls, toolId: AgentKind, scope?: strin
   });
   roots.set(proxy, root);
   return proxy;
+}
+
+/** The model this run must use: the scope's own choice, else the bridge default.
+ * Shared scopes follow their settings scope; a shared scope without one (an
+ * imported session with no personal group) keeps whatever the session used. */
+export function effectiveModel(root: Controls, toolId: AgentKind, scope?: string): string | undefined {
+  const controls = controlsForTool(root, toolId, scope);
+  const explicit = resolveModelArg(toolId, controls.profileConfig.preferences.model);
+  if (explicit) return explicit;
+  const binding = scope ? controls.toolBindings?.get(scope) : undefined;
+  if ((binding?.linkedSource || binding?.auxiliaryWorkgroup) && (!scope || !controls.toolBindings?.settingsScope(scope))) return undefined;
+  return controls.agentDefaults?.get(toolId);
 }
 
 export function toolForScope(controls: Controls, scope: string): AgentKind {

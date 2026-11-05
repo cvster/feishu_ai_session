@@ -128,6 +128,8 @@ export interface Controls {
   auxiliaryApprovals?: import('../bot/auxiliary-approvals').AuxiliaryApprovals;
   toolRegistry?: ToolRegistry;
   toolBindings?: ToolBindingStore;
+  /** Bridge-owned default model per tool, applied whenever a scope has no explicit choice. */
+  agentDefaults?: import('../agent/defaults').AgentDefaultStore;
   defaultToolId?: import('../config/profile-schema').AgentKind;
   executorForTool?(id: import('../config/profile-schema').AgentKind): RunExecutor;
   workerRuntimes?: Map<ToolId, { inbox: import('../worker/inbox').WorkerInbox; replies?: WorkerReplySync }>;

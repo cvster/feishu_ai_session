@@ -5,7 +5,7 @@ import { initialState, reduce } from '../card/run-state';
 import type { Controls } from '../commands';
 import type { AuxiliaryApproval } from '../bot/auxiliary-approvals';
 import { prepareRunFlow, recordRunSessionEvent, startRunFlow } from '../bot/run-flow';
-import { isWorkerScopeArchived, controlsForTool } from '../tools/context';
+import { isWorkerScopeArchived, controlsForTool, effectiveModel } from '../tools/context';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
@@ -35,6 +35,7 @@ export function createA2ARunner(deps: { controls: Controls; sessions: SessionSto
       const flowInput: Parameters<typeof startRunFlow>[0] = {
         scopeId: task.scope, ...(binding.nativeId ? { nativeBinding: { nativeId: binding.nativeId, sourceId: binding.sourceId } } : {}), scope: { source: 'a2a', chatId: task.scope, actorId: task.actorId }, prompt, attachments: [],
         access: { ok: true, reason: 'allowed-chat' }, capability, profileConfig: controls.profileConfig,
+        model: effectiveModel(root, binding.toolId, task.scope),
         sessions, sessionCatalog, workspaces, executor: root.executorForTool!(binding.toolId),
         checkSessionArchived: async () => !await context.valid() || !auxiliary.isActive(task.scope) ||
           await isWorkerScopeArchived(root, task.scope),
