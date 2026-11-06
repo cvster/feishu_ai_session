@@ -178,7 +178,8 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     const queueSignature = deliveryUuid(JSON.stringify(queuedMessages));
     const queueChanged = previousDelivery?.queueSignature !== queueSignature && (!!queuedMessages.length || previousDelivery?.queueSignature !== undefined);
     const repairTextLayout = deps.adapter.id === 'codex' && previousDelivery?.finished &&
-      previousDelivery.textLayoutVersion !== 1 && job.createdAt >= Date.now() - 24 * 60 * 60_000;
+      !!previousDelivery.messageId &&
+      previousDelivery.textLayoutVersion !== 2 && job.createdAt >= Date.now() - 24 * 60 * 60_000;
     const forceRefresh = refreshKeys.has(ledgerKey) || queueChanged || layoutChanged || !!repairTextLayout;
     if (previousDelivery?.nativeRecovery && !nativeTurn) return;
     if (previousDelivery?.finished && !repairControls && !nativeTurn && !forceRefresh) return;
@@ -195,7 +196,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     }
     let state = startRunRuntime(initialState, job.createdAt);
     for (const row of snapshot.events) state = reduce(state, row.event);
-    if (nativeTurn) state = nativeTurn.state;
+    if (nativeTurn) state = deps.adapter.id === 'codex' ? restoreMessageBoundaries(nativeTurn.state, nativeTurn.state) : nativeTurn.state;
     // A completed turn has stable text; old workers still expose its native
     // message boundaries through the read-only conversation API.
     if (deps.adapter.id === 'codex' && !nativeTurn && binding.nativeId && !isJobActive(snapshot.job)) {
@@ -274,7 +275,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     delivery.queueSignature = queueSignature;
     refreshKeys.delete(ledgerKey);
     delivery.lastEvent = lastEvent; delivery.pushedAt = Date.now(); delivery.finished = finished; delivery.controlsVersion = 1;
-    if (finished) delivery.textLayoutVersion = 1;
+    if (finished) delivery.textLayoutVersion = 2;
     if (auxiliary) {
       delivery.auxiliaryLayoutVersion = 1; delivery.auxiliaryPreviousReply = auxiliaryPreviousReply;
       if (delivery.messageId && (!latest || newerReply(job, latest))) latestSharedReplies.set(target.scope, { id: job.id, createdAt: job.createdAt });

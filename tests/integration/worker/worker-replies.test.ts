@@ -362,11 +362,11 @@ it.each(['card', 'markdown'] as const)('repairs completed Codex message boundari
     await repaired.runNow();
     const patched = h.patch.mock.calls.at(-1) as unknown as [{data:{content:string}}] | undefined;
     const output = mode === 'card' ? vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1] : JSON.parse(patched![0].data.content);
-    expect(JSON.stringify(output)).toContain('before restart\\n\\nafter restart');
+    expect(JSON.stringify(output)).toContain('before restart\\n\\n**after restart**');
     expect(h.reply).toHaveBeenCalledOnce();expect(h.calls).toHaveLength(1);
     await repaired.runNow();expect(conversation).toHaveBeenCalledOnce();
     const ledger = JSON.parse(await readFile(h.statePath, 'utf8'));
-    expect(ledger.deliveries[h.job.id].textLayoutVersion).toBe(1);
+    expect(ledger.deliveries[h.job.id].textLayoutVersion).toBe(2);
   } finally { await repaired.stop(); await h.catalog.flush(); await h.sessions.flush(); }
 });
 

@@ -7,6 +7,7 @@ import type { SessionCatalog } from '../session/catalog';
 import type { NativeConversationReader, NativeConversationTurn } from '../agent/native-conversation';
 import { renderCard } from '../card/run-renderer';
 import { renderText } from '../card/text-renderer';
+import { restoreMessageBoundaries } from '../card/message-boundaries';
 import { getMessageReplyMode, getShowToolCalls } from '../config/schema';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { log } from '../core/logger';
@@ -110,7 +111,8 @@ export async function startNativeTurnSync(deps: NativeTurnSyncDeps) {
       delivery.inputMessageId = await send(scope, id, turn, delivery, true, 'post', JSON.stringify({ zh_cn: { title: '', content: [[{ tag: 'md', text: markdown }]] } }));
       await save();
     }
-    let view = getShowToolCalls(deps.controls.cfg) ? turn.state : { ...turn.state, blocks: turn.state.blocks.filter(block => block.kind !== 'tool') };
+    const formatted = toolId === 'codex' ? restoreMessageBoundaries(turn.state, turn.state) : turn.state;
+    let view = getShowToolCalls(deps.controls.cfg) ? formatted : { ...formatted, blocks: formatted.blocks.filter(block => block.kind !== 'tool') };
     // Worker snapshots refresh observation clocks even for completed turns.
     // Those clocks are replaced below; hashing them would rewrite every old
     // card each poll and delay delivery of new native messages.
