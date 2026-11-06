@@ -1,12 +1,14 @@
 import { marked, type MarkedToken, type Token } from 'marked';
 import { decodeHTML } from 'entities';
 import type { RunState } from '../card/run-state';
+import { diagrams, mermaidSource } from '../diagram/renderer';
 
 /** Only these presentation nodes cross the Web API; never send arbitrary HTML. */
 export interface MarkdownNode {
   tag: 'span' | 'p' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'strong' | 'em' | 'del' |
     'code' | 'pre' | 'blockquote' | 'br' | 'hr' | 'ul' | 'ol' | 'li' | 'a' |
-    'table' | 'thead' | 'tbody' | 'tr' | 'th' | 'td';
+    'table' | 'thead' | 'tbody' | 'tr' | 'th' | 'td' | 'diagram';
+  diagramId?: string;
   text?: string;
   children?: MarkdownNode[];
   href?: string;
@@ -38,7 +40,10 @@ function nodes(tokens: Token[], depth = 0): MarkdownNode[] {
       case 'paragraph': return [node('p', nested(t.tokens))];
       case 'heading': return [node(('h' + t.depth) as MarkdownNode['tag'], nested(t.tokens))];
       case 'strong': case 'em': case 'del': case 'blockquote': return [node(t.type, nested(t.tokens))];
-      case 'code': return [node('pre', [{ tag: 'code', text: t.text }])];
+      case 'code': {
+        const source = mermaidSource(t), diagramId = source === undefined ? undefined : diagrams.register(source);
+        return diagramId ? [{ tag: 'diagram', diagramId, text: source }] : [node('pre', [{ tag: 'code', text: t.text }])];
+      }
       case 'codespan': return [{ tag: 'code', text: t.text }];
       case 'br': case 'hr': return [{ tag: t.type }];
       case 'checkbox': return [text(t.checked ? '☑ ' : '☐ ')];
@@ -65,7 +70,10 @@ export class WebMarkdown {
   private characters = 0;
   parse(value: string): MarkdownNode[] {
     const cached = this.cache.get(value);
-    if (cached) { this.cache.delete(value); this.cache.set(value, cached); return cached; }
+    if (cached) {
+      const refresh = (items: MarkdownNode[]) => { for (const item of items) { if (item.tag === 'diagram' && item.text) diagrams.register(item.text); if (item.children) refresh(item.children); } };
+      refresh(cached); this.cache.delete(value); this.cache.set(value, cached); return cached;
+    }
     let result: MarkdownNode[];
     try { result = nodes(marked.lexer(value, { gfm: true, breaks: true })); }
     catch { result = [node('p', [text(value)])]; } // Keep partial streaming output readable.

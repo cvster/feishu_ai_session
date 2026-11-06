@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { diagrams } from '../diagram/renderer';
 import { randomBytes } from 'node:crypto';
 import { dirname, join, basename } from 'node:path';
 import { WebLoginSessions } from './login-sessions';
@@ -98,6 +99,20 @@ export async function startBridgeWeb(options: { configPath: string; service: Per
     }
     const token = cookie(req), bearer = req.headers.authorization?.match(/^Bearer ([^\s]+)$/i)?.[1];
     await authenticate(token, local, bearer);
+    const diagram = /^\/api\/diagrams\/([a-f0-9]{64})\.(svg|png|mmd)$/.exec(url.pathname);
+    if (diagram && req.method === 'GET') {
+      const id = diagram[1]!, format = diagram[2]!, source = diagrams.source(id);
+      if (source === undefined) throw new WebError(404, '图表不存在，请刷新会话');
+      let data: string | Buffer = source;
+      if (format !== 'mmd') {
+        try { const image = await diagrams.render(id); data = format === 'svg' ? image.svg : image.png; }
+        catch { throw new WebError(422, '图表暂无法显示，请查看源码'); }
+      }
+      res.setHeader('Content-Type', format === 'svg' ? 'image/svg+xml; charset=utf-8' : format === 'png' ? 'image/png' : 'text/plain; charset=utf-8');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+      if (url.searchParams.get('download') === '1') res.setHeader('Content-Disposition', `attachment; filename="diagram-${id.slice(0, 12)}.${format}"`);
+      res.end(data); return;
+    }
     if (url.pathname === '/api/settings') {
       if (req.method === 'GET') { respond(res, 200, options.service.settings()); return; }
       if (req.method === 'POST') {

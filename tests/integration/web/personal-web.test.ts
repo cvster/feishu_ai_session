@@ -36,6 +36,7 @@ import type { RunPolicyAllow } from '../../../src/policy/run-policy';
 import { RUN_BUTTON_IMAGES, COMPLETED_STOP_IMAGE } from '../../../src/card/run-button-images';
 import { WorkerApiError } from '../../../src/worker/tool-api';
 import type { WebConfig } from '../../../src/web/config';
+import { WebMarkdown } from '../../../src/web/markdown';
 
 async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}, authoritative = false, archiveEffect?: 'delete') {
   const native = { nativeId: 'native', name: 'AA-web', cwd: '/project', createdAtMs: 1, updatedAtMs: 2, archived: false };
@@ -534,6 +535,25 @@ it('requires cookie auth and same origin, revokes on owner/config changes, and d
   await h.login(); const text = await (await h.request('/api/sessions')).text(); expect(text).not.toContain('cli_test'); expect(text).not.toContain('token'); expect(text).not.toContain('local-kilo');
   h.controls.botOwnerId = 'ou_other'; expect((await h.request('/api/sessions')).status).toBe(401); h.controls.botOwnerId = 'ou_owner';
   await writeFile(h.configPath, JSON.stringify({ ...JSON.parse(await readFile(h.configPath, 'utf8')), secretHash: '0'.repeat(64) })); expect((await h.request('/api/sessions')).status).toBe(401);
+});
+
+it('serves local diagram images and source behind the same conversation authentication', async () => {
+  const h = await harness('kilo', '127.0.0.2');
+  const source = 'flowchart TD\n A[用户] --> B[服务]';
+  const id = new WebMarkdown().parse('```mermaid\n' + source + '\n```')[0]!.diagramId!;
+  const base = '/api/diagrams/' + id;
+  expect((await h.request(base + '.svg')).status).toBe(401);
+  await h.login();
+  const svg = await h.request(base + '.svg');
+  expect(svg.status).toBe(200); expect(svg.headers.get('content-type')).toContain('image/svg+xml');
+  expect(svg.headers.get('content-security-policy')).toContain("default-src 'none'");
+  expect(await svg.text()).toContain('用户');
+  const png = await h.request(base + '.png?download=1');
+  expect(png.headers.get('content-disposition')).toContain('attachment; filename="diagram-');
+  expect(Buffer.from(await png.arrayBuffer()).subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+  expect(await (await h.request(base + '.mmd')).text()).toBe(source);
+  expect((await h.request('/api/diagrams/' + '0'.repeat(64) + '.svg')).status).toBe(404);
+  h.controls.botOwnerId = 'ou_other'; expect((await h.request(base + '.png')).status).toBe(401);
 });
 
 

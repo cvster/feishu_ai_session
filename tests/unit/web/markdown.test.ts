@@ -31,3 +31,13 @@ it('preserves code literally and displays incomplete streaming Markdown until it
   expect(content(md.parse('**正在'))).toBe('**正在');
   expect(flatten(md.parse('**正在完成**')).some(n => n.tag === 'strong')).toBe(true);
 });
+
+it('creates local diagram nodes only for supported, complete Mermaid fences', () => {
+  const md = new WebMarkdown(), source = 'flowchart TD\n A[开始] --> B[完成]';
+  const result = md.parse('```mermaid\n' + source + '\n```');
+  expect(result).toEqual([{ tag: 'diagram', text: source, diagramId: expect.stringMatching(/^[a-f0-9]{64}$/) }]);
+  expect(md.parse('```mermaid\n' + source)[0]?.tag).toBe('pre');
+  expect(md.parse('```text\n' + source + '\n```')[0]?.tag).toBe('pre');
+  expect(md.parse('```mermaid\npie\n "A": 1\n```')[0]?.tag).toBe('pre');
+  expect(md.parse('```mermaid\nflowchart TD\nA[<script>x</script>]\n```')[0]?.tag).toBe('pre');
+});

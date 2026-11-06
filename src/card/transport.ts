@@ -5,6 +5,7 @@ import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { marked, type Token } from 'marked';
 import { log } from '../core/logger';
+import { diagrams, mermaidSource } from '../diagram/renderer';
 
 const uploads = new WeakMap<LarkChannel, Map<string, Promise<string>>>();
 const installed = new WeakSet<LarkChannel>();
@@ -22,6 +23,10 @@ async function imageKey(channel: LarkChannel, path: string): Promise<string> {
   if (bytes.length > IMAGE_LIMIT || !(bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) ||
     bytes.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex')) || /^GIF8[79]a$/.test(bytes.subarray(0, 6).toString()) ||
     bytes.subarray(0, 4).toString() === 'RIFF' && bytes.subarray(8, 12).toString() === 'WEBP')) throw new Error('Local file is not a supported image');
+  return uploadImage(channel, bytes);
+}
+
+async function uploadImage(channel: LarkChannel, bytes: Buffer): Promise<string> {
   const digest = createHash('sha256').update(bytes).digest('hex');
   let cache = uploads.get(channel);
   if (!cache) { cache = new Map(); uploads.set(channel, cache); }
@@ -41,7 +46,7 @@ async function imageKey(channel: LarkChannel, path: string): Promise<string> {
 
 /** CardKit images accept uploaded keys, not local paths or remote URLs. */
 async function cardMarkdown(channel: LarkChannel, content: string): Promise<string> {
-  if (!content.includes('![')) return content;
+  if (!content.includes('![') && !/mermaid/i.test(content)) return content;
   async function rewrite(raw: string, tokens: Token[]): Promise<string> {
     let result = '', offset = 0;
     for (const token of tokens) {
@@ -49,7 +54,12 @@ async function cardMarkdown(channel: LarkChannel, content: string): Promise<stri
       if (start < 0) continue;
       result += raw.slice(offset, start);
       let replacement = token.raw;
-      if (token.type === 'image' && !/^img_[A-Za-z0-9_-]+$/.test(token.href)) {
+      const source = mermaidSource(token);
+      const diagramId = source === undefined ? undefined : diagrams.register(source);
+      if (diagramId) {
+        try { replacement = `![Mermaid 图表](${await uploadImage(channel, (await diagrams.render(diagramId)).png)})\n\n`; }
+        catch { log.warn('card', 'diagram-unavailable'); } // Preserve the source on any failure.
+      } else if (token.type === 'image' && !/^img_[A-Za-z0-9_-]+$/.test(token.href)) {
         const label = token.text.replace(/[\[\]`<>]/g, '') || '图片';
         if (/^https?:\/\//i.test(token.href)) replacement = `[${label}](${token.href})`;
         else {

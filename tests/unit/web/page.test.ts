@@ -17,6 +17,7 @@ class Element {
   clientHeight = 480;
   private top = 0;
   onclick?: (event?: { stopPropagation(): void }) => void | Promise<void>;
+  onerror?: () => void;
   onsubmit?: (event: { preventDefault(): void }) => Promise<void>;
   onkeydown?: (event: { key: string; preventDefault(): void }) => void;
   open = false;
@@ -105,6 +106,23 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const snapshot = (index: number, answer?: string, count?: number) => Stream.all.at(-1)!.emit('snapshot', { sessions: rows, conversation: conversation(index, answer, count) });
   return { node, rows, requests, writes, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all, storage, browserWindow, settings, clipboard, fallbackCopy, body };
 }
+
+it('shows diagrams using local image URLs with zoom, downloads, source and failure fallback', async () => {
+  const h = harness(); await h.ready();
+  const source = 'flowchart TD\nA[开始]-->B[完成]', sections = [{ nodes: new WebMarkdown().parse('```mermaid\n' + source + '\n```') }];
+  const c = h.conversation(0, '', 1);
+  h.requests[0]!.resolve({ ...c, turns: [{ ...c.turns[0], answerSections: sections }] }); await h.settle();
+  const box = h.node('messages').querySelector('.diagram')!, image = box.querySelector('img')!;
+  expect(image.src).toMatch(/^\/api\/diagrams\/[a-f0-9]{64}\.svg$/);
+  expect(box.querySelector('code')?.textContent).toBe(source);
+  expect(box.querySelectorAll('a').map(a => a.getAttribute('href'))).toEqual([image.src + '?download=1', image.src.replace(/svg$/, 'png') + '?download=1']);
+  box.querySelector('button')!.onclick!();
+  const dialog = h.body.querySelector('dialog')!;
+  expect(dialog.open).toBe(true); expect(dialog.querySelector('img')?.src).toBe(image.src);
+  dialog.querySelectorAll('button').at(-1)!.onclick!(); expect(dialog.open).toBe(false);
+  image.onerror!(); expect(image.hidden).toBe(true); expect(box.querySelector('details')?.open).toBe(true);
+  expect(box.text).toContain('图表暂无法显示');
+});
 
 it.each([true, false])('opens the most recently updated session on entry when recent visibility is %s and preserves later selections', async showRecent => {
   const h = harness({ showRecent }, 3, undefined, [10, 30, 20]); await h.ready();

@@ -50,6 +50,25 @@ it('retains Feishu image keys and turns remote images into links without fetchin
   expect(result.body.elements[0]!.content).toBe('![key](img_v3_key)\n[remote](https://example.com/qr.png)');
   expect(h.image).not.toHaveBeenCalled();
 });
+it('uploads complete Mermaid diagrams once and retains surrounding answer text', async () => {
+  const h = harness(), content = '检查过程\n\n```mermaid\nflowchart TD\n A[开始] --> B[完成]\n```\n\n**最终结论**';
+  const source = card(content);
+  await h.channel.createCard(source); await h.channel.updateCardById('card_1', source, 2);
+  expect(h.image).toHaveBeenCalledOnce();
+  expect(h.image.mock.calls[0]![0].data.image.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+  const sent = JSON.parse(h.update.mock.calls[0]![0].data.card.data).body.elements[0].content;
+  expect(sent).toContain('检查过程'); expect(sent).toContain('![Mermaid 图表](img_v3_uploaded)'); expect(sent).toContain('**最终结论**');
+  expect(source.body.elements[0]!.content).toBe(content);
+});
+it.each(['partial', 'invalid', 'upload-failed', 'unsupported'] as const)('keeps the exact Mermaid source when %s', async kind => {
+  const h = harness();
+  const body = kind === 'invalid' ? 'flowchart INVALID\n A --> B' : kind === 'unsupported' ? 'pie\n "A": 1' : 'flowchart LR\n A --> B';
+  const content = '文字\n\n```mermaid\n' + body + (kind === 'partial' ? '' : '\n```') + '\n';
+  if (kind === 'upload-failed') h.image.mockRejectedValueOnce(Error('upload unavailable'));
+  await h.channel.createCard(card(content));
+  expect(h.create.mock.calls[0]![0]).toEqual(card(content));
+  if (kind === 'partial' || kind === 'unsupported') expect(h.image).not.toHaveBeenCalled();
+});
 it.each(['missing','non-image','upload-failed'] as const)('does not suppress the answer or its URL when a picture is %s', async kind => {
   const h=harness(), path=await imageFile();
   if(kind==='missing') await rm(path);
