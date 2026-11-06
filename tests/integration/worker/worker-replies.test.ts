@@ -11,12 +11,12 @@ import { SessionStore } from '../../../src/session/store';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import type { Controls } from '../../../src/commands';
 
-async function repliesFixture(mode: 'card' | 'markdown' | 'text' = 'card', privateFF = false) {
-  const h = await fixture();
+async function repliesFixture(mode: 'card' | 'markdown' | 'text' = 'card', privateFF = false, tool: 'claude' | 'codex' = 'claude') {
+  const h = await fixture(tool);
   const scope = privateFF ? 'oc_private' : 'oc_group';
   if (privateFF) h.options.delivery = { ...h.options.delivery!, scope, chatId: 'oc_private', replyTo: 'om_private' };
   const bindings = new ToolBindingStore(join(h.dir, 'bindings.json')); await bindings.load();
-  bindings.set(scope, { toolId: 'claude', sourceId: 'local-claude', nativeId: 'native', nativeCreated: false }); await bindings.flush();
+  bindings.set(scope, { toolId: tool, sourceId: `local-${tool}`, nativeId: 'native', nativeCreated: false }); await bindings.flush();
   const catalog = new SessionCatalog(join(h.dir, 'catalog.json')); await catalog.load();
   const sessions = new SessionStore(join(h.dir, 'sessions.json')); await sessions.load();
   const profile = createDefaultProfileConfig({ agentKind: 'codex', codex: { binaryPath: 'codex', inheritCodexHome: true }, accounts: { app: { id: 'cli_test', secret: 'test', tenant: 'feishu' } } });
@@ -340,5 +340,48 @@ it('keeps the latest long shared reply expanded, folds its predecessor only afte
     const ledger = JSON.parse(await readFile(h.statePath, 'utf8')).deliveries;
     expect(ledger[first.job.id]).toMatchObject({ auxiliaryPreviousReply: true, auxiliaryLayoutVersion: 1 });
     expect(ledger[next.id]).toMatchObject({ auxiliaryPreviousReply: false, auxiliaryLayoutVersion: 1 });
+  } finally { await publisher.stop(); await h.catalog.flush(); await h.sessions.flush(); }
+});
+
+it.each(['card', 'markdown'] as const)('repairs completed Codex message boundaries in the same %s reply without restarting its worker', async mode => {
+  const h = await repliesFixture(mode, false, 'codex');
+  const first = await h.start(); await first.runNow(); h.finish();
+  await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('completed'));
+  await first.runNow(); await first.stop();
+  const raw = JSON.parse(await readFile(h.statePath, 'utf8'));
+  delete raw.deliveries[h.job.id].textLayoutVersion;
+  await writeFile(h.statePath, JSON.stringify(raw));
+  const { initialState } = await import('../../../src/card/run-state');
+  const health = await h.client.health();
+  vi.spyOn(h.client, 'health').mockResolvedValue({ ...health, capabilities: { ...health.capabilities!, conversation: true } });
+  const conversation = vi.spyOn(h.client, 'conversation').mockResolvedValue({ id: 'native', cwd: h.dir, archived: false,
+    turns: [{ id: 'original', bridge: true, bridgeJobId: h.job.id, input: '', createdAtMs: h.job.createdAt,
+      state: { ...initialState, terminal: 'done', blocks: ['before restart\n', 'after restart'].map(content => ({kind:'text',content,streaming:false})) } }] });
+  const repaired = await h.start();
+  try {
+    await repaired.runNow();
+    const patched = h.patch.mock.calls.at(-1) as unknown as [{data:{content:string}}] | undefined;
+    const output = mode === 'card' ? vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1] : JSON.parse(patched![0].data.content);
+    expect(JSON.stringify(output)).toContain('before restart\\n\\nafter restart');
+    expect(h.reply).toHaveBeenCalledOnce();expect(h.calls).toHaveLength(1);
+    await repaired.runNow();expect(conversation).toHaveBeenCalledOnce();
+    const ledger = JSON.parse(await readFile(h.statePath, 'utf8'));
+    expect(ledger.deliveries[h.job.id].textLayoutVersion).toBe(1);
+  } finally { await repaired.stop(); await h.catalog.flush(); await h.sessions.flush(); }
+});
+
+it.each(['different-job', 'wrong-cwd', 'wrong-text', 'offline'] as const)('keeps completed Codex journal text intact when native boundary evidence is %s', async mismatch => {
+  const h = await repliesFixture('card', false, 'codex'); h.finish();
+  await vi.waitFor(async () => expect((await h.client.snapshot(h.job.id)).job.status).toBe('completed'));
+  const { initialState } = await import('../../../src/card/run-state');
+  const health = await h.client.health();
+  vi.spyOn(h.client, 'health').mockResolvedValue({ ...health, capabilities: { ...health.capabilities!, conversation: true } });
+  const conversation = vi.spyOn(h.client, 'conversation').mockResolvedValue({id:'native', cwd:mismatch === 'wrong-cwd' ? '/other' : h.dir, archived:false,
+    turns:[{id:'turn', bridge:true, bridgeJobId:mismatch === 'different-job' ? 'other' : h.job.id, input:'', createdAtMs:h.job.createdAt,
+      state:{...initialState, terminal:'done', blocks:['before restart\n', mismatch === 'wrong-text' ? 'different text' : 'after restart'].map(content => ({kind:'text',content,streaming:false}))}}]});
+  if (mismatch === 'offline') conversation.mockRejectedValue(Error('offline'));
+  const publisher = await h.start();
+  try { await publisher.runNow(); const output=JSON.stringify(vi.mocked(h.channel.createCard).mock.calls);
+    expect(output).toContain('before restart\\nafter restart'); expect(output).not.toContain('different text');
   } finally { await publisher.stop(); await h.catalog.flush(); await h.sessions.flush(); }
 });

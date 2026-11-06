@@ -8,6 +8,7 @@ import type { SessionStore } from '../session/store';
 import type { ActiveRuns, RunHandle } from '../bot/active-runs';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { initialState, reduce, startRunRuntime, updateRunRuntime } from '../card/run-state';
+import { restoreMessageBoundaries } from '../card/message-boundaries';
 import { renderCard, type RunCardRenderOptions } from '../card/run-renderer';
 import { renderText } from '../card/text-renderer';
 import { getMessageReplyMode, getShowToolCalls } from '../config/schema';
@@ -31,6 +32,7 @@ interface ReplyDelivery extends CompletionDelivery {
   sendingSince?: number;
   finished?: boolean;
   controlsVersion?: number;
+  textLayoutVersion?: number;
   auxiliaryLayoutVersion?: number;
   auxiliaryPreviousReply?: boolean;
   skipped?: boolean;
@@ -175,7 +177,9 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     const queuedMessages = deps.controls.messageQueue?.forReply?.(target.scope, `worker:${target.scope}:${job.id}`) ?? [];
     const queueSignature = deliveryUuid(JSON.stringify(queuedMessages));
     const queueChanged = previousDelivery?.queueSignature !== queueSignature && (!!queuedMessages.length || previousDelivery?.queueSignature !== undefined);
-    const forceRefresh = refreshKeys.has(ledgerKey) || queueChanged || layoutChanged;
+    const repairTextLayout = deps.adapter.id === 'codex' && previousDelivery?.finished &&
+      previousDelivery.textLayoutVersion !== 1 && job.createdAt >= Date.now() - 24 * 60 * 60_000;
+    const forceRefresh = refreshKeys.has(ledgerKey) || queueChanged || layoutChanged || !!repairTextLayout;
     if (previousDelivery?.nativeRecovery && !nativeTurn) return;
     if (previousDelivery?.finished && !repairControls && !nativeTurn && !forceRefresh) return;
     const snapshot = await deps.adapter.client.snapshot(job.id);
@@ -192,6 +196,15 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     let state = startRunRuntime(initialState, job.createdAt);
     for (const row of snapshot.events) state = reduce(state, row.event);
     if (nativeTurn) state = nativeTurn.state;
+    // A completed turn has stable text; old workers still expose its native
+    // message boundaries through the read-only conversation API.
+    if (deps.adapter.id === 'codex' && !nativeTurn && binding.nativeId && !isJobActive(snapshot.job)) {
+      const conversation = await nativeConversation(binding.nativeId, true);
+      const turnIds = new Set(snapshot.events.flatMap(row => row.event.type === 'system' && row.event.turnId ? [row.event.turnId] : []));
+      const turn = conversation?.turns.find(turn => turn.bridgeJobId === job.id && (!turnIds.size || turnIds.has(turn.id)));
+      if (conversation?.id === binding.nativeId && !conversation.archived && conversation.cwd === job.options.cwd && turn)
+        state = restoreMessageBoundaries(state, turn.state);
+    }
     state = updateRunRuntime(state, { nowMs: Date.now(), processRunning: nativeTurn ? nativeTurn.state.terminal === 'running' : isJobActive(snapshot.job) });
     if (!getShowToolCalls(deps.controls.cfg)) state = { ...state, blocks: state.blocks.filter(block => block.kind !== 'tool') };
     if (deps.controls.auxiliaryApprovals) state = await deps.controls.auxiliaryApprovals.review(source.scope, job.id, source.replyTo, state);
@@ -261,6 +274,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     delivery.queueSignature = queueSignature;
     refreshKeys.delete(ledgerKey);
     delivery.lastEvent = lastEvent; delivery.pushedAt = Date.now(); delivery.finished = finished; delivery.controlsVersion = 1;
+    if (finished) delivery.textLayoutVersion = 1;
     if (auxiliary) {
       delivery.auxiliaryLayoutVersion = 1; delivery.auxiliaryPreviousReply = auxiliaryPreviousReply;
       if (delivery.messageId && (!latest || newerReply(job, latest))) latestSharedReplies.set(target.scope, { id: job.id, createdAt: job.createdAt });
