@@ -11,6 +11,11 @@ import type { WorkerQuestion } from '../../../src/worker/protocol';
 import { createTmpProfile } from '../../helpers/tmp-profile';
 import { createFakeChannel } from '../../helpers/fake-channel';
 import { FakeAgentAdapter } from '../../helpers/fake-agent';
+import { handleCardAction } from '../../../src/card/dispatcher';
+import { ActiveRuns } from '../../../src/bot/active-runs';
+import { PendingQueue } from '../../../src/bot/pending-queue';
+import { SessionStore } from '../../../src/session/store';
+import { WorkspaceStore } from '../../../src/workspace/store';
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); });
 async function fixture(origin: WorkerQuestion['origin'] = 'native') {
@@ -38,6 +43,29 @@ it.each(['native', 'worker'] as const)('routes %s questions to their allowed des
 });
 it('never publishes unknown-origin questions', async () => {
   const h = await fixture('unknown'); expect(h.channel.rawClient.requests.filter(r => r.method === 'im.v1.message.create')).toEqual([]);
+});
+it('submits an auxiliary question card through the dispatcher once and refuses stale answers', async () => {
+  const h = await fixture('worker'), delivery = await h.delivery();
+  h.controls.auxiliary = { isAuxiliary: (scope: string) => scope === 'oc_shared', isActive: () => true, canStop: () => false } as unknown as Controls['auxiliary'];
+  h.controls.workerQuestions = h.handle;
+  h.question.request.kind = 'async'; h.question.request.isBlocking = false;
+  h.question.request.questions[0]!.options = null;
+  const pending = new PendingQueue(60_000, () => {}), agent = new FakeAgentAdapter();
+  cleanups.push(async () => { pending.cancelAll(); });
+  const dispatch = (token: string) => handleCardAction({
+    channel: h.channel as any, controls: h.controls, sessionCatalog: h.catalog, agent, pending,
+    sessions: new SessionStore(join(h.tmp.profile, 'sessions.json')), workspaces: new WorkspaceStore(join(h.tmp.profile, 'workspaces.json')),
+    activeRuns: new ActiveRuns(), chatModeCache: { resolve: async () => 'group' } as any,
+    evt: { chatId: delivery.scope, messageId: delivery.messageId, operator: { openId: 'member' }, action: { value: { __worker_input: token } },
+      raw: { action: { form_value: { custom_0: '平板上的重启按键' } } } } as any,
+  });
+  await dispatch('wrong-token'); expect(h.client.answer).not.toHaveBeenCalled();
+  await dispatch(delivery.token);
+  expect(h.client.answer).toHaveBeenCalledOnce();
+  expect(h.client.answer).toHaveBeenCalledWith('native', 'question', { q: { answers: ['平板上的重启按键'] } });
+  expect((await h.ledger()).entries[0][1].status).toBe('submitted');
+  await dispatch(delivery.token); expect(h.client.answer).toHaveBeenCalledOnce();
+  expect(agent.runs).toHaveLength(0); expect(pending.snapshot()).toEqual([]);
 });
 it('revalidates token, message, binding, source, application and archive before sending answers', async () => {
   const h = await fixture('worker'), d = await h.delivery();

@@ -96,9 +96,11 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   // A DM resume candidate is explicitly selected and validated by applyResume.
   if (deps.sessionCatalog?.isScopeArchived(scope) && !(mode === 'p2p' && payload.cmd === 'resume.use')) return;
 
+  const questionAnswer = typeof payload.__worker_input === 'string' || typeof payload.__codex_input === 'string';
   if (deps.controls.auxiliary?.isAuxiliary(scope)) {
     const action = typeof payload.cmd === 'string' ? payload.cmd : '';
-    if (!deps.controls.auxiliary.isActive(scope) || !['stop', 'refresh'].includes(action)) return;
+    // Question cards issued to this group use their own exact message/token/binding checks below.
+    if (!deps.controls.auxiliary.isActive(scope) || (!questionAnswer && !['stop', 'refresh'].includes(action))) return;
     if (action === 'stop' && !deps.controls.auxiliary.canStop(scope, operatorId, payload.auxiliaryRunId)) return;
   }
   if (LEGACY_CLAUDE_CALLBACK_MARKER in payload) {
@@ -107,7 +109,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   }
 
   // Native replies use their original RPC; async replies steer the exact turn.
-  if (typeof payload.__worker_input === 'string' || typeof payload.__codex_input === 'string') {
+  if (questionAnswer) {
     try {
       const handler = deps.controls.workerQuestions;
       if (!handler) throw new Error('交互监听器未启动，请在工具界面回答');

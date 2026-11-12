@@ -91,6 +91,27 @@ describe('signed card callback dispatch', () => {
     expect(h.pending.cancel('oc_group')).toHaveLength(0);
   });
 
+  it.each(['__worker_input', '__codex_input'])('routes %s answers from active auxiliary groups without launching a run', async marker => {
+    const h = await createHarness(), handleAction = vi.fn(async () => {});
+    h.controls.auxiliary = { isAuxiliary: () => true, isActive: () => true, canStop: () => false } as unknown as Controls['auxiliary'];
+    h.controls.workerQuestions = { handleAction };
+    await h.dispatch({ [marker]: 'opaque-token' }, { custom_0: '平板上的重启按键' });
+    expect(handleAction).toHaveBeenCalledWith('oc_group', 'om_card', 'opaque-token', { custom_0: '平板上的重启按键' });
+    expect(h.agent.runs).toHaveLength(0); expect(h.pending.snapshot()).toEqual([]);
+  });
+
+  it('still rejects auxiliary answers after leaving the group and unrelated auxiliary controls', async () => {
+    const h = await createHarness(), handleAction = vi.fn(async () => {});
+    let active = false;
+    h.controls.auxiliary = { isAuxiliary: () => true, isActive: () => active, canStop: () => false } as unknown as Controls['auxiliary'];
+    h.controls.workerQuestions = { handleAction };
+    await h.dispatch({ __worker_input: 'opaque-token' }, { custom_0: 'answer' });
+    active = true;
+    for (const cmd of ['config', 'finish', 'fork', 'unknown']) await h.dispatch({ cmd });
+    expect(handleAction).not.toHaveBeenCalled(); expect(h.channel.sent).toHaveLength(0);
+    expect(h.agent.runs).toHaveLength(0); expect(h.pending.snapshot()).toEqual([]);
+  });
+
   it('runs built-in command callbacks only when the bridge token verifies', async () => {
     const h = await createHarness();
     const activeRun = h.agent.run({ runId: 'run-active', prompt: 'running' }) as FakeAgentRun;
@@ -190,7 +211,6 @@ describe('signed card callback dispatch', () => {
     const listModels = vi.fn(async () => Array.from({ length: 160 }, (_, i) => ({ value: `native-${i}`, label: `Native ${i}` })));
     Object.assign(h.agent, { listModels });
     await h.dispatch({ cmd: 'config.models.0' });
-    await h.dispatch({ cmd: 'config' });
     listModels.mockClear();
     const card = (h.channel.sent.at(-1)?.content as any).card;
     const buttons = card.body.elements.find((element: any) => element.tag === 'column_set').columns.map((column: any) => column.elements[0]);
