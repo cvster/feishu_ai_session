@@ -1257,6 +1257,12 @@ it('updates native reply queue rows after the controls without sending a separat
   } finally { await mirror.stop(); }
 });
 
+it.each(['relative-project', '../project', 'C:relative-project', '/project\u0000bad'])('rejects invalid project paths before creating a group: %s', async cwd => {
+  const h=await harness();const create=vi.fn();h.channel.rawClient.im.v1.chat.create=create as any;
+  await expect(h.service.create('kilo',cwd,'AA-invalid-path')).rejects.toMatchObject({status:400});
+  expect(create).not.toHaveBeenCalled();
+});
+
 it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('shows new %s project groups before their first message, including reserved native ids', async tool => {
   const h = await harness(tool, '127.0.0.1', {}, true); await h.login();
   const chatCreate = vi.fn(async () => ({ code: 0, data: { chat_id: 'oc_new' } }));

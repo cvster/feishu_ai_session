@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { dirname, normalize } from 'node:path';
+import { dirname, isAbsolute, normalize } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { QueuedMessage } from '../bot/message-queue';
 import type { Controls } from '../commands';
@@ -418,7 +418,7 @@ export class PersonalSessionService {
   async create(toolId: string, cwd: string, name: string) {
     this.requireFeishuWrite();
     name = name.trim(); if (name.length > 100 || /[\u0000-\u001f]/.test(name)) throw new WebError(400, '名称最多 100 字');
-    if (!cwd.startsWith('/') || cwd.length > 4096) throw new WebError(400, '项目路径无效');
+    if (!isAbsolute(cwd) || cwd.length > 4096 || /[\u0000\r\n]/.test(cwd)) throw new WebError(400, '项目路径无效');
     const owner = this.owner();
     if (!this.deps.controls.toolRegistry?.find(toolId)) throw new WebError(404, '工具 worker 未发现');
     if (!this.deps.create) throw new WebError(503, '会话操作尚未就绪');
