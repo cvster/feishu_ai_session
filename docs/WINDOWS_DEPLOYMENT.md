@@ -287,6 +287,7 @@ $Script = @(
 ```powershell
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/windows-install-computer-use.ps1 -CheckOnly
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/windows-install-computer-use.ps1
+node tools/windows-probe-node-repl.mjs --sky
 ```
 
 安装器备份配置，仅替换既有 node_repl MCP 的启动命令并去掉固定原生管道地址。无窗口适配器
@@ -297,6 +298,15 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/wi
 支持时调用公开 `config/mcpServer/reload` 重新加载 MCP 配置，再通过官方 node_repl 的
 `sky.list_windows()` 验证；热加载返回成功不等于已验证电脑操作恢复。不要通过重放用户提示词
 测试，也不要为此直接杀掉承载其他会话的共享 app-server。
+
+若能连接原生管道，但返回 `failed to launch codex app-server: program not found`，
+也要检查**桌面进程启动时继承的 PATH**，不能只检查 MCP/worker 的 CLI。桌面 Computer Use
+服务独立启动 CLI；App 更新清理旧版本目录后，其旧 PATH 可能失效。
+`windows-launch-desktop.ps1` 现在显式传入受保护的 `CODEX_CLI_PATH` 并前置其目录。
+使用安装器 `-RepairUserPath` 可备份用户 PATH、移除版本化 App CLI 目录并加入受保护目录。
+已运行的桌面不会自动继承新环境；可在确认旧路径不存在后，人工建立该旧路径到完整受保护
+运行时的临时目录联接，兼容现有桌面而不重启。不要覆盖任何已存在的目录或修改 App 包。
+只调用 MCP 热加载无法修正桌面侧继承的环境。
 
 本页为完整**手动 Windows 部署操作规程**，不是声称已有 Windows 一键版本部署程序。
 当前一键脚本仅安装共享启动入口；Linux 的自动发布/回滚逻辑不受本文影响。

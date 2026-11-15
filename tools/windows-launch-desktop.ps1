@@ -55,6 +55,11 @@ if ($Check) {
 # Start is idempotent and serialized. Never restart a healthy older writer.
 & (Join-Path $PSScriptRoot 'windows-shared-app-server.ps1') -Action start -Port $Port
 $env:CODEX_APP_SERVER_WS_URL = "ws://127.0.0.1:$Port"
+# Desktop's Computer Use service also launches a CLI independently of the
+# shared writer. Do not let it inherit an App-update cache path that can vanish.
+$desktopCli = Save-WindowsCodexRuntime -Binary (Resolve-WindowsCodexBinary -Configured (Get-WindowsConfiguredCodex))
+$env:CODEX_CLI_PATH = $desktopCli
+$env:PATH = (Split-Path $desktopCli -Parent) + ';' + $env:PATH
 $running = @(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited })
 if ($running.Count -gt 0) {
   $ids = @($running | Select-Object -ExpandProperty Id)

@@ -38,6 +38,8 @@ public static class NodeReplHost {
                 if (options != null && options.ContainsKey("binaryPath")) cli = options["binaryPath"] as string;
             }
             if (String.IsNullOrEmpty(cli) || !File.Exists(cli)) throw new Exception("Protected Codex CLI unavailable. Repair the Windows bridge runtime first.");
+            string configuredCli = Environment.GetEnvironmentVariable("CODEX_CLI_PATH");
+            if (!String.IsNullOrEmpty(configuredCli) && File.Exists(configuredCli)) cli = configuredCli;
             if (args.Length == 1 && args[0] == "--check") {
                 Console.WriteLine(new JavaScriptSerializer().Serialize(new { runtime=runtime, cli=cli, computerUsePipes=pipes.Length })); return 0;
             }

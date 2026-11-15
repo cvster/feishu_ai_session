@@ -1,6 +1,6 @@
 # Fix only the existing node_repl MCP entry. Never restart Desktop or app-server.
 [CmdletBinding()]
-param([switch]$CheckOnly)
+param([switch]$CheckOnly, [switch]$RepairUserPath)
 $ErrorActionPreference='Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'Windows only.' }
 $env:PSModulePath=(Join-Path $PSHOME 'Modules')+';'+$env:PSModulePath
@@ -27,8 +27,26 @@ $body=$match.Groups[2].Value
 if([regex]::Matches($body,'(?m)^command\s*=').Count -ne 1){throw 'Ambiguous node_repl command; no config was changed.'}
 $body=[regex]::Replace($body,'(?m)^command\s*=.*$',("command = '"+$exe+"'"))
 $next=$text.Substring(0,$match.Index)+$match.Groups[1].Value+$body+$text.Substring($match.Index+$match.Length)
-# Do not leave a stale fallback that another startup could accidentally reuse.
-$next=[regex]::Replace($next,'(?m)^SKY_CUA_NATIVE_PIPE_DIRECTORY\s*=.*\r?\n','')
+# Scope environment repairs to this MCP server, preserving all other entries.
+$envMatch=[regex]::Match($next,'(?ms)(^\[mcp_servers\.node_repl\.env\]\r?\n)(.*?)(?=^\[|\z)')
+if(-not $envMatch.Success){throw 'Existing node_repl environment section not found; no config was changed.'}
+$envBody=[regex]::Replace($envMatch.Groups[2].Value,'(?m)^SKY_CUA_NATIVE_PIPE_DIRECTORY\s*=.*\r?\n','')
+$worker=Get-Content (Join-Path $env:USERPROFILE '.lark-channel\profiles\codex\workers\codex\config.json') -Raw | ConvertFrom-Json
+$cli=$worker.options.binaryPath
+if(-not(Test-Path -LiteralPath $cli -PathType Leaf)){throw 'Protected CLI missing; no config was changed.'}
+if($RepairUserPath){
+  $oldPath=[Environment]::GetEnvironmentVariable('Path','User')
+  $cliDirectory=Split-Path $cli -Parent
+  $parts=@($oldPath -split ';' | Where-Object {$_ -and $_ -notmatch '[/\\]OpenAI[/\\]Codex[/\\]bin[/\\][^/\\]+[/\\]?$' -and $_ -ne $cliDirectory})
+  $newPath=(@($cliDirectory)+$parts) -join ';'
+  if($newPath -ne $oldPath){
+    [IO.File]::WriteAllText((Join-Path $directory ('user-path-before-computer-use-'+(Get-Date -Format yyyyMMdd-HHmmss)+'.txt')),$oldPath)
+    [Environment]::SetEnvironmentVariable('Path',$newPath,'User')
+  }
+}
+$cliLine="CODEX_CLI_PATH = '"+$cli+"'"
+if($envBody -match '(?m)^CODEX_CLI_PATH\s*='){$envBody=[regex]::Replace($envBody,'(?m)^CODEX_CLI_PATH\s*=.*$',$cliLine)}else{$envBody+=$cliLine+"`r`n"}
+$next=$next.Substring(0,$envMatch.Index)+$envMatch.Groups[1].Value+$envBody+$next.Substring($envMatch.Index+$envMatch.Length)
 if($next -ne $text){Copy-Item -LiteralPath $file -Destination ($file+'.before-dynamic-node-repl-'+(Get-Date -Format yyyyMMdd-HHmmss))
   $temporary=$file+'.dynamic.tmp';[IO.File]::WriteAllText($temporary,$next,[Text.UTF8Encoding]::new($false))
   [IO.File]::Replace($temporary,$file,$file+'.dynamic-node-repl.previous')}

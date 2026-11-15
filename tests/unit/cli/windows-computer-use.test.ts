@@ -22,4 +22,11 @@ describe('Windows Computer Use bootstrap safety', () => {
     expect(installer).not.toMatch(/Stop-Process|Stop-ScheduledTask|Restart-Service/);
     expect(installer).toContain("$env:OS -ne 'Windows_NT'");
   });
+  it('pins the Desktop service CLI independently of the shared writer', () => {
+    const desktop = readFileSync('tools/windows-launch-desktop.ps1', 'utf8');
+    expect(desktop).toContain('$env:CODEX_CLI_PATH = $desktopCli');
+    expect(desktop).toContain("$env:PATH = (Split-Path $desktopCli -Parent)");
+    expect(installer).toContain('$RepairUserPath');
+    expect(installer).toContain('user-path-before-computer-use-');
+  });
 });
