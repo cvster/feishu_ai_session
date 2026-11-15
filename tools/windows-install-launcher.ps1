@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'This installer is Windows-only.' }
 $destination = Join-Path $env:USERPROFILE '.lark-channel\windows-launcher'
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
-foreach ($name in @('windows-codex-common.ps1', 'windows-shared-app-server.ps1', 'windows-launch-desktop.ps1', 'windows-shortcut.ps1', 'windows-shortcut.vbs')) {
+foreach ($name in @('windows-codex-common.ps1', 'windows-shared-app-server.ps1', 'windows-launch-desktop.ps1', 'windows-shortcut.ps1', 'windows-shortcut.vbs', 'windows-prepare-codex.ps1', 'windows-service-host.cs')) {
   $source = Join-Path $PSScriptRoot $name
   $target = Join-Path $destination $name
   if ([IO.Path]::GetFullPath($source) -ne [IO.Path]::GetFullPath($target)) {

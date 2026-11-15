@@ -42,12 +42,13 @@ param(
   [string]$Action = 'status',
   [int]$Port = 4517,
   [string]$CodexPath,
-  [string]$CodexHome
+  [string]$CodexHome,
+  [string]$StateDirectory
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-codex-common.ps1')
-$stateDir = Join-Path $env:USERPROFILE '.lark-channel\shared-app-server'
+$stateDir = if ($StateDirectory) { [IO.Path]::GetFullPath($StateDirectory) } else { Join-Path $env:USERPROFILE '.lark-channel\shared-app-server' }
 $stateFile = Join-Path $stateDir 'state.json'
 $stdoutLog = Join-Path $stateDir 'stdout.log'
 $stderrLog = Join-Path $stateDir 'stderr.log'
@@ -117,8 +118,8 @@ function Start-ServerCore {
         if ($existing.port -ne $Port) { throw "Shared server is on port $($existing.port), not requested port $Port. It was not restarted." }
         $candidate = Resolve-CodexBinary -Explicit $CodexPath
         [pscustomobject]@{ status = 'already-running'; pid = $owned.ProcessId; url = "ws://127.0.0.1:$($existing.port)";
-          codex = $existing.codexPath; discoveredCodex = $candidate; updateAvailable = $candidate -ne $existing.codexPath } | ConvertTo-Json -Compress
-        if ($candidate -ne $existing.codexPath) { Write-Warning 'A newer Codex CLI was discovered. The running shared server is preserved; the new CLI is used on its next start.' }
+          codex = $existing.codexPath; discoveredCodex = $candidate; updateAvailable = $candidate -ne $(if ($existing.sourceCodexPath) { $existing.sourceCodexPath } else { $existing.codexPath }) } | ConvertTo-Json -Compress
+        if ($candidate -ne $(if ($existing.sourceCodexPath) { $existing.sourceCodexPath } else { $existing.codexPath })) { Write-Warning 'A newer Codex CLI was discovered. The running shared server is preserved; the new CLI is used on its next start.' }
         return
       }
       throw "Recorded app-server pid $($owned.ProcessId) is running but not ready on port $($existing.port). Run -Action stop first."
@@ -130,6 +131,8 @@ function Start-ServerCore {
   if ($listener) { throw "Port $Port is already in use by pid $($listener[0].OwningProcess). Choose another -Port." }
 
   $binary = Resolve-CodexBinary -Explicit $CodexPath
+  $sourceBinary = $binary
+  $binary = Save-WindowsCodexRuntime -Binary $binary
   $compatibility = Test-WindowsCodexCompatibility -Binary $binary
   $resolvedHome = if ($CodexHome) { $CodexHome } else { Join-Path $env:USERPROFILE '.codex' }
   if (-not (Test-Path -LiteralPath $resolvedHome)) { throw "CODEX_HOME does not exist: $resolvedHome" }
@@ -153,15 +156,26 @@ function Start-ServerCore {
     '-c', 'features.prefer_mxc=true',
     '-c', 'plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled=true'
   )
-  $process = Start-Process -FilePath $binary -ArgumentList $arguments -WindowStyle Hidden -PassThru `
-    -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+  $hostExecutable = Get-WindowsServiceHost
+  $commandFile = Join-Path $stateDir 'host-command.json'
+  [IO.File]::WriteAllText($commandFile, (@{ executable=$binary; arguments=($arguments -join ' ');
+    directory=(Split-Path $binary -Parent); stdout=$stdoutLog; stderr=$stderrLog } | ConvertTo-Json))
+  $hostProcess = Start-Process -FilePath $hostExecutable -ArgumentList ('"' + $commandFile + '"') -WindowStyle Hidden -PassThru
+  if (-not (Wait-Ready -TargetPort $Port)) { throw "Windowless app-server startup failed. See $stderrLog and $commandFile.error.log" }
+  $listener = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop | Select-Object -First 1
+  $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)"
+  if ($process.ExecutablePath -ne $binary -or $process.CommandLine -notmatch [regex]::Escape("ws://127.0.0.1:$Port")) {
+    throw 'Listener ownership changed during startup; no process was stopped.'
+  }
 
   $state = [pscustomobject]@{
     version = 1
-    pid = $process.Id
+    pid = $process.ProcessId
+    hostPid = $hostProcess.Id
     port = $Port
     url = "ws://127.0.0.1:$Port"
     codexPath = $binary
+    sourceCodexPath = $sourceBinary
     codexVersion = $compatibility.version
     codexHome = $resolvedHome
     startedAt = (Get-Date).ToString('o')
@@ -172,7 +186,7 @@ function Start-ServerCore {
     $tail = if (Test-Path -LiteralPath $stderrLog) { (Get-Content -LiteralPath $stderrLog -Tail 20) -join "`n" } else { '' }
     throw "Shared app-server did not become ready on port $Port. $tail"
   }
-  [pscustomobject]@{ status = 'started'; pid = $process.Id; url = $state.url; codex = $binary; codexHome = $resolvedHome } | ConvertTo-Json -Compress
+  [pscustomobject]@{ status = 'started'; pid = $process.ProcessId; url = $state.url; codex = $binary; codexHome = $resolvedHome } | ConvertTo-Json -Compress
 }
 
 function Stop-Server {
@@ -213,7 +227,7 @@ function Show-Status {
     codex = $state.codexPath
     codexVersion = $state.codexVersion
     discoveredCodex = (Resolve-CodexBinary -Explicit $CodexPath)
-    updateAvailable = (Resolve-CodexBinary -Explicit $CodexPath) -ne $state.codexPath
+    updateAvailable = (Resolve-CodexBinary -Explicit $CodexPath) -ne $(if ($state.sourceCodexPath) { $state.sourceCodexPath } else { $state.codexPath })
     codexHome = $state.codexHome
     desktopConnections = $desktopConnections
     task = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty State)

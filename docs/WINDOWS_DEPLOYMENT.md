@@ -159,7 +159,21 @@ $Entry = Join-Path $Release 'bin/lark-channel-bridge.mjs'
 已有生产 worker 不要为此重复启动；不能用 `/health` 代替共享会话验收。
 
 Windows worker 用 `worker run` 自行托管；Linux 的 `worker start` 不能照搬。
-建议在“任务计划程序”分别注册两个任务，或用 PowerShell `Register-ScheduledTask`：
+推荐使用仓库的无窗口任务安装器（只注册，不启动或停止）：
+
+```powershell
+& (Join-Path $Repo 'tools/windows-install-services.ps1') -BridgeRelease $Release `
+  -CodexWorkerRelease '<保留或明确升级的 Codex worker release>' `
+  -PiWorkerRelease '<保留或明确升级的 Pi worker release>'
+```
+
+未使用 Pi 时省略该参数。任务直接执行 Windows GUI 子系统托管器，不经过 CMD/cscript，
+并通过 Job Object 管理子进程生命周期。日志追加到 profile 的 `logs/bridge`、`logs/worker-codex`、
+`logs/worker-pi`。Codex worker 启动前准备完整、哈希校验的独立组件副本；共享 writer 下一次启动
+也使用独立副本。既有健康进程不会自动替换；切换当前窗口需一次明确的服务重启。
+安装器备份原任务 XML/配置，组件副本保留旧版用于回滚。详见 [Windows 升级说明](WINDOWS_UPGRADE.md)。
+
+下表及编码示例保留作为旧版任务的人工排查参考，新安装不再推荐这种 PowerShell 动作：
 
 | 项 | 桥接任务 | Codex worker 任务 |
 |---|---|---|

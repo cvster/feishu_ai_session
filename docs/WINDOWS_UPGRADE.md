@@ -35,6 +35,11 @@ Git 中包括完整启动资源；运行后生成的任务、快捷方式、日�
 - 对默认 `codex`，优先 Desktop CLI，再回退 PATH 中的 `codex.exe`。
 - 自定义绝对路径保持固定；路径失效明确报错，不静默改用其它账号/安装。
 - 启动新 writer 前检查 CLI 版本、`app-server --listen` 和 `queue --remote` 能力。
+- 还需同目录存在非空的 `codex-code-mode-host.exe`、`codex-command-runner.exe`、
+  `codex-windows-sandbox-setup.exe`；跳过 `.staging-*` 和缺少组件的升级目录。
+- 启动前将同目录全部文件复制到 `~/.lark-channel/codex-runtime/<内容哈希>`，逐文件验证
+  SHA-256 后发布。运行使用独立副本，App 清理旧版本不再移除执行组件。不自动删除旧副本；
+  文件校验失败明确停止启动，不覆盖损坏副本，不从不同版本拼装缺失 EXE。
 - 桥接底层已有 `resolveCodexBinary` / `spawnCodexProcess`，在每次创建 CLI 子进程时重新
   解析路径；无需为恢复已删除的 Desktop 版本路径而重启正在工作的 worker。此处不改变该跨平台代码。
 
@@ -51,7 +56,25 @@ Git 中包括完整启动资源；运行后生成的任务、快捷方式、日�
 重启旧 writer**。新 exe 在 writer 下一次明确启动时使用。两个登录任务同时启动时由互斥锁
 串行化 writer 创建。App 已运行但未接入共享端点时，提示用户手动关闭后重新打开，不强制杀进程。
 
-## 升级后的边界
+## 桥接与 worker 真正无窗口托管
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/windows-install-services.ps1 `
+  -BridgeRelease 'C:\software\feishu-ai-session-runtime\releases\<桥接版本>' `
+  -CodexWorkerRelease 'C:\software\feishu-ai-session-runtime\releases\<Codex worker版本>' `
+  -PiWorkerRelease 'C:\software\feishu-ai-session-runtime\releases\<Pi worker版本>'
+```
+
+只给出实际部署的 worker 参数，各进程保留原 release，不顺带升级 worker 业务代码。
+安装器本地编译 `windows-service-host.cs` 为 Windows GUI 子系统 EXE，计划任务直接执行它；
+子进程设置 `UseShellExecute=false`、`CreateNoWindow=true`，不再经过 CMD/cscript。
+日志追加到 profile 的 `logs/bridge`、`logs/worker-codex`、`logs/worker-pi`；启动器等待真实
+子进程退出并返回退出码。Job Object 保证任务停止时不留下孤儿 Node/子进程。
+Codex worker 每次启动前校验并准备完整独立运行组件，仅更新自己配置的 binaryPath，保留
+其余字段和 ACL。安装器仅注册，不停止/启动现有进程；旧窗口需要一次明确的服务切换才能消失。
+生成的 EXE、任务 JSON 和组件副本属于本机产物，不提交 Git；C#、PowerShell 源码与测试入库。
+
+## 升级后的边界（兼容性）
 
 升级完成后使用专用快捷方式打开，检查 Desktop 与飞书的双向显示、问询和工具是否正常。
 路径/CLI 参数检查不等于完整桌面协议兼容性检查。桌面的 `CODEX_APP_SERVER_WS_URL` 是
