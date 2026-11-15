@@ -24,6 +24,7 @@ import { isPersonalWorkgroup, type ToolBinding } from '../tools/bindings';
 import { DEFAULT_MODEL, resolveModelArg, type ModelOption } from '../agent/models';
 import { cachedModelChoices, modelCachePath } from '../agent/model-cache';
 import { isStorableModel } from '../agent/defaults';
+import { migrateWebOwner, ownerApiUnavailable, validWebOwner, type WebOwnerCache } from './owner-cache';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
@@ -45,6 +46,7 @@ export class PersonalSessionService {
   private markdown = new WebMarkdown();
   private receipts: Record<string, Receipt> = {};
   private favorites: Record<string, string> = {};
+  private webOwner?: WebOwnerCache;
   private operations = new Map<string, Promise<unknown>>();
   private metadata = new Map<string, ToolSnapshot>();
   private listedAt = 0;
@@ -63,21 +65,42 @@ export class PersonalSessionService {
     cwdFor?(scope: string): string | undefined;
   }) {}
   async load() {
+    let legacy = true;
     try {
       const r = JSON.parse(await readFile(this.deps.path, 'utf8'));
       if (r.version !== 1 || !r.receipts || Array.isArray(r.receipts)) throw new Error('网页请求账本无效');
       this.receipts = r.receipts;
+      legacy = r.webOwner === undefined;
+      if (validWebOwner(r.webOwner, this.deps.controls.profile, this.deps.controls.profileConfig.accounts.app.id)) this.webOwner = r.webOwner;
       if (r.favorites !== undefined) {
         if (!r.favorites || typeof r.favorites !== 'object' || Array.isArray(r.favorites) || Object.entries(r.favorites).some(([id, owner]) => !/^[a-f0-9]{64}$/.test(id) || typeof owner !== 'string' || !owner)) throw new Error('网页收藏记录无效');
         this.favorites = r.favorites;
       }
     }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+    if (!this.webOwner && legacy) {
+      const ids = new Set(this.bindings().flatMap(([scope, b]) => [this.identity(scope, b), this.identity(scope, { ...b, nativeId: undefined })]));
+      this.webOwner = migrateWebOwner(this.receipts, ids, this.deps.controls.profile, this.deps.controls.profileConfig.accounts.app.id);
+    }
+    this.rememberOwner();
+    if (this.webOwner) await this.save();
   }
+  private rememberOwner(): boolean {
+    const c = this.deps.controls;
+    if (c.ownerRefreshState !== 'ok' || !c.botOwnerId) return false;
+    if (this.webOwner?.ownerId === c.botOwnerId && this.webOwner.profile === c.profile && this.webOwner.appId === c.profileConfig.accounts.app.id) return false;
+    this.webOwner = { version: 1, profile: c.profile, appId: c.profileConfig.accounts.app.id, ownerId: c.botOwnerId, verifiedAt: Date.now() };
+    return true;
+  }
+  feishuUnavailable(): boolean { return this.deps.controls.ownerRefreshState === 'failed' && ownerApiUnavailable(this.deps.controls.ownerRefreshError); }
   private owner() {
     const c = this.deps.controls;
-    if (c.ownerRefreshState !== 'ok' || !c.botOwnerId) throw new WebError(503, '暂时无法确认当前所有者，请稍后重试');
-    return c.botOwnerId;
+    if (c.ownerRefreshState === 'ok' && c.botOwnerId) {
+      if (this.rememberOwner()) void this.save().catch(e => log.warn('web', 'owner-cache-save-failed', { error: String(e) }));
+      return c.botOwnerId;
+    }
+    if (this.feishuUnavailable() && validWebOwner(this.webOwner, c.profile, c.profileConfig.accounts.app.id)) return this.webOwner.ownerId;
+    throw new WebError(503, '暂时无法确认当前所有者，请稍后重试');
   }
   settings() { this.owner(); return this.deps.controls.auxiliary?.prefixSettings() ?? { sharedSessionPrefix: false }; }
   async updateSettings(enabled: boolean) {
@@ -202,6 +225,7 @@ export class PersonalSessionService {
   private async readGroup(scope: string, binding: ToolBinding) {
     const seq = ++this.observations, previous = this.groups.get(scope);
     try {
+      if (this.feishuUnavailable()) throw new Error('飞书暂不可用，显示本地会话记录');
       const result = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: scope } });
       const data = result.data;
       if (result.code || !data || !['group', 'topic', 'p2p'].includes(data.chat_mode ?? '')) throw new Error('群信息未确认');
@@ -255,7 +279,8 @@ export class PersonalSessionService {
         (r.threadId ?? r.sessionId) === b.nativeId).sort((a, z) => z.updatedAt - a.updatedAt)[0];
       // Project ownership is stable even when the tool changes cwd while executing.
       const cwd = normalize(this.deps.cwdFor?.(scope) ?? catalog?.cwdRealpath ?? row?.cwd ?? '.');
-      const online = this.groups.get(scope)?.mode === 'group' && meta?.online === true && !!tool && tool.sourceId === b.sourceId && (!!row || b.nativeCreated === false);
+      const groupAvailable = this.groups.get(scope)?.mode === 'group';
+      const online = (groupAvailable || (this.feishuUnavailable() && b.nativeCreated !== false)) && meta?.online === true && !!tool && tool.sourceId === b.sourceId && (!!row || b.nativeCreated === false);
       const group = this.groups.get(scope);
       // A confirmed name sync may be newer than our 15-second group snapshot.
       const name = group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
@@ -268,7 +293,7 @@ export class PersonalSessionService {
       return [{ id: this.identity(scope, b), scope, toolId: b.toolId, tool: meta?.label ?? b.toolId,
         updatedAtMs,
         favorite: this.favorites[hash(JSON.stringify([owner, this.identity(scope, b)]))] === owner, cwd, project: cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd, name: name ?? row?.name ?? b.nativeId!, online,
-        canSend: online && meta?.capabilities?.jobs.submit === true,
+        canSend: online && groupAvailable && meta?.capabilities?.jobs.submit === true,
         canRename: this.groups.get(scope)?.mode === 'group',
         nativeConversation: meta?.capabilities?.conversation === true }];
     });
@@ -298,7 +323,7 @@ export class PersonalSessionService {
     this.operations.set(key, task); void task.finally(() => { if (this.operations.get(key) === task) this.operations.delete(key); }).catch(() => {});
     return task;
   }
-  private save() { return this.serial('ledger', () => writeFileAtomic(this.deps.path, JSON.stringify({ version: 1, receipts: this.receipts, favorites: this.favorites }) + '\n', { mode: 0o600 })); }
+  private save() { return this.serial('ledger', () => writeFileAtomic(this.deps.path, JSON.stringify({ version: 1, receipts: this.receipts, favorites: this.favorites, webOwner: this.webOwner }) + '\n', { mode: 0o600 })); }
   async favorite(id: string, favorite: boolean) {
     if (typeof favorite !== 'boolean') throw new WebError(400, '收藏状态需为布尔值');
     return this.serial('favorite:' + id, async () => {

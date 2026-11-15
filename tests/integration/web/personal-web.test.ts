@@ -111,6 +111,34 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi
   return { ...h, bindings, agentDefaults, catalog, controls, sessions, pending, inbox, service, consoleService, makeService, makeConsole, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
 }
 
+it('lists and reads local sessions after restart during Feishu quota exhaustion without new Feishu calls', async () => {
+  const h = await harness('codex'); await h.replies.stop();
+  const original = await h.service.list(); expect(original.length).toBeGreaterThan(0);
+  h.controls.ownerRefreshState = 'failed'; h.controls.ownerRefreshError = 'Request failed with status code 429';
+  delete h.controls.botOwnerId;
+  const chat = vi.mocked(h.channel.rawClient.im.v1.chat.get); chat.mockClear();
+  const restarted = h.makeService(); await restarted.load();
+  expect(restarted.ownerIdentity()).toBe('ou_owner');
+  const rows = await restarted.list(); expect(rows.map(r=>r.id)).toEqual(original.map(r=>r.id));
+  expect(rows[0]!.canSend).toBe(false);
+  expect((await restarted.read(rows[0]!.id)).turns.length).toBeGreaterThan(0);
+  expect(chat).not.toHaveBeenCalled();
+  h.controls.ownerRefreshError = 'permission denied'; expect(()=>restarted.ownerIdentity()).toThrow();
+});
+
+it('migrates verified old Web receipts, but not when the application identity changes', async () => {
+  const h = await harness(); await h.replies.stop();
+  const [row] = await h.service.list();
+  const path = join(h.dir,'web-receipts.json');
+  const legacy = {version:1, favorites:{}, receipts:{one:{owner:'ou_owner',sessionId:row!.id,enqueued:true,createdAt:Date.now()-1000}}};
+  await writeFile(path,JSON.stringify(legacy));
+  h.controls.ownerRefreshState='failed';h.controls.ownerRefreshError='Request failed with status code 429';delete h.controls.botOwnerId;
+  const migrated=h.makeService();await migrated.load();expect(migrated.ownerIdentity()).toBe('ou_owner');
+  expect(JSON.parse(await readFile(path,'utf8')).webOwner.appId).toBe('cli_test');
+  h.controls.profileConfig.accounts.app.id='cli_changed';
+  const other=h.makeService();await other.load();expect(()=>other.ownerIdentity()).toThrow();
+});
+
 async function sharedInput(h: Awaited<ReturnType<typeof harness>>, options: { name?: string; content?: string } = {}) {
   const toolId = h.bindings.get('oc_group')!.toolId;
   const source = { toolId, sourceId: h.client.sourceId, nativeId: 'native' };

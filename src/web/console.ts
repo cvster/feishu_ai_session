@@ -84,6 +84,7 @@ export class BridgeConsoleService {
       while (index < chatIds.length) {
         const id = chatIds[index++]!;
         if (this.deps.catalog?.isChatDissolved(id)) { chats.set(id, { status: 'dissolved' }); continue; }
+        if (this.deps.personal.feishuUnavailable()) { chats.set(id, { error: '飞书暂不可用，显示本地记录' }); continue; }
         try {
           const r = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: id } });
           if (r.code === 232009 || r.code === 232011) { chats.set(id, { status: r.code === 232009 ? 'dissolved' : 'unavailable' }); continue; }
