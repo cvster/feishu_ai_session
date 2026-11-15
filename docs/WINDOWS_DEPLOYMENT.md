@@ -277,5 +277,26 @@ $Script = @(
 - 不用旧的整份 `.lark-channel`/`.codex` 备份覆盖当前状态；那会回退队列/收据/历史。
   运行配置只按必要字段恢复。日志和脱敏部署记录可本地保留，不提交真实凭据或个人会话。
 
+## 10. 桌面 Computer Use 运行时更新
+
+若现有 `node_repl` MCP 配置固定了旧的 `cua_node` 目录或桌面原生管道，桌面升级/重启后可能
+出现 `Computer Use native pipe is unavailable`。仅修正磁盘配置不会自动清除已有 MCP 进程缓存。
+
+在 Windows PowerShell 5 中运行：
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/windows-install-computer-use.ps1 -CheckOnly
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/windows-install-computer-use.ps1
+```
+
+安装器备份配置，仅替换既有 node_repl MCP 的启动命令并去掉固定原生管道地址。无窗口适配器
+每次启动时选择完整的官方 node_repl/Node/sky 运行时、当前唯一的桌面管道，以及 worker 配置中的
+受保护 CLI。没有管道或存在多个管道时明确报错，不猜测端点；不启动电脑控制辅助程序。
+安装器本身不重启桌面、worker 或共享 app-server，Linux 配置不受影响。
+
+支持时调用公开 `config/mcpServer/reload` 重新加载 MCP 配置，再通过官方 node_repl 的
+`sky.list_windows()` 验证；热加载返回成功不等于已验证电脑操作恢复。不要通过重放用户提示词
+测试，也不要为此直接杀掉承载其他会话的共享 app-server。
+
 本页为完整**手动 Windows 部署操作规程**，不是声称已有 Windows 一键版本部署程序。
 当前一键脚本仅安装共享启动入口；Linux 的自动发布/回滚逻辑不受本文影响。
