@@ -312,6 +312,7 @@ export class BridgeConsoleService {
     return { item, timeline: timeline.slice(-100) };
   }
   async action(action: string, id?: string, target?: string) {
+    this.deps.personal.requireFeishuWrite();
     this.owner(); const key = action + ':' + (id ?? '') + ':' + (target ?? '');
     if (this.actions.has(key)) return this.actions.get(key);
     const task = this.perform(action, id, target).finally(() => { this.actions.delete(key); this.cached = undefined; });

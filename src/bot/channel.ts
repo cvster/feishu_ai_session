@@ -8,6 +8,8 @@ import { AuxiliaryApprovals } from './auxiliary-approvals';
 import { AuxiliaryGroups } from './auxiliary-groups';
 import { isRetiredPrivateInput } from './auxiliary-private';
 import { startBridgeWeb } from '../web/server';
+import { loadWebConfig } from '../web/config';
+import { connectForLocalWeb } from '../web/offline-start';
 import { createMessageQueue, retireQueueCards } from './message-queue';
 import { enqueuePersonalInput } from './intake-queue';
 import { PersonalSessionService, WebError } from '../web/service';
@@ -619,10 +621,12 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
   });
 
-  await channel.connect();
+  const localWebEnabled = deps.appPaths?.profileDir ? (await loadWebConfig(join(deps.appPaths.profileDir, 'web.json')).catch(() => undefined))?.enabled === true : false;
+  const feishuConnected = await connectForLocalWeb(channel, localWebEnabled);
+  if (!feishuConnected) log.warn('web', 'feishu-offline-start', { reason: '飞书暂不可用；仅启动本地 Web，不启动飞书投递及维护轮询' });
   // Clear keys on account changes: Feishu image keys belong to one app only.
   controls.runControlIcons = undefined;
-  if (deps.appPaths?.profileDir && channel.rawClient.im?.v1?.image?.create) {
+  if (feishuConnected && deps.appPaths?.profileDir && channel.rawClient.im?.v1?.image?.create) {
     try {
       controls.runControlIcons = await prepareRunControlIcons({
         appId: cfg.accounts.app.id,
@@ -658,16 +662,16 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       }
     },
   } : undefined;
-  const groupCleanup = groupCleanupDeps ? createGroupCleanup(groupCleanupDeps) : undefined;
+  const groupCleanup = feishuConnected && groupCleanupDeps ? createGroupCleanup(groupCleanupDeps) : undefined;
   await groupCleanup?.start();
-  const archiveNotifications = sessionCatalog ? startSessionArchiveNotifications({ channel, controls, catalog: sessionCatalog }) : undefined;
+  const archiveNotifications = feishuConnected && sessionCatalog ? startSessionArchiveNotifications({ channel, controls, catalog: sessionCatalog }) : undefined;
   controls.sessionArchiveNotifications = archiveNotifications;
-  await controls.auxiliary?.recover().catch(error => log.warn('auxiliary', 'recovery-failed', { error: String(error) }));
+  if (feishuConnected) await controls.auxiliary?.recover().catch(error => log.warn('auxiliary', 'recovery-failed', { error: String(error) }));
   controls.messageQueue = createMessageQueue(controls, pending, sessionCatalog);
-  if (deps.appPaths?.profileDir) await retireQueueCards({ controls, channel, path: join(deps.appPaths.profileDir, 'queue-cards.json') });
-  const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
+  if (feishuConnected && deps.appPaths?.profileDir) await retireQueueCards({ controls, channel, path: join(deps.appPaths.profileDir, 'queue-cards.json') });
+  const knownChatsRefresh = feishuConnected ? startKnownChatsRefreshTimer(channel, controls) : undefined;
   const aaSessionGroupSync =
-    sessionCatalog && deps.appPaths?.profileDir
+    feishuConnected && sessionCatalog && deps.appPaths?.profileDir
       ? startAaSessionGroupSync({
           channel,
           controls,
@@ -700,6 +704,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const workerReplies: Awaited<ReturnType<typeof startWorkerReplies>>[] = [];
   const attached = new Set<string>();
   const attachWorker = async (tool: import('../tools/types').AgentTool) => {
+    if (!feishuConnected) return;
     const workerTool = tool.agent; const runtime = controls.workerRuntimes?.get(tool.id);
     if (!(workerTool instanceof DurableAgentAdapter) || !runtime || !sessionCatalog || !deps.appPaths?.profileDir) return;
     const scopedControls = controlsForTool(controls, tool.id);
@@ -797,14 +802,14 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       ...(identity.name ? { name: identity.name } : {}),
     });
   }
-  log.info('ws', 'connected', {
+  if (feishuConnected) log.info('ws', 'connected', {
     bot: identity?.name ?? 'unknown',
     openId: identity?.openId ?? '-',
     agent: `${agent.displayName} (${agent.id})`,
     appId: cfg.accounts.app.id,
     procId: controls.processId,
   });
-  console.log('正在监听消息。按 Ctrl+C 退出。\n');
+  console.log(feishuConnected ? '正在监听消息。按 Ctrl+C 退出。\n' : '飞书暂不可用：本地 Web 只读模式，后台 worker 保持运行。\n');
 
   if (deps.appPaths?.profileDir && controls.auxiliary && controls.auxiliaryApprovals) {
     try {
@@ -850,7 +855,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       if (bridgeWeb) log.info('web', 'listening', { url: bridgeWeb.url });
     } catch { log.warn('web', 'startup-failed', { reason: '请检查 web 配置或端口占用' }); }
   }
-  await controls.auxiliaryApprovals?.recover();
+  if (feishuConnected) await controls.auxiliaryApprovals?.recover();
 
   modelCacheSync = deps.appPaths?.profileDir ? startWorkerModelCache({
     profileDir: deps.appPaths.profileDir, botAppId: cfg.accounts.app.id,
@@ -867,11 +872,19 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     cfg.accounts.app.tenant === 'lark'
       ? 'https://open.larksuite.com'
       : 'https://open.feishu.cn';
-  const keepalive = startKeepalive({
+  const keepalive = feishuConnected ? startKeepalive({
     channel,
     domain: probeDomain,
     forceReconnect: () => controls.restart(),
-  });
+  }) : undefined;
+  let reconnecting = false;
+  const offlineReconnect = !feishuConnected ? setInterval(() => {
+    if (disconnecting || reconnecting) return;
+    reconnecting = true;
+    void channel.connect().then(() => controls.restart()).catch(error => log.warn('web', 'feishu-still-unavailable', { error: String(error) }))
+      .finally(() => { reconnecting = false; });
+  }, 30 * 60_000) : undefined;
+  offlineReconnect?.unref();
 
   return {
     channel,
@@ -892,7 +905,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       controls.workerReplySync = undefined;
       await controls.auxiliary?.flush();
       ownerRefresh.stop();
-      knownChatsRefresh.stop();
+      knownChatsRefresh?.stop();
       aaSessionGroupSync?.stop();
       await Promise.all([...questionSyncs.values()].map(handle => handle.stop()));
       await Promise.all([...nativeSyncs.values()].map(handle => handle.stop()));
@@ -902,7 +915,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       controls.sessionArchiveNotifications = undefined;
       controls.nativeReplySync = undefined;
       controls.refreshMirroredRunCard = undefined;
-      keepalive.stop();
+      keepalive?.stop();
+      if (offlineReconnect) clearInterval(offlineReconnect);
       pending.cancelAll();
       const [disconnectResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),

@@ -123,6 +123,7 @@ it('lists and reads local sessions after restart during Feishu quota exhaustion 
   expect(rows[0]!.canSend).toBe(false);
   expect((await restarted.read(rows[0]!.id)).turns.length).toBeGreaterThan(0);
   expect(chat).not.toHaveBeenCalled();
+  await expect(restarted.send(rows[0]!.id,'offline-request-id-123','must not send')).rejects.toMatchObject({status:503});
   h.controls.ownerRefreshError = 'permission denied'; expect(()=>restarted.ownerIdentity()).toThrow();
 });
 

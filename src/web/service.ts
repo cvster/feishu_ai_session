@@ -93,6 +93,7 @@ export class PersonalSessionService {
     return true;
   }
   feishuUnavailable(): boolean { return this.deps.controls.ownerRefreshState === 'failed' && ownerApiUnavailable(this.deps.controls.ownerRefreshError); }
+  requireFeishuWrite(): void { if (this.feishuUnavailable()) throw new WebError(503, '飞书暂不可用；本地会话列表和历史仍可读取，请恢复飞书额度后再执行此操作'); }
   private owner() {
     const c = this.deps.controls;
     if (c.ownerRefreshState === 'ok' && c.botOwnerId) {
@@ -351,6 +352,7 @@ export class PersonalSessionService {
     return { requestId, status: receipt.queued === false ? 'submitted' : 'queued', queuedMessages: this.queuedFor(scope) };
   }
   async send(id: string, requestId: string, text: string) {
+    this.requireFeishuWrite();
     if (!/^[\w-]{16,120}$/.test(requestId) || !text.trim() || text.length > 16_000) throw new WebError(400, '需要唯一请求 ID 和 1–16000 字文本');
     return this.serial('send:' + requestId, async () => {
       const owner = this.owner(), fingerprint = hash(JSON.stringify([id, owner, text]));
@@ -393,6 +395,7 @@ export class PersonalSessionService {
     return { removed: true, queuedMessages: this.queuedFor(session.scope) };
   }
   async rename(id: string, name: string) {
+    this.requireFeishuWrite();
     name = name.trim(); if (!name || name.length > 100 || /[\u0000-\u001f]/.test(name)) throw new WebError(400, '名称需为 1–100 字');
     this.owner();
     const entry = this.bindings().find(([scope, b]) => this.identity(scope, b) === id);
@@ -415,6 +418,7 @@ export class PersonalSessionService {
   }
   /** Create a personal AI group in an existing project; its session starts with the first message. */
   async create(toolId: string, cwd: string, name: string) {
+    this.requireFeishuWrite();
     name = name.trim(); if (name.length > 100 || /[\u0000-\u001f]/.test(name)) throw new WebError(400, '名称最多 100 字');
     if (!cwd.startsWith('/') || cwd.length > 4096) throw new WebError(400, '项目路径无效');
     const owner = this.owner();
@@ -431,6 +435,7 @@ export class PersonalSessionService {
     });
   }
   async control(id: string, action: string, values?: unknown) {
+    if (action !== 'refresh') this.requireFeishuWrite();
     return this.serial('control:' + id, async () => {
       if (action === 'finish' || action === 'config') {
         const owner = this.owner(), entry = this.bindings().find(([scope, b]) => this.identity(scope, b) === id);
