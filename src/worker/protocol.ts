@@ -65,6 +65,8 @@ export interface WorkerSessionService {
 export type WorkerErrorCode = 'invalid-request' | 'unauthorized' | 'not-found' | 'unsupported-operation' | 'busy' | 'conflict' | 'unavailable' | 'internal-error';
 
 export interface RunDelivery {
+  /** Web submission is local; IM publication is a separate best-effort reader. */
+  origin?: 'web';
   scope: string;
   chatId: string;
   replyTo: string;

@@ -107,6 +107,12 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   return { node, rows, requests, writes, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all, storage, browserWindow, settings, clipboard, fallbackCopy, body };
 }
 
+it('keeps the composer enabled at mobile width for a locally writable session',async()=>{
+  const h=harness();h.browserWindow.innerWidth=375;await h.ready();
+  h.requests[0]!.resolve(h.conversation(0));await h.settle();
+  expect(h.node('composer').hidden).toBe(false);expect(h.node('input').disabled).toBe(false);expect(h.node('send').disabled).toBe(false);
+});
+
 it('shows diagrams using local image URLs with zoom, downloads, source and failure fallback', async () => {
   const h = harness(); await h.ready();
   const source = 'flowchart TD\nA[开始]-->B[完成]', sections = [{ nodes: new WebMarkdown().parse('```mermaid\n' + source + '\n```') }];

@@ -10,6 +10,7 @@ import { isRetiredPrivateInput } from './auxiliary-private';
 import { startBridgeWeb } from '../web/server';
 import { loadWebConfig } from '../web/config';
 import { connectForLocalWeb } from '../web/offline-start';
+import { isWebInput } from '../web/input';
 import { createMessageQueue, retireQueueCards } from './message-queue';
 import { enqueuePersonalInput } from './intake-queue';
 import { PersonalSessionService, WebError } from '../web/service';
@@ -411,7 +412,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       });
       try {
         const drain = async () => {
-          const resolvedMode = await chatModeCache.resolve(channel, firstMsg.chatId);
+          const resolvedMode = batch.every(isWebInput) ? 'group' : await chatModeCache.resolve(channel, firstMsg.chatId);
           // Feishu/Lark converted topic groups may still resolve as `group` from
           // the chat info API/cache, while message events already carry threadId.
           // Treat threadId as authoritative for IM messages so scope and replies
@@ -704,12 +705,12 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const workerReplies: Awaited<ReturnType<typeof startWorkerReplies>>[] = [];
   const attached = new Set<string>();
   const attachWorker = async (tool: import('../tools/types').AgentTool) => {
-    if (!feishuConnected) return;
     const workerTool = tool.agent; const runtime = controls.workerRuntimes?.get(tool.id);
     if (!(workerTool instanceof DurableAgentAdapter) || !runtime || !sessionCatalog || !deps.appPaths?.profileDir) return;
     const scopedControls = controlsForTool(controls, tool.id);
     if (!attached.has(tool.id)) {
     const replies = await startWorkerReplies({
+      canPublish: () => feishuConnected && controls.ownerRefreshState !== 'failed',
       adapter: workerTool, channel, controls: scopedControls, sessions, catalog: sessionCatalog, activeRuns,
       statePath: join(deps.appPaths.profileDir, workerRepliesName(tool.id)),
       onReady: async jobs => {
@@ -718,6 +719,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         const busy = new Set(jobs.filter(isJobActive).map(job => job.options.delivery?.scope).filter((scope): scope is string => Boolean(scope)));
         for (const entry of pending.snapshot()) if (controls.toolBindings?.get(entry.scope)?.toolId === tool.id && !busy.has(entry.scope) && !activeRuns.get(entry.scope)) pending.unblock(entry.scope);
         for (const entry of runtime.inbox?.available() ?? []) {
+          if (!feishuConnected && !isWebInput(entry.message)) continue;
           const binding = controls.toolBindings?.get(entry.scope);
           if ((controls.auxiliary?.isAuxiliary(entry.scope) && !controls.auxiliary.isActive(entry.scope)) || binding?.toolId !== tool.id || binding.sourceId !== workerTool.client.sourceId || sessionCatalog.isScopeArchived(entry.scope)) {
             await runtime.inbox?.reject(entry.scope, [entry.message]); continue;
@@ -738,7 +740,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     runtime.replies = replies; workerReplies.push(replies); attached.add(tool.id);
     }
     const health = await workerTool.client.health().catch(() => undefined);
-    if (health?.capabilities?.conversation && !nativeSyncs.has(tool.id)) try {
+    if (feishuConnected && health?.capabilities?.conversation && !nativeSyncs.has(tool.id)) try {
     await migrateMirrorLedger(join(deps.appPaths.profileDir, `${tool.id}-turn-sync.json`), join(deps.appPaths.profileDir, `${tool.id}-native-turn-sync.json`), tool.id, tool.sourceId, sessionCatalog);
     nativeSyncs.set(tool.id, await startNativeTurnSync({
       channel, controls, catalog: sessionCatalog, toolId: tool.id, displayName: tool.label, sourceId: tool.sourceId,
@@ -750,11 +752,11 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         } } : {}) },
     }));
     } catch (error) { log.warn('worker', 'native-monitor-failed', { toolId: tool.id, error: String(error) }); }
-    if (health?.capabilities?.questions && !questionSyncs.has(tool.id)) try { questionSyncs.set(tool.id, await startWorkerQuestions({
+    if (feishuConnected && health?.capabilities?.questions && !questionSyncs.has(tool.id)) try { questionSyncs.set(tool.id, await startWorkerQuestions({
       channel, controls, catalog: sessionCatalog, tool, client: workerTool.client, profileDir: deps.appPaths.profileDir,
     }));
     } catch (error) { log.warn('worker', 'question-monitor-failed', { toolId: tool.id, error: String(error) }); }
-    if (health?.capabilities?.nativeSessionNames && !nameSyncs.has(tool.id)) try { nameSyncs.set(tool.id, await startWorkerNameSync({
+    if (feishuConnected && health?.capabilities?.nativeSessionNames && !nameSyncs.has(tool.id)) try { nameSyncs.set(tool.id, await startWorkerNameSync({
       channel, controls: { ...controls, toolRegistry: { all: () => [tool] } as import('../tools/types').ToolRegistry }, catalog: sessionCatalog,
       profileDir: deps.appPaths.profileDir,
     }));
@@ -809,7 +811,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
     procId: controls.processId,
   });
-  console.log(feishuConnected ? '正在监听消息。按 Ctrl+C 退出。\n' : '飞书暂不可用：本地 Web 只读模式，后台 worker 保持运行。\n');
+  console.log(feishuConnected ? '正在监听消息。按 Ctrl+C 退出。\n' : '飞书暂不可用：本地 Web 可聊天，飞书消息同步暂停。\n');
 
   if (deps.appPaths?.profileDir && controls.auxiliary && controls.auxiliaryApprovals) {
     try {
@@ -1250,6 +1252,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const agent = tool?.agent ?? primaryAgent;
   const executor = tool ? rootControls.executorForTool?.(toolId) ?? primaryExecutor : primaryExecutor;
   const batch = agent instanceof DurableAgentAdapter ? [...new Map(currentInputs.map(message => [messageRequestId(message), message])).values()] : currentInputs;
+  const webBatch = batch.length > 0 && batch.every(isWebInput);
   if (batch.length === 0) return;
   const firstMsg = batch[0];
   const lastMsg = batch[batch.length - 1];
@@ -1380,7 +1383,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // user's message. Otherwise the SDK posts at top level and the user's
   // topic discussion breaks visually.
   const sendOpts = {
-    replyTo: lastMsg.messageId,
+    replyTo: [...batch].reverse().find(message => !isWebInput(message))?.messageId ?? '',
     ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
   };
   log.info('flush', 'reply-target', {
@@ -1427,7 +1430,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
     ...(agent instanceof DurableAgentAdapter ? {
       requestKey: JSON.stringify([controls.profile, scope, batch.map(messageRequestId).sort()]),
-      delivery: { scope, chatId, replyTo: lastMsg.messageId, replyInThread: sendOpts.replyInThread,
+      delivery: { scope, chatId, replyTo: sendOpts.replyTo, replyInThread: sendOpts.replyInThread, ...(webBatch ? { origin: 'web' as const } : {}),
         operatorOpenId: firstMsg.senderId, policyFingerprint: '', botAppId: controls.profileConfig.accounts.app.id,
         sourceId: agent.client.sourceId, messageIds: batch.map(messageRequestId) },
       idleTimeoutMs: sessions.getIdleTimeoutMinutes(scope) !== undefined
@@ -1454,7 +1457,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       source: 'im',
       code: flow.rejectReason.code,
     });
-    if (!controls.workerInbox || await controls.workerInbox.notifyOnce(scope, batch)) await channel.send(chatId, {
+    if (!webBatch && (!controls.workerInbox || await controls.workerInbox.notifyOnce(scope, batch))) await channel.send(chatId, {
       markdown: flow.rejectReason.retryable && controls.workerInbox
         ? `${flow.rejectReason.userVisible}\n消息已保留，服务恢复后会自动重试。` : flow.rejectReason.userVisible,
     }, sendOpts);
@@ -1516,7 +1519,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         if (!recorded && !handle.detached) {
           if (event.retryable) controls.workerInbox?.defer(scope, batch);
           else await controls.workerInbox?.reject(scope, batch);
-          if (!controls.workerInbox || await controls.workerInbox.notifyOnce(scope, batch)) await channel.send(chatId, { markdown: `⚠️ ${event.message}` }, sendOpts);
+          if (!webBatch && (!controls.workerInbox || await controls.workerInbox.notifyOnce(scope, batch))) await channel.send(chatId, { markdown: `⚠️ ${event.message}` }, sendOpts);
         }
       }
     }

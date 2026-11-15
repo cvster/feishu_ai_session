@@ -20,6 +20,7 @@ import { DurableAgentAdapter } from './adapter';
 import { isJobActive, type WorkerJob } from './protocol';
 import { nativeSessionFields } from '../tools/definitions';
 import { sharedJobPersonalScope, namedSharedMessages } from './shared-history';
+import { messageRequestId } from './identity';
 
 interface ReplyDelivery extends CompletionDelivery {
   parts?: CardPart[];
@@ -42,6 +43,7 @@ interface ReplyDelivery extends CompletionDelivery {
   nativeRecovery?: { turnId: string; signature?: string; finished?: boolean };
 }
 export interface WorkerRepliesDeps {
+  canPublish?(): boolean;
   adapter: DurableAgentAdapter;
   channel: LarkChannel;
   controls: Controls;
@@ -122,6 +124,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
     }
     for (const job of [...jobs].sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))) {
       if (stopped || !job.options.delivery) continue;
+      if (deps.canPublish?.() === false) continue;
       try { await publish(job); } catch (error) { log.warn('worker-replies', 'publish-failed', { toolId: deps.adapter.id, jobId: job.id, error: error instanceof Error ? error.message : String(error) }); }
       try {
         const scope = sharedJobPersonalScope(deps.controls, deps.catalog, job);
@@ -143,7 +146,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
   async function publish(job: WorkerJob, mirror?: { scope: string; key: string; input: string }): Promise<void> {
     const source = job.options.delivery!;
     const target = mirror ? { ...source, scope: mirror.scope, chatId: mirror.scope, replyTo: '', replyInThread: false,
-      operatorOpenId: deps.controls.botOwnerId! } : source;
+      operatorOpenId: deps.controls.botOwnerId! } : { ...source };
     const ledgerKey = mirror?.key ?? job.id, messageKey = mirror?.key ?? `worker-reply:${job.id}`;
     if (mirror && sharedJobPersonalScope(deps.controls, deps.catalog, job) !== mirror.scope) return;
     if (deps.controls.auxiliary?.isAuxiliary(target.scope) && !deps.controls.auxiliary.isActive(target.scope)) return;
@@ -223,13 +226,15 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       deps.controls.toolBindings?.get(target.scope)?.nativeId === (init?.type === 'system' ? init.sessionId ?? init.threadId ?? binding.nativeId : binding.nativeId) &&
       deps.controls.toolBindings?.get(target.scope)?.sourceId === target.sourceId &&
       deps.controls.toolBindings?.get(target.scope)?.toolId === deps.adapter.id;
-    if (mirror) {
+    const webInput = !mirror && source.origin === 'web' ? deps.controls.workerInbox?.receipts(target.scope)
+      .filter(r => source.messageIds?.includes(messageRequestId(r.message))).map(r => r.message.content).join('\n\n') : undefined;
+    if (mirror || webInput) {
       if (!delivery.inputMessageId) {
         checkSendWindow(delivery.inputSendingSince, Date.now());
         delivery.inputSendingSince ??= Date.now(); await save();
         if (!active()) return;
         delivery.inputMessageId = await sendDeliveryMessage(deps.channel, { chatId: target.chatId }, 'text',
-          JSON.stringify({ text: `来自辅助群\n${mirror.input}` }), deliveryUuid(`${messageKey}:input`));
+          JSON.stringify({ text: mirror ? `来自辅助群\n${mirror.input}` : `来自网页\n${webInput}` }), deliveryUuid(`${messageKey}:input`));
         await save();
       }
       target.replyTo = delivery.inputMessageId;

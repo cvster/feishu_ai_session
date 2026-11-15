@@ -80,7 +80,8 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi
   const pending = new PendingQueue(5, (scope, batch) => {
     queued = (async () => {
       await h.client.submit({ requestKey: JSON.stringify([scope, batch.map(m => m.messageId)]), options: { ...h.options, sessionId: tool === 'codex' ? undefined : 'native', threadId: tool === 'codex' ? 'native' : undefined, initialSessionId: undefined,
-        prompt: batch.map(m => m.content).join('\n'), delivery: { ...h.options.delivery!, messageIds: batch.map(m => m.messageId) } } });
+        prompt: batch.map(m => m.content).join('\n'), delivery: { ...h.options.delivery!,
+          ...(batch.every(m => m.rawContentType === 'bridge_web') ? { origin: 'web' as const, replyTo: '' } : {}), messageIds: batch.map(m => m.messageId) } } });
       await inbox.reconcile(await h.client.list()); inbox.releaseQueued(scope, batch);
     })();
   }); cleanups.push(async () => { pending.cancelAll(); await queued; });
@@ -120,10 +121,13 @@ it('lists and reads local sessions after restart during Feishu quota exhaustion 
   const restarted = h.makeService(); await restarted.load();
   expect(restarted.ownerIdentity()).toBe('ou_owner');
   const rows = await restarted.list(); expect(rows.map(r=>r.id)).toEqual(original.map(r=>r.id));
-  expect(rows[0]!.canSend).toBe(false);
+  expect(rows[0]!.canSend).toBe(true);
   expect((await restarted.read(rows[0]!.id)).turns.length).toBeGreaterThan(0);
   expect(chat).not.toHaveBeenCalled();
-  await expect(restarted.send(rows[0]!.id,'offline-request-id-123','must not send')).rejects.toMatchObject({status:503});
+  await restarted.send(rows[0]!.id,'offline-request-id-123','local Web input');
+  await vi.waitFor(()=>expect(h.calls).toHaveLength(1));
+  expect(h.calls[0]!.prompt).toBe('local Web input');
+  expect(h.create).not.toHaveBeenCalled();
   h.controls.ownerRefreshError = 'permission denied'; expect(()=>restarted.ownerIdentity()).toThrow();
 });
 
@@ -335,10 +339,11 @@ it.each(['codex', 'zcode', 'kilo'] as const)('syncs Web/group/native messages th
   expect(rows[0]).toMatchObject({ tool: 'Tool from manifest', project: 'project', canSend: true, canRename: true });
   const input = { requestId: 'web-unique-request-01', text: '/exit is plain user input here' };
   const [a, b] = await Promise.all([h.request('/api/sessions/' + id + '/send', input), h.request('/api/sessions/' + id + '/send', input)]);
-  expect([a.status, b.status]).toEqual([202, 202]); expect(h.create).toHaveBeenCalledOnce(); expect(h.enqueue).toHaveBeenCalledOnce();
-  expect(JSON.parse((h.create.mock.calls[0] as any)[0].data.content)).toEqual({ text: '来自网页\n' + input.text });
+  expect([a.status, b.status]).toEqual([202, 202]); expect(h.create).not.toHaveBeenCalled(); expect(h.enqueue).toHaveBeenCalledOnce();
   await vi.waitFor(() => expect(h.calls).toHaveLength(1)); expect(h.calls[0]?.prompt).toBe(input.text);
-  await h.replies.runNow(); expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls)).toContain('before restart');
+  await h.replies.runNow(); expect(h.create).toHaveBeenCalledOnce();
+  expect(JSON.parse((h.create.mock.calls[0] as any)[0].data.content)).toEqual({ text: '来自网页\n' + input.text });
+  expect(JSON.stringify(vi.mocked(h.channel.updateCardById).mock.calls)).toContain('before restart');
   const abort = new AbortController(); const response = await fetch(h.web.url + '/api/events?session=' + id, { signal: abort.signal });
   const reader = response.body!.getReader(); let streamed = '';
   await vi.waitFor(async () => { if (!streamed.includes('before restart')) streamed += new TextDecoder().decode((await reader.read()).value); expect(streamed).toContain('before restart'); });
@@ -377,11 +382,12 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('uses live g
   await h.names.stop();
   const service = h.makeService(); await service.load();
   expect((await service.list())[0]).toMatchObject({ name: 'AA-实际群名', updatedAtMs: h.native.updatedAtMs });
-  // A transient Feishu failure retains the last confirmed group title.
+  // A transient Feishu failure retains the title without blocking local input.
   vi.mocked(h.channel.rawClient.im.v1.chat.get).mockRejectedValueOnce(new Error('temporary lookup failure'));
-  await expect(service.send((await service.list())[0]!.id, 'group-read-failure-01', 'test')).rejects.toMatchObject({ status: 503 });
-  expect((await service.list())[0]).toMatchObject({ name: 'AA-实际群名', online: false });
-  expect(h.enqueue).not.toHaveBeenCalled();
+  const now=Date.now(),clock=vi.spyOn(Date,'now').mockReturnValue(now+15_001);
+  try { expect((await service.list())[0]).toMatchObject({ name: 'AA-实际群名', online: true, canSend:true, canRename:false }); } finally {clock.mockRestore();}
+  await service.send((await service.list())[0]!.id, 'group-read-failure-01', 'test');
+  expect(h.enqueue).toHaveBeenCalledOnce();
 });
 
 it('serves the exact group avatar PNGs for every tool and rejects unknown assets', async () => {
@@ -437,13 +443,13 @@ it('returns phase/count summaries for native and bridge turns without private de
   for (const detail of ['private-thought', 'PrivateTool', 'private-command', 'private-tool-id']) expect(JSON.stringify(finished)).not.toContain(detail);
 });
 
-it.each([{ code: 232017, data: { name: '错误返回名', chat_mode: 'group' } }, { code: 0, data: { name: '未确认群模式' } }])('keeps the confirmed title and disables writes on an invalid group response: %j', async response => {
+it.each([{ code: 232017, data: { name: '错误返回名', chat_mode: 'group' } }, { code: 0, data: { name: '未确认群模式' } }])('keeps the confirmed title and permits local input on an invalid group response: %j', async response => {
   const h = await harness(); await h.names.stop();
   const id = (await h.service.list())[0]!.id;
   vi.mocked(h.channel.rawClient.im.v1.chat.get).mockResolvedValueOnce(response as any);
-  await expect(h.service.send(id, 'invalid-group-response-01', 'test')).rejects.toMatchObject({ status: 503 });
-  expect((await h.service.list())[0]).toMatchObject({ name: 'AA-web', online: false });
-  expect(h.enqueue).not.toHaveBeenCalled();
+  const now=Date.now(),clock=vi.spyOn(Date,'now').mockReturnValue(now+15_001);
+  try { expect((await h.service.list())[0]).toMatchObject({ name: 'AA-web', online:true,canSend:true,canRename:false }); } finally {clock.mockRestore();}
+  await h.service.send(id, 'invalid-group-response-01', 'test');expect(h.enqueue).toHaveBeenCalledOnce();
 });
 
 it('refreshes a changed group title after 15 seconds and publishes it through SSE', async () => {
@@ -547,14 +553,33 @@ it('retains offline routes but excludes shared, archived and changed-account rou
   await expect(h.service.read(id)).rejects.toMatchObject({ status: 404 });
 });
 
-it('recovers an ambiguous group post with its UUID and never enqueues after binding changed', async () => {
+it('continues Web input and output when Feishu mirroring fails and retries only the IM publication',async()=>{
+  const h=await harness('codex');const row=(await h.service.list())[0]!;
+  h.create.mockRejectedValue(new Error('Feishu quota exceeded'));
+  await h.service.send(row.id,'web-im-failure-request-01','independent input');
+  await vi.waitFor(()=>expect(h.calls).toHaveLength(1));
+  await h.replies.runNow();expect((await h.service.read(row.id)).turns.some(t=>t.input==='independent input'&&t.answer.includes('before restart'))).toBe(true);
+  const uuid=(h.create.mock.calls[0]![0] as any).data.uuid;
+  h.create.mockResolvedValue({code:0,data:{message_id:'om_restored'}});await h.replies.runNow();
+  expect((h.create.mock.calls.at(-1)![0] as any).data.uuid).toBe(uuid);expect(h.calls).toHaveLength(1);
+});
+
+it('submits Web input without waiting for Feishu chat lookup, even after the list cache expires',async()=>{
+  const h=await harness();const row=(await h.service.list())[0]!;
+  const get=vi.mocked(h.channel.rawClient.im.v1.chat.get);get.mockClear();get.mockImplementation(async()=>{throw Error('chat lookup must not run during local send');});
+  const now=Date.now(),clock=vi.spyOn(Date,'now').mockReturnValue(now+60_000);
+  try {await h.service.send(row.id,'web-no-chat-lookup-123','local input');expect(get).not.toHaveBeenCalled();}finally{clock.mockRestore();}
+});
+
+it('recovers a lost local enqueue acknowledgement with the same message id and rejects changed bindings', async () => {
   const h = await harness(); const id = (await h.service.list())[0]!.id;
-  h.create.mockRejectedValueOnce(new Error('ack lost'));
+  h.enqueue.mockImplementationOnce(async message => { await enqueuePersonalInput({agent:h.adapter,controls:h.controls,activeRuns:h.activeRuns,pending:h.pending,scope:message.chatId,msg:message}); throw new Error('ack lost'); });
   await expect(h.service.send(id, 'ambiguous-request-1', 'hello')).rejects.toThrow('ack lost');
   await h.service.send(id, 'ambiguous-request-1', 'hello');
-  expect((h.create.mock.calls[0] as any)[0].data.uuid).toBe((h.create.mock.calls[1] as any)[0].data.uuid); expect(h.enqueue).toHaveBeenCalledOnce();
-  h.create.mockImplementationOnce(async () => { h.catalog.archiveScope('oc_group', 'native'); return { code: 0, data: { message_id: 'om_late' } }; });
-  await expect(h.service.send(id, 'rebound-request-02', 'another')).rejects.toMatchObject({ status: 409 }); expect(h.enqueue).toHaveBeenCalledOnce();
+  expect(h.enqueue.mock.calls[0]![0].messageId).toBe(h.enqueue.mock.calls[1]![0].messageId); expect(h.create).not.toHaveBeenCalled();
+  await vi.waitFor(()=>expect(h.calls).toHaveLength(1));
+  h.catalog.archiveScope('oc_group','native');
+  await expect(h.service.send(id, 'rebound-request-02', 'another')).rejects.toMatchObject({ status: 404 }); expect(h.enqueue).toHaveBeenCalledTimes(2);
 });
 
 it('requires cookie auth and same origin, revokes on owner/config changes, and does not reveal tool secrets', async () => {
@@ -1218,7 +1243,7 @@ it('updates native reply queue rows after the controls without sending a separat
     const sends = h.create.mock.calls.length, cards = vi.mocked(h.channel.createCard).mock.calls.length;
     const session = (await h.service.list())[0]!;
     await h.service.send(session.id, 'native-queue-request-123', 'pending native followup');
-    const afterSend = h.create.mock.calls.length; expect(afterSend).toBe(sends + 1); // The Web input, not a queue card.
+    const afterSend = h.create.mock.calls.length; expect(afterSend).toBe(sends); // Queued input does not depend on an IM post.
     await mirror.runNow();
     expect(h.create).toHaveBeenCalledTimes(afterSend); expect(h.channel.createCard).toHaveBeenCalledTimes(cards);
     const card = vi.mocked(h.channel.updateCardById).mock.calls.at(-1)![1] as any;
@@ -1355,7 +1380,7 @@ it('returns durable send confirmations across restart and native read failures w
   expect((await restarted.read(session.id)).confirmedRequestIds).toContain(requestId);
   h.controls.botOwnerId = 'ou_new_owner';
   expect((await restarted.read(session.id)).confirmedRequestIds).not.toContain(requestId);
-  expect(h.create).toHaveBeenCalledOnce(); expect(h.calls).toHaveLength(0);
+  expect(h.create).not.toHaveBeenCalled(); expect(h.calls).toHaveLength(0);
 });
 
 it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('loads inline %s settings and refreshes models through authenticated common commands', async tool => {

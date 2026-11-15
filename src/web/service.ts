@@ -25,6 +25,7 @@ import { DEFAULT_MODEL, resolveModelArg, type ModelOption } from '../agent/model
 import { cachedModelChoices, modelCachePath } from '../agent/model-cache';
 import { isStorableModel } from '../agent/defaults';
 import { migrateWebOwner, ownerApiUnavailable, validWebOwner, type WebOwnerCache } from './owner-cache';
+import { WEB_INPUT_TYPE } from './input';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
@@ -266,8 +267,8 @@ export class PersonalSessionService {
     const binding = this.bindings().find(([bound]) => bound === scope)?.[1];
     await Promise.all([tool && this.readTool(tool), binding && this.readGroup(scope, binding)]);
   }
-  async list(): Promise<WebSession[]> {
-    this.owner(); await this.refresh(); const owner = this.owner();
+  async list(localSnapshot = false): Promise<WebSession[]> {
+    this.owner(); if (!localSnapshot) await this.refresh(); const owner = this.owner();
     return this.bindings().flatMap(([scope, b]) => {
       if (this.deps.controls.auxiliary?.isAuxiliary(scope) || ['topic', 'p2p'].includes(this.groups.get(scope)?.mode ?? '')) return [];
       // A not-yet-started session is only shown while its group is confirmed.
@@ -281,7 +282,7 @@ export class PersonalSessionService {
       // Project ownership is stable even when the tool changes cwd while executing.
       const cwd = normalize(this.deps.cwdFor?.(scope) ?? catalog?.cwdRealpath ?? row?.cwd ?? '.');
       const groupAvailable = this.groups.get(scope)?.mode === 'group';
-      const online = (groupAvailable || (this.feishuUnavailable() && b.nativeCreated !== false)) && meta?.online === true && !!tool && tool.sourceId === b.sourceId && (!!row || b.nativeCreated === false);
+      const online = (groupAvailable || b.nativeCreated !== false) && meta?.online === true && !!tool && tool.sourceId === b.sourceId && (!!row || b.nativeCreated === false);
       const group = this.groups.get(scope);
       // A confirmed name sync may be newer than our 15-second group snapshot.
       const name = group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
@@ -294,20 +295,23 @@ export class PersonalSessionService {
       return [{ id: this.identity(scope, b), scope, toolId: b.toolId, tool: meta?.label ?? b.toolId,
         updatedAtMs,
         favorite: this.favorites[hash(JSON.stringify([owner, this.identity(scope, b)]))] === owner, cwd, project: cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd, name: name ?? row?.name ?? b.nativeId!, online,
-        canSend: online && groupAvailable && meta?.capabilities?.jobs.submit === true,
+        canSend: online && meta?.capabilities?.jobs.submit === true,
         canRename: this.groups.get(scope)?.mode === 'group',
         nativeConversation: meta?.capabilities?.conversation === true }];
     });
   }
-  private async resolve(id: string, write = false) {
+  private async resolve(id: string, write = false, localWrite = false) {
     this.owner();
     // Only this session's own facts need to be fresh; a full refresh here made every
     // send and every control wait for unrelated workers and groups.
     if (write) {
       const entry = this.bindings().find(([scope, b]) => this.identity(scope, b) === id);
-      if (entry) await this.refreshSession(entry[1].toolId, entry[0]);
+      if (entry) {
+        if (localWrite) await this.refreshTool(entry[1].toolId);
+        else await this.refreshSession(entry[1].toolId, entry[0]);
+      }
     }
-    const session = (await this.list()).find(s => s.id === id);
+    const session = (await this.list(localWrite)).find(s => s.id === id);
     if (!session) throw new WebError(404, '会话已归档、群已失效或绑定已变化');
     const b = this.deps.controls.toolBindings!.get(session.scope)!;
     const tool = this.deps.controls.toolRegistry?.find(b.toolId);
@@ -352,7 +356,6 @@ export class PersonalSessionService {
     return { requestId, status: receipt.queued === false ? 'submitted' : 'queued', queuedMessages: this.queuedFor(scope) };
   }
   async send(id: string, requestId: string, text: string) {
-    this.requireFeishuWrite();
     if (!/^[\w-]{16,120}$/.test(requestId) || !text.trim() || text.length > 16_000) throw new WebError(400, '需要唯一请求 ID 和 1–16000 字文本');
     return this.serial('send:' + requestId, async () => {
       const owner = this.owner(), fingerprint = hash(JSON.stringify([id, owner, text]));
@@ -362,23 +365,18 @@ export class PersonalSessionService {
         const { session } = await this.resolve(id); this.assertBinding(id, session.scope);
         return this.sendResult(session.scope, requestId, old);
       }
-      const { session } = await this.resolve(id, true);
+      const { session } = await this.resolve(id, true, true);
       if (!session.canSend) throw new WebError(503, '此会话不可发送');
-      if (await this.deps.channel.getChatMode(session.scope) !== 'group') throw new WebError(409, '群已转为话题模式');
       const receipt = this.receipts[requestId] ??= { fingerprint, sessionId: id, scope: session.scope, owner, createdAt: Date.now(), queued: this.conversations.get(id)?.turns.some(turn => ['running', 'accepted', 'waiting_input', 'submitted'].includes(turn.status)) ?? false };
       if (receipt.enqueued) return this.sendResult(session.scope, requestId, receipt);
       await this.save(); this.assertBinding(id, session.scope);
       if (!receipt.messageId) {
-        if (Date.now() - receipt.createdAt > 55 * 60_000) throw new WebError(409, '发送结果未确认且已超过去重窗口，请检查群消息');
-        const response = await this.deps.channel.rawClient.im.v1.message.create({ params: { receive_id_type: 'chat_id' }, data: {
-          receive_id: session.scope, msg_type: 'text', content: JSON.stringify({ text: `来自网页\n${text}` }), uuid: hash(fingerprint + requestId).slice(0, 48),
-        } });
-        if (response.code || !response.data?.message_id) throw new WebError(502, '群消息发送未确认；重试会复用请求 ID');
-        receipt.messageId = response.data.message_id; await this.save();
+        receipt.messageId = 'web_' + hash(fingerprint + requestId); await this.save();
       }
       this.assertBinding(id, session.scope);
+      if (this.owner() !== owner) throw new WebError(409, '所有者已变化');
       const disposition = await this.deps.enqueue({ messageId: receipt.messageId, chatId: session.scope, chatType: 'group', senderId: owner,
-        createTime: receipt.createdAt, content: text, resources: [], mentions: [], mentionAll: false, mentionedBot: true, rawContentType: 'text' });
+        createTime: receipt.createdAt, content: text, resources: [], mentions: [], mentionAll: false, mentionedBot: true, rawContentType: WEB_INPUT_TYPE });
       if (disposition) receipt.queued = disposition.queued;
       receipt.enqueued = true; await this.save();
       return this.sendResult(session.scope, requestId, receipt);
@@ -435,7 +433,7 @@ export class PersonalSessionService {
     });
   }
   async control(id: string, action: string, values?: unknown) {
-    if (action !== 'refresh') this.requireFeishuWrite();
+    if (!['refresh', 'stop', 'config'].includes(action)) this.requireFeishuWrite();
     return this.serial('control:' + id, async () => {
       if (action === 'finish' || action === 'config') {
         const owner = this.owner(), entry = this.bindings().find(([scope, b]) => this.identity(scope, b) === id);

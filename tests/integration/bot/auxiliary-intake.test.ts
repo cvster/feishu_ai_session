@@ -1,6 +1,8 @@
 import { startWorkerServer } from '../../../src/worker/server';
 import { WorkerClient } from '../../../src/worker/client';
 import { join } from 'node:path';
+import { createServer } from 'node:net';
+import { configureWeb } from '../../../src/web/config';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { EventMap, NormalizedMessage } from '@larksuite/channel';
@@ -24,12 +26,13 @@ import { log } from '../../../src/core/logger';
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const f of cleanups.splice(0).reverse()) await f(); vi.restoreAllMocks(); });
 const originalId = '11111111-1111-4111-8111-111111111111';
-async function harness(status: 'pending' | 'active' = 'active', twoGroups = false) {
+async function harness(status: 'pending' | 'active' = 'active', twoGroups = false, offlineWeb = false) {
   const tmp = await createTmpProfile('aux-intake-'); cleanups.push(() => tmp.cleanup());
   const home = join(tmp.profile, 'codex-home'); await mkdir(home);
   const history = join(home, `${originalId}.jsonl`); await writeFile(history, 'source');
   const source = { toolId: 'codex' as const, sourceId: home, nativeId: originalId, historyPath: history };
   const bindings = new ToolBindingStore(join(tmp.profile, 'tool-bindings.json')); await bindings.load();
+  if (offlineWeb) bindings.set('oc_web', {toolId:'codex',sourceId:home,nativeId:originalId,nativeCreated:true,name:'AA-Web-offline'});
   if (status === 'active') {
     bindings.set('aux_shared', { toolId: 'codex', sourceId: home, name: 'FF-原会话', nativeCreated: false, linkedSource: source });
     bindings.linkAuxiliary('oc_aux', 'aux_shared');
@@ -44,7 +47,8 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
   const channel = createFakeChannel(); const handlers: Partial<Pick<EventMap, 'message' | 'cardAction'>> = {};
   const download = vi.fn(async () => { throw new Error('must not download'); });
   mock.channel = Object.assign(channel, { botIdentity: { openId: 'ou_bot', name: '示例助手' },
-    on: (h: typeof handlers) => Object.assign(handlers, h), connect: async () => {}, disconnect: async () => {},
+    on: (h: typeof handlers) => Object.assign(handlers, h), connect: async () => { if(offlineWeb) throw Object.assign(new Error('quota exceeded'),{response:{status:429}}); }, disconnect: async () => {},
+    ...(offlineWeb ? {getAppInfo:async()=>{throw new Error('Request failed with status code 429');}} : {}),
     getChatMode: async () => 'topic', getConnectionStatus: () => ({ state: 'connected', reconnectAttempts: 0 }),
     listChats: async () => [], getChatInfo: async () => ({ name: '讨论' }),
     addReaction: async () => 'reaction', removeReaction: async () => {}, downloadResourceToFile: download,
@@ -65,6 +69,7 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
   agent.run = opts => ({ runId: opts.runId, stop: async () => {}, waitForExit: async () => true, events: { async *[Symbol.asyncIterator]() {
     await submit(opts);
     yield { type: 'system' as const, threadId: originalId, turnId: opts.runId, cwd: opts.cwd };
+    if (offlineWeb) yield {type:'text' as const,delta:'local worker reply'};
     yield { type: 'done' as const, threadId: originalId, terminationReason: 'normal' as const };
   } } });
   const stateDir = join(tmp.profile, 'workers', 'any-directory');
@@ -75,6 +80,13 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
   const records = async () => (await client.list()).map(job => ({ scope: job.options.delivery!.scope, replyTo: job.options.delivery!.replyTo, status: job.status }));
   const catalog = new SessionCatalog(join(tmp.profile, 'catalog.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
+  let webUrl='';
+  if(offlineWeb){
+    const socket=createServer();await new Promise<void>(resolve=>socket.listen(0,'127.0.0.1',resolve));
+    const port=(socket.address() as {port:number}).port;await new Promise<void>(resolve=>socket.close(()=>resolve()));
+    await configureWeb(join(tmp.profile,'web.json'),'127.0.0.1',port);webUrl='http://127.0.0.1:'+port;
+    await writeFile(join(tmp.profile,'web-receipts.json'),JSON.stringify({version:1,receipts:{},favorites:{},webOwner:{version:1,profile:'codex',appId:'cli_test',ownerId:'ou_owner',verifiedAt:Date.now()-1}}));
+  }
   const bridge = await startChannel({ cfg: profile, controls, agent, sessions: new SessionStore(join(tmp.profile, 'sessions.json')),
     sessionCatalog: catalog, workspaces,
     appPaths: { profileDir: tmp.profile, mediaDir: join(tmp.profile, 'media'), secretsFile: join(tmp.profile, 'secret'), keystoreSaltFile: join(tmp.profile, 'salt') },
@@ -87,8 +99,23 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
   const cardAction = (cmd: string, chatId = 'oc_callback') => handlers.cardAction!({
     messageId: `om_${cmd}`, chatId, operator: { openId: 'ou_owner' }, action: { tag: 'button', value: { cmd } },
   });
-  return { controls, channel, submit, records, message, cardAction, download, history, memberGet, createGroup, catalog, workspaces, cwd: tmp.workspace, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
+  return { controls, channel, submit, records, message, cardAction, download, history, memberGet, createGroup, catalog, workspaces, webUrl, client, cwd: tmp.workspace, approvalsPath: join(tmp.profile, 'ff-approvals.json') };
 }
+it('executes authenticated Web input through the full bridge while Feishu is unavailable',async()=>{
+  const h=await harness('active',false,true);
+  const rows=await (await fetch(h.webUrl+'/api/sessions')).json() as {id:string;scope:string;canSend:boolean}[];
+  const row=rows.find(r=>r.scope==='oc_web')!;expect(row?.canSend).toBe(true);
+  const input={requestId:'full-offline-web-request-123',text:'offline local question'};
+  const send=()=>fetch(h.webUrl+'/api/sessions/'+row.id+'/send',{method:'POST',headers:{Origin:h.webUrl,'Content-Type':'application/json'},body:JSON.stringify(input)});
+  expect((await send()).status).toBe(202);expect((await send()).status).toBe(202);
+  await vi.waitFor(()=>expect(h.submit).toHaveBeenCalledOnce(),{timeout:10000});
+  expect(h.submit.mock.calls[0]![0].delivery).toMatchObject({origin:'web',replyTo:''});
+  expect(h.submit.mock.calls[0]![0].prompt).toContain(input.text);
+  await vi.waitFor(async()=>expect((await h.client.list())[0]?.status).toBe('completed'));
+  const result=await (await fetch(h.webUrl+'/api/sessions/'+row.id)).json() as {turns:{input:string;answer:string}[]};
+  expect(result.turns.some(t=>t.input===input.text&&t.answer==='local worker reply')).toBe(true);
+  expect(h.channel.sent).toHaveLength(0);expect(h.channel.streams).toHaveLength(0);
+});
 it.each(['stop', 'config', 'refresh', 'fork', 'finish'])('acknowledges %s before slow card processing and completes it once', async cmd => {
   const h = await harness();
   let release!: () => void;
