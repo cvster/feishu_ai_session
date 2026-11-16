@@ -28,11 +28,11 @@ it('keeps complete folded auxiliary answers without duplicating the preview or i
 
 it('keeps legacy card headings, columns, fields and Markdown literally, without traversing callbacks', () => {
   const literal = '```json\n{"schema":"2.0","body":{"elements":[]}}\n```\n\n[日志](https://example.com/log)';
-  const raw = { header: { title: { tag: 'plain_text', content: '检查结果' } }, elements: [
+  const raw = { config: { summary: { content: '已完成' } }, header: { title: { tag: 'plain_text', content: '检查结果' } }, elements: [
     { tag: 'column_set', columns: [{ tag: 'column', elements: [{ tag: 'div', fields: [{ text: { tag: 'lark_md', content: '电机正常' } }] }] }] },
     { tag: 'markdown', content: literal },
     { tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '重启' }, value: { secret: 'CALLBACK_SECRET' } }] },
-    { tag: 'interactive_container', behaviors: [{ type: 'callback', value: { secret: 'CALLBACK_SECRET' } }], elements: [{ tag: 'img', alt: { content: '停止' }, img_key: 'img_control' }] },
+    { tag: 'interactive_container', hover_tips: { tag: 'plain_text', content: '停止当前回复' }, behaviors: [{ type: 'callback', value: { secret: 'CALLBACK_SECRET' } }], elements: [{ tag: 'img', alt: { content: '停止' }, img_key: 'img_control' }] },
   ] };
   const output = project(raw);
   expect(output).toBe('<interactive_card>\n检查结果\n\n电机正常\n\n' + literal + '\n</interactive_card>');
@@ -44,6 +44,12 @@ it('keeps images from the actual content but does not expose button images or fo
     { tag: 'button', text: { tag: 'plain_text', content: '删除' }, img_key: 'img_control' },
     { tag: 'input', value: 'PRIVATE_FORM_VALUE' }]));
   expect(output).toBe('<interactive_card>\n![接线图](img_diagram)\n</interactive_card>');
+});
+
+it('keeps article text inside a third-party clickable container while omitting its callback metadata', () => {
+  const output = project({ ...card([{ tag: 'interactive_container', behaviors: [{ type: 'callback', value: { secret: 'PRIVATE_CALLBACK' } }],
+    elements: [{ tag: 'markdown', content: '报告摘要 [原文](https://example.com/report)' }] }]), config: { summary: { content: '已完成' } } });
+  expect(output).toBe('<interactive_card>\n报告摘要 [原文](https://example.com/report)\n</interactive_card>');
 });
 
 it('keeps data tables as readable contiguous Markdown', () => {

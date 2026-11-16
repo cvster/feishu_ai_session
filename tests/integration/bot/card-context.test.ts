@@ -8,7 +8,7 @@ const answer = '其余29个电机ID符合范围。\n颈部62/63未应答。\n\n`
 const source = { schema: '2.0', config: { summary: { content: '已完成' } }, body: { elements: [
   { tag: 'markdown', content: answer, element_id: '_16' },
   { tag: 'markdown', content: "<font color='green'>✅ 已完成 · 用时 18秒 · 最近更新 17:33:51 · 项目 a1</font>", element_id: '_15' },
-  { tag: 'column_set', columns: [{ tag: 'column', elements: [{ tag: 'interactive_container', behaviors: [{ type: 'callback', value: { cmd: 'stop', bridge_token: 'PRIVATE_CALLBACK' } }],
+  { tag: 'column_set', columns: [{ tag: 'column', elements: [{ tag: 'interactive_container', hover_tips: { tag: 'plain_text', content: '停止当前回复' }, behaviors: [{ type: 'callback', value: { cmd: 'stop', bridge_token: 'PRIVATE_CALLBACK' } }],
     elements: [{ tag: 'img', img_key: 'img_control', alt: { tag: 'plain_text', content: '停止当前回复' } }] }] }] },
 ] } };
 const item = (raw: unknown = source) => ({ message_id: 'om_reply', msg_type: 'interactive', body: { content: JSON.stringify(raw) },

@@ -2,9 +2,11 @@ export const INTERACTIVE_CARD_PLACEHOLDER = '[interactive card]';
 const MAX_CARD_CHARS = 1_000_000;
 const MAX_TEXT_CHARS = 60_000;
 const TEXT_TAGS = new Set(['plain_text', 'lark_md', 'markdown']);
-const CONTROL_TAGS = new Set(['action', 'button', 'interactive_container', 'input', 'select_static', 'select_person',
+const CONTROL_TAGS = new Set(['action', 'button', 'input', 'select_static', 'select_person',
   'multi_select_static', 'multi_select_person', 'date_picker', 'picker_time', 'picker_datetime', 'overflow', 'checker']);
 const BRIDGE_SUMMARIES = new Set(['已完成', '已中断', '已超时', '出错', '等待选择', '正在调用工具', '正在输出', '思考中']);
+const BRIDGE_CONTROLS = new Set(['停止当前回复', '本次任务已完成', '本次任务已结束', '刷新会话状态',
+  '模型与推理设置', '复制会话并创建新群', '归档会话（打开终止任务确认）']);
 type CardNode = Record<string, unknown>;
 
 /** Decode structural JSON strings, never JSON-looking text inside a Markdown node. */
@@ -74,6 +76,8 @@ export function expandInteractiveCard(flattenedContent: string, rawJsonContent: 
     }
     const node = object(value);
     if (!node || typeof node.tag === 'string' && CONTROL_TAGS.has(node.tag)) return;
+    if (bridge && node.tag === 'interactive_container' &&
+      BRIDGE_CONTROLS.has(textValue(node.hover_tips) || textValue(node.disabled_tips))) return;
     if (typeof node.tag === 'string' && TEXT_TAGS.has(node.tag)) {
       const content = typeof node.content === 'string' ? node.content : '';
       if (!bridge || !isRuntimeText(content)) add(content);

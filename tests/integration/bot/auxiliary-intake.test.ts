@@ -184,7 +184,7 @@ it('keeps only quoted card text in a real auxiliary worker submission while reta
   const card = { schema: '2.0', config: { summary: { content: '已完成' } }, body: { elements: [
     { tag: 'markdown', content: '29个电机ID正常，颈部62/63未应答。' },
     { tag: 'markdown', content: "<font color='green'>✅ 已完成 · 用时 18秒 · 最近更新 17:33:51</font>" },
-    { tag: 'interactive_container', behaviors: [{ type: 'callback', value: { private: 'PRIVATE_CALLBACK' } }],
+    { tag: 'interactive_container', hover_tips: { tag: 'plain_text', content: '停止当前回复' }, behaviors: [{ type: 'callback', value: { private: 'PRIVATE_CALLBACK' } }],
       elements: [{ tag: 'img', img_key: 'img_control' }] },
   ] } };
   h.channel.fetchRawMessage = async () => [{ message_id: 'om_previous', msg_type: 'interactive', body: { content: JSON.stringify(card) } }] as any;
