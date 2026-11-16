@@ -14,6 +14,7 @@ export async function enqueuePersonalInput({ agent, controls, activeRuns, pendin
 }): Promise<{ queued: boolean }> {
   let queued = pending.isBlocked(scope) || !!activeRuns.get(scope) || pending.snapshot().some(row => row.scope === scope && row.messages.length > 0);
   if (agent instanceof DurableAgentAdapter) {
+    const workerQueue=(await agent.client.health().catch(()=>undefined))?.capabilities?.jobs.persistentQueue===true;
     try {
       const id = messageRequestId(msg);
       const jobs = await agent.client.list();
@@ -25,7 +26,7 @@ export async function enqueuePersonalInput({ agent, controls, activeRuns, pendin
     } catch { /* Submission will fail closed if the worker remains unavailable. */ }
     if (controls.workerInbox && !await controls.workerInbox.receive(scope, msg)) return { queued };
     if (controls.workerInbox && !controls.workerInbox.markQueued(scope, msg)) return { queued };
-    if (activeRuns.get(scope)) pending.block(scope);
+    if (!workerQueue&&activeRuns.get(scope)) pending.block(scope);
   }
 
   if (activeRuns.newRunsPaused()) return { queued }; // durable pending will resume on reconnect

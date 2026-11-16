@@ -50,6 +50,37 @@ every 10 seconds and when opening the session panel. It can start with no worker
 
 ## Common routes
 
+Workers advertising `jobs.persistentQueue: true` accept `enqueue: true` in
+`WorkerSubmission`. Acceptance is fsynced before dispatch. The worker owns FIFO
+ordering per native conversation (and delivery scope), plus global concurrency;
+unrelated conversations can run in parallel. Clients without this opt-in retain
+the old busy-rejection behavior. The bridge retains only its intake outbox and
+short message debounce, not execution scheduling.
+
+- `POST /jobs/:id/stop` with `{ "queuedOnly": true }` cancels waiting work only;
+  it returns 409 once dispatched and never interrupts a running task by mistake.
+- A normal stop targets the current job; subsequent waiting jobs continue.
+- `POST /drain` stops intake/dispatch and reports active/queued counts. Existing
+  runs finish; restart only after `active` reaches zero for a lossless upgrade.
+  Graceful shutdown detaches observers when the adapter supports `detach` (native
+  execution continues); adapters without detach are stopped. Do not assume an
+  arbitrary provider's task survives worker replacement.
+- Undispatched accepted jobs resume after restart. Dispatched work is **never
+  replayed**. An uncertain native execution quarantines its conversation until
+  the exact recorded native turn is observed terminal. Unknown jobs are not
+  pruned while holding that quarantine.
+- `POST /jobs/:id/recover` with `{ "confirm": "<full job id>" }` is an explicit
+  operator acknowledgment, not retry. It requires a verified native conversation
+  with no running turns; missing/unavailable native status fails closed.
+
+Web routes live separately in `web-session-routes.json`, scoped to profile,
+application, tool, source and native ID. The Web directory reads worker native
+sessions; no Feishu group is required. Existing personal group IDs remain aliases
+for old bookmarks/history, and an optional group link is display/publication
+metadata only. Web-only rename/fork/archive/stop use worker APIs. Feishu-only
+group creation remains a distinct operation. A Web reply is mirrored to IM only
+when a matching real personal group exists; `web:*` is never used as a chat ID.
+
 | Method | Route | Request / result |
 | --- | --- | --- |
 | GET | `/health` | Identity, manifest, capabilities |

@@ -10,6 +10,7 @@ import { isJobActive, type WorkerJob, type WorkerSubmission, type WorkerSessionS
 import { handleWorkerToolRequest, workerCapabilities, readWorkerBody, WorkerApiError, type WorkerToolApi } from './tool-api';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { resolveRunReasoning } from './reasoning';
+import { PersistentScheduler } from './scheduler';
 
 const CLOSE_GRACE_MS = 5000;
 /** ~36 s: longer than the 30 s stale window of a SIGKILLed holder. */
@@ -21,11 +22,13 @@ export interface WorkerServerOptions {
   sourceId: string;
   botAppId: string;
   maxConcurrent?: number;
+  maxQueued?: number;
   sessions?: WorkerSessionService;
   manifest?: WorkerManifest;
   /** Diagnostic/test overrides; production probes stale observers conservatively. */
   livenessIntervalMs?: number;
   livenessGraceMs?: number;
+  recoveryIntervalMs?: number;
 }
 class HttpError extends WorkerApiError {
   constructor(status: number, message: string, retryable = status === 429 || status === 503) {
@@ -34,6 +37,7 @@ class HttpError extends WorkerApiError {
 }
 
 export async function startWorkerServer(options: WorkerServerOptions) {
+  for(const limit of [options.maxConcurrent??4,options.maxQueued??1000])if(!Number.isSafeInteger(limit)||limit<1)throw new Error('Worker queue limits must be positive integers');
   await mkdir(options.stateDir, { recursive: true, mode: 0o700 });
   const lockPath = join(options.stateDir, 'worker.lock');
   await writeFile(lockPath, '', { flag: 'a', mode: 0o600 });
@@ -44,20 +48,26 @@ export async function startWorkerServer(options: WorkerServerOptions) {
   const store = new JobStore(join(options.stateDir, 'jobs'));
   try { await store.load(); } catch (error) { await release(); throw error; }
   for (const job of store.list()) if (isJobActive(job)) {
+    if(job.status==='accepted'&&job.enqueue&&job.queue?.version===1&&!job.queue.dispatchedAt)continue;
     const terminal = store.snapshot(job.id)?.events.map(row => row.event).reverse().find(event => event.type === 'done' || event.type === 'error');
     if (terminal) {
       await store.put({ ...job, status: terminal.type === 'error' && terminal.submissionStatus === 'unknown' ? 'unknown' : terminal.type === 'done' && terminal.terminationReason === 'normal' ? 'completed' : terminal.terminationReason === 'interrupted' ? 'interrupted' : 'failed', updatedAt: Date.now() });
       continue;
     }
     // A crash may occur on either side of spawn. Never replay an uncertain request.
-    await store.append(job.id, { type: 'error', terminationReason: 'failed', message: '执行服务曾退出，任务状态无法确认；未自动重新执行。请检查已产生的操作。' });
-    await store.put({ ...job, status: 'unknown', updatedAt: Date.now(), error: 'worker-restarted' });
+    await store.append(job.id, { type: 'error', submissionStatus:'unknown', terminationReason: 'failed', message: '执行服务曾退出，任务状态无法确认；未自动重新执行。请检查已产生的操作。' });
+    const init=store.snapshot(job.id)?.events.map(r=>r.event).reverse().find(e=>e.type==='system'&&(e.threadId||e.sessionId));
+    const native=job.queue?.nativeId??(init?.type==='system'?init.threadId??init.sessionId:undefined)??job.options.threadId??job.options.sessionId??job.options.initialSessionId;
+    await store.put({ ...job, status: 'unknown', updatedAt: Date.now(), error: 'worker-restarted',
+      ...(native?{queue:{version:1 as const,sequence:job.queue?.sequence??job.createdAt,dispatchedAt:job.queue?.dispatchedAt??job.createdAt,recoveryPending:true,nativeId:native}}:{}) });
   }
   const runs = new Map<string, AgentRun>();
   const tasks = new Map<string, Promise<void>>();
   const stopped = new Set<string>();
+  const detaching = new Set<string>();
   const nativeLeases = new Set<string>();
   let closing = false;
+  let draining = false;
   let serial: Promise<unknown> = Promise.resolve();
   const exclusive = <T>(fn: () => Promise<T>): Promise<T> => {
     const task = serial.then(fn); serial = task.catch(() => {}); return task;
@@ -118,12 +128,24 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     let orphanConfirmations = 0;
     try {
       if (stopped.has(job.id)) { status = 'interrupted'; return; }
-      await options.agent.prepareRun?.(job.options);
-      const reasoning = await resolveRunReasoning(options.agent, options.sessions, job.options);
+      let runOptions=job.options;
+      if(!runOptions.sessionId&&!runOptions.threadId&&runOptions.delivery?.scope){
+        const previous=store.list().filter(j=>j.id!==job.id&&j.createdAt<=job.createdAt&&j.queue?.dispatchedAt&&j.options.delivery?.scope===runOptions.delivery!.scope&&j.options.delivery.sourceId===runOptions.delivery!.sourceId&&j.options.delivery.botAppId===runOptions.delivery!.botAppId&&(!runOptions.initialSessionId||j.options.initialSessionId===runOptions.initialSessionId)).sort((a,b)=>(b.queue?.sequence??b.createdAt)-(a.queue?.sequence??a.createdAt));
+        for(const prior of previous){
+          const init=store.snapshot(prior.id)?.events.map(r=>r.event).reverse().find(e=>e.type==='system'&&(e.sessionId||e.threadId));
+          if(init?.type==='system'){runOptions={...runOptions,initialSessionId:undefined,...(init.threadId?{threadId:init.threadId}:{sessionId:init.sessionId})};break;}
+        }
+      }
+      observedNative=runOptions.threadId??runOptions.sessionId??runOptions.initialSessionId;
+      if(observedNative)nativeLeases.add(observedNative);
+      await options.agent.prepareRun?.(runOptions);
+      const reasoning = await resolveRunReasoning(options.agent, options.sessions, runOptions);
       if (stopped.has(job.id) || closing) { status = 'interrupted'; return; }
       await persistStatus(job, 'running');
+      // stop/close may win while the running transition is being fsynced.
+      if(stopped.has(job.id)||closing){status='interrupted';return;}
       options.agent.setBotIdentity?.(job.botIdentity ?? { openId: '' });
-      run = options.agent.run({ ...job.options, runId: job.id, reasoningEffort: reasoning.nativeEffort }); runs.set(job.id, run);
+      run = options.agent.run({ ...runOptions, runId: job.id, reasoningEffort: reasoning.nativeEffort }); runs.set(job.id, run);
       await store.append(job.id, { type: 'system', requestedReasoningEffort: reasoning.requested,
         reasoningEffort: reasoning.nativeEffort ?? 'unavailable', ...(reasoning.model ? { model: reasoning.model } : {}) });
       if (run.checkLiveness && run.detach) {
@@ -194,6 +216,10 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       if (!terminal && recoveryEvent) {
         await store.append(job.id, recoveryEvent); terminal = true; status = 'unknown';
       }
+      if(!terminal&&detaching.has(job.id)){
+        await store.append(job.id,{type:'error',submissionStatus:'unknown',terminationReason:'failed',message:'执行服务已断开观察，原生任务未停止；等待核实结果。'});
+        terminal=true;status='unknown';
+      }
       if (!await run.waitForExit(5000)) await run.stop();
       if (!terminal && (stopped.has(job.id) || timeout)) status = 'interrupted';
     } catch (error) {
@@ -207,14 +233,19 @@ export async function startWorkerServer(options: WorkerServerOptions) {
       if (!terminal) await store.append(job.id, status === 'interrupted' || stopped.has(job.id) || timeout
         ? { type: 'done', terminationReason: timeout ? 'timeout' : 'interrupted' }
         : { type: 'error', terminationReason: 'failed', message: `${options.agent.displayName} 进程已退出，但未返回完整结果；未自动重新执行。` });
-      await persistStatus(job, status);
-      runs.delete(job.id); tasks.delete(job.id); stopped.delete(job.id);
+      if(status==='unknown')await store.put({...job,status,updatedAt:Date.now(),queue:{version:1,sequence:job.queue?.sequence??job.createdAt,dispatchedAt:job.queue?.dispatchedAt??job.createdAt,recoveryPending:true,...(observedNative?{nativeId:observedNative}:{})}});
+      else await persistStatus(job, status);
+      runs.delete(job.id); stopped.delete(job.id);detaching.delete(job.id);
       if (native) nativeLeases.delete(native);
       if (observedNative) nativeLeases.delete(observedNative);
     }
   };
+  const scheduler=new PersistentScheduler({store,active:tasks,limit:options.maxConcurrent??2,exclusive,execute,
+    blocked:job=>{const native=job.options.threadId??job.options.sessionId??job.options.initialSessionId;return !!native&&nativeLeases.has(native);},
+    onError:error=>log.warn('worker','scheduler-failed',{error:String(error)})});
+  let sequence=Math.max(0,...store.list().map(j=>j.queue?.sequence??0));
   const submit = async (input: WorkerSubmission): Promise<WorkerJob> => exclusive(async () => {
-    if (closing) throw new HttpError(503, '执行服务正在停止');
+    if (closing || draining) throw new HttpError(503, '执行服务正在停止接收新任务');
     validateSubmission(input);
     if (input.options.delivery && (input.options.delivery.sourceId !== options.sourceId || input.options.delivery.botAppId !== options.botAppId)) throw new HttpError(409, '执行服务的数据来源或飞书应用不匹配');
     const id = jobIdFor(input.requestKey), fingerprint = submissionFingerprint(input);
@@ -227,16 +258,42 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     if (delivery?.messageIds?.length && store.list().some(job => job.options.delivery?.scope === delivery.scope &&
       job.options.delivery?.messageIds?.some(id => delivery.messageIds!.includes(id)))) throw new HttpError(409, '消息已由原任务接收，未重复执行；请重新发送本次新增内容');
     const native = input.options.threadId ?? input.options.sessionId ?? input.options.initialSessionId;
-    if (tasks.size >= (options.maxConcurrent ?? 2)) throw new HttpError(429, '执行服务已达到并发上限');
-    if ((native && nativeLeases.has(native)) || store.list().some(job => isJobActive(job) && input.options.delivery && job.options.delivery?.scope === input.options.delivery.scope)) throw new HttpError(409, '该会话已有任务运行', true);
-    const job: WorkerJob = { ...input, options: { ...input.options, runId: id }, version: 1, id, fingerprint, status: 'accepted', createdAt: Date.now(), updatedAt: Date.now() };
+    if(!input.enqueue){
+      if (tasks.size >= (options.maxConcurrent ?? 2)) throw new HttpError(429, '执行服务已达到并发上限');
+      if ((native && nativeLeases.has(native)) || store.list().some(job => isJobActive(job) &&
+        ((native&&[job.options.threadId,job.options.sessionId,job.options.initialSessionId].includes(native))||
+          (input.options.delivery&&job.options.delivery?.scope===input.options.delivery.scope)))) throw new HttpError(409, '该会话已有任务运行', true);
+    }
+    if(store.list().filter(j=>j.status==='accepted'&&!j.queue?.dispatchedAt).length>=(options.maxQueued??1000))throw new HttpError(429,'持久化等待队列已满');
+    const job: WorkerJob = { ...input, options: { ...input.options, runId: id }, version: 1, id, fingerprint, status: 'accepted', createdAt: Date.now(), updatedAt: Date.now(),queue:{version:1,sequence:++sequence} };
     await store.put(job);
-    if (native) nativeLeases.add(native);
-    const task = Promise.resolve().then(() => execute(job)); tasks.set(id, task);
-    void task.catch(() => {}); // Persist errors in execute; failed disk writes remain visible on restart.
+    scheduler.kick();
     return job;
   });
   const token = randomBytes(32).toString('hex');
+  let recovering=false;
+  const recover=async()=>{
+    if(recovering||closing||!options.sessions?.conversation)return;
+    recovering=true;
+    try{for(const job of store.list().filter(j=>j.queue?.recoveryPending)){
+      const native=job.queue?.nativeId??job.options.threadId??job.options.sessionId??job.options.initialSessionId;
+      const turnIds=new Set(store.snapshot(job.id)?.events.flatMap(r=>r.event.type==='system'&&r.event.turnId?[r.event.turnId]:[])??[]);
+      if(!native||!turnIds.size)continue; // No exact proof: quarantine, never guess or replay.
+      try{
+        const snapshot=await options.sessions.conversation(native);
+        if(snapshot.id!==native)continue;
+        const turn=snapshot.turns.find(t=>turnIds.has(t.id));
+        if(!turn||turn.state.terminal==='running')continue;
+        await exclusive(async()=>{
+          const current=store.get(job.id);if(!current?.queue?.recoveryPending)return;
+          const status=turn.state.terminal==='done'?'completed':turn.state.terminal==='interrupted'?'interrupted':'failed';
+          await store.append(job.id,status==='failed'?{type:'error',terminationReason:'failed',message:'原生任务已结束，状态已核实'}:{type:'done',terminationReason:status==='completed'?'normal':'interrupted'});
+          await store.put({...current,status,updatedAt:Date.now(),queue:{...current.queue,recoveryPending:false},error:undefined});
+        });scheduler.kick();
+      }catch{/* Keep the native lease quarantined until authoritative evidence returns. */}
+    }}finally{recovering=false;}
+  };
+  const recoveryTimer=setInterval(()=>{void recover();},options.recoveryIntervalMs??10_000);recoveryTimer.unref();
   const server = createServer((req, res) => {
     // Keep-alive pollers would otherwise hold server.close() open indefinitely.
     if (closing) res.shouldKeepAlive = false;
@@ -256,12 +313,38 @@ export async function startWorkerServer(options: WorkerServerOptions) {
     if (req.method === 'POST' && url.pathname === '/jobs') {
       return reply(res, 200, await submit(await readWorkerBody(req, 2_000_000) as unknown as WorkerSubmission));
     }
-    const match = /^\/jobs\/([a-f0-9]{64})(\/stop)?$/.exec(url.pathname);
+    if(req.method==='POST'&&url.pathname==='/drain'){
+      await exclusive(async()=>{draining=true;scheduler.pause();});
+      return reply(res,200,{draining:true,active:tasks.size,queued:store.list().filter(j=>j.status==='accepted'&&!j.queue?.dispatchedAt).length});
+    }
+    const match = /^\/jobs\/([a-f0-9]{64})(\/(?:stop|recover))?$/.exec(url.pathname);
     if (!match || !store.get(match[1]!)) throw new HttpError(404, 'Task not found');
     const id = match[1]!;
-    if (req.method === 'POST' && match[2]) {
-      stopped.add(id); await runs.get(id)?.stop();
-      if (!tasks.has(id)) stopped.delete(id);
+    if(req.method==='POST'&&match[2]==='/recover'){
+      const body=await readWorkerBody(req,1024);
+      if(body.confirm!==id)throw new HttpError(400,'必须显式确认原任务已停止；不会重新执行原消息');
+      await exclusive(async()=>{
+        const job=store.get(id)!;if(!job.queue?.recoveryPending)throw new HttpError(409,'任务不处于待核实状态');
+        const native=job.queue.nativeId??job.options.threadId??job.options.sessionId??job.options.initialSessionId;
+        if(!native||!options.sessions?.conversation)throw new HttpError(409,'无法核实原生任务，请先恢复原生状态查询');
+        const snapshot=await options.sessions.conversation(native);
+        if(snapshot.id!==native||snapshot.turns.some(t=>t.state.terminal==='running'))throw new HttpError(409,'原生会话仍在运行或身份未确认，未释放队列');
+        await store.put({...job,updatedAt:Date.now(),queue:{...job.queue,recoveryPending:false},error:'operator-confirmed-no-replay'});
+      });scheduler.kick();return reply(res,200,{ok:true});
+    }
+    if (req.method === 'POST' && match[2]==='/stop') {
+      const body=req.headers['content-length']===undefined&&!req.headers['transfer-encoding']?{}:await readWorkerBody(req,1024);
+      let active:AgentRun|undefined;
+      await exclusive(async()=>{
+        const job=store.get(id)!;
+        if(job.status==='accepted'&&!job.queue?.dispatchedAt){
+          await store.append(id,{type:'done',terminationReason:'interrupted'});await persistStatus(job,'interrupted');return;
+        }
+        if(body.queuedOnly===true)throw new HttpError(409,'任务已开始执行，未停止当前任务');
+        if(job.queue?.recoveryPending)throw new HttpError(409,'正在核实重启前的任务，不能安全停止未知进程');
+        if(tasks.has(id)){stopped.add(id);active=runs.get(id);}
+      });
+      await active?.stop();scheduler.kick();
       return reply(res, 200, { ok: true });
     }
     if (req.method === 'GET' && !match[2]) {
@@ -277,13 +360,17 @@ export async function startWorkerServer(options: WorkerServerOptions) {
   const endpointFile = join(options.stateDir, 'endpoint.json');
   await writeFileAtomic(endpointFile, `${JSON.stringify({ version: 1, url: `http://127.0.0.1:${address.port}`, token, pid: process.pid })}\n`, { mode: 0o600 });
   await chmod(endpointFile, 0o600);
+  scheduler.kick();
+  void recover();
   return {
     store,
     async close(): Promise<void> {
       closing = true;
+      clearInterval(recoveryTimer);
+      scheduler.pause();await scheduler.idle();
       const closed = new Promise<void>(resolve => server.close(() => resolve())); server.closeIdleConnections();
-      for (const id of tasks.keys()) stopped.add(id);
-      await Promise.allSettled([...runs.values()].map(run => run.stop()));
+      for (const id of tasks.keys())if(runs.get(id)?.detach)detaching.add(id);else stopped.add(id);
+      await Promise.allSettled([...runs.entries()].map(([id,run])=>detaching.has(id)?run.detach!():run.stop()));
       await Promise.allSettled([...tasks.values()]);
       // In-flight requests get a short grace period; then drop what is left.
       const grace = setTimeout(() => server.closeAllConnections(), CLOSE_GRACE_MS); grace.unref();

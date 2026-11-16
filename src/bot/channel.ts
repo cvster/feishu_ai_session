@@ -11,6 +11,8 @@ import { startBridgeWeb } from '../web/server';
 import { loadWebConfig } from '../web/config';
 import { connectForLocalWeb } from '../web/offline-start';
 import { isWebInput } from '../web/input';
+import {WebRoutes,isWebScope} from '../web/routes';
+import {executionBinding,setExecutionBinding} from '../tools/execution-routes';
 import { createMessageQueue, retireQueueCards } from './message-queue';
 import { enqueuePersonalInput } from './intake-queue';
 import { PersonalSessionService, WebError } from '../web/service';
@@ -95,6 +97,7 @@ import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
 import { handleCommentMention } from './comments';
 import { recordRunSessionEvent, startRunFlow } from './run-flow';
+import { submitQueuedRunFlow } from './queued-run-flow';
 import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
@@ -264,6 +267,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     controls.defaultToolId = controls.profileConfig.agentKind;
     controls.toolBindings = new ToolBindingStore(join(deps.appPaths.profileDir, 'tool-bindings.json'));
     await controls.toolBindings.load();
+    controls.webRoutes=new WebRoutes(join(deps.appPaths.profileDir,'web-session-routes.json'),controls.profile,cfg.accounts.app.id);await controls.webRoutes.load();
+    for(const [scope,binding]of controls.webRoutes.entries())if(!workspaces.cwdFor(scope))workspaces.setCwd(scope,binding.cwd);
     controls.agentDefaults = new AgentDefaultStore(join(deps.appPaths.profileDir, 'agent-defaults.json'));
     await controls.agentDefaults.load();
     if (sessionCatalog) {
@@ -282,9 +287,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       if (!instance) {
         instance = new RunExecutor({
           agent: controls.toolRegistry!.get(id).agent, pool, activeRuns,
-          sessionNameForScope: scope => controls.toolBindings?.get(scope)?.name,
+          sessionNameForScope: scope => executionBinding(controls,scope)?.name,
           initialSessionIdForScope: scope => {
-            const binding = controls.toolBindings?.get(scope);
+            const binding = executionBinding(controls,scope);
             return binding?.nativeCreated === false ? binding.nativeId : undefined;
           },
           nativeSessionLocks,
@@ -716,16 +721,28 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       statePath: join(deps.appPaths.profileDir, workerRepliesName(tool.id)),
       onReady: async jobs => {
         if (disconnecting) return;
+        runtime.jobs=jobs;
+        const queuedWorker=(await workerTool.client.health()).capabilities?.jobs.persistentQueue===true;
         await runtime.inbox?.reconcile(jobs);
+        for(const job of jobs){
+          const delivery=job.options.delivery,binding=delivery&&executionBinding(controls,delivery.scope);
+          if(!delivery||!binding||binding.nativeCreated!==false||binding.toolId!==tool.id||binding.sourceId!==tool.sourceId||sessionCatalog.isScopeArchived(delivery.scope))continue;
+          const snapshot=await workerTool.client.snapshot(job.id);const event=snapshot.events.find(r=>r.event.type==='system'&&(r.event.threadId||r.event.sessionId))?.event;
+          if(event?.type!=='system')continue;const native=event.threadId??event.sessionId;if(!native)continue;
+          const cwd=job.options.cwd;if(!cwd)continue;
+          setExecutionBinding(controls,delivery.scope,{...binding,nativeId:native,nativeCreated:true});
+          sessionCatalog.upsertActive({preserveBinding:true,scopeId:delivery.scope,agentId:tool.id,cwdRealpath:cwd,policyFingerprint:delivery.policyFingerprint,botAppId:delivery.botAppId,...(toolDefinition(tool.id).nativeField==='threadId'?{threadId:native}:{sessionId:native})});
+          if(toolDefinition(tool.id).nativeField==='sessionId')sessions.set(delivery.scope,native,cwd);
+        }
         const busy = new Set(jobs.filter(isJobActive).map(job => job.options.delivery?.scope).filter((scope): scope is string => Boolean(scope)));
-        for (const entry of pending.snapshot()) if (controls.toolBindings?.get(entry.scope)?.toolId === tool.id && !busy.has(entry.scope) && !activeRuns.get(entry.scope)) pending.unblock(entry.scope);
+        for (const entry of pending.snapshot()) if (!queuedWorker&&controls.toolBindings?.get(entry.scope)?.toolId === tool.id && !busy.has(entry.scope) && !activeRuns.get(entry.scope)) pending.unblock(entry.scope);
         for (const entry of runtime.inbox?.available() ?? []) {
           if (!feishuConnected && !isWebInput(entry.message)) continue;
-          const binding = controls.toolBindings?.get(entry.scope);
+          const binding = executionBinding(controls,entry.scope);
           if ((controls.auxiliary?.isAuxiliary(entry.scope) && !controls.auxiliary.isActive(entry.scope)) || binding?.toolId !== tool.id || binding.sourceId !== workerTool.client.sourceId || sessionCatalog.isScopeArchived(entry.scope)) {
             await runtime.inbox?.reject(entry.scope, [entry.message]); continue;
           }
-          if (busy.has(entry.scope) || activeRuns.get(entry.scope)) continue;
+          if (!queuedWorker&&(busy.has(entry.scope) || activeRuns.get(entry.scope))) continue;
           if (runtime.inbox!.markQueued(entry.scope, entry.message)) pending.push(entry.scope, entry.message);
         }
       },
@@ -826,8 +843,14 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   if (deps.appPaths?.profileDir && controls.toolBindings) {
     const webControls = new WebSessionControls(async (scope, owner) => {
       if (disconnecting) throw new WebError(503, '桥接正在重连，请稍后重试');
+      const localControls=isWebScope(scope)?new Proxy(controls,{get(target,key,receiver){
+        if(key==='botOwnerId')return owner;
+        if(key==='ownerRefreshState')return 'ok';
+        if(key==='refreshOwner')return async()=>{};
+        return Reflect.get(target,key,receiver);
+      }}):controls;
       return { channel, scope, chatMode: 'group', sessions, sessionCatalog, workspaces, activeRuns, pending,
-        processPool: pool, agent, controls,
+        processPool: pool, agent, controls:localControls,
         msg: { messageId: 'web-control', chatId: scope, chatType: 'group', senderId: owner, content: '',
           resources: [], mentions: [], mentionedBot: true, mentionAll: false, rawContentType: 'interactive', createTime: Date.now() } };
     });
@@ -838,12 +861,14 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       cwdFor: scope => workspaces.cwdFor(scope),
       enqueue: async msg => {
         if (disconnecting) throw new WebError(503, '桥接正在重连，请稍后重试');
-        const binding = controls.toolBindings!.get(msg.chatId);
+        const binding = executionBinding(controls,msg.chatId);
         const tool = binding && controls.toolRegistry?.find(binding.toolId);
-        if (!binding || !isPersonalWorkgroup(msg.chatId, binding) || !tool || tool.sourceId !== binding.sourceId ||
+        if (!binding || (!isWebScope(msg.chatId)&&!isPersonalWorkgroup(msg.chatId, binding)) || !tool || tool.sourceId !== binding.sourceId ||
           sessionCatalog?.isScopeArchived(msg.chatId)) throw new WebError(409, '会话绑定已失效');
         const scoped = controlsForTool(controls, binding.toolId, msg.chatId);
-        if (!canUseGroup(scoped.profileConfig, scoped, msg.chatId, msg.senderId).ok) throw new WebError(403, '此群不在允许响应的范围内');
+        if (isWebScope(msg.chatId)){if(!isWebInput(msg)||msg.senderId!==service.ownerIdentity())throw new WebError(403,'网页身份已变化');}
+        else if (!canUseGroup(scoped.profileConfig, scoped, msg.chatId, msg.senderId).ok) throw new WebError(403, '此群不在允许响应的范围内');
+        if(isWebScope(msg.chatId)){const route=controls.webRoutes!.get(msg.chatId)!;if(!workspaces.cwdFor(msg.chatId))workspaces.setCwd(msg.chatId,route.cwd);}
         return enqueuePersonalInput({ agent: tool.agent, controls: scoped, activeRuns, pending, scope: msg.chatId, msg });
       },
     });
@@ -928,6 +953,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         callbackNonceStore?.flush(),
         workspaces.flush(),
         controls.toolBindings?.flush(),
+        controls.webRoutes?.flush(),
         ...Array.from(controls.workerRuntimes?.values() ?? [], runtime => runtime.inbox.flush()),
         controls.auxiliaryApprovals?.flush(),
       ]);
@@ -1086,7 +1112,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const toolId = toolForScope(rootControls, scope);
   const controls = controlsForTool(rootControls, toolId, scope);
   const tool = rootControls.toolRegistry?.all().find(tool => tool.id === toolId);
-  const binding = rootControls.toolBindings?.get(scope);
+  const binding = executionBinding(rootControls,scope);
   if (binding && tool && binding.sourceId !== tool.sourceId) throw new Error('会话数据来源已变化，不能恢复到其他账户/目录');
   const agent = tool?.agent ?? primaryAgent;
   const executor = tool ? rootControls.executorForTool?.(toolId) ?? primaryExecutor : primaryExecutor;
@@ -1248,7 +1274,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const toolId = toolForScope(rootControls, scope);
   const controls = controlsForTool(rootControls, toolId, scope);
   const tool = rootControls.toolRegistry?.all().find(tool => tool.id === toolId);
-  const binding = rootControls.toolBindings?.get(scope);
+  const binding = executionBinding(rootControls,scope);
   if (binding && tool && binding.sourceId !== tool.sourceId) throw new Error('会话数据来源已变化，不能恢复到其他账户/目录');
   const agent = tool?.agent ?? primaryAgent;
   const executor = tool ? rootControls.executorForTool?.(toolId) ?? primaryExecutor : primaryExecutor;
@@ -1397,7 +1423,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   });
 
   const accessDecision =
-    firstMsg.chatType === 'p2p'
+    webBatch&&isWebScope(scope)?{ok:true as const,reason:'owner' as const}:firstMsg.chatType === 'p2p'
       ? canUseDm(controls.profileConfig, controls, firstMsg.senderId)
       : canUseGroup(controls.profileConfig, controls, firstMsg.chatId, firstMsg.senderId);
   const scopeContext: ScopeContext = {
@@ -1412,8 +1438,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     await commandSessionCatalogIdentity({ msg: firstMsg, scope, mode, workspaces, controls, access: accessDecision }));
   const flowInput = {
     scopeId: scope,
-    ...(controls.toolBindings?.get(scope)?.nativeCreated !== false && controls.toolBindings?.get(scope)?.nativeId ? {
-      nativeBinding: { nativeId: controls.toolBindings.get(scope)!.nativeId!, sourceId: controls.toolBindings.get(scope)!.sourceId },
+    sessionName:binding?.name,
+    initialSessionId:binding?.nativeCreated===false?binding.nativeId:undefined,
+    ...(binding?.nativeCreated !== false && binding?.nativeId ? {
+      nativeBinding: { nativeId: binding.nativeId, sourceId: binding.sourceId },
     } : {}),
     scope: scopeContext,
     prompt,
@@ -1444,7 +1472,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       stage: 'submit',
     },
   } satisfies Parameters<typeof startRunFlow>[0];
-  const flow = await startRunFlow(flowInput);
+  const queuedWorker=agent instanceof DurableAgentAdapter&&(await agent.client.health()).capabilities?.jobs.persistentQueue===true;
+  const flow = queuedWorker ? await submitQueuedRunFlow(flowInput,agent as DurableAgentAdapter) : await startRunFlow(flowInput);
   if (!flow.ok) {
     if (controls.workerInbox) {
       await controls.workerInbox.recordDiagnostic(scope, batch, flow.rejectReason.code,
@@ -1465,6 +1494,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     return;
   }
 
+  if('job' in flow){
+    const runtime=rootControls.workerRuntimes?.get(toolId);
+    if(runtime)runtime.jobs=[...(runtime.jobs??[]).filter(j=>j.id!==flow.job.id),flow.job];
+    await controls.workerInbox?.reconcile([flow.job]);return;
+  }
   const { execution, cwdRealpath: cwd } = flow;
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
   const handle = execution.handle;

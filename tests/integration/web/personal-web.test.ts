@@ -37,6 +37,7 @@ import { RUN_BUTTON_IMAGES, COMPLETED_STOP_IMAGE } from '../../../src/card/run-b
 import { WorkerApiError } from '../../../src/worker/tool-api';
 import type { WebConfig } from '../../../src/web/config';
 import { WebMarkdown } from '../../../src/web/markdown';
+import {WebRoutes,isWebScope} from '../../../src/web/routes';
 
 async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}, authoritative = false, archiveEffect?: 'delete') {
   const native = { nativeId: 'native', name: 'AA-web', cwd: '/project', createdAtMs: 1, updatedAtMs: 2, archived: false };
@@ -79,8 +80,9 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi
   let queued!: Promise<void>;
   const pending = new PendingQueue(5, (scope, batch) => {
     queued = (async () => {
-      await h.client.submit({ requestKey: JSON.stringify([scope, batch.map(m => m.messageId)]), options: { ...h.options, sessionId: tool === 'codex' ? undefined : 'native', threadId: tool === 'codex' ? 'native' : undefined, initialSessionId: undefined,
-        prompt: batch.map(m => m.content).join('\n'), delivery: { ...h.options.delivery!,
+      const nativeId=controls.webRoutes?.get(scope)?.nativeId??'native';
+      await h.client.submit({ requestKey: JSON.stringify([scope, batch.map(m => m.messageId)]), options: { ...h.options, sessionId: tool === 'codex' ? undefined : nativeId, threadId: tool === 'codex' ? nativeId : undefined, initialSessionId: undefined,
+        prompt: batch.map(m => m.content).join('\n'), delivery: { ...h.options.delivery!,scope,chatId:scope,
           ...(batch.every(m => m.rawContentType === 'bridge_web') ? { origin: 'web' as const, replyTo: '' } : {}), messageIds: batch.map(m => m.messageId) } } });
       await inbox.reconcile(await h.client.list()); inbox.releaseQueued(scope, batch);
     })();
@@ -111,6 +113,46 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi
   controls.workerRuntimes!.get(tool)!.replies = replies;
   return { ...h, bindings, agentDefaults, catalog, controls, sessions, pending, inbox, service, consoleService, makeService, makeConsole, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
 }
+
+it('lists native Web sessions without a Feishu binding and mutates them without IM APIs',async()=>{
+  const h=await harness('codex');await h.replies.stop();
+  const routes=new WebRoutes(join(h.dir,'web-routes.json'),'test','cli_test');await routes.load();h.controls.webRoutes=routes;
+  const unbound={...h.native,nativeId:'unbound-native',name:'AA-cffex-行情'};
+  h.provider.list.mockResolvedValue([h.native,unbound]);
+  h.controls.ownerRefreshState='failed';h.controls.ownerRefreshError='Request failed with status code 429';
+  const get=vi.mocked(h.channel.rawClient.im.v1.chat.get);get.mockClear();
+  const rows=await h.service.list(),row=rows.find(r=>r.name===unbound.name)!;
+  expect(row).toBeDefined();expect(isWebScope(row.scope)).toBe(true);expect(row.canSend).toBe(true);expect(row.feishuChatId).toBeUndefined();
+  expect(rows.find(r=>r.name===h.native.name)?.feishuChatId).toBe('oc_group');
+  expect(get).not.toHaveBeenCalled();
+  h.provider.rename.mockImplementation(async()=>{});
+  await h.service.rename(row.id,'renamed-native');expect(h.provider.rename.mock.calls[0]!.slice(0,2)).toEqual(['unbound-native','renamed-native']);expect(get).not.toHaveBeenCalled();
+  await h.service.send(row.id,'unbound-request-id-123','native-only Web');
+  await vi.waitFor(()=>expect(h.calls).toHaveLength(1));expect(h.calls[0]!.delivery?.scope).toBe(row.scope);expect(h.calls[0]!.threadId).toBe('unbound-native');expect(h.create).not.toHaveBeenCalled();
+  const restarted=new WebRoutes(join(h.dir,'web-routes.json'),'test','cli_test');await restarted.load();expect(restarted.get(row.scope)?.nativeId).toBe(unbound.nativeId);
+  expect(()=>restarted.set(row.scope,{...restarted.get(row.scope)!,nativeId:'replacement'})).toThrow('identity');
+  h.finish();
+});
+
+it('keeps old group URLs as aliases and forks/archives native Web sessions without group mutations',async()=>{
+  const h=await harness('codex');await h.replies.stop();
+  const old=(await h.service.list())[0]!;
+  const routes=new WebRoutes(join(h.dir,'web-routes.json'),'test','cli_test');await routes.load();h.controls.webRoutes=routes;
+  routes.ensure(h.controls.toolRegistry!.get('codex'),h.native);
+  const native=(await h.service.list())[0]!;expect(native.aliasIds).toContain(old.id);
+  expect((await h.service.read(old.id)).session.id).toBe(native.id);
+  await h.service.favorite(old.id,true);expect((await h.service.list())[0]!.favorite).toBe(true);
+  await h.service.favorite(native.id,false);expect((await h.service.list())[0]!.favorite).toBe(false);
+  const fork=await h.service.control(native.id,'fork');const forkButton=fork.elements.find(e=>e.kind==='button')!;
+  if(forkButton.kind!=='button')throw Error('Missing fork confirmation');
+  await h.service.control(native.id,forkButton.action);await h.service.control(native.id,forkButton.action);expect(h.provider.fork).toHaveBeenCalledOnce();
+  expect((await h.service.list()).some(r=>r.name==='AA-web（分叉）')).toBe(true);expect(h.create).not.toHaveBeenCalled();
+  const archive=await h.service.control(native.id,'finish');const archiveButton=archive.elements.find(e=>e.kind==='button')!;
+  if(archiveButton.kind!=='button')throw Error('Missing archive confirmation');
+  await h.service.control(native.id,archiveButton.action);expect(h.provider.archive).toHaveBeenCalledOnce();
+  expect(h.channel.rawClient.im.v1.chat.delete).not.toHaveBeenCalled();
+  await expect(h.service.read(native.id)).rejects.toMatchObject({status:404});
+});
 
 it('lists and reads local sessions after restart during Feishu quota exhaustion without new Feishu calls', async () => {
   const h = await harness('codex'); await h.replies.stop();

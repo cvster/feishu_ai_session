@@ -16,7 +16,7 @@ export interface WorkerToolApi {
   assertIdle(nativeId?: string): void;
 }
 export function workerCapabilities(api: Pick<WorkerToolApi, 'agent' | 'sessions'>): WorkerCapabilities {
-  return { apiVersion: 2, jobs: { submit: true, read: true, stop: true, eventCursor: true },
+  return { apiVersion: 2, jobs: { submit: true, read: true, stop: true, eventCursor: true, persistentQueue: true },
     models: typeof api.agent.listModels === 'function', reasoningMapping: true,
     sessions: { list: !!api.sessions, history: !!api.sessions,
       rename: !!api.sessions?.rename || typeof api.agent.renameSession === 'function',

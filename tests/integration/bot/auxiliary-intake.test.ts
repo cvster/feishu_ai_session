@@ -103,8 +103,8 @@ async function harness(status: 'pending' | 'active' = 'active', twoGroups = fals
 }
 it('executes authenticated Web input through the full bridge while Feishu is unavailable',async()=>{
   const h=await harness('active',false,true);
-  const rows=await (await fetch(h.webUrl+'/api/sessions')).json() as {id:string;scope:string;canSend:boolean}[];
-  const row=rows.find(r=>r.scope==='oc_web')!;expect(row?.canSend).toBe(true);
+  const rows=await (await fetch(h.webUrl+'/api/sessions')).json() as {id:string;scope:string;feishuChatId?:string;canSend:boolean}[];
+  const row=rows.find(r=>r.feishuChatId==='oc_web')!;expect(row?.canSend).toBe(true);
   const input={requestId:'full-offline-web-request-123',text:'offline local question'};
   const send=()=>fetch(h.webUrl+'/api/sessions/'+row.id+'/send',{method:'POST',headers:{Origin:h.webUrl,'Content-Type':'application/json'},body:JSON.stringify(input)});
   expect((await send()).status).toBe(202);expect((await send()).status).toBe(202);

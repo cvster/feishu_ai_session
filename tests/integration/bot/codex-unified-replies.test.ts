@@ -80,6 +80,7 @@ async function harness(late = false, restoredMedia = false) {
   const tmp = await createTmpProfile('codex-worker-channel-'); cleanups.push(() => tmp.cleanup());
   const channel = createFakeChannel(), handlers: { message?: (message: NormalizedMessage) => Promise<void> } = {};
   mock.channel = Object.assign(channel, { botIdentity: { openId: 'ou_bot', name: 'Bridge' }, connect: async () => {}, disconnect: async () => {},
+    getAppInfo:async()=>({ownerId:'ou_user'}),
     on: (h: typeof handlers) => Object.assign(handlers, h), getChatMode: async () => 'group', getConnectionStatus: () => ({ state: 'connected', reconnectAttempts: 0 }),
     listChats: async () => [], getChatInfo: async () => ({ name: 'test' }), addReaction: async () => 'reaction', removeReaction: async () => {},
     downloadResourceToFile: async () => { throw Error('expired attachment'); } });

@@ -17,10 +17,12 @@ import { PollHealth } from '../core/poll-health';
 import { publishCards, checkSendWindow, deliveryUuid, sendDeliveryMessage, type CardPart } from '../card/multipart';
 import { notifyCompletion, type CompletionDelivery } from '../bot/completion-notification';
 import { DurableAgentAdapter } from './adapter';
-import { isJobActive, type WorkerJob } from './protocol';
+import { isJobActive, isJobWaiting, type WorkerJob } from './protocol';
 import { nativeSessionFields } from '../tools/definitions';
 import { sharedJobPersonalScope, namedSharedMessages } from './shared-history';
 import { messageRequestId } from './identity';
+import {isWebScope} from '../web/routes';
+import {executionBinding} from '../tools/execution-routes';
 
 interface ReplyDelivery extends CompletionDelivery {
   parts?: CardPart[];
@@ -106,6 +108,8 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
   const health = new PollHealth('worker-replies', 'sync-unavailable', { toolId: deps.adapter.id });
   async function sync(): Promise<void> {
     const jobs = await deps.adapter.client.list();
+    // Intake/reconciliation must not wait behind an IM publish request.
+    if (!stopped) await deps.onReady?.(jobs);
     latestSharedReplies.clear();
     for (const job of jobs) {
       const scope = job.options.delivery?.scope, delivered = deliveries[job.id];
@@ -120,10 +124,10 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       const nativeId = job.options.threadId ?? job.options.sessionId ?? job.options.initialSessionId;
       if (scope) deps.controls.messageQueue?.observeReply?.(scope, `worker:${scope}:${job.id}`, job.createdAt,
         !!binding && binding.toolId === deps.adapter.id && binding.sourceId === job.options.delivery?.sourceId &&
-        (!nativeId || nativeId === binding.nativeId) && (isJobActive(job) || !!(deliveries[job.id]?.nativeRecovery && !deliveries[job.id]!.nativeRecovery!.finished)));
+        (!nativeId || nativeId === binding.nativeId) && (!isJobWaiting(job)&&isJobActive(job) || !!(deliveries[job.id]?.nativeRecovery && !deliveries[job.id]!.nativeRecovery!.finished)));
     }
     for (const job of [...jobs].sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))) {
-      if (stopped || !job.options.delivery) continue;
+      if (stopped || !job.options.delivery || isJobWaiting(job)) continue;
       if (deps.canPublish?.() === false) continue;
       try { await publish(job); } catch (error) { log.warn('worker-replies', 'publish-failed', { toolId: deps.adapter.id, jobId: job.id, error: error instanceof Error ? error.message : String(error) }); }
       try {
@@ -141,13 +145,16 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
         await publish(job, { scope, key, input });
       } catch (error) { log.warn('worker-replies', 'shared-mirror-failed', { toolId: deps.adapter.id, jobId: job.id, error: error instanceof Error ? error.message : String(error) }); }
     }
-    if (!stopped) await deps.onReady?.(jobs);
   }
   async function publish(job: WorkerJob, mirror?: { scope: string; key: string; input: string }): Promise<void> {
     const source = job.options.delivery!;
+    const webBinding=isWebScope(source.scope)?executionBinding(deps.controls,source.scope):undefined;
+    const webGroup=webBinding&&deps.controls.toolBindings?.activePersonalBindings().find(([,b])=>b.toolId===webBinding.toolId&&b.sourceId===webBinding.sourceId&&b.nativeId===webBinding.nativeId)?.[0];
+    if(isWebScope(source.scope)&&!webGroup)return; // A Web-only session never targets the IM API.
     const target = mirror ? { ...source, scope: mirror.scope, chatId: mirror.scope, replyTo: '', replyInThread: false,
-      operatorOpenId: deps.controls.botOwnerId! } : { ...source };
-    const ledgerKey = mirror?.key ?? job.id, messageKey = mirror?.key ?? `worker-reply:${job.id}`;
+      operatorOpenId: deps.controls.botOwnerId! } : webGroup?{...source,scope:webGroup,chatId:webGroup,replyTo:'',replyInThread:false}:{ ...source };
+    const webKey=webGroup?`web-reply:${job.id}:${deliveryUuid(webGroup)}`:undefined;
+    const ledgerKey = mirror?.key ?? webKey ?? job.id, messageKey = mirror?.key ?? webKey ?? `worker-reply:${job.id}`;
     if (mirror && sharedJobPersonalScope(deps.controls, deps.catalog, job) !== mirror.scope) return;
     if (deps.controls.auxiliary?.isAuxiliary(target.scope) && !deps.controls.auxiliary.isActive(target.scope)) return;
     const observer = recovered.get(job.id);
@@ -226,7 +233,7 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       deps.controls.toolBindings?.get(target.scope)?.nativeId === (init?.type === 'system' ? init.sessionId ?? init.threadId ?? binding.nativeId : binding.nativeId) &&
       deps.controls.toolBindings?.get(target.scope)?.sourceId === target.sourceId &&
       deps.controls.toolBindings?.get(target.scope)?.toolId === deps.adapter.id;
-    const webInput = !mirror && source.origin === 'web' ? deps.controls.workerInbox?.receipts(target.scope)
+    const webInput = !mirror && source.origin === 'web' ? deps.controls.workerInbox?.receipts(source.scope)
       .filter(r => source.messageIds?.includes(messageRequestId(r.message))).map(r => r.message.content).join('\n\n') : undefined;
     if (mirror || webInput) {
       if (!delivery.inputMessageId) {
@@ -324,8 +331,11 @@ export async function startWorkerReplies(deps: WorkerRepliesDeps) {
       nativeCache.delete(binding.nativeId); await runNow(); return result;
     },
     async stopScope(scope: string): Promise<boolean> {
-      const jobs = (await deps.adapter.client.list()).filter(job => isJobActive(job) &&
-        (job.options.delivery?.scope === scope || sharedJobPersonalScope(deps.controls, deps.catalog, job) === scope));
+      const binding=deps.controls.toolBindings?.get(scope);
+      const jobs = (await deps.adapter.client.list()).filter(job => isJobActive(job) && !isJobWaiting(job) &&
+        (job.options.delivery?.scope === scope || sharedJobPersonalScope(deps.controls, deps.catalog, job) === scope ||
+          !!binding&&isWebScope(job.options.delivery?.scope??'')&&job.options.delivery?.sourceId===binding.sourceId&&
+          (job.options.threadId??job.options.sessionId??job.options.initialSessionId)===binding.nativeId));
       await Promise.all(jobs.map(job => deps.adapter.client.stop(job.id))); return jobs.length > 0;
     },
     async stop(): Promise<void> {

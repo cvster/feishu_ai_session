@@ -26,6 +26,8 @@ import type { RunDelivery } from '../worker/protocol';
 export interface StartRunFlowInput {
   scopeId: string;
   nativeBinding?: { nativeId: string; sourceId: string };
+  sessionName?: string;
+  initialSessionId?: string;
   scope: ScopeContext;
   prompt: string;
   attachments: AgentAttachment[];

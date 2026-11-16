@@ -6,6 +6,8 @@ import { toolProfile } from './runtime';
 import type { AgentKind } from '../config/profile-schema';
 import { RunRejected } from '../runtime/errors';
 import { WorkerRequestError } from '../worker/client';
+import {executionBinding} from './execution-routes';
+import {isWebScope} from '../web/routes';
 
 const roots = new WeakMap<Controls, Controls>();
 
@@ -15,7 +17,7 @@ export function controlsForTool(root: Controls, toolId: AgentKind, scope?: strin
   root = roots.get(root) ?? root;
   const proxy = new Proxy(root, {
     get(target, key, receiver) {
-      const binding = scope ? target.toolBindings?.get(scope) : undefined;
+      const binding = scope ? executionBinding(target,scope) : undefined;
       const profile = toolProfile(target.profileConfig, toolId);
       const shared = binding?.linkedSource || binding?.auxiliaryWorkgroup;
       const settingsScope = scope && shared ? target.toolBindings?.settingsScope(scope) : scope;
@@ -29,6 +31,13 @@ export function controlsForTool(root: Controls, toolId: AgentKind, scope?: strin
         preferences: { ...target.cfg.preferences, model: profile.preferences.model, reasoningEffort: profile.preferences.reasoningEffort } };
       if (key === 'workerInbox') return target.workerRuntimes?.get(toolId)?.inbox;
       if (key === 'workerReplySync') return target.workerRuntimes?.get(toolId)?.replies;
+      if(key==='toolBindings'&&scope&&isWebScope(scope)&&target.toolBindings)return new Proxy(target.toolBindings,{get(store,key){
+        if(key==='get')return (s:string)=>isWebScope(s)?target.webRoutes?.get(s):store.get(s);
+        if(key==='set')return (s:string,b:import('./bindings').ToolBinding)=>isWebScope(s)?target.webRoutes?.set(s,b):store.set(s,b);
+        if(key==='settingsScope')return (s:string)=>isWebScope(s)?s:store.settingsScope(s);
+        if(key==='flush')return ()=>Promise.all([store.flush(),target.webRoutes?.flush()]);
+        const value=Reflect.get(store,key);return typeof value==='function'?value.bind(store):value;
+      }});
       return Reflect.get(target, key, receiver);
     },
   });
@@ -49,17 +58,17 @@ export function effectiveModel(root: Controls, toolId: AgentKind, scope?: string
 }
 
 export function toolForScope(controls: Controls, scope: string): AgentKind {
-  return controls.toolBindings?.get(scope)?.toolId ?? controls.profileConfig.agentKind;
+  return executionBinding(controls,scope)?.toolId ?? controls.profileConfig.agentKind;
 }
 
 export async function routeCommandContext(ctx: CommandContext, options: { skipSessionIdentity?: boolean } = {}): Promise<CommandContext> {
   if (!ctx.controls.toolRegistry || !ctx.controls.toolRegistry.has(toolForScope(ctx.controls, ctx.scope))) return ctx;
   const id = toolForScope(ctx.controls, ctx.scope);
   const tool = ctx.controls.toolRegistry.get(id);
-  const binding = ctx.controls.toolBindings?.get(ctx.scope);
+  const binding = executionBinding(ctx.controls,ctx.scope);
   if (binding && binding.sourceId !== tool.sourceId) throw new Error('会话数据来源已变化，不能恢复到其他账户/目录');
   const controls = controlsForTool(ctx.controls, id, ctx.scope);
-  const access = ctx.msg.chatType === 'p2p' ? canUseDm(controls.profileConfig, controls, ctx.msg.senderId) : canUseGroup(controls.profileConfig, controls, ctx.msg.chatId, ctx.msg.senderId);
+  const access = isWebScope(ctx.scope)?{ok:true as const,reason:'owner' as const}:ctx.msg.chatType === 'p2p' ? canUseDm(controls.profileConfig, controls, ctx.msg.senderId) : canUseGroup(controls.profileConfig, controls, ctx.msg.chatId, ctx.msg.senderId);
   return { ...ctx, agent: tool.agent, controls,
     sessionCatalogIdentity: options.skipSessionIdentity ? undefined : ctx.sessionCatalogIdentity?.agentId === id ? ctx.sessionCatalogIdentity : await commandSessionCatalogIdentity({ msg: ctx.msg, scope: ctx.scope, mode: ctx.chatMode, workspaces: ctx.workspaces, controls, access }),
     runExecutor: ctx.controls.executorForTool?.(id) ?? ctx.runExecutor };
@@ -67,7 +76,7 @@ export async function routeCommandContext(ctx: CommandContext, options: { skipSe
 
 /** Fail closed when a bound worker cannot confirm its native session state. */
 export async function isWorkerScopeArchived(controls: Controls, scope: string): Promise<boolean> {
-  const binding = controls.toolBindings?.get(scope);
+  const binding = executionBinding(controls,scope);
   if (!binding?.nativeId) return false;
   const tool = controls.toolRegistry?.find(binding.toolId);
   if (!tool) throw new RunRejected('execution-worker-unavailable', '会话 worker 暂时不可用');
