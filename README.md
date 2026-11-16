@@ -8,6 +8,8 @@
 
 回复中的完整 `mermaid` 代码块会在本机生成图表：飞书卡片显示 PNG，网页显示 SVG，并支持放大、下载 SVG/PNG 和查看源码。支持流程图（含 `flowchart TD`）、时序图、状态图、类图、ER 图和 XY 图；不支持的语法、过大的图和渲染失败均保留源码。无需外部渲染服务或浏览器进程；中文建议安装 Noto Sans CJK 字体（Debian/Ubuntu：`fonts-noto-cjk`）。
 
+引用、话题历史、合并转发和直接发来的卡片只向模型提供可读正文，保留正文中的代码、表格、链接及内容图片引用；不传递卡片布局、按钮回调或桥接运行状态。辅助群的权限与来源规则继续保留。
+
 本项目基于原始 GitHub 项目 [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge)（原名 `feishu-claude-code-bridge`） 二次开发，保留原项目的版权与许可证说明。
 
 **本项目开发者：Lennox Gao。** 使用过程中有问题、建议或需求，欢迎联系。

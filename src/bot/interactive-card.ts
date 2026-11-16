@@ -1,64 +1,123 @@
-/**
- * SDK's `convertInteractive` flattens an interactive card by walking the
- * JSON tree (`walkCard`) and pulling text-bearing nodes. Three failure
- * modes we paper over here:
- *
- *   1. CardKit 2.0 webhook dual-publish. Feishu pushes v2 cards in webhook
- *      events as JSON with BOTH:
- *        - `elements`: a v1-shaped "请升级至最新版本客户端" fallback so
- *          older clients/SDKs aren't broken.
- *        - `user_dsl`: a JSON string containing the real schema 2.0 card.
- *      SDK only walks `elements`, so without intervention Claude sees the
- *      "please upgrade" downgrade. We pull `user_dsl` when present.
- *
- *   2. CardKit 2.0 API response. When `im.v1.message.get` is called with
- *      `card_msg_content_type=user_card_content` (SDK ≥ 1.65), the
- *      response's `body.content` IS the schema 2.0 DSL itself
- *      (`{schema:"2.0", body, config, header}`) — not wrapped in
- *      `user_dsl`. We detect by `schema:"2.0"` and inject as-is.
- *
- *   3. Zero-text v1 cards. Button-only / image-only / decorative cards
- *      have no text-bearing nodes; SDK collapses to the literal placeholder
- *      `[interactive card]` (lib/index.js:88951,88955). We fall back to the
- *      raw JSON so Claude can see the card structure.
- *
- * All branches wrap output in an `<interactive_card>` block to distinguish
- * the quoted card structure from the current user request.
- */
 export const INTERACTIVE_CARD_PLACEHOLDER = '[interactive card]';
+const MAX_CARD_CHARS = 1_000_000;
+const MAX_TEXT_CHARS = 60_000;
+const TEXT_TAGS = new Set(['plain_text', 'lark_md', 'markdown']);
+const CONTROL_TAGS = new Set(['action', 'button', 'interactive_container', 'input', 'select_static', 'select_person',
+  'multi_select_static', 'multi_select_person', 'date_picker', 'picker_time', 'picker_datetime', 'overflow', 'checker']);
+const BRIDGE_SUMMARIES = new Set(['已完成', '已中断', '已超时', '出错', '等待选择', '正在调用工具', '正在输出', '思考中']);
+type CardNode = Record<string, unknown>;
 
-export function expandInteractiveCard(
-  flattenedContent: string,
-  rawJsonContent: string | undefined,
-): string {
-  if (!rawJsonContent) return flattenedContent;
-
-  const parsed = tryParseJson(rawJsonContent);
-
-  // Branch 1: webhook v2 — `user_dsl` nested as a string. Prefer it over
-  // `elements` (which would be the upgrade-fallback).
-  if (parsed && typeof parsed.user_dsl === 'string' && parsed.user_dsl.trim().length > 0) {
-    return `<interactive_card>\n${parsed.user_dsl}\n</interactive_card>`;
+/** Decode structural JSON strings, never JSON-looking text inside a Markdown node. */
+function decode(value: unknown): unknown {
+  for (let n = 0; n < 4 && typeof value === 'string'; n++) {
+    if (value.length > MAX_CARD_CHARS) return undefined;
+    try { value = JSON.parse(value); } catch { return undefined; }
   }
-
-  // Branch 2: API v2 — raw content already IS the schema 2.0 DSL.
-  if (parsed && parsed.schema === '2.0') {
-    return `<interactive_card>\n${rawJsonContent}\n</interactive_card>`;
-  }
-
-  // Branch 3: SDK collapsed a v1 card to placeholder (zero text-bearing
-  // nodes). Substitute raw JSON so Claude can see the structure.
-  if (flattenedContent === INTERACTIVE_CARD_PLACEHOLDER) {
-    return `<interactive_card>\n${rawJsonContent}\n</interactive_card>`;
-  }
-
-  return flattenedContent;
+  return value;
+}
+function object(value: unknown): CardNode | undefined {
+  const decoded = decode(value);
+  return decoded && typeof decoded === 'object' && !Array.isArray(decoded) ? decoded as CardNode : undefined;
+}
+function textValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  const node = object(value);
+  return typeof node?.content === 'string' ? node.content : '';
 }
 
-function tryParseJson(s: string): { user_dsl?: unknown; schema?: unknown } | undefined {
-  try {
-    return JSON.parse(s) as { user_dsl?: unknown; schema?: unknown };
-  } catch {
-    return undefined;
-  }
+function isRuntimeText(text: string): boolean {
+  const plain = text.trim().replace(/^<font\b[^>]*>([\s\S]*)<\/font>$/i, '$1').trim();
+  return /^(?:运行中 · .+ · 已运行.+|(?:✅ 已完成|⏹ 已中断|⏱ 已超时|⚠️ 运行失败) · 用时 .+) · 最近更新 \d{2}:\d{2}:\d{2}(?: · [^\n]*)?$/.test(plain) ||
+    /^(?:🧠 思考中|🧠 思考完成|🧠 正在思考|🧰 正在调用工具|✍️ 正在输出|⏳ 等待选择|🧰 \d+ 个工具调用（(?:进行中|已完成)）)$/.test(plain);
+}
+
+function readableFallback(flattened: string): string {
+  const text = flattened.trim();
+  // Never fall back to a serialized card, including an old expanded-card wrapper.
+  const candidate = text.replace(/^<interactive_card>\s*([\s\S]*?)\s*<\/interactive_card>$/, '$1');
+  const parsed = decode(candidate);
+  if (!text || parsed && typeof parsed === 'object' || /^\{\s*"(?:schema|body|elements|user_dsl)"\s*:/.test(candidate)) return INTERACTIVE_CARD_PLACEHOLDER;
+  return text.length > MAX_TEXT_CHARS ? text.slice(0, MAX_TEXT_CHARS) + '\n（卡片正文过长，已截断）' : text;
+}
+
+/** Keep readable card content, not CardKit DSL, callbacks or presentation metadata. */
+export function expandInteractiveCard(flattenedContent: string, rawJsonContent: string | undefined): string {
+  if (!rawJsonContent) return readableFallback(flattenedContent);
+  let card = object(rawJsonContent);
+  // Prefer the real v2 card to the webhook's v1 "please upgrade" fallback.
+  for (let n = 0; card?.user_dsl !== undefined && n < 4; n++) card = object(card.user_dsl);
+  if (!card) return readableFallback(flattenedContent);
+  const body = object(card.body);
+  if (!body && !Array.isArray(decode(card.elements)) && !card.tag) return readableFallback(flattenedContent);
+  const bridge = BRIDGE_SUMMARIES.has(textValue(object(card.config)?.summary));
+  let count = 0, characters = 0, truncated = false;
+  const parts: string[] = [];
+  const add = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const available = MAX_TEXT_CHARS - characters;
+    if (available <= 0) { truncated = true; return; }
+    parts.push(trimmed.slice(0, available)); characters += Math.min(trimmed.length, available);
+    if (trimmed.length > available) truncated = true;
+  };
+  const walk = (value: unknown, depth = 0): void => {
+    if (depth > 30 || ++count > 10_000 || characters >= MAX_TEXT_CHARS) { truncated = true; return; }
+    value = decode(value);
+    if (Array.isArray(value)) {
+      // Folded auxiliary replies contain a short preview followed by the full answer.
+      const full = bridge ? value.find(item => {
+        const panel = object(item);
+        return panel?.tag === 'collapsible_panel' && textValue(object(panel.header)?.title) === '查看详细说明（点击展开 / 收起）';
+      }) : undefined;
+      for (const child of full ? [full] : value) { walk(child, depth + 1); if (truncated) break; }
+      return;
+    }
+    const node = object(value);
+    if (!node || typeof node.tag === 'string' && CONTROL_TAGS.has(node.tag)) return;
+    if (typeof node.tag === 'string' && TEXT_TAGS.has(node.tag)) {
+      const content = typeof node.content === 'string' ? node.content : '';
+      if (!bridge || !isRuntimeText(content)) add(content);
+      return;
+    }
+    if (node.tag === 'img') {
+      const alt = textValue(node.alt) || textValue(node.title) || '图片';
+      add(typeof node.img_key === 'string' ? `![${alt}](${node.img_key})` : `[${alt}]`);
+      return;
+    }
+    if (node.tag === 'file') {
+      const name = textValue(node.title) || textValue(node.file_name) || '附件';
+      add(typeof node.file_key === 'string' ? `[${name}](${node.file_key})` : `[${name}]`);
+      return;
+    }
+    if (node.tag === 'a') {
+      const label = textValue(node.text) || textValue(node.content);
+      add(typeof node.href === 'string' && /^https?:\/\//i.test(node.href) ? `[${label || node.href}](${node.href})` : label);
+      return;
+    }
+    if (node.tag === 'table' && Array.isArray(node.columns) && Array.isArray(node.rows)) {
+      const columns = node.columns.map(object).filter((column): column is CardNode => typeof column?.name === 'string');
+      const cell = (value: unknown) => (typeof value === 'number' || typeof value === 'boolean' ? String(value) : textValue(value)).replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>');
+      if (columns.length) {
+        const lines = ['| ' + columns.map(column => cell(column.display_name ?? column.name)).join(' | ') + ' |',
+          '| ' + columns.map(() => '---').join(' | ') + ' |'];
+        let length = lines.join('\n').length;
+        for (const row of node.rows) {
+          const record = object(row);
+          if (record) { const line = '| ' + columns.map(column => cell(record[column.name as string])).join(' | ') + ' |'; lines.push(line); length += line.length + 1; }
+          if (length >= MAX_TEXT_CHARS - characters || lines.length >= 10_000) { truncated = true; break; }
+        }
+        add(lines.join('\n'));
+      }
+      return;
+    }
+    // Traverse only visible content slots; never callback values, config, alt tips or styles.
+    if (node.tag !== 'collapsible_panel' && node.title !== undefined) walk(node.title, depth + 1);
+    if (node.text !== undefined) { if (typeof node.text === 'string') add(node.text); else walk(node.text, depth + 1); }
+    for (const key of ['elements', 'columns', 'fields']) if (node[key] !== undefined) walk(node[key], depth + 1);
+  };
+  if (card.header) walk(object(card.header)?.title);
+  walk(body?.elements ?? card.elements ?? card);
+  if (truncated) parts.push('（卡片正文过长，已截断）');
+  const content = parts.join('\n\n');
+  return content ? `<interactive_card>\n${content}\n</interactive_card>` : INTERACTIVE_CARD_PLACEHOLDER;
 }

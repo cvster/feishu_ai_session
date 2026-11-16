@@ -41,7 +41,7 @@ export interface QuotedContext {
  * Rewrite an interactive sub-message's body.content so the SDK's
  * `convertInteractive` → `walkCard` finds a text node and emits real card
  * content instead of the literal `[interactive card]` placeholder. We wrap
- * our expanded `<interactive_card>` block as a `plain_text` node — that's
+ * our readable `<interactive_card>` block as a `plain_text` node — that's
  * one of the three tags walkCard treats as text-bearing
  * (plain_text / lark_md / markdown).
  *
@@ -55,9 +55,8 @@ function preExpandInteractive(item: ApiMessageItem): ApiMessageItem {
   const raw = item.body?.content;
   if (typeof raw !== 'string' || raw.length === 0) return item;
   const expanded = expandInteractiveCard('[interactive card]', raw);
-  // expandInteractiveCard returns the placeholder unchanged when there's
-  // nothing to expand — skip rewriting in that case to avoid double wrapping.
-  if (expanded === '[interactive card]') return item;
+  // Also replace control-only cards with a placeholder: otherwise the SDK
+  // would re-extract their button labels from the original JSON.
   const wrapper = JSON.stringify({ tag: 'plain_text', content: expanded });
   return { ...item, body: { ...item.body, content: wrapper } };
 }
@@ -155,9 +154,7 @@ async function normalizeItemToQuoted(
       createdAt: Number.isFinite(createMs) && createMs > 0
         ? new Date(createMs).toISOString()
         : '',
-      // For zero-text interactive cards the SDK gave us "[interactive card]"
-      // — substitute the raw JSON so Claude can still see what was quoted.
-      content: expandInteractiveCard(normalized.content, parent.body?.content),
+      content: parent.msg_type === 'interactive' ? expandInteractiveCard(normalized.content, parent.body?.content) : normalized.content,
       rawContentType: parent.msg_type ?? 'text',
     };
   } catch (err) {

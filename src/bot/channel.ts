@@ -43,6 +43,7 @@ import {
 } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { handleCardAction } from '../card/dispatcher';
+import { expandInteractiveCard } from './interactive-card';
 import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
 import { renderCard, type RunCardRenderOptions } from '../card/run-renderer';
@@ -2364,8 +2365,14 @@ function buildPrompt(
   // common in bot-at-bot group chats), annotate each segment with its sender
   // so the agent can tell who said what. Single-message batches stay verbatim.
   const annotate = batch.length > 1;
+  const interactiveCards = batch.flatMap(message => {
+    const card = toPromptInteractiveCard(message);
+    return card ? [{ ...card, content: annotate ? `${senderAnnotation(message)} ${card.content}` : card.content }] : [];
+  });
+  const cardIds = new Set(interactiveCards.map(card => card.messageId));
   const texts = batch
     .map((m) => {
+      if (cardIds.has(m.messageId)) return ''; // The readable card is already included in context.cards.
       const text = stripAttachmentRefs(m.content, fileKeys).trim();
       if (!text) return '';
       return annotate ? `${senderAnnotation(m)} ${text}` : text;
@@ -2374,15 +2381,16 @@ function buildPrompt(
   const userPart =
     texts.length > 0
       ? texts.join('\n\n')
-      : attachments.length > 0
-        ? '请看下面的附件。'
-        : '（对方发来一条没有正文的消息——通常是只 @ 了你的唤醒（ping）。请简短回应。）';
+      : interactiveCards.length > 0
+        ? '请看下面的卡片。'
+        : attachments.length > 0
+          ? '请看下面的附件。'
+          : '（对方发来一条没有正文的消息——通常是只 @ 了你的唤醒（ping）。请简短回应。）';
 
   const senderType = senderTypeOf(first);
   const mentions = mergeMentions(batch);
   const quotedMessages = quotes.map(toPromptQuote);
   const topicMessages = topicContext.map(toPromptTopicMessage);
-  const interactiveCards = batch.map(toPromptInteractiveCard).filter(isDefined);
   const promptAttachments = attachments.map(toPromptAttachment);
 
   return buildDirectUserPrompt({
@@ -2504,18 +2512,6 @@ function toPromptInteractiveCard(m: NormalizedMessage): BridgePromptInteractiveC
   if (typeof rawContent !== 'string' || rawContent.length === 0) return undefined;
   return {
     messageId: m.messageId,
-    content: parseJsonOrRaw(rawContent),
+    content: expandInteractiveCard(m.content, rawContent),
   };
-}
-
-function parseJsonOrRaw(input: string): unknown {
-  try {
-    return JSON.parse(input) as unknown;
-  } catch {
-    return input;
-  }
-}
-
-function isDefined<T>(value: T | undefined): value is T {
-  return value !== undefined;
 }

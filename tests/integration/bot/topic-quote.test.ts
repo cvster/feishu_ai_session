@@ -7,6 +7,7 @@ import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
 import { FakeAgentAdapter } from '../../helpers/fake-agent.js';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
+import { createFakeChannel } from '../../helpers/fake-channel.js';
 
 const sdkMock = vi.hoisted(() => ({
   channel: undefined as FakeLarkChannel | undefined,
@@ -311,6 +312,33 @@ describe('topic message quote handling', () => {
     );
   });
 
+  it('passes directly received cards to the agent once as readable content, without raw DSL or SDK control labels', async () => {
+    const h = await createHarness({ chatMode: 'group' });
+    await startTestBridge(h);
+    const raw = JSON.stringify({ schema: '2.0', body: { elements: [{ tag: 'markdown', content: '检查正文' },
+      { tag: 'button', text: { tag: 'plain_text', content: '执行' }, value: { secret: 'PRIVATE_CALLBACK' } }] } });
+    await h.channel.handlers.message?.({ ...message({ messageId: 'om_card', rootId: '', parentId: '', content: 'SDK control labels' }),
+      rawContentType: 'interactive', raw: { message: { content: raw } } } as NormalizedMessage);
+    await waitFor(() => h.agent.runOptions.length === 1);
+    const prompt = h.agent.runOptions[0]!.prompt;
+    expect(prompt.match(/检查正文/g)).toHaveLength(1);
+    expect(prompt).toContain('请看下面的卡片');
+    expect(prompt).not.toMatch(/PRIVATE_CALLBACK|SDK control labels|"schema"|"elements"/);
+  });
+
+  it('retains sender attribution when a directly received card and a text request are batched', async () => {
+    const h = await createHarness({ chatMode: 'group' });
+    await startTestBridge(h);
+    const raw = JSON.stringify({ schema: '2.0', body: { elements: [{ tag: 'markdown', content: '检查正文' }] } });
+    await h.channel.handlers.message?.({ ...message({ messageId: 'om_card', rootId: '', parentId: '', content: 'SDK card' }),
+      senderName: '甲', rawContentType: 'interactive', raw: { sender: { sender_type: 'user' }, message: { content: raw } } } as NormalizedMessage);
+    await h.channel.handlers.message?.({ ...message({ messageId: 'om_followup', rootId: '', parentId: '', content: '做成表格' }), senderName: '乙' });
+    await waitFor(() => h.agent.runOptions.length === 1);
+    const prompt = h.agent.runOptions[0]!.prompt;
+    expect(prompt).toContain('[甲 (user)]'); expect(prompt).toContain('[乙]: 做成表格');
+    expect(prompt.match(/检查正文/g)).toHaveLength(1);
+  });
+
   it('keeps non-root reply quotes in topic chats', async () => {
     const h = await createHarness({
       quotedMessages: {
@@ -434,16 +462,22 @@ function createFakeLarkChannel(options: {
   };
   const rawThreadIds = options.rawThreadIds ?? {};
   const threadMessages = options.threadMessages ?? [];
+  const base = createFakeChannel();
   return {
+    ...base,
     handlers,
     sent,
     streams,
     botIdentity: { openId: 'ou_bot', name: 'Bridge' },
     rawClient: {
+      ...base.rawClient,
       request: vi.fn(async () => ({ data: { items: [] } })),
       im: {
+        ...base.rawClient.im,
         v1: {
+          ...base.rawClient.im.v1,
           message: {
+            ...base.rawClient.im.v1.message,
             list: vi.fn(async () => ({ data: { items: threadMessages, has_more: false } })),
           },
           messageReaction: {

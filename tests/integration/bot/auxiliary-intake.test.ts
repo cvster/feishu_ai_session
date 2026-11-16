@@ -178,6 +178,24 @@ it('accepts direct owner messages in the FF personal workgroup using the origina
   expect(h.submit.mock.calls[0]![0].prompt).toContain('直接继续本次调试');
   expect(h.controls.auxiliary?.isAuxiliary('oc_ffowner')).toBe(false);
 });
+
+it('keeps only quoted card text in a real auxiliary worker submission while retaining the group policy', async () => {
+  const h = await harness();
+  const card = { schema: '2.0', config: { summary: { content: '已完成' } }, body: { elements: [
+    { tag: 'markdown', content: '29个电机ID正常，颈部62/63未应答。' },
+    { tag: 'markdown', content: "<font color='green'>✅ 已完成 · 用时 18秒 · 最近更新 17:33:51</font>" },
+    { tag: 'interactive_container', behaviors: [{ type: 'callback', value: { private: 'PRIVATE_CALLBACK' } }],
+      elements: [{ tag: 'img', img_key: 'img_control' }] },
+  ] } };
+  h.channel.fetchRawMessage = async () => [{ message_id: 'om_previous', msg_type: 'interactive', body: { content: JSON.stringify(card) } }] as any;
+  await h.message({ content: '本次检查帮我做个简单的表格吧', replyToMessageId: 'om_previous' });
+  await vi.waitFor(() => expect(h.submit).toHaveBeenCalledOnce());
+  const prompt = JSON.parse(h.submit.mock.calls[0]![0].prompt);
+  expect(prompt.context.chat_id).toBe('oc_aux'); expect(prompt.rules.permissions).toContain('修改源码');
+  expect(prompt.user_input).toContain('29个电机ID正常，颈部62/63未应答。');
+  expect(prompt.user_input).toContain('本次检查帮我做个简单的表格吧');
+  expect(prompt.user_input).not.toMatch(/PRIVATE_CALLBACK|img_control|最近更新|"schema"|"elements"/);
+});
 it('routes a copied-session read through normal intake and the durable Codex submission queue', async () => {
   const h = await harness(); const sourceId = h.controls.toolRegistry!.get('codex').sourceId;
   const copiedFrom = { copyId: 'copy-test', toolId: 'codex' as const, sourceId, nativeId: originalId, name: '来源会话', cwd: h.cwd };
