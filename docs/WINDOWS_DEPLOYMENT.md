@@ -252,6 +252,23 @@ $Script = @(
 
 ## 8. 上线验证
 
+### worker 持久队列版本升级
+
+本版将排队与原生会话互斥放入 worker 内独立模块，仍是原有进程结构，Linux 使用同一实现。
+需将桥接和实际启用的本机 worker 都切换到本版 release，`/health` 中核实
+`capabilities.jobs.persistentQueue === true`。旧 worker 不具备此标记时，桥接继续使用旧行为。
+
+新版 worker 可先调用鉴权 `POST /drain` 停止接收/派发，再等待 active 归零后切换。
+未派发队列持久保留；已派发、无法确认结果的任务不自动重跑。支持 `detach` 的适配器在
+正常关闭时仅断开观察，原生执行继续；其他适配器可能停止运行，不能一概保证不断任务。
+旧版 worker 不具备 drain/安全关闭语义，不应套用新版保障。共享 app-server 和桌面 App
+无需随 worker 更新重启。首次升级若当前 Codex 执行位于独立共享 writer，应先核实队列
+提交已确认且 worker 仅保留只读观察；不能通过旧 worker 的 stop 接口做版本切换。
+
+Web 原生目录保存于 profile 下 `web-session-routes.json`，包含工作目录和可选会话设置，
+属于私有运行状态，不提交 Git。保留该文件、收件箱、worker jobs 和 Web 登录账本。
+原生会话的显示和聊天无需先建飞书群，原群链接兼容为别名；没有真实群关联时隐藏“打开飞书群”。
+
 - `Get-ScheduledTask` 的桥接/worker 任务正常；还需核对实际 Node PID 和动作中的绝对路径。
 - 共享执行端 `http://127.0.0.1:4517/readyz` 返回 200，桌面和 worker 仍连接同一 writer。
 - `http://127.0.0.1:36666/`、`/console` 和 `/api/access` 返回预期结果；免密入口的

@@ -26,11 +26,16 @@ import { cachedModelChoices, modelCachePath } from '../agent/model-cache';
 import { isStorableModel } from '../agent/defaults';
 import { migrateWebOwner, ownerApiUnavailable, validWebOwner, type WebOwnerCache } from './owner-cache';
 import { WEB_INPUT_TYPE } from './input';
+import {isJobWaiting} from '../worker/protocol';
+import {isWebScope} from './routes';
+import {executionBinding} from '../tools/execution-routes';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
   id: string; scope: string; toolId: string; tool: string; project: string; cwd: string; name: string;
   updatedAtMs: number; favorite: boolean; online: boolean; canSend: boolean; canRename: boolean; nativeConversation: boolean;
+  feishuChatId?: string;
+  aliasIds?: string[];
 }
 export interface WebTurn { id: string; input: string; inputMessages?: { senderName: string; text: string }[]; answer: string; answerSections?: WebAnswerSection[]; requestIds?: string[]; progress?: string[]; statusText?: string; statusColor?: string; status: string; createdAtMs: number; origin: 'bridge' | 'native' }
 export interface WebConversation { session: WebSession; turns: WebTurn[]; queuedMessages?: QueuedMessage[]; confirmedRequestIds?: string[]; notice?: string }
@@ -58,6 +63,7 @@ export class PersonalSessionService {
   private listing?: Promise<void>;
   private terminalClocks = new Map<string, { signature: string; checkedAt: number }>();
   private jobs = new Map<string, { cursor: number; state: RunState; turnId?: string; nativeId?: string; updatedAt?: number }>();
+  private nativeChoices=new Map<string,{id:string;action:'archive'|'fork';owner:string;expires:number;result?:Promise<WebControlResult & {sessions?:WebSession[]}>}>();
   constructor(private readonly deps: {
     controls: Controls; catalog?: SessionCatalog; channel: LarkChannel; path: string;
     enqueue(msg: NormalizedMessage): Promise<void | { queued: boolean }>;
@@ -80,7 +86,7 @@ export class PersonalSessionService {
     }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
     if (!this.webOwner && legacy) {
-      const ids = new Set(this.bindings().flatMap(([scope, b]) => [this.identity(scope, b), this.identity(scope, { ...b, nativeId: undefined })]));
+      const ids = new Set([...this.bindings(),...this.feishuBindings()].flatMap(([scope, b]) => [this.identity(scope, b), this.identity(scope, { ...b, nativeId: undefined })]));
       this.webOwner = migrateWebOwner(this.receipts, ids, this.deps.controls.profile, this.deps.controls.profileConfig.accounts.app.id);
     }
     this.rememberOwner();
@@ -190,19 +196,29 @@ export class PersonalSessionService {
   private identity(scope: string, b: { toolId: string; sourceId: string; nativeId?: string }) {
     return hash(JSON.stringify([this.deps.controls.profile, this.deps.controls.profileConfig.accounts.app.id, scope, b.toolId, b.sourceId, b.nativeId]));
   }
+  private aliases(scope:string,b:ToolBinding):string[]{
+    return isWebScope(scope)?this.feishuBindings().filter(([,f])=>f.toolId===b.toolId&&f.sourceId===b.sourceId&&f.nativeId===b.nativeId).flatMap(([s,f])=>[this.identity(s,f),this.identity(s,{...f,nativeId:undefined})]):[];
+  }
+  private matches(id:string,scope:string,b:ToolBinding){return this.identity(scope,b)===id||this.aliases(scope,b).includes(id);}
   private receiptScopes(scope: string): string[] {
-    return [scope, ...(this.deps.controls.toolBindings?.entries() ?? []).flatMap(([source]) =>
-      sharedPersonalScope(this.deps.controls, this.deps.catalog, source) === scope ? [source] : [])];
+    const binding=executionBinding(this.deps.controls,scope);
+    const personal=new Set([scope,...(isWebScope(scope)?this.feishuBindings().filter(([,b])=>b.toolId===binding?.toolId&&b.sourceId===binding?.sourceId&&b.nativeId===binding?.nativeId).map(([s])=>s):[])]);
+    return [...personal, ...(this.deps.controls.toolBindings?.entries() ?? []).flatMap(([source]) =>
+      personal.has(sharedPersonalScope(this.deps.controls, this.deps.catalog, source)??'') ? [source] : [])];
   }
   /**
    * Active personal routes plus fresh groups whose native session is created by
    * their first message, so a group created here can be used before that.
    */
-  private bindings(): [string, ToolBinding][] {
+  private feishuBindings(): [string, ToolBinding][] {
     const tools = this.deps.controls.toolBindings, active = tools?.activePersonalBindings() ?? [];
     const scopes = new Set(active.map(([scope]) => scope));
     return [...active, ...(tools?.entries() ?? []).filter(([scope, b]) => !scopes.has(scope) && b.nativeCreated === false &&
       isPersonalWorkgroup(scope, b) && !this.deps.catalog?.isScopeArchived(scope))];
+  }
+  private bindings(): [string, ToolBinding][] {
+    const routes=this.deps.controls.webRoutes;
+    return routes?[...routes.entries(),...this.feishuBindings().filter(([,b])=>b.nativeCreated===false)]:this.feishuBindings();
   }
   private setTool(id: string, seq: number, snapshot: Omit<ToolSnapshot, 'seq'>) {
     if ((this.metadata.get(id)?.seq ?? -1) < seq) this.metadata.set(id, { ...snapshot, seq });
@@ -218,6 +234,10 @@ export class PersonalSessionService {
       const health = await tool.agent.client.health();
       const rows = health.capabilities?.sessions.list ? await tool.listSessions() : [];
       this.setTool(tool.id, seq, { label: tool.label, sourceId: tool.sourceId, rows, capabilities: health.capabilities, online: true, listed: health.capabilities?.sessions.list === true });
+      if(this.metadata.get(tool.id)?.seq===seq&&this.deps.controls.webRoutes){
+        for(const row of rows)this.deps.controls.webRoutes.ensure(tool,row);
+        await this.deps.controls.webRoutes.flush();
+      }
     } catch { this.setTool(tool.id, seq, { label: tool.label, sourceId: tool.sourceId, rows: previous?.sourceId === tool.sourceId ? previous.rows : [], capabilities: previous?.capabilities, online: false, listed: previous?.sourceId === tool.sourceId && previous.listed === true }); }
   }
   /**
@@ -250,7 +270,8 @@ export class PersonalSessionService {
       const present = new Set<string>(tools.map(t => t.id));
       for (const [id, snapshot] of this.metadata) if (!present.has(id) && snapshot.seq < startedAt) snapshot.online = false;
       await Promise.all(tools.map(tool => this.readTool(tool)));
-      const bindings = this.bindings();
+      // Native Web listings never wait for optional IM group metadata.
+      const bindings = this.feishuBindings().filter(([,b])=>!this.deps.controls.webRoutes||b.nativeCreated===false);
       const scopes = new Set(bindings.map(([scope]) => scope));
       for (const [scope, snapshot] of this.groups) if (!scopes.has(scope) && snapshot.seq < startedAt) this.groups.delete(scope);
       await Promise.all(bindings.map(([scope, binding]) => this.readGroup(scope, binding)));
@@ -265,7 +286,7 @@ export class PersonalSessionService {
   private async refreshSession(toolId: AgentKind, scope: string) {
     const tool = this.deps.controls.toolRegistry?.find(toolId);
     const binding = this.bindings().find(([bound]) => bound === scope)?.[1];
-    await Promise.all([tool && this.readTool(tool), binding && this.readGroup(scope, binding)]);
+    await Promise.all([tool && this.readTool(tool), binding && !isWebScope(scope) && this.readGroup(scope, binding)]);
   }
   async list(localSnapshot = false): Promise<WebSession[]> {
     this.owner(); if (!localSnapshot) await this.refresh(); const owner = this.owner();
@@ -275,17 +296,19 @@ export class PersonalSessionService {
       if (b.nativeCreated === false && this.groups.get(scope)?.mode !== 'group') return [];
       const meta = this.metadata.get(b.toolId), tool = this.deps.controls.toolRegistry?.find(b.toolId);
       const row = meta?.sourceId === b.sourceId ? meta.rows.find(r => r.nativeId === b.nativeId) : undefined;
-      if (row?.archived || (meta?.sourceId === b.sourceId && meta.listed && meta.capabilities?.sessionListAuthoritative && b.nativeCreated !== false && b.nativeId && !row)) return [];
+      if (row?.archived || (isWebScope(scope)&&this.deps.controls.webRoutes?.get(scope)?.archived) || (meta?.sourceId === b.sourceId && meta.listed && meta.capabilities?.sessionListAuthoritative && b.nativeCreated !== false && b.nativeId && !row)) return [];
       const catalog = this.deps.catalog?.entries().filter(r => r.scopeId === scope && r.status === 'active' && r.agentId === b.toolId &&
         (!r.sourceId || r.sourceId === b.sourceId) && (!r.botAppId || r.botAppId === this.deps.controls.profileConfig.accounts.app.id) &&
         (r.threadId ?? r.sessionId) === b.nativeId).sort((a, z) => z.updatedAt - a.updatedAt)[0];
       // Project ownership is stable even when the tool changes cwd while executing.
-      const cwd = normalize(this.deps.cwdFor?.(scope) ?? catalog?.cwdRealpath ?? row?.cwd ?? '.');
+      const cwd = normalize(this.deps.cwdFor?.(scope) ?? this.deps.controls.webRoutes?.get(scope)?.cwd ?? catalog?.cwdRealpath ?? row?.cwd ?? '.');
       const groupAvailable = this.groups.get(scope)?.mode === 'group';
       const online = (groupAvailable || b.nativeCreated !== false) && meta?.online === true && !!tool && tool.sourceId === b.sourceId && (!!row || b.nativeCreated === false);
       const group = this.groups.get(scope);
       // A confirmed name sync may be newer than our 15-second group snapshot.
-      const name = group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
+      const name = isWebScope(scope)?row?.name??b.name:group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
+      const feishuChatId=isWebScope(scope)?this.feishuBindings().find(([,f])=>f.toolId===b.toolId&&f.sourceId===b.sourceId&&f.nativeId===b.nativeId)?.[0]:scope;
+      const aliasIds=this.aliases(scope,b);
       // Use native activity rather than the catalog's periodically refreshed timestamp.
       // Pending bridge input should also appear immediately, before the worker lists it.
       const activity = [b.createdAtMs ?? 0, row?.updatedAtMs ?? catalog?.boundAt ?? catalog?.updatedAt ?? 0,
@@ -294,9 +317,11 @@ export class PersonalSessionService {
       const updatedAtMs = Math.max(0, ...activity.filter(t => Number.isFinite(t) && t >= 0));
       return [{ id: this.identity(scope, b), scope, toolId: b.toolId, tool: meta?.label ?? b.toolId,
         updatedAtMs,
-        favorite: this.favorites[hash(JSON.stringify([owner, this.identity(scope, b)]))] === owner, cwd, project: cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd, name: name ?? row?.name ?? b.nativeId!, online,
+        favorite: [this.identity(scope,b),...aliasIds].some(id=>this.favorites[hash(JSON.stringify([owner,id]))]===owner), cwd, project: cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd, name: name ?? row?.name ?? b.nativeId!, online,
+        ...(aliasIds.length?{aliasIds}:{}),
         canSend: online && meta?.capabilities?.jobs.submit === true,
-        canRename: this.groups.get(scope)?.mode === 'group',
+        ...(feishuChatId?{feishuChatId}:{}),
+        canRename: isWebScope(scope)?meta?.capabilities?.sessions.rename===true:this.groups.get(scope)?.mode === 'group',
         nativeConversation: meta?.capabilities?.conversation === true }];
     });
   }
@@ -305,22 +330,22 @@ export class PersonalSessionService {
     // Only this session's own facts need to be fresh; a full refresh here made every
     // send and every control wait for unrelated workers and groups.
     if (write) {
-      const entry = this.bindings().find(([scope, b]) => this.identity(scope, b) === id);
+      const entry = this.bindings().find(([scope, b]) => this.matches(id,scope,b));
       if (entry) {
         if (localWrite) await this.refreshTool(entry[1].toolId);
         else await this.refreshSession(entry[1].toolId, entry[0]);
       }
     }
-    const session = (await this.list(localWrite)).find(s => s.id === id);
+    const session = (await this.list(localWrite)).find(s => s.id === id||s.aliasIds?.includes(id));
     if (!session) throw new WebError(404, '会话已归档、群已失效或绑定已变化');
-    const b = this.deps.controls.toolBindings!.get(session.scope)!;
+    const b = executionBinding(this.deps.controls,session.scope)!;
     const tool = this.deps.controls.toolRegistry?.find(b.toolId);
     if (write && (!session.online || !(tool?.agent instanceof DurableAgentAdapter))) throw new WebError(503, 'Worker 离线或会话不可用');
     return { session, b, client: tool?.sourceId === b.sourceId && tool.agent instanceof DurableAgentAdapter ? tool.agent.client : undefined };
   }
   private assertBinding(id: string, scope: string) {
     this.owner();
-    const b = this.bindings().find(([s, b]) => s === scope && this.identity(s, b) === id);
+    const b = this.bindings().find(([s, b]) => s === scope && this.matches(id,s,b));
     if (!b || this.deps.controls.auxiliary?.isAuxiliary(scope)) throw new WebError(409, '会话绑定已变化，未继续提交');
   }
   private serial<T>(key: string, action: () => Promise<T>): Promise<T> {
@@ -336,10 +361,10 @@ export class PersonalSessionService {
       const { session } = await this.resolve(id);
       this.assertBinding(id, session.scope);
       if (this.owner() !== owner) throw new WebError(409, '所有者已变化');
-      const key = hash(JSON.stringify([owner, id])), previous = this.favorites[key];
+      const key = hash(JSON.stringify([owner, id])), previous = {...this.favorites};
       if (favorite) this.favorites[key] = owner;
-      else delete this.favorites[key];
-      try { await this.save(); } catch (error) { if (previous) this.favorites[key] = previous; else delete this.favorites[key]; throw error; }
+      else for(const target of [id,session.id,...session.aliasIds??[]])delete this.favorites[hash(JSON.stringify([owner,target]))];
+      try { await this.save(); } catch (error) { this.favorites=previous; throw error; }
       return { favorite };
     });
   }
@@ -347,8 +372,8 @@ export class PersonalSessionService {
     const byMessage = requests ?? new Map(Object.entries(this.receipts).filter(([, receipt]) => receipt.scope === scope && receipt.messageId)
       .map(([id, receipt]) => [receipt.messageId!, [id]]));
     return (this.deps.controls.messageQueue?.list(scope) ?? []).flatMap(item => {
-      const ids = item.messageId ? byMessage.get(item.messageId) : undefined;
-      if (ids?.some(id => this.receipts[id]?.queued === false)) return [];
+      const ids = [...new Set((item.messageIds??(item.messageId?[item.messageId]:[])).flatMap(id=>byMessage.get(id)??[]))];
+      if (!item.messageIds&&ids?.some(id => this.receipts[id]?.queued === false)) return [];
       return [{ ...item, ...(ids?.length ? { requestIds: ids } : {}) }];
     });
   }
@@ -393,13 +418,20 @@ export class PersonalSessionService {
     return { removed: true, queuedMessages: this.queuedFor(session.scope) };
   }
   async rename(id: string, name: string) {
-    this.requireFeishuWrite();
     name = name.trim(); if (!name || name.length > 100 || /[\u0000-\u001f]/.test(name)) throw new WebError(400, '名称需为 1–100 字');
     this.owner();
-    const entry = this.bindings().find(([scope, b]) => this.identity(scope, b) === id);
+    const entry = this.bindings().find(([scope, b]) => this.matches(id,scope,b));
     if (!entry) throw new WebError(404, '会话已归档、群已失效或绑定已变化');
     const [scope, binding] = entry;
     this.assertBinding(id, scope);
+    if(isWebScope(scope)){
+      const tool=this.deps.controls.toolRegistry?.find(binding.toolId);
+      if(!tool||tool.sourceId!==binding.sourceId||!binding.nativeId)throw new WebError(409,'会话身份已变化');
+      await sessionOperations(tool).rename(binding.nativeId,name);
+      this.deps.controls.webRoutes!.set(scope,{...binding,name});await this.deps.controls.webRoutes!.flush();
+      await this.refreshTool(binding.toolId);return {name};
+    }
+    this.requireFeishuWrite();
     const group = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: scope } });
     if (group.code || !group.data) throw new WebError(503, '群状态未确认，暂不可改名');
     if (group.data.chat_mode !== 'group') throw new WebError(409, '仅支持个人 AI 会话群');
@@ -433,10 +465,44 @@ export class PersonalSessionService {
     });
   }
   async control(id: string, action: string, values?: unknown) {
-    if (!['refresh', 'stop', 'config'].includes(action)) this.requireFeishuWrite();
+    const nativeEntry=this.bindings().find(([scope,b])=>this.matches(id,scope,b)&&isWebScope(scope));
+    if (!nativeEntry&&!['refresh', 'stop', 'config'].includes(action)) this.requireFeishuWrite();
     return this.serial('control:' + id, async () => {
+      const choice=this.nativeChoices.get(action);
+      if(nativeEntry||choice){
+        const {session,b,client}=await this.resolve(id,true,true);
+        if(!client||!b.nativeId)throw new WebError(503,'Worker 尚未就绪');
+        if(action==='refresh')return {conversation:await this.read(id),elements:[]};
+        if(action==='stop'){
+          const jobs=await client.list();
+          const active=jobs.find(j=>['accepted','running'].includes(j.status)&&!isJobWaiting(j)&&(j.options.threadId??j.options.sessionId??j.options.initialSessionId)===b.nativeId);
+          if(active)await client.stop(active.id);
+          else {const native=await client.conversation(b.nativeId);const turn=native.turns.find(t=>t.state.terminal==='running');if(turn)await client.stopNativeTurn(b.nativeId,turn.id,session.cwd);}
+          return {elements:[{kind:'text' as const,text:'已请求停止当前消息，后续排队消息继续执行。'}]};
+        }
+        if(action==='finish'||action==='fork'){
+          const token='native-'+hash(JSON.stringify([id,action,this.owner(),Date.now(),Math.random()]));
+          for(const [key,c]of this.nativeChoices)if(c.expires<Date.now())this.nativeChoices.delete(key);
+          if(this.nativeChoices.size>=2000)throw new WebError(429,'操作过多，请稍后重试');
+          this.nativeChoices.set(token,{id,action:action==='finish'?'archive':'fork',owner:this.owner(),expires:Date.now()+15*60_000});
+          return {elements:[{kind:'text' as const,text:action==='finish'?'确认归档此原生会话？不会解散飞书群。':'分叉会创建独立原生会话，不依赖飞书群。'},
+            {kind:'button' as const,text:action==='finish'?'确认归档':'创建分叉',action:token,primary:true,danger:action==='finish'}]};
+        }
+        if(choice){
+          if(choice.id!==id||choice.owner!==this.owner()||choice.expires<Date.now())throw new WebError(409,'操作已过期或会话已变化');
+          return choice.result??= (async()=>{
+            if(choice.action==='archive'){
+              await client.archiveSession(b.nativeId!);this.deps.controls.webRoutes!.set(session.scope,{...b,archived:true});await this.deps.controls.webRoutes!.flush();
+              return {elements:[{kind:'text' as const,text:'会话已归档。'}],sessions:await this.list()};
+            }
+            const fork=await client.forkSession(b.nativeId!);const tool=this.deps.controls.toolRegistry!.get(b.toolId);
+            this.deps.controls.webRoutes!.ensure(tool,{...fork,createdAtMs:Date.now(),updatedAtMs:Date.now()});await this.deps.controls.webRoutes!.flush();
+            return {elements:[{kind:'text' as const,text:'已创建分叉：'+fork.name}],sessions:await this.list()};
+          })();
+        }
+      }
       if (action === 'finish' || action === 'config') {
-        const owner = this.owner(), entry = this.bindings().find(([scope, b]) => this.identity(scope, b) === id);
+        const owner = this.owner(), entry = this.bindings().find(([scope, b]) => this.matches(id,scope,b));
         if (!entry) throw new WebError(404, '会话已归档或绑定已变化');
         this.assertBinding(id, entry[0]);
         if (!this.deps.control) throw new WebError(503, '会话操作尚未就绪');
@@ -492,12 +558,13 @@ export class PersonalSessionService {
     const { session, b, client } = await this.resolve(id);
     const owner = this.owner(), requests = new Map<string, string[]>(), confirmedRequestIds: string[] = [];
     // Messages sent before the first run created the native session were recorded under its pending identity.
-    const ids = new Set([id, this.identity(session.scope, { ...b, nativeId: undefined })]);
-    for (const [requestId, receipt] of Object.entries(this.receipts)) if ((receipt.scope === session.scope || ids.has(receipt.sessionId)) && receipt.owner === owner && receipt.messageId) {
+    const ids = new Set([id,session.id,...session.aliasIds??[], this.identity(session.scope, { ...b, nativeId: undefined })]);
+    const receiptScopes=new Set(this.receiptScopes(session.scope));
+    for (const [requestId, receipt] of Object.entries(this.receipts)) if ((receiptScopes.has(receipt.scope??'') || ids.has(receipt.sessionId)) && receipt.owner === owner && receipt.messageId) {
       const ids = requests.get(receipt.messageId) ?? []; ids.push(requestId); requests.set(receipt.messageId, ids);
       if (receipt.enqueued) confirmedRequestIds.push(requestId);
     }
-    const queuedMessages = this.queuedFor(session.scope, requests);
+    let queuedMessages = this.queuedFor(session.scope, requests);
     const runtime = this.deps.controls.workerRuntimes?.get(b.toolId);
     const receipts = this.receiptScopes(session.scope).flatMap(scope => runtime?.inbox.receipts(scope) ?? []);
     const turns: WebTurn[] = receipts.filter(r => r.status === 'pending' || r.status === 'rejected' || r.status === 'cancelled').map(r => ({ id: 'receipt:' + r.message.messageId,
@@ -509,12 +576,15 @@ export class PersonalSessionService {
     if (!session.online || !client) return { session, queuedMessages, confirmedRequestIds, turns: this.conversations.get(id)?.turns ?? turns, notice: 'Worker 离线；恢复后会重新读取会话' };
     try {
       const [native, allJobs] = await Promise.all([session.nativeConversation && b.nativeCreated !== false && b.nativeId ? client.conversation(b.nativeId) : undefined, client.list()]);
+      if(runtime){runtime.jobs=allJobs;queuedMessages=this.queuedFor(session.scope,requests);}
       this.assertBinding(id, session.scope);
       if ((native?.id !== undefined && native.id !== b.nativeId) || native?.archived) throw new WebError(404, '会话已归档或身份变化');
-      const jobs = allJobs.filter(j => (j.options.delivery?.scope === session.scope || sharedJobPersonalScope(this.deps.controls, this.deps.catalog, j) === session.scope) &&
+      const scopes=new Set(this.receiptScopes(session.scope));
+      const jobs = allJobs.filter(j => (scopes.has(j.options.delivery?.scope??'') || scopes.has(sharedJobPersonalScope(this.deps.controls, this.deps.catalog, j)??'')) &&
         j.options.delivery?.sourceId === b.sourceId && j.options.delivery.botAppId === this.deps.controls.profileConfig.accounts.app.id);
       const linkedTurns = new Set<string>();
       for (const job of jobs) {
+        if(isJobWaiting(job))continue;
         const cacheKey = b.sourceId + ':' + job.id;
         let view = this.jobs.get(cacheKey);
         if (!view) { view = { cursor: 0, state: structuredClone(startRunRuntime(initialState, job.createdAt)) }; this.jobs.set(cacheKey, view); }
@@ -527,11 +597,11 @@ export class PersonalSessionService {
         view.updatedAt = job.updatedAt;
         if ((job.options.threadId ?? job.options.sessionId ?? view.nativeId) !== b.nativeId) continue;
         if (view.turnId) linkedTurns.add(view.turnId);
-        const shared = job.options.delivery!.scope !== session.scope;
+        const shared = this.deps.controls.auxiliary?.isAuxiliary(job.options.delivery!.scope)===true;
         // Delivery ids keep the callback suffix that made the request unique (`om_x:callback:copy-read-…`),
         // while inbox receipts carry the plain Feishu message id.
         const inputs = shared ? (await namedSharedMessages(this.deps.controls, this.deps.channel, job)).map(message => ({ message })) :
-          receipts.filter(r => r.scope === session.scope && job.options.delivery?.messageIds?.some(id => id === r.message.messageId || id === messageRequestId(r.message)));
+          receipts.filter(r => r.scope === job.options.delivery!.scope && job.options.delivery?.messageIds?.some(id => id === r.message.messageId || id === messageRequestId(r.message)));
         const ids = new Set(inputs.map(r => 'receipt:' + r.message.messageId));
         for (let i = turns.length - 1; i >= 0; i--) if (ids.has(turns[i]!.id)) turns.splice(i, 1);
         const nativeTurn = native?.turns.find(t => t.bridgeJobId === job.id || t.id === view!.turnId);
@@ -544,7 +614,7 @@ export class PersonalSessionService {
         const status = job.status === 'running' ? (view.state.footer === 'waiting_input' ? 'waiting_input' : 'running') : job.status;
         let state = shared ? view.state : nativeTurn?.state ?? view.state;
         if (shared && this.deps.controls.auxiliaryApprovals) state = await this.deps.controls.auxiliaryApprovals.review(job.options.delivery!.scope, job.id, job.options.delivery!.replyTo, state);
-        if (shared && sharedJobPersonalScope(this.deps.controls, this.deps.catalog, job) !== session.scope) continue;
+        if (shared && !scopes.has(sharedJobPersonalScope(this.deps.controls, this.deps.catalog, job)??'')) continue;
         const terminal = { accepted: 'running', running: 'running', completed: 'done', failed: 'error', interrupted: 'interrupted', unknown: state.terminal }[job.status] as RunState['terminal'];
         const statusState: RunState = { ...state, terminal, runtime: view.state.runtime,
           execution: state.execution || view.state.execution || job.options.model || job.options.reasoningEffort

@@ -6,7 +6,7 @@ import type { CodexInputAnswers, CodexInputRequest } from '../session/codex-user
 /** Transport capabilities, independent of provider-specific compatibility flags. */
 export interface WorkerCapabilities {
   apiVersion: 2;
-  jobs: { submit: true; read: true; stop: true; eventCursor: true };
+  jobs: { submit: true; read: true; stop: true; eventCursor: true; persistentQueue?: true };
   models: boolean;
   reasoningMapping?: boolean;
   sessions: { list: boolean; history: boolean; rename: boolean; archive: boolean; fork: boolean; archiveEffect?: 'delete' };
@@ -79,6 +79,8 @@ export interface RunDelivery {
 }
 
 export interface WorkerSubmission {
+  /** Opt in to durable FIFO scheduling; old clients retain busy rejections. */
+  enqueue?: true;
   requestKey: string;
   options: AgentRunOptions;
   botIdentity?: AgentBotIdentity;
@@ -86,6 +88,7 @@ export interface WorkerSubmission {
 
 export type JobStatus = 'accepted' | 'running' | 'completed' | 'failed' | 'interrupted' | 'unknown';
 export interface WorkerJob extends WorkerSubmission {
+  queue?: { version: 1; sequence: number; dispatchedAt?: number; recoveryPending?: boolean; nativeId?:string };
   version: 1;
   id: string;
   fingerprint: string;
@@ -98,3 +101,4 @@ export interface StoredEvent { seq: number; at: number; event: AgentEvent }
 export interface JobSnapshot { job: WorkerJob; events: StoredEvent[] }
 export interface WorkerEndpoint { version: 1; url: string; token: string; pid: number }
 export const isJobActive = (job: WorkerJob): boolean => job.status === 'accepted' || job.status === 'running';
+export const isJobWaiting = (job:WorkerJob):boolean => job.status==='accepted'&&job.enqueue===true&&job.queue?.version===1&&!job.queue.dispatchedAt;

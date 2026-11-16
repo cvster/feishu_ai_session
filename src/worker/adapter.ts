@@ -13,6 +13,7 @@ export class DurableAgentAdapter implements AgentAdapter {
   private identity?: AgentBotIdentity;
   constructor(readonly client: WorkerClient, private readonly cli?: Pick<AgentAdapter, 'displayName'> & Partial<AgentAdapter>) {}
   setBotIdentity(identity: AgentBotIdentity): void { this.identity = identity; }
+  submitQueued(input:import('./protocol').WorkerSubmission){return this.client.submit({...input,enqueue:true,botIdentity:this.identity});}
   async isAvailable(): Promise<boolean> { return this.client.health().then(() => true, () => false); }
   async listModels(options?: { cwd?: string }) { await this.prepareRun(); return this.client.models(options?.cwd); }
   async prepareRun(_options?: AgentRunOptions): Promise<void> {

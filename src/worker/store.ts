@@ -53,7 +53,7 @@ export class JobStore {
   async prune(): Promise<void> {
     const now = this.now(); this.prunedAt = now;
     for (const job of [...this.jobs.values()]) {
-      if (isJobActive(job) || now - job.updatedAt < JOB_RETENTION_MS) continue;
+      if (isJobActive(job) || job.queue?.recoveryPending || now - job.updatedAt < JOB_RETENTION_MS) continue;
       await rm(join(this.root, `${job.id}.ndjson`), { force: true });
       await rm(join(this.root, `${job.id}.json`), { force: true });
       this.jobs.delete(job.id); this.events.delete(job.id);

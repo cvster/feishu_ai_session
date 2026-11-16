@@ -9,8 +9,11 @@ import { messageRequestId } from '../worker/identity';
 import { deliveryUuid, type CardPart } from '../card/multipart';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { log } from '../core/logger';
+import {isJobWaiting} from '../worker/protocol';
+import {executionBinding} from '../tools/execution-routes';
+import {isWebScope} from '../web/routes';
 
-export interface QueuedMessage { id: string; text: string; senderName: string; createdAtMs: number; messageId?: string; requestIds?: string[] }
+export interface QueuedMessage { id: string; text: string; senderName: string; createdAtMs: number; messageId?: string; messageIds?:string[]; requestIds?: string[] }
 export interface MessageQueue {
   list(scope: string): QueuedMessage[];
   remove(scope: string, id: string, actor: string): Promise<boolean>;
@@ -20,16 +23,23 @@ export interface MessageQueue {
 /** Only waiting input is cancellable. A flushed batch belongs to its executor. */
 export function createMessageQueue(controls: Controls, pending: PendingQueue, catalog?: SessionCatalog): MessageQueue {
   const replies = new Map<string, { scope: string; createdAtMs: number; checkedAtMs: number; binding: string }>();
-  const bindingKey = (scope: string) => { const b = controls.toolBindings?.get(scope); return JSON.stringify([b?.toolId, b?.sourceId, b?.nativeId]); };
+  const bindingKey = (scope: string) => { const b = executionBinding(controls,scope); return JSON.stringify([b?.toolId, b?.sourceId, b?.nativeId]); };
   function entries(scope: string) {
-    const binding = controls.toolBindings?.get(scope), tool = binding && controls.toolRegistry?.find(binding.toolId);
-    if (!binding || !isPersonalWorkgroup(scope, binding) || controls.auxiliary?.isAuxiliary(scope) ||
+    const binding = executionBinding(controls,scope), tool = binding && controls.toolRegistry?.find(binding.toolId);
+    if (!binding || (!isWebScope(scope)&&!isPersonalWorkgroup(scope, binding)) || controls.auxiliary?.isAuxiliary(scope) ||
       catalog?.isScopeArchived(scope) || !tool || tool.sourceId !== binding.sourceId) return [];
     const inbox = controls.workerRuntimes?.get(binding.toolId)?.inbox;
     const waiting = new Set(pending.snapshot().find(e => e.scope === scope)?.messages.map(messageRequestId));
     return (inbox?.pendingReceipts(scope) ?? []).filter(e =>
       (!e.queued || waiting.has(e.requestId))).map(e => ({ ...e, inbox: inbox!,
         id: deliveryUuid(JSON.stringify([controls.profileConfig.accounts.app.id, scope, binding.toolId, binding.sourceId, binding.nativeId, e.requestId])) }));
+  }
+  function workerEntries(scope:string){
+    const binding=executionBinding(controls,scope),runtime=binding&&controls.workerRuntimes?.get(binding.toolId),tool=binding&&controls.toolRegistry?.find(binding.toolId);
+    if(!binding||!runtime||!tool||tool.sourceId!==binding.sourceId||catalog?.isScopeArchived(scope))return [];
+    return (runtime.jobs??[]).filter(job=>isJobWaiting(job)&&job.options.delivery?.scope===scope&&job.options.delivery.sourceId===binding.sourceId&&job.options.delivery.botAppId===controls.profileConfig.accounts.app.id)
+      .map(job=>{const messages=runtime.inbox.receipts(scope).filter(r=>job.options.delivery?.messageIds?.includes(messageRequestId(r.message))).map(r=>r.message);
+        return {job,runtime,tool,messages,id:deliveryUuid(JSON.stringify(['worker-queue',controls.profile,job.id]))};});
   }
   return {
     observeReply(scope, id, createdAtMs, running) {
@@ -41,13 +51,22 @@ export function createMessageQueue(controls: Controls, pending: PendingQueue, ca
         .sort((a, b) => b[1].createdAtMs - a[1].createdAtMs || b[0].localeCompare(a[0]));
       return candidates[0]?.[0] === id ? this.list(scope) : [];
     },
-    list: scope => entries(scope).map(e => ({ id: e.id, messageId: e.message.messageId, text: e.message.content || '[附件消息]', senderName: e.message.senderName ?? '用户', createdAtMs: Number(e.message.createTime) })),
+    list: scope => [...entries(scope).map(e => ({ id: e.id, messageId: e.message.messageId, text: e.message.content || '[附件消息]', senderName: e.message.senderName ?? '用户', createdAtMs: Number(e.message.createTime) })),
+      ...workerEntries(scope).map(e=>({id:e.id,messageId:e.messages[0]?.messageId,messageIds:e.messages.map(m=>m.messageId),text:e.messages.map(m=>m.content||'[附件消息]').join('\n\n')||'已接收的任务',senderName:[...new Set(e.messages.map(m=>m.senderName??'用户'))].join('、'),createdAtMs:e.job.createdAt}))],
     async remove(scope, id, actor) {
+      const worker=workerEntries(scope).find(e=>e.id===id);
+      if(worker){
+        if(actor!==worker.job.options.delivery?.operatorOpenId&&(controls.ownerRefreshState!=='ok'||actor!==controls.botOwnerId))throw new Error('消息所有者已变化，请刷新队列。');
+        if(!(worker.tool.agent instanceof DurableAgentAdapter))return false;
+        await worker.tool.agent.client.cancelQueued(worker.job.id);
+        worker.runtime.jobs=worker.runtime.jobs?.map(j=>j.id===worker.job.id?{...j,status:'interrupted' as const}:j);
+        await worker.runtime.inbox.cancelAccepted(scope,worker.job.options.delivery?.messageIds??[]);return true;
+      }
       let entry = entries(scope).find(e => e.id === id);
       if (!entry) return false;
       if (actor !== entry.message.senderId && (controls.ownerRefreshState !== 'ok' || actor !== controls.botOwnerId))
         throw new Error('只能删除自己排队的消息，所有者可删除全部排队消息。');
-      const binding = controls.toolBindings?.get(scope), tool = binding && controls.toolRegistry?.find(binding.toolId);
+      const binding = executionBinding(controls,scope), tool = binding && controls.toolRegistry?.find(binding.toolId);
       if (tool?.agent instanceof DurableAgentAdapter) {
         const jobs = await tool.agent.client.list();
         if (jobs.some(job => job.options.delivery?.scope === scope && job.options.delivery.messageIds?.includes(entry!.requestId))) {

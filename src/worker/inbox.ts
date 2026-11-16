@@ -46,6 +46,10 @@ export class WorkerInbox {
     entry.status = 'cancelled'; this.queued.delete(key); this.deferredUntil.delete(key);
     await this.persist(); return true;
   }
+  async cancelAccepted(scope:string,messageIds:string[]):Promise<void>{
+    for(const entry of Object.values(this.entries))if(entry.scope===scope&&messageIds.includes(messageRequestId(entry.message))&&entry.status==='accepted')entry.status='cancelled';
+    await this.persist();
+  }
   releaseQueued(scope: string, messages: NormalizedMessage[]): void { for (const message of messages) this.queued.delete(this.key(scope, message)); }
   receipts(scope: string): InboxEntry[] { return structuredClone(Object.values(this.entries).filter(e => e.scope === scope)); }
   pendingReceipts(scope: string) {

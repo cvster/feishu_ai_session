@@ -128,11 +128,12 @@ export interface Controls {
   auxiliaryApprovals?: import('../bot/auxiliary-approvals').AuxiliaryApprovals;
   toolRegistry?: ToolRegistry;
   toolBindings?: ToolBindingStore;
+  webRoutes?: import('../web/routes').WebRoutes;
   /** Bridge-owned default model per tool, applied whenever a scope has no explicit choice. */
   agentDefaults?: import('../agent/defaults').AgentDefaultStore;
   defaultToolId?: import('../config/profile-schema').AgentKind;
   executorForTool?(id: import('../config/profile-schema').AgentKind): RunExecutor;
-  workerRuntimes?: Map<ToolId, { inbox: import('../worker/inbox').WorkerInbox; replies?: WorkerReplySync }>;
+  workerRuntimes?: Map<ToolId, { inbox: import('../worker/inbox').WorkerInbox; replies?: WorkerReplySync; jobs?: import('../worker/protocol').WorkerJob[] }>;
   workerReplySync?: WorkerReplySync;
   workerQuestions?: { handleAction(scope: string, messageId: string, token: string, form?: Record<string, unknown>): Promise<void> };
   workerInbox?: import('../worker/inbox').WorkerInbox;

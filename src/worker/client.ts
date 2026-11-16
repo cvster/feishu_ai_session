@@ -144,4 +144,7 @@ export class WorkerClient {
   async submit(input: WorkerSubmission): Promise<WorkerJob> { await this.health(); return this.request('/jobs', input); }
   async snapshot(id: string, after = 0): Promise<JobSnapshot> { return this.request(`/jobs/${id}?after=${after}`); }
   async stop(id: string): Promise<void> { await this.request(`/jobs/${id}/stop`, {}); }
+  async acknowledgeRecovery(id:string):Promise<void>{await this.request(`/jobs/${id}/recover`,{confirm:id});}
+  async cancelQueued(id: string): Promise<void> { await this.request(`/jobs/${id}/stop`, {queuedOnly:true}); }
+  async drain():Promise<{draining:true;active:number;queued:number}>{return this.request('/drain',{});}
 }
