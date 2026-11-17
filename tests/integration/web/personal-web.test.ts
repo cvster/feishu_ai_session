@@ -38,6 +38,7 @@ import { WorkerApiError } from '../../../src/worker/tool-api';
 import type { WebConfig } from '../../../src/web/config';
 import { WebMarkdown } from '../../../src/web/markdown';
 import {WebRoutes,isWebScope} from '../../../src/web/routes';
+import { chatIsDissolved } from '../../../src/bot/group-cleanup';
 
 async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}, authoritative = false, archiveEffect?: 'delete') {
   const native = { nativeId: 'native', name: 'AA-web', cwd: '/project', createdAtMs: 1, updatedAtMs: 2, archived: false };
@@ -132,6 +133,27 @@ it('lists native Web sessions without a Feishu binding and mutates them without 
   const restarted=new WebRoutes(join(h.dir,'web-routes.json'),'test','cli_test');await restarted.load();expect(restarted.get(row.scope)?.nativeId).toBe(unbound.nativeId);
   expect(()=>restarted.set(row.scope,{...restarted.get(row.scope)!,nativeId:'replacement'})).toThrow('identity');
   h.finish();
+});
+
+it('shares group detail evidence across console polls and cleanup, and bypasses it for an explicit fresh check', async () => {
+  const h = await harness(); await h.replies.stop(); await h.names.stop();
+  h.controls.webRoutes = new WebRoutes(join(h.dir, 'routes.json'), 'test', 'cli_test');
+  const get = vi.mocked(h.channel.rawClient.im.v1.chat.get); get.mockClear();
+  const first = (await h.consoleService.snapshot()).bindings[0]!;
+  const reads = get.mock.calls.length; expect(reads).toBe(1);
+  const time = Date.now(), clock = vi.spyOn(Date, 'now');
+  try {
+    for (let i = 1; i <= 6; i++) {
+      clock.mockReturnValue(time + i * 10_001);
+      expect((await h.consoleService.snapshot()).bindings[0]!.groupInspection.checkedAt).toBe(first.groupInspection.checkedAt);
+      expect(await chatIsDissolved(h.channel, 'oc_group', false)).toBe(false);
+    }
+    expect(get).toHaveBeenCalledTimes(reads);
+    get.mockResolvedValue({ code: 232009 } as any);
+    const checked = (await h.consoleService.snapshot(true)).bindings[0]!;
+    expect(checked).toMatchObject({ groupState: 'dissolved', canArchive: true });
+    expect(get).toHaveBeenCalledTimes(reads + 1);
+  } finally { clock.mockRestore(); }
 });
 
 it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('omits unnamed %s native sessions from Web lists and recovers matching group titles without changing native data', async tool => {

@@ -33,6 +33,7 @@ export interface SessionNameSyncOptions extends Omit<CodexNameSyncOptions, 'agen
   chatCheckIntervalMs?: number;
   renameSession?(id: string, name: string): Promise<void>;
   onSynchronized?(scope: string, id: string, name: string): Promise<void>;
+  groupName?(chatId: string, nativeNameChanged: boolean): Promise<string | undefined>;
 }
 export interface NamedSessionSnapshot { id: string; name?: string }
 
@@ -134,7 +135,9 @@ export class SessionNameSync {
     if (mode !== 'group') return;
     // A stale knownChats cache is not evidence of a rename. On lookup failure
     // leave the baseline untouched and retry, never overwrite either side.
-    const groupName = (await this.options.channel.getChatInfo(chatId)).name?.trim();
+    const groupName = (this.options.groupName
+      ? await this.options.groupName(chatId, !!threadChanged)
+      : (await this.options.channel.getChatInfo(chatId)).name)?.trim();
     if (!groupName || !isActive()) return;
 
     const repairBaseline = state && state.groupName !== state.threadName &&

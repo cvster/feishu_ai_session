@@ -8,6 +8,7 @@ import { DurableAgentAdapter } from '../worker/adapter';
 import { NAME_SYNC_INTERVAL_MS, SessionNameSync } from './thread-name';
 import { log } from '../core/logger';
 import { PollHealth } from '../core/poll-health';
+import { fetchChatInfoResult, fetchKnownChatsResult, type KnownChatsFetchResult } from './lark-info';
 
 /** Poll native metadata only; remote mutations go through the owning worker. */
 export async function startToolNameSync(options: {
@@ -32,12 +33,28 @@ export async function startToolNameSync(options: {
   // those rows still represent one group, not competing personal bindings.
   const exclusive = (scope: string, id: string) => active(scope, id) &&
     new Set(ownedEntries().filter(row => (row.sessionId ?? row.threadId) === id).map(row => row.scopeId)).size === 1;
+  let roster: Promise<KnownChatsFetchResult> | undefined, rosterForced = false, forceChats = false;
   const sync = new SessionNameSync({ channel: options.channel, toolId: tool.id, sourceId: tool.sourceId,
     appId: controls.profileConfig.accounts.app.id, statePath: options.statePath,
     // This poller's timer already throttles lookups. A second throttle would
     // skip a poll when worker metadata arrives faster than on the prior tick.
     chatCheckIntervalMs: 0,
     knownChats: () => controls.knownChats ?? [],
+    groupName: async (chatId, changed) => {
+      const fresh = forceChats || changed;
+      if (!roster || fresh && !rosterForced) {
+        roster = fetchKnownChatsResult(options.channel, fresh);
+        rosterForced = fresh;
+      }
+      const result = await roster;
+      if (!result.ok) throw new Error('群列表读取失败，保留现有名称');
+      const name = result.chats.find(chat => chat.id === chatId)?.name;
+      if (name && name !== '(无名)') return name;
+      // Omission may mean limited visibility; obtain exact evidence, never infer dissolution.
+      const detail = await fetchChatInfoResult(options.channel, chatId, fresh);
+      if (detail.code || !detail.data) throw new Error('群信息读取失败，保留现有名称');
+      return detail.data.name;
+    },
     renameSession: (id, name) => sessionOperations(tool).rename(id, name),
     onSynchronized: async (scope, id, name) => {
       if (!exclusive(scope, id)) return;
@@ -47,9 +64,10 @@ export async function startToolNameSync(options: {
   await sync.load();
   let stopped = false, running: Promise<void> | undefined;
   const health = new PollHealth('session', 'native-name-poll-failed', { toolId: tool.id }, options.intervalMs ?? NAME_SYNC_INTERVAL_MS, 2 * 60_000);
-  const tick = () => {
+  const tick = (force = true) => {
     if (stopped) return Promise.resolve();
     if (running) return running;
+    roster = undefined; rosterForced = false; forceChats = force;
     running = (async () => {
       await controls.auxiliary?.syncSharedPrefix(tool.id);
       const entries = ownedEntries().filter(row => exclusive(row.scopeId, (row.sessionId ?? row.threadId)!));
@@ -63,7 +81,7 @@ export async function startToolNameSync(options: {
     })().then(() => health.ok(), error => health.failed(error)).finally(() => { running = undefined; });
     return running;
   };
-  const timer = setInterval(() => { if (health.due()) void tick(); }, options.intervalMs ?? NAME_SYNC_INTERVAL_MS); timer.unref();
+  const timer = setInterval(() => { if (health.due()) void tick(false); }, options.intervalMs ?? NAME_SYNC_INTERVAL_MS); timer.unref();
   void tick();
   return { tick, async stop() { stopped = true; clearInterval(timer); await running; } };
 }

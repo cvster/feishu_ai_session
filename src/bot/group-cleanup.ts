@@ -5,6 +5,7 @@ import { log } from '../core/logger';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
+import { fetchChatInfoResult } from './lark-info';
 
 interface Deps {
   channel: LarkChannel;
@@ -18,9 +19,9 @@ interface Deps {
 }
 
 /** Missing list entries, invalid IDs and permission failures are not proof of dissolution. */
-export async function chatIsDissolved(channel: LarkChannel, chatId: string): Promise<boolean> {
+export async function chatIsDissolved(channel: LarkChannel, chatId: string, force = true): Promise<boolean> {
   try {
-    const result = await channel.rawClient.im.v1.chat.get({ path: { chat_id: chatId } });
+    const result = await fetchChatInfoResult(channel, chatId, force);
     if (result.code === 232009) return true;
     if (result.code) throw new Error(`群信息查询失败（${result.code}）`);
     if (!result.data) throw new Error('群信息查询未返回数据');
@@ -110,7 +111,7 @@ export function createGroupCleanup(deps: Deps): { start(): Promise<void>; runNow
   let stopped = false;
   let cursor = 0;
   const completed = new Set<string>();
-  const scan = async () => {
+  const scan = async (force: boolean) => {
     const ids = groupIds(deps).filter(id => !completed.has(id));
     if (!ids.length) return;
     const start = cursor % ids.length;
@@ -119,7 +120,7 @@ export function createGroupCleanup(deps: Deps): { start(): Promise<void>; runNow
     for (let n = 0; n < count && !stopped; n++) {
       const chatId = ids[(start + n) % ids.length]!;
       try {
-        if (!deps.catalog.isChatDissolved(chatId) && !await chatIsDissolved(deps.channel, chatId)) continue;
+        if (!deps.catalog.isChatDissolved(chatId) && !await chatIsDissolved(deps.channel, chatId, force)) continue;
         if (stopped) break;
         await cleanDissolvedChat(deps, chatId);
         completed.add(chatId);
@@ -128,17 +129,17 @@ export function createGroupCleanup(deps: Deps): { start(): Promise<void>; runNow
       }
     }
   };
-  const runNow = (): Promise<void> => {
+  const runNow = (force = true): Promise<void> => {
     if (stopped) return Promise.resolve();
     if (running) return running;
-    running = (deps.controls.withAaSessionGroupSyncPaused?.(scan) ?? scan()).finally(() => { running = undefined; });
+    running = (deps.controls.withAaSessionGroupSyncPaused?.(() => scan(force)) ?? scan(force)).finally(() => { running = undefined; });
     return running;
   };
   return {
     async start() {
       await runNow();
       if (stopped || timer) return;
-      timer = setInterval(() => { void runNow().catch(error => log.fail('group-cleanup', error)); }, deps.intervalMs ?? 60_000);
+      timer = setInterval(() => { void runNow(false).catch(error => log.fail('group-cleanup', error)); }, deps.intervalMs ?? 60_000);
       timer.unref();
     },
     runNow,

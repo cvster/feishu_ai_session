@@ -30,6 +30,7 @@ import {isJobWaiting} from '../worker/protocol';
 import {isWebScope} from './routes';
 import {executionBinding} from '../tools/execution-routes';
 import { namedSession } from '../session/display-name';
+import { fetchChatInfoResult } from '../bot/lark-info';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
@@ -249,7 +250,7 @@ export class PersonalSessionService {
     const seq = ++this.observations, previous = this.groups.get(scope);
     try {
       if (this.feishuUnavailable()) throw new Error('飞书暂不可用，显示本地会话记录');
-      const result = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: scope } });
+      const result = await fetchChatInfoResult(this.deps.channel, scope, true);
       const data = result.data;
       if (result.code || !data || !['group', 'topic', 'p2p'].includes(data.chat_mode ?? '')) throw new Error('群信息未确认');
       this.setGroup(scope, seq, { mode: data.chat_mode!, name: data.name?.trim() || undefined, bindingName: binding.name });

@@ -35,7 +35,8 @@ async function fixture(toolId: 'codex' | 'claude' | 'dsh' | 'zcode' | 'kilo' = '
   const list=vi.fn(async()=>[{nativeId:'session_native',name:title,cwd:dir,createdAtMs:1,updatedAtMs:2}]);
   const update=vi.fn(async(p:{data:{name:string}})=>{group=p.data.name;return {code:0};});
   const getChatInfo=vi.fn(async()=>({name:group}));
-  const channel={getChatMode:vi.fn(async()=> 'group'),getChatInfo,rawClient:{im:{v1:{chat:{update}}}}} as unknown as LarkChannel;
+  const listChats=vi.fn(async()=>{const info=await getChatInfo();return bindings.entries().map(([id])=>({id,name:info.name}));});
+  const channel={listChats,getChatMode:vi.fn(async()=> 'group'),getChatInfo,rawClient:{im:{v1:{chat:{update}}}}} as unknown as LarkChannel;
   const profile=createDefaultProfileConfig({agentKind:'codex',codex:{binaryPath:'codex',inheritCodexHome:true},accounts:{app:{id:'bot',secret:'test',tenant:'feishu'}}});
   const controls={profileConfig:profile,toolBindings:bindings} as unknown as Controls;
   const worker=new WorkerClient(dir,'local','bot',toolId);
@@ -59,6 +60,23 @@ async function fixture(toolId: 'codex' | 'claude' | 'dsh' | 'zcode' | 'kilo' = '
   };
   return {dir,bindings,catalog,add,legacyAdd,omitCatalogSource,controls,channel,tool,rename,list,ready,start,startRegistered,health,capabilities,update,getChatInfo,title:(v:string)=>{title=v;},group:(v:string)=>{group=v;}};
 }
+it('shares one roster request across tool name pollers instead of reading each group separately', async () => {
+  const h = await fixture('codex');
+  h.controls.toolRegistry!.register({ ...h.tool, id: 'claude' });
+  h.bindings.set('oc_second', { toolId: 'claude', sourceId: 'local', nativeId: 'session_native', name: 'old' });
+  h.catalog.upsertActive({ scopeId: 'oc_second', agentId: 'claude', sessionId: 'session_native', sourceId: 'local',
+    cwdRealpath: h.dir, botAppId: 'bot', policyFingerprint: 'second' });
+  vi.useFakeTimers();
+  const sync = await h.startRegistered(); h.getChatInfo.mockClear();
+  h.group('轮询发现的新群名'); await vi.advanceTimersByTimeAsync(60_000);
+  await vi.waitFor(() => {
+    expect(h.bindings.get('oc_group')?.name).toBe('轮询发现的新群名');
+    expect(h.bindings.get('oc_second')?.name).toBe('轮询发现的新群名');
+  });
+  expect(h.getChatInfo).toHaveBeenCalledOnce();
+  await sync.stop();
+});
+
 it.each(['codex','zcode'] as const)('syncs legacy %s catalog rows only after verifying their current binding source',async toolId=>{
   const h=await fixture(toolId);await h.omitCatalogSource();const sync=await h.startRegistered();
   expect(h.rename).toHaveBeenCalledWith('session_native','AA-copy（ZCode）');await sync.tick();

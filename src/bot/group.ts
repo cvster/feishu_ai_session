@@ -3,6 +3,7 @@ import type { AgentKind } from '../config/profile-schema';
 import { sessionGroupAvatar } from './group-avatar';
 import { log } from '../core/logger';
 import { muteSessionGroup } from './group-notifications';
+import { invalidateChatInfo } from './lark-info';
 
 export interface CreateBoundChatOptions {
   channel: LarkChannel;
@@ -81,6 +82,7 @@ async function createTrackedChat(opts: CreateBoundChatOptions): Promise<CreatedC
   });
   const chatId = response.data?.chat_id;
   if (response.code || !chatId) throw new Error(`Feishu chat creation failed (${response.code ?? 'unknown'}): ${response.msg ?? 'missing chat_id'}`);
+  invalidateChatInfo(channel, chatId);
   bridgeCreatedChats.add(chatId);
   await muteSessionGroup(channel, chatId);
   return { chatId, name };
@@ -101,6 +103,7 @@ export async function dissolveChat(channel: LarkChannel, chatId: string): Promis
     throw Object.assign(new Error(`Feishu rejected chat deletion (${response.code}): ${response.msg ?? 'unknown error'}`),
       { code: response.code, msg: response.msg });
   }
+  invalidateChatInfo(channel, chatId);
 }
 
 /** Explain management-policy failures without exposing SDK transport details. */
@@ -124,6 +127,7 @@ export async function renameChat(channel: LarkChannel, chatId: string, name: str
   if (response.code && response.code !== 0) {
     throw new Error(`Feishu rejected chat rename (${response.code}): ${response.msg ?? 'unknown error'}`);
   }
+  invalidateChatInfo(channel, chatId);
 }
 
 const DEFAULT_CHAT_PREFIX = 'Codex任务';

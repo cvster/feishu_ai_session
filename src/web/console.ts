@@ -14,6 +14,7 @@ import { PersonalSessionService, WebError } from './service';
 import { ManagementStateStore, type SessionState, type GroupState, type StateInspection } from './management-state';
 import { describeChatDeletionError, dissolveChat } from '../bot/group';
 import { namedSession } from '../session/display-name';
+import { fetchChatInfoResult, fetchKnownChatsResult } from '../bot/lark-info';
 
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const clean = (v: unknown) => redactDiagnosticText(String(v ?? '')).replace(/\bsk-[A-Za-z0-9_-]{12,}/g, '[REDACTED]').slice(0, 2000);
@@ -73,7 +74,9 @@ export class BridgeConsoleService {
       } catch (e) { o.error = clean(e instanceof Error ? e.message : e); }
       this.observations.set(id, o);
     }));
-    const chats = new Map<string, { name?: string; mode?: string; status?: string; error?: string }>();
+    const chats = new Map<string, { name?: string; mode?: string; status?: string; error?: string; checkedAtMs?: number }>();
+    const roster = this.deps.personal.feishuUnavailable() ? undefined : await fetchKnownChatsResult(this.deps.channel, force);
+    const names = new Map(roster?.ok ? roster.chats.map(chat => [chat.id, chat.name]) : []);
     const chatIds = [...new Set([...entries.map(([scope]) => scope.split(':')[0]!), ...sharedRows.map(row => row.chatId), ...dissolved.map(r => r.chatId)].filter(id => id.startsWith('oc_')))];
     // Limit Feishu fan-out while inspecting many bindings.
     let index = 0;
@@ -83,10 +86,10 @@ export class BridgeConsoleService {
         if (this.deps.catalog?.isChatDissolved(id)) { chats.set(id, { status: 'dissolved' }); continue; }
         if (this.deps.personal.feishuUnavailable()) { chats.set(id, { error: '飞书暂不可用，显示本地记录' }); continue; }
         try {
-          const r = await this.deps.channel.rawClient.im.v1.chat.get({ path: { chat_id: id } });
-          if (r.code === 232009 || r.code === 232011) { chats.set(id, { status: r.code === 232009 ? 'dissolved' : 'unavailable' }); continue; }
+          const r = await fetchChatInfoResult(this.deps.channel, id, force);
+          if (r.code === 232009 || r.code === 232011) { chats.set(id, { status: r.code === 232009 ? 'dissolved' : 'unavailable', checkedAtMs: r.checkedAtMs }); continue; }
           if (r.code || !r.data) throw new Error(r.msg || '群信息未确认');
-          chats.set(id, { name: r.data.name, mode: r.data.chat_mode, status: r.data.chat_status });
+          chats.set(id, { name: force ? r.data.name : names.get(id) ?? r.data.name, mode: r.data.chat_mode, status: r.data.chat_status, checkedAtMs: r.checkedAtMs });
         } catch (e) {
           const failure = e as { code?: number; response?: { data?: { code?: number } } };
           const code = failure?.response?.data?.code ?? failure?.code;
@@ -154,7 +157,7 @@ export class BridgeConsoleService {
       const now = Date.now(), probe = this.sessionChecks.get(checkKey(b));
       const groupNow: GroupState | undefined = ['dissolved', 'dissolved_save'].includes(group?.status ?? '') ? 'dissolved' :
         group && !group.error && group.mode === 'group' && (!group.status || group.status === 'normal') ? 'active' : undefined;
-      const groupEvidence = groupNow ? this.states.confirm(groupKey(b.scope), groupNow, now) : this.states.get(groupKey(b.scope));
+      const groupEvidence = groupNow ? this.states.confirm(groupKey(b.scope), groupNow, group?.checkedAtMs ?? now) : this.states.get(groupKey(b.scope));
       const groupState = groupEvidence?.state as GroupState | undefined;
       const groupInspection: StateInspection = { result: groupNow ? 'ok' : 'failed', attemptedAt: now, checkedAt: groupEvidence?.checkedAt,
         ...(!groupNow ? { reason: group?.error ? '群信息读取失败：' + group.error : '当前群类型或状态不支持个人 AI 会话群' } : {}) };
