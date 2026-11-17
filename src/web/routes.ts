@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import type { ToolBinding } from '../tools/bindings';
 import type { AgentTool, ToolSession } from '../tools/types';
 import { writeFileAtomic } from '../platform/atomic-write';
+import { namedSession } from '../session/display-name';
 export interface WebRoute extends ToolBinding {
   nativeId: string;
   cwd: string;
@@ -65,7 +66,7 @@ export class WebRoutes {
       ...old,
       ...base,
       cwd: old?.cwd || row.cwd,
-      name: row.name || row.nativeId,
+      name: namedSession(row.nativeId, row.name, old?.name),
       nativeCreated: true,
       archived: row.archived === true,
       createdAtMs: old?.createdAtMs ?? row.createdAtMs,

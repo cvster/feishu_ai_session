@@ -13,14 +13,11 @@ import { log, redactDiagnosticText } from '../core/logger';
 import { PersonalSessionService, WebError } from './service';
 import { ManagementStateStore, type SessionState, type GroupState, type StateInspection } from './management-state';
 import { describeChatDeletionError, dissolveChat } from '../bot/group';
+import { namedSession } from '../session/display-name';
 
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const clean = (v: unknown) => redactDiagnosticText(String(v ?? '')).replace(/\bsk-[A-Za-z0-9_-]{12,}/g, '[REDACTED]').slice(0, 2000);
 const jobScope = (j: WorkerJob) => j.options.delivery?.scope ?? '';
-function namedSession(nativeId: string, ...names: (string | undefined)[]): string | undefined {
-  return names.map(name => name?.trim()).find(name => name && name !== nativeId &&
-    !/^[a-f0-9-]{16,}$/i.test(name) && !(name.length >= 8 && /^[a-f0-9-]+$/i.test(name) && nativeId.startsWith(name)));
-}
 interface Observation { id: AgentKind; label: string; sourceId?: string; online: boolean; checkedAt: number; error?: string; health?: HealthDetails; jobsKnown: boolean; nativeKnown: boolean; jobs: WorkerJob[]; native: ToolSession[] }
 export interface ConsoleItem {
   id: string; toolId: string; tool: string; scope: string; name: string; sender: string; text: string;

@@ -29,6 +29,7 @@ import { WEB_INPUT_TYPE } from './input';
 import {isJobWaiting} from '../worker/protocol';
 import {isWebScope} from './routes';
 import {executionBinding} from '../tools/execution-routes';
+import { namedSession } from '../session/display-name';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
@@ -290,6 +291,7 @@ export class PersonalSessionService {
   }
   async list(localSnapshot = false): Promise<WebSession[]> {
     this.owner(); if (!localSnapshot) await this.refresh(); const owner = this.owner();
+    const personalBindings = this.feishuBindings();
     return this.bindings().flatMap(([scope, b]) => {
       if (this.deps.controls.auxiliary?.isAuxiliary(scope) || ['topic', 'p2p'].includes(this.groups.get(scope)?.mode ?? '')) return [];
       // A not-yet-started session is only shown while its group is confirmed.
@@ -306,8 +308,12 @@ export class PersonalSessionService {
       const online = (groupAvailable || b.nativeCreated !== false) && meta?.online === true && !!tool && tool.sourceId === b.sourceId && (!!row || b.nativeCreated === false);
       const group = this.groups.get(scope);
       // A confirmed name sync may be newer than our 15-second group snapshot.
-      const name = isWebScope(scope)?row?.name??b.name:group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
-      const feishuChatId=isWebScope(scope)?this.feishuBindings().find(([,f])=>f.toolId===b.toolId&&f.sourceId===b.sourceId&&f.nativeId===b.nativeId)?.[0]:scope;
+      const personal = personalBindings.filter(([, f]) => f.toolId === b.toolId && f.sourceId === b.sourceId && f.nativeId === b.nativeId);
+      const name = isWebScope(scope) ? namedSession(b.nativeId!, row?.name, b.name, ...personal.map(([, f]) => f.name)) : group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
+      // Keep unnamed native records in the identity directory, but do not flood
+      // the sidebar/recent list with UUIDs from temporary or untitled sessions.
+      if (isWebScope(scope) && !name) return [];
+      const feishuChatId=isWebScope(scope)?personal[0]?.[0]:scope;
       const aliasIds=this.aliases(scope,b);
       // Use native activity rather than the catalog's periodically refreshed timestamp.
       // Pending bridge input should also appear immediately, before the worker lists it.

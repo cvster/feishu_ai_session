@@ -134,6 +134,46 @@ it('lists native Web sessions without a Feishu binding and mutates them without 
   h.finish();
 });
 
+it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('omits unnamed %s native sessions from Web lists and recovers matching group titles without changing native data', async tool => {
+  const h = await harness(tool); await h.replies.stop(); await h.names.stop();
+  const routes = new WebRoutes(join(h.dir, 'web-routes.json'), 'test', 'cli_test');
+  await routes.load(); h.controls.webRoutes = routes;
+  const unnamed = ['', '01234567-89ab-4cde-8fab-0123456789ab', '01234567', 'abcdef0123456789abcdef0123456789', '   ']
+    .map((name, i) => ({ ...h.native, nativeId: `01234567-89ab-4cde-8fab-0123456789a${i}`, name }));
+  const named = { ...h.native, nativeId: 'unbound-named', name: 'deadbeef 行情分析' };
+  h.bindings.set('oc_other', { ...h.bindings.get('oc_group')!, nativeId: unnamed[1]!.nativeId, sourceId: 'another-source', name: '别处的群名' });
+  h.native.name = '';
+  h.provider.list.mockResolvedValue([h.native, ...unnamed, named]);
+  const rows = await h.service.list();
+  expect(rows.map(row => row.name).sort()).toEqual(['AA-web', named.name].sort());
+  expect(rows.find(row => row.name === 'AA-web')?.feishuChatId).toBe('oc_group');
+  expect(routes.entries()).toHaveLength(unnamed.length + 2);
+  expect(h.provider.archive).not.toHaveBeenCalled(); expect(h.provider.rename).not.toHaveBeenCalled();
+  // Naming a previously hidden session makes its existing identity visible.
+  const scope = routes.scope({ toolId: tool, sourceId: h.client.sourceId, nativeId: unnamed[0]!.nativeId });
+  unnamed[0]!.name = '新增的会话名';
+  const refreshed = h.makeService(); await refreshed.load();
+  expect((await refreshed.list()).find(row => row.scope === scope)?.name).toBe('新增的会话名');
+});
+
+it('preserves a known Web title when native metadata temporarily falls back to an ID, including after restart', async () => {
+  const h = await harness('claude'); await h.replies.stop(); await h.names.stop();
+  const path = join(h.dir, 'web-routes.json'), routes = new WebRoutes(path, 'test', 'cli_test');
+  await routes.load(); h.controls.webRoutes = routes;
+  const native = { ...h.native, nativeId: '01234567-89ab-4cde-8fab-0123456789ab', name: '研究报告' };
+  h.provider.list.mockResolvedValue([native]);
+  const original = (await h.service.list())[0]!;
+  native.name = native.nativeId;
+  const refreshed = h.makeService(); await refreshed.load();
+  expect((await refreshed.list())[0]).toMatchObject({ id: original.id, name: '研究报告' });
+  const restored = new WebRoutes(path, 'test', 'cli_test'); await restored.load(); h.controls.webRoutes = restored;
+  const restarted = h.makeService(); await restarted.load();
+  expect((await restarted.list())[0]).toMatchObject({ id: original.id, name: '研究报告' });
+  native.name = '新的报告名';
+  const renamed = h.makeService(); await renamed.load();
+  expect((await renamed.list())[0]).toMatchObject({ id: original.id, name: '新的报告名' });
+});
+
 it('keeps old group URLs as aliases and forks/archives native Web sessions without group mutations',async()=>{
   const h=await harness('codex');await h.replies.stop();
   const old=(await h.service.list())[0]!;
