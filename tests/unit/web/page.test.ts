@@ -17,6 +17,7 @@ class Element {
   clientHeight = 480;
   private top = 0;
   onclick?: (event?: { stopPropagation(): void }) => void | Promise<void>;
+  oninput?: () => void;
   onerror?: () => void;
   onsubmit?: (event: { preventDefault(): void }) => Promise<void>;
   onkeydown?: (event: { key: string; preventDefault(): void }) => void;
@@ -420,16 +421,53 @@ it('keeps a failed send across reload and reuses its request ID and bubble on re
   const data = h.requests[1]!.data;
   h.requests[1]!.reject(new Error('network unavailable')); await submit;
   expect(h.node('messages').querySelector('.send_unknown')!.text).toContain('发送未确认');
-  expect(h.node('send').textContent).toBe('重试');
+  expect(h.node('send').textContent).toBe('发送');
   const restored = harness(undefined, 2, h.storage); await restored.ready();
   restored.requests[0]!.resolve(restored.conversation(0, '', 0)); await restored.settle();
   expect(restored.node('messages').text).toContain('重试消息');
-  const retry = restored.node('composer').onsubmit!({ preventDefault() {} });
+  const retryButton=restored.node('messages').querySelector('.failed-actions')!.querySelectorAll('button')[0]!;
+  expect(retryButton.textContent).toBe('重发');expect(retryButton.disabled).toBe(false);
+  const retry = retryButton.onclick!();
   expect(restored.requests[1]!.data).toEqual(data);
   expect(restored.node('messages').querySelectorAll('.user')).toHaveLength(1);
   restored.requests[1]!.resolve({ status: 'queued' }); await retry;
   expect(restored.node('messages').querySelectorAll('.user')).toHaveLength(0);
   expect(restored.storage.has('bridge-web-draft:' + restored.rows[0]!.id)).toBe(false);
+});
+
+it('keeps multiple failed sends independently, allows new input, and deletes only the chosen local record',async()=>{
+  const h=harness();await h.ready();h.requests[0]!.resolve(h.conversation(0,'',0));await h.settle();
+  h.node('input').value='失败一';const first=h.node('composer').onsubmit!({preventDefault(){}});
+  const firstId=h.requests[1]!.data.requestId;h.requests[1]!.reject(Error('offline'));await first;
+  expect((h.node('input') as any).readOnly).toBe(false);expect(h.node('send').disabled).toBe(false);
+  h.node('input').value='失败二';const second=h.node('composer').onsubmit!({preventDefault(){}});
+  const secondId=h.requests[2]!.data.requestId;expect(secondId).not.toBe(firstId);expect(h.requests[2]!.data.text).toBe('失败二');
+  h.requests[2]!.reject(Error('offline'));await second;
+  const key='bridge-web-draft:'+h.rows[0]!.id;
+  expect(JSON.parse(h.storage.get(key)!).map((r:any)=>r.requestId)).toEqual([firstId,secondId]);
+  h.node('input').value='未发送的草稿';h.node('input').oninput!();
+  const actions=h.node('messages').querySelectorAll('.failed-actions');expect(actions).toHaveLength(2);
+  await actions[0]!.querySelectorAll('button')[1]!.onclick!();
+  expect(h.node('messages').text).not.toContain('失败一');expect(h.node('messages').text).toContain('失败二');
+  expect(h.node('input').value).toBe('未发送的草稿');expect(h.requests).toHaveLength(3);
+  expect(JSON.parse(h.storage.get(key)!).map((r:any)=>r.requestId)).toEqual([secondId]);
+  const restored=harness(undefined,2,h.storage);await restored.ready();restored.requests[0]!.resolve(restored.conversation(0,'',0));await restored.settle();
+  expect(restored.node('messages').text).not.toContain('失败一');expect(restored.node('messages').text).toContain('失败二');
+  expect(restored.node('input').value).toBe('未发送的草稿');
+  const retry=restored.node('messages').querySelector('.failed-actions')!.querySelectorAll('button')[0]!.onclick!();
+  expect(restored.requests[1]!.data).toEqual({requestId:secondId,text:'失败二'});
+  restored.requests[1]!.resolve({status:'submitted'});await retry;
+  expect(restored.node('input').value).toBe('未发送的草稿');expect(restored.storage.has(key)).toBe(false);
+});
+
+it('restores legacy single pending requests in the queue with usable retry and delete buttons',async()=>{
+  const h=harness();const id=h.rows[0]!.id;
+  h.storage.set('bridge-web-draft:'+id,JSON.stringify({requestId:'legacy-request-12345',text:'旧版未确认消息',placement:'queue'}));
+  await h.settle();expect(h.node('notice').textContent).toBe('');await h.ready();h.requests[0]!.resolve(h.conversation(0,'',0));await h.settle();
+  const actions=h.node('queued-messages').querySelector('.failed-actions')!;expect(actions).toBeDefined();
+  expect(actions.querySelectorAll('button').map(b=>[b.textContent,b.disabled])).toEqual([['重发',false],['删除',false]]);
+  await actions.querySelectorAll('button')[1]!.onclick!();expect(h.node('queued-messages').hidden).toBe(true);
+  expect(h.storage.has('bridge-web-draft:'+id)).toBe(false);expect(h.requests).toHaveLength(1);
 });
 
 it('accepts SSE confirmation before a lost HTTP acknowledgement without reverting a real turn to a failed bubble', async () => {
@@ -462,7 +500,7 @@ it('isolates late send results on session switches and clears optimistic content
   expect(h.node('messages').text).not.toContain('第一会话的消息'); expect(h.node('input').value).toBe('第二会话的草稿');
   expect(h.node('message-error').textContent).toBe('');
   h.choose(0); expect(h.node('messages').text).toContain('第一会话的消息');
-  const retry = h.node('composer').onsubmit!({ preventDefault() {} });
+  const retry = h.node('messages').querySelector('.failed-actions')!.querySelectorAll('button')[0]!.onclick!();
   h.streams.at(-1)!.emit('snapshot', { sessions: [h.rows[1]], conversation: h.conversation(0, '', 0) });
   h.requests[3]!.resolve({ status: 'queued' }); await retry;
   expect(h.node('messages').text).toBe(''); expect(h.node('composer').hidden).toBe(true);
@@ -556,9 +594,9 @@ it.each(['turn', 'receipt'] as const)('clears a lost acknowledgement only after 
   const h = harness(); await h.ready(); const empty = h.conversation(0, '', 0); h.requests[0]!.resolve(empty); await h.settle();
   h.node('input').value = '迟到的确认'; const send = h.node('composer').onsubmit!({ preventDefault() {} });
   const requestId = h.requests[1]!.data.requestId; h.requests[1]!.reject(Error('connection interrupted')); await send;
-  expect(h.node('send').textContent).toBe('重试'); expect(h.node('messages').text).toContain('发送未确认');
+  expect(h.node('send').textContent).toBe('发送'); expect(h.node('messages').text).toContain('发送未确认');
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: empty });
-  expect(h.node('send').textContent).toBe('重试');
+  expect(h.node('send').textContent).toBe('发送');
   const confirmation = source === 'turn' ? { turns: [{ id: 'job:confirmed', input: '迟到的确认', answer: '', status: 'running', requestIds: [requestId], createdAtMs: Date.now() }] } :
     { confirmedRequestIds: [requestId], queuedMessages: [{ id: 'a'.repeat(48), text: '迟到的确认', requestIds: [requestId] }] };
   h.streams.at(-1)!.emit('snapshot', { sessions: h.rows, conversation: { ...empty, ...confirmation } });
