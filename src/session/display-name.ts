@@ -3,3 +3,9 @@ export function namedSession(nativeId: string, ...names: (string | undefined)[])
   return names.map(name => name?.trim()).find(name => name && name !== nativeId &&
     !/^[a-f0-9-]{16,}$/i.test(name) && !(name.length >= 8 && /^[a-f0-9-]+$/i.test(name) && nativeId.startsWith(name)));
 }
+
+/** Shared-session pickers put FF first, followed by AA and other names. */
+export function sharedSessionPriority(name?: string): number {
+  const title = name?.trimStart();
+  return title?.startsWith('FF') ? 0 : title?.startsWith('AA') ? 1 : 2;
+}

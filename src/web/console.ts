@@ -13,7 +13,7 @@ import { log, redactDiagnosticText } from '../core/logger';
 import { PersonalSessionService, WebError } from './service';
 import { ManagementStateStore, type SessionState, type GroupState, type StateInspection } from './management-state';
 import { describeChatDeletionError, dissolveChat } from '../bot/group';
-import { namedSession } from '../session/display-name';
+import { namedSession, sharedSessionPriority } from '../session/display-name';
 import { fetchChatInfoResult, fetchKnownChatsResult } from '../bot/lark-info';
 
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -214,7 +214,7 @@ export class BridgeConsoleService {
         return name ? [{ id: this.targetId(o.id, o.sourceId!, s.nativeId), toolId: o.id, tool: o.label,
           name, cwd: s.cwd, updatedAt: s.updatedAtMs }] : [];
       }) : [])
-      .sort((a, b) => Number(b.name.trimStart().startsWith('AA')) - Number(a.name.trimStart().startsWith('AA')) || b.updatedAt - a.updatedAt || a.name.localeCompare(b.name));
+      .sort((a, b) => sharedSessionPriority(a.name) - sharedSessionPriority(b.name) || b.updatedAt - a.updatedAt || a.name.localeCompare(b.name));
     const inspectedSharedGroups = await Promise.all(sharedRows.map(async row => {
       const group = chats.get(row.chatId), ref = row.source, o = ref && this.observations.get(ref.toolId);
       const native = o?.sourceId === ref?.sourceId ? o?.native.find(s => s.nativeId === ref?.nativeId) : undefined;

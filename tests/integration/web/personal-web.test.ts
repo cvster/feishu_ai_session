@@ -1202,6 +1202,16 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('console man
   expect(h.provider.archive).not.toHaveBeenCalled(); expect(h.bindings.get('oc_group')?.nativeId).toBe('native');
 });
 
+it('puts FF sessions before AA and newer ordinary sessions in the Web association picker', async () => {
+  const h = await harness('codex'); await h.replies.stop(); await managedShared(h);
+  const ff = ['FF-old', '  FF-new'].map((name, index) => ({ ...h.native, nativeId: `ff-sort-${index}`, name, updatedAtMs: index }));
+  for (const row of ff) h.bindings.set(`aux_${row.nativeId.trim()}`, { toolId: 'codex', sourceId: h.client.sourceId,
+    nativeId: row.nativeId, nativeCreated: true, linkedSource: { toolId: 'codex', sourceId: h.client.sourceId, nativeId: row.nativeId } });
+  h.provider.list.mockResolvedValue([h.native, { ...h.native, nativeId: 'aa-new', name: 'AA-new', updatedAtMs: 100 },
+    { ...h.native, nativeId: 'ordinary', name: '普通会话', updatedAtMs: 1000 }, ...ff]);
+  expect((await h.consoleService.snapshot(true)).sharedTargets.map(s => s.name)).toEqual(['FF-new', 'FF-old', 'AA-new', 'AA-web', '普通会话']);
+});
+
 it('offers named shared sessions, recovers binding titles and excludes unnamed or ID-only history', async () => {
   const h = await harness('codex'); await h.replies.stop(); await managedShared(h);
   const recovered = { ...h.native, nativeId: '12345678-1234-4234-8234-123456789abc', name: '12345678-1234-4234-8234-123456789abc' };

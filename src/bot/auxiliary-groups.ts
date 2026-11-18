@@ -9,6 +9,7 @@ import { isPersonalWorkgroup, sessionRefKey, type ToolBindingStore, type LinkedS
 import { a2aSessionBindings } from '../a2a/sessions';
 import type { WebRoutes } from '../web/routes';
 import { loadA2AConfig } from '../a2a/config';
+import { sharedSessionPriority } from '../session/display-name';
 import type { SessionCatalog, SessionCatalogIdentity } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
@@ -547,7 +548,7 @@ export class AuxiliaryGroups {
       await this.deps.channel.send(row.ownerId, { text: `「${row.name}」已启用会话共享。成员在群内真实 @机器人发送“私聊”，即可创建包含该成员和你的私聊群。` });
       return;
     }
-    let description = '选择工具和已有会话，将该会话共享给群内的AI助手。AA 会话优先，其次是其他个人工作群会话，最后是未绑定个人工作群的会话。辅助群与原会话共用上下文，AI助手只回复当前群的 @ 提问。';
+    let description = '选择工具和已有会话，将该会话共享给群内的AI助手。FF 会话优先，其次是 AA、其他个人工作群会话，最后是未绑定个人工作群的会话。辅助群与原会话共用上下文，AI助手只回复当前群的 @ 提问。';
     if (toolId) {
       const tool = this.deps.tools.get(toolId);
       const chats = await fetchKnownChatsResult(this.deps.channel);
@@ -557,7 +558,10 @@ export class AuxiliaryGroups {
           !binding.linkedSource && !binding.sharedScope && !binding.auxiliaryWorkgroup && !this.deps.catalog?.isScopeArchived(scope) &&
           binding.toolId === toolId && binding.sourceId === tool.sourceId)
         .map(([, binding]) => binding.nativeId));
-      const rank = (s: { name?: string; nativeId: string }) => s.name?.trimStart().startsWith('AA') ? 0 : personalSessions.has(s.nativeId) ? 1 : 2;
+      const rank = (s: { name?: string; nativeId: string }) => {
+        const prefix = sharedSessionPriority(s.name);
+        return prefix < 2 ? prefix : personalSessions.has(s.nativeId) ? 2 : 3;
+      };
       const sessions = (await tool.listSessions()).filter(s => this.shareable(toolId, tool.sourceId, s)).sort((a, b) => rank(a) - rank(b) || b.updatedAtMs - a.updatedAtMs || a.nativeId.localeCompare(b.nativeId));
       page = Math.max(0, Math.min(page, Math.max(0, Math.ceil(sessions.length / SHARED_SESSION_PAGE_SIZE) - 1))); base.page = page;
       for (const s of sessions.slice(page * SHARED_SESSION_PAGE_SIZE, (page + 1) * SHARED_SESSION_PAGE_SIZE)) buttons.push(this.button(`${s.name || s.nativeId.slice(0, 12)} · ${s.cwd}`, { ...base, nativeId: s.nativeId }));
@@ -565,7 +569,7 @@ export class AuxiliaryGroups {
       if ((page + 1) * SHARED_SESSION_PAGE_SIZE < sessions.length) buttons.push(this.button('下一页', { ...base, page: page + 1 }));
       buttons.push(this.button('返回工具选择', { ...base, toolId: undefined, page: 0 }));
       description = sessions.length
-        ? `${tool.label}：AA 会话 → 其他个人工作群会话 → 其他会话；同类按最近更新排序。将继承项目目录，并直接在所选原会话中处理每次 @ 消息。${chats.ok ? '' : '\n群列表暂不可用，其他会话统一按最近更新排序。'}`
+        ? `${tool.label}：FF 会话 → AA 会话 → 其他个人工作群会话 → 其他会话；同类按最近更新排序。将继承项目目录，并直接在所选原会话中处理每次 @ 消息。${chats.ok ? '' : '\n群列表暂不可用，其他会话统一按最近更新排序。'}`
         : `${tool.label}：暂无可共享的未归档会话。`;
     } else for (const tool of this.deps.tools.all()) buttons.push(this.button(tool.label, { ...base, toolId: tool.id }));
     const card = { schema: '2.0',

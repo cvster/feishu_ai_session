@@ -155,10 +155,13 @@ describe('auxiliary owner linking and lifecycle', () => {
     expect(h.groups.get('oc_aux')?.status).toBe('pending');
     expect(JSON.stringify(h.cards.at(-1))).toContain('群列表暂不可用');
   });
-  it('ranks AA sessions before other personal sessions and unbound history, then paginates', async () => {
+  it('ranks FF before AA, other personal sessions and unbound history, then paginates', async () => {
     const h = await harness('codex'); const tool = h.tools.get('codex'); const original = (await tool.listSessions())[0]!;
+    for (const name of ['FF-first', '  FF-second']) h.bindings.set(`aux_${name.trim()}`, { toolId: 'codex', sourceId: h.home,
+      nativeId: name, nativeCreated: true, linkedSource: { toolId: 'codex', sourceId: h.home, nativeId: name } });
     vi.mocked(tool.listSessions).mockResolvedValue([
       { ...original, name: '普通个人会话', updatedAtMs: 2 },
+      ...['FF-first', '  FF-second'].map(name => ({ ...original, nativeId: name, name, updatedAtMs: 0 })),
       ...['AA-first', '  AA-second', 'history-a', 'history-b', 'history-c', 'history-d', 'history-e', 'history-f', 'history-g', 'history-h'].map((name, i) =>
         ({ ...original, nativeId: name, name, updatedAtMs: i < 2 ? 1 : 100 + i })),
       { ...original, nativeId: 'archived-native', name: 'AA-archived', archived: true, updatedAtMs: 9999 },
@@ -166,12 +169,12 @@ describe('auxiliary owner linking and lifecycle', () => {
     await h.groups.joined(joined); await h.groups.action(h.event());
     const labels = () => h.cards.at(-1).body.elements.filter((e: any) => e.tag === 'button').map((e: any) => e.text.content);
     expect(labels().filter((s: string) => s.includes(' · ')).map((s: string) => s.split(' · ')[0]))
-      .toEqual(['  AA-second', 'AA-first', '普通个人会话', 'history-h', 'history-g', 'history-f', 'history-e', 'history-d', 'history-c', 'history-b']);
+      .toEqual(['  FF-second', 'FF-first', '  AA-second', 'AA-first', '普通个人会话', 'history-h', 'history-g', 'history-f', 'history-e', 'history-d']);
     const sent = vi.mocked(h.channel.send).mock.calls.length;
     const creates = vi.mocked(h.channel.createCard).mock.calls.length;
     const next = h.cards.at(-1).body.elements.find((e: any) => e.text?.content === '下一页').behaviors[0].value;
     await h.groups.action(h.event(next));
-    expect(labels().filter((s: string) => s.includes(' · '))).toEqual([`history-a · ${h.cwd}`]);
+    expect(labels().filter((s: string) => s.includes(' · '))).toEqual(['history-c', 'history-b', 'history-a'].map(name => `${name} · ${h.cwd}`));
     expect(h.channel.send).toHaveBeenCalledTimes(sent); expect(h.channel.createCard).toHaveBeenCalledTimes(creates);
     expect(h.channel.updateCardById).toHaveBeenCalled();
     const previous = h.cards.at(-1).body.elements.find((e: any) => e.text?.content === '上一页').behaviors[0].value;
