@@ -143,7 +143,8 @@ it('creates and queries A2A config behind Web auth, preserving unrelated endpoin
   const created = await response.json() as Awaited<ReturnType<PersonalSessionService['createA2a']>>;
   expect(created).toMatchObject({ enabled: true, alias: 'web-test', credential: { role: 'member' }, keys: [{ name: 'caller', active: true }] });
   expect(created.credential.token).toMatch(/^a2a_/);
-  expect(h.bindings.entries()).toEqual(before);
+  for (const [scope, binding] of before) expect(h.bindings.get(scope)).toEqual(binding);
+  expect(h.bindings.entries().filter(([, b]) => b.linkedSource && !b.sharedScope)).toHaveLength(1);
   const queried = await (await h.request(path)).json() as Awaited<ReturnType<PersonalSessionService['a2aConfig']>>;
   expect(queried).not.toHaveProperty('credential');
   expect(JSON.stringify(queried)).not.toContain(created.credential.token);
@@ -164,15 +165,36 @@ it('creates and queries A2A config behind Web auth, preserving unrelated endpoin
   expect((await h.request(path, { name: 'archived' })).status).toBe(404);
 });
 
+it('automatically shares a newly created Web A2A endpoint and applies the enabled FF naming policy', async () => {
+  const h = await harness('kilo'); await h.replies.stop(); const auxiliary = await webA2a(h);
+  await auxiliary.setPrefixSettings(true, 'ou_owner');
+  const row = (await h.service.list())[0]!;
+  await saveA2AConfig(join(h.dir, 'a2a.json'), { version: 1, enabled: true, host: '10.88.1.2', port: 36999, namespace: 'Test', endpoints: {} });
+  const response = await h.request(`/api/sessions/${row.id}/a2a`, { name: 'new-agent', alias: 'auto-shared' });
+  expect(response.status).toBe(201);
+  const created = await response.json() as Awaited<ReturnType<PersonalSessionService['createA2a']>>;
+  expect(created.credential.token).toMatch(/^a2a_/);
+  await vi.waitFor(() => expect(h.native.name).toBe('FF-web'));
+  expect(h.bindings.get('oc_group')).toMatchObject({ nativeId: 'native', name: 'FF-web' });
+  expect(h.bindings.entries().filter(([, b]) => b.linkedSource && !b.sharedScope)).toHaveLength(1);
+  expect(auxiliary.groups()).toEqual([]);
+  expect((await h.service.list()).some(s => s.id === row.id)).toBe(true);
+});
+
 it('opens A2A for a native Web conversation without creating a personal group and retires it on native archival', async () => {
   const h = await harness('codex'); await h.replies.stop();
   const routes = new WebRoutes(join(h.dir, 'web-session-routes.json'), 'test', 'cli_test'); await routes.load(); h.controls.webRoutes = routes;
   const unbound = { ...h.native, nativeId: 'unbound-a2a', name: 'AA-unbound' };
   h.provider.list.mockResolvedValue([h.native, unbound]);
+  h.provider.rename.mockImplementation(async (id, name) => { if (id === unbound.nativeId) unbound.name = name; else h.native.name = name; });
   const auxiliary = await webA2a(h), rows = await h.service.list(), row = rows.find(r => r.name === unbound.name)!;
+  await auxiliary.setPrefixSettings(true, 'ou_owner');
   await saveA2AConfig(join(h.dir, 'a2a.json'), { version: 1, enabled: true, host: '10.88.1.2', port: 36999, namespace: 'Test', endpoints: {} });
   const before = h.bindings.entries(), response = await h.request(`/api/sessions/${row.id}/a2a`, { name: 'native-caller' });
-  expect(response.status).toBe(201); expect(h.bindings.entries()).toEqual(before);
+  expect(response.status).toBe(201);
+  for (const [scope, binding] of before) expect(h.bindings.get(scope)).toEqual(binding);
+  await vi.waitFor(() => expect(unbound.name).toBe('FF-unbound'));
+  expect(routes.get(row.scope)?.name).toBe('FF-unbound');
   const scope = a2aSessionBindings(h.bindings.entries(), routes.entries()).find(([, b]) => b.nativeId === unbound.nativeId)![0];
   const task = await auxiliary.acceptApi(scope, 'test-request', 'test-caller');
   expect(h.bindings.get(task)).toMatchObject({ nativeId: unbound.nativeId, sharedScope: scope });

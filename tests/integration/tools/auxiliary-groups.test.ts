@@ -22,6 +22,7 @@ import type { ChatModeCache } from '../../../src/bot/chat-mode-cache';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import { syncAaSessionGroupsOnce } from '../../../src/bot/aa-session-groups';
 import { a2aSessionBindings } from '../../../src/a2a/sessions';
+import { saveA2AConfig } from '../../../src/a2a/config';
 
 const roots: string[] = [];
 const flushes: (() => Promise<unknown>)[] = [];
@@ -719,6 +720,37 @@ it('does not consume the first-binding announcement when routing fails, includin
   expect(restored.get('oc_aux')?.hasBound).toBe(true);
 });
 
+
+it('promotes existing A2A sources before any call, follows the FF toggle, and preserves session identity', async () => {
+  const h = await harness('claude'), tool = h.tools.get('claude');
+  h.workspaces.setCwd('oc_original', h.cwd);
+  let name = 'AA-A2A地图';
+  vi.mocked(tool.listSessions).mockImplementation(async () => [{ nativeId: sourceId, name, cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 }]);
+  const rename = vi.fn(async (_id: string, value: string) => { name = value; });
+  tool.sessions = { historyPointer: async () => ({ format: 'jsonl', path: h.history }), rename, archive: async () => {} };
+  const groupRename = vi.fn(async () => ({ code: 0 })); h.channel.rawClient.im.v1.chat.update = groupRename as any;
+  h.bindings.set('oc_original', { ...h.bindings.get('oc_original')!, name });
+  const scope = a2aSessionBindings(h.bindings.entries())[0]![0], configPath = join(h.root, 'a2a.json');
+  const config = { version: 1 as const, enabled: true, host: '10.88.1.2', port: 36999, namespace: 'Test', endpoints: { [scope]: { enabled: true, alias: 'map', keys: [] } } };
+  await saveA2AConfig(configPath, config);
+  const restored = new AuxiliaryGroups(h.deps); await restored.load();
+  expect(h.bindings.get(scope)).toMatchObject({ nativeId: sourceId, linkedSource: { nativeId: sourceId } });
+  expect(restored.groups()).toEqual([]); expect(rename).not.toHaveBeenCalled();
+  const generation = restored.apiSession(scope)!.generation;
+  await restored.setPrefixSettings(true, 'ou_owner');
+  expect(name).toBe('FF-A2A地图'); expect(rename).toHaveBeenCalledOnce(); expect(groupRename).toHaveBeenCalledOnce();
+  expect(h.bindings.get('oc_original')).toMatchObject({ nativeId: sourceId, name });
+  expect(h.bindings.get(scope)?.name).toBe(name);
+  expect(restored.apiSession(scope)!.generation).toBe(generation);
+  expect(restored.shareable('claude', h.home, (await tool.listSessions())[0]!)).toBe(true);
+  await restored.syncSharedPrefix('claude'); expect(rename).toHaveBeenCalledOnce();
+  await restored.setPrefixSettings(false, 'ou_owner'); name = 'AA-手动改名'; await restored.syncSharedPrefix('claude'); expect(name).toBe('AA-手动改名');
+  config.endpoints[scope]!.enabled = false; await saveA2AConfig(configPath, config);
+  await restored.setPrefixSettings(true, 'ou_owner'); expect(name).toBe('AA-手动改名');
+  config.endpoints[scope]!.enabled = true; await saveA2AConfig(configPath, config);
+  h.bindings.archive('claude', h.home, sourceId); await restored.syncSharedPrefix('claude'); expect(name).toBe('AA-手动改名');
+  expect(await readFile(configPath, 'utf8')).toContain('"alias": "map"');
+});
 
 it.each(['AA-电机检测', 'AF-电机检测', 'FF-电机检测'] as const)('persists optional shared-prefix naming for %s, renames the original and its personal group, and keeps it shareable', async original => {
   const h = await harness(); await h.activate(); await h.activate('oc_aux_2');

@@ -1,9 +1,10 @@
 import { defaultAlias, loadA2AConfig, mintKey, saveA2AConfig, setAlias, type A2AConfig } from '../a2a/config';
 import { withA2AConfigLock } from '../a2a/management';
 import { WebError } from './service';
+import { log } from '../core/logger';
 
 export class WebA2AManagement {
-  constructor(private deps: { path: string; owner(): string; target(id: string): Promise<{ scope: string; name: string }> }) {}
+  constructor(private deps: { path: string; owner(): string; target(id: string): Promise<{ scope: string; name: string }>; onCreated?(scope: string): Promise<void> }) {}
   private view(config: A2AConfig | undefined, scope: string, name: string, owner: string) {
     const endpoint = config?.endpoints[scope], alias = defaultAlias(scope);
     const baseUrl = config ? `http://${config.host}:${config.port}/${config.namespace}/agents/${alias}` : undefined;
@@ -21,7 +22,7 @@ export class WebA2AManagement {
         input.alias !== undefined && typeof input.alias !== 'string') throw new WebError(400, '请填写调用者名称（1–80 字），以及可选的接口别名');
     const name = input.name.trim(), alias = typeof input.alias === 'string' ? input.alias.trim() : '';
     const owner = this.deps.owner();
-    return withA2AConfigLock(this.deps.path, async () => {
+    const created = await withA2AConfigLock(this.deps.path, async () => {
       const target = await this.deps.target(id), config = await loadA2AConfig(this.deps.path);
       if (!config?.enabled) throw new WebError(409, 'A2A 监听尚未启用，请先在本机配置并重启桥接');
       const endpoint = config.endpoints[target.scope] ??= { enabled: false, keys: [] };
@@ -36,7 +37,11 @@ export class WebA2AManagement {
       const issued = mintKey(name, owner, 'member');
       endpoint.enabled = true; endpoint.keys.push(issued.key);
       await saveA2AConfig(this.deps.path, config);
-      return { ...this.view(config, target.scope, target.name, owner), credential: { keyId: issued.key.id, token: issued.token, role: issued.key.role } };
+      return { scope: target.scope, response: { ...this.view(config, target.scope, target.name, owner), credential: { keyId: issued.key.id, token: issued.token, role: issued.key.role } } };
     });
+    // The credential is committed: a naming/reconciliation failure must not lose its one-time response.
+    try { await this.deps.onCreated?.(created.scope); }
+    catch (error) { log.warn('a2a', 'sharing-sync-pending', { error: String(error) }); }
+    return created.response;
   }
 }

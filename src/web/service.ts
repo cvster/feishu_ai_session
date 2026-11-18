@@ -78,6 +78,11 @@ export class PersonalSessionService {
   private a2aManagement() {
     const c = this.deps.controls;
     return new WebA2AManagement({ path: join(dirname(this.deps.path), 'a2a.json'),
+      onCreated: async scope => {
+        await c.auxiliary?.reconcileApiSharing();
+        const binding = c.toolBindings?.get(scope);
+        if (binding) void c.auxiliary?.syncSharedPrefix(binding.toolId).catch(error => log.warn('a2a', 'prefix-sync-pending', { error: String(error) }));
+      },
       owner: () => {
         if (c.ownerRefreshState !== 'ok' || !c.botOwnerId) throw new WebError(503, '暂时无法确认当前应用所有者，A2A 管理暂不可用');
         return c.botOwnerId;

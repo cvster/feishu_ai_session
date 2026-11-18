@@ -1,13 +1,14 @@
 import { isToolId, nativeSessionFields } from '../tools/definitions';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { BotAddedEvent, CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { AgentKind } from '../config/profile-schema';
 import type { ToolRegistry, ToolSession } from '../tools/types';
 import { isPersonalWorkgroup, sessionRefKey, type ToolBindingStore, type LinkedSession, type ToolBinding } from '../tools/bindings';
 import { a2aSessionBindings } from '../a2a/sessions';
 import type { WebRoutes } from '../web/routes';
+import { loadA2AConfig } from '../a2a/config';
 import type { SessionCatalog, SessionCatalogIdentity } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
@@ -137,6 +138,7 @@ export class AuxiliaryGroups {
     for (const scope of Object.keys(this.records).filter(scope => scope.includes(':ffdm_')))
       await this.deps.cancelPending(scope);
     await this.save();
+    await this.reconcileApiSharing();
   }
   get(chatId: string): AuxiliaryGroup | undefined { return this.records[chatId] ?? this.apiRequests[chatId]; }
   isActive(chatId: string): boolean {
@@ -151,6 +153,22 @@ export class AuxiliaryGroups {
   }
   apiRequest(scope: string): AuxiliaryApiRequest | undefined { return this.apiRequests[scope]; }
   private apiBindings() { return a2aSessionBindings(this.deps.bindings.entries(), this.deps.webRoutes?.()?.entries()); }
+  /** A2A enablement is sharing, even before the first external task arrives. */
+  async reconcileApiSharing(toolId?: AgentKind): Promise<[string, ToolBinding][]> {
+    let config;
+    try { config = await loadA2AConfig(join(dirname(this.deps.path), 'a2a.json')); }
+    catch (error) { log.warn('a2a', 'sharing-config-unavailable', { error: String(error) }); return []; }
+    if (!config?.enabled) return [];
+    const bindings = new Map(this.apiBindings()), shared: [string, ToolBinding][] = [];
+    for (const [scope, endpoint] of Object.entries(config.endpoints)) {
+      const binding = bindings.get(scope);
+      if (!endpoint.enabled || !binding || toolId && binding.toolId !== toolId || !this.apiSession(scope)) continue;
+      if (!this.deps.bindings.get(scope)) this.deps.bindings.set(scope, binding);
+      shared.push([scope, binding]);
+    }
+    await this.deps.bindings.flush();
+    return shared;
+  }
   /** Stable API aliases survive the migration from FF to the original conversation. */
   apiSession(sharedScope: string): { sharedScope: string; name: string; cwd: string; generation: string; ownerId: string } | undefined {
     const b = this.apiBindings().find(([scope]) => scope === sharedScope)?.[1], ownerId = this.deps.ownerId();
@@ -263,17 +281,21 @@ export class AuxiliaryGroups {
   }
   /** Persistent naming policy; use common worker rename operations for every tool. */
   async syncSharedPrefix(toolId: AgentKind): Promise<void> {
+    const apiBindings = await this.reconcileApiSharing(toolId);
     if (!this.sharedSessionPrefix) return;
     await this.serial(`prefix:${toolId}`, async () => {
       const tool = this.deps.tools.find(toolId);
       if (!this.sharedSessionPrefix || !tool?.sessions?.rename) return;
       const groups = Object.values(this.records).filter(row => row.source?.toolId === toolId && row.source.sourceId === tool.sourceId &&
         row.status === 'active' && this.isActive(row.chatId));
-      if (!groups.length) return;
+      const api = new Map(apiBindings.filter(([, b]) => b.sourceId === tool.sourceId).map(([scope, b]) => [b.nativeId!, scope]));
+      const apiActive = (id: string) => { const scope = api.get(id); return !!scope && !!this.apiSession(scope); };
+      const ids = new Set([...groups.map(row => row.source!.nativeId), ...api.keys()]);
+      if (!ids.size) return;
       let sessions: ToolSession[];
       try { sessions = await tool.listSessions(); }
       catch (error) { log.warn('auxiliary', 'prefix-list-failed', { toolId, error: String(error) }); return; }
-      for (const id of new Set(groups.map(row => row.source!.nativeId))) {
+      for (const id of ids) {
         const session = sessions.find(row => row.nativeId === id);
         if (!session || session.archived || !session.name) continue;
         const name = session.name.startsWith('FF-') ? session.name :
@@ -281,9 +303,9 @@ export class AuxiliaryGroups {
         if (name.length > 100) { log.warn('auxiliary', 'prefix-name-too-long', { toolId }); continue; }
         try {
           const relevant = groups.filter(row => row.source!.nativeId === id);
-          if (!(await Promise.all(relevant.map(row => auxiliaryBotIsMember(this.deps.channel, row.chatId).catch(() => false)))).some(Boolean)) continue;
-          if (!this.sharedSessionPrefix || this.deps.tools.find(toolId) !== tool || !relevant.some(row =>
-            row.source?.toolId === toolId && row.source.sourceId === tool.sourceId && row.source.nativeId === id && this.isActive(row.chatId))) continue;
+          if (!apiActive(id) && !(await Promise.all(relevant.map(row => auxiliaryBotIsMember(this.deps.channel, row.chatId).catch(() => false)))).some(Boolean)) continue;
+          if (!this.sharedSessionPrefix || this.deps.tools.find(toolId) !== tool || (!apiActive(id) && !relevant.some(row =>
+            row.source?.toolId === toolId && row.source.sourceId === tool.sourceId && row.source.nativeId === id && this.isActive(row.chatId)))) continue;
           const personal = this.deps.bindings.activePersonalBindings().filter(([, b]) => b.toolId === toolId && b.sourceId === tool.sourceId && b.nativeId === id);
           // Change the personal group first, so ordinary bidirectional sync also repairs a worker rename failure.
           for (const [scope, binding] of personal) if (binding.name !== name) {
@@ -291,13 +313,22 @@ export class AuxiliaryGroups {
             this.deps.bindings.set(scope, { ...binding, name });
           }
           if (session.name !== name) await sessionOperations(tool).rename(id, name);
+          for (const [scope, binding] of this.deps.bindings.entries()) if (binding.linkedSource && !binding.sharedScope &&
+            binding.toolId === toolId && binding.sourceId === tool.sourceId && binding.nativeId === id && binding.name !== name)
+            this.deps.bindings.set(scope, { ...binding, name });
+          const routes = this.deps.webRoutes?.();
+          for (const [scope, route] of routes?.entries() ?? []) if (route.toolId === toolId && route.sourceId === tool.sourceId && route.nativeId === id)
+            routes?.set(scope, { ...route, name });
+          await routes?.flush();
           await this.deps.bindings.flush();
         } catch (error) { log.warn('auxiliary', 'prefix-rename-failed', { toolId, error: String(error) }); }
       }
     });
   }
   private isSharedSource(toolId: AgentKind, sourceId: string, nativeId: string): boolean {
-    return Object.values(this.records).some(row => row.source?.toolId === toolId && row.source.sourceId === sourceId && row.source.nativeId === nativeId);
+    return Object.values(this.records).some(row => row.source?.toolId === toolId && row.source.sourceId === sourceId && row.source.nativeId === nativeId) ||
+      this.deps.bindings.entries().some(([, b]) => !b.sharedScope && b.linkedSource?.toolId === toolId &&
+        b.linkedSource.sourceId === sourceId && b.linkedSource.nativeId === nativeId);
   }
   shareable(toolId: AgentKind, sourceId: string, session: ToolSession): boolean {
     return !session.archived && (!session.name?.startsWith('FF-') || this.isSharedSource(toolId, sourceId, session.nativeId)) && !this.isAuxiliaryNative(toolId, sourceId, session.nativeId) &&
