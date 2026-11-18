@@ -4,7 +4,7 @@ import type { Controls } from '../commands';
 import type { SessionCatalog } from '../session/catalog';
 import type { AgentKind } from '../config/profile-schema';
 import type { ToolSession } from '../tools/types';
-import { isPersonalWorkgroup } from '../tools/bindings';
+import { isPersonalWorkgroup, sessionRefKey } from '../tools/bindings';
 import { WorkerRequestError } from '../worker/client';
 import { DurableAgentAdapter } from '../worker/adapter';
 import { isJobActive, type WorkerJob } from '../worker/protocol';
@@ -14,6 +14,7 @@ import { PersonalSessionService, WebError } from './service';
 import { ManagementStateStore, type SessionState, type GroupState, type StateInspection } from './management-state';
 import { describeChatDeletionError, dissolveChat } from '../bot/group';
 import { namedSession, sharedSessionPriority } from '../session/display-name';
+import { groupSessionBindings } from '../session/group-sessions';
 import { fetchChatInfoResult, fetchKnownChatsResult } from '../bot/lark-info';
 
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -205,8 +206,10 @@ export class BridgeConsoleService {
       forgottenChats.add(chatId);
     }
     const items = this.items();
+    const groupedKeys = new Set(groupSessionBindings(c.toolBindings, sharedRows, this.deps.catalog)
+      .flatMap(([, b]) => b.nativeId ? [sessionRefKey(b.toolId, b.sourceId, b.nativeId)] : []));
     const sharedTargets = [...this.observations.values()].flatMap(o => o.online && o.nativeKnown && o.sourceId ?
-      o.native.filter(s => c.auxiliary?.shareable?.(o.id, o.sourceId!, s)).flatMap(s => {
+      o.native.filter(s => groupedKeys.has(sessionRefKey(o.id, o.sourceId!, s.nativeId)) && c.auxiliary?.shareable?.(o.id, o.sourceId!, s)).flatMap(s => {
         const personal = personalBindings.filter(([, b]) => b.toolId === o.id && b.sourceId === o.sourceId && b.nativeId === s.nativeId);
         const name = namedSession(s.nativeId, s.name, ...personal.flatMap(([scope, b]) => [b.name, chats.get(scope)?.name]),
           ...entries.filter(([, b]) => b.toolId === o.id && b.sourceId === o.sourceId && b.nativeId === s.nativeId).map(([, b]) => b.name));

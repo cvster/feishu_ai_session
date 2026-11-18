@@ -37,7 +37,7 @@ import { RUN_BUTTON_IMAGES, COMPLETED_STOP_IMAGE } from '../../../src/card/run-b
 import { WorkerApiError } from '../../../src/worker/tool-api';
 import type { WebConfig } from '../../../src/web/config';
 import { WebMarkdown } from '../../../src/web/markdown';
-import {WebRoutes,isWebScope} from '../../../src/web/routes';
+import {WebRoutes} from '../../../src/web/routes';
 import { chatIsDissolved } from '../../../src/bot/group-cleanup';
 import { loadA2AConfig, mintKey, saveA2AConfig } from '../../../src/a2a/config';
 import { a2aSessionBindings } from '../../../src/a2a/sessions';
@@ -181,12 +181,13 @@ it('automatically shares a newly created Web A2A endpoint and applies the enable
   expect((await h.service.list()).some(s => s.id === row.id)).toBe(true);
 });
 
-it('opens A2A for a native Web conversation without creating a personal group and retires it on native archival', async () => {
+it('opens A2A for a grouped native Web conversation and retires it on native archival', async () => {
   const h = await harness('codex'); await h.replies.stop();
   const routes = new WebRoutes(join(h.dir, 'web-session-routes.json'), 'test', 'cli_test'); await routes.load(); h.controls.webRoutes = routes;
   const unbound = { ...h.native, nativeId: 'unbound-a2a', name: 'AA-unbound' };
   h.provider.list.mockResolvedValue([h.native, unbound]);
   h.provider.rename.mockImplementation(async (id, name) => { if (id === unbound.nativeId) unbound.name = name; else h.native.name = name; });
+  h.bindings.set('oc_a2a', { toolId: 'codex', sourceId: h.client.sourceId, nativeId: unbound.nativeId, nativeCreated: true, name: unbound.name });
   const auxiliary = await webA2a(h), rows = await h.service.list(), row = rows.find(r => r.name === unbound.name)!;
   await auxiliary.setPrefixSettings(true, 'ou_owner');
   await saveA2AConfig(join(h.dir, 'a2a.json'), { version: 1, enabled: true, host: '10.88.1.2', port: 36999, namespace: 'Test', endpoints: {} });
@@ -204,24 +205,25 @@ it('opens A2A for a native Web conversation without creating a personal group an
   expect(h.send).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
 });
 
-it('lists native Web sessions without a Feishu binding and mutates them without IM APIs',async()=>{
-  const h=await harness('codex');await h.replies.stop();
-  const routes=new WebRoutes(join(h.dir,'web-routes.json'),'test','cli_test');await routes.load();h.controls.webRoutes=routes;
-  const unbound={...h.native,nativeId:'unbound-native',name:'AA-cffex-行情'};
-  h.provider.list.mockResolvedValue([h.native,unbound]);
-  h.controls.ownerRefreshState='failed';h.controls.ownerRefreshError='Request failed with status code 429';
-  const get=vi.mocked(h.channel.rawClient.im.v1.chat.get);get.mockClear();
-  const rows=await h.service.list(),row=rows.find(r=>r.name===unbound.name)!;
-  expect(row).toBeDefined();expect(isWebScope(row.scope)).toBe(true);expect(row.canSend).toBe(true);expect(row.feishuChatId).toBeUndefined();
-  expect(rows.find(r=>r.name===h.native.name)?.feishuChatId).toBe('oc_group');
-  expect(get).not.toHaveBeenCalled();
-  h.provider.rename.mockImplementation(async()=>{});
-  await h.service.rename(row.id,'renamed-native');expect(h.provider.rename.mock.calls[0]!.slice(0,2)).toEqual(['unbound-native','renamed-native']);expect(get).not.toHaveBeenCalled();
-  await h.service.send(row.id,'unbound-request-id-123','native-only Web');
-  await vi.waitFor(()=>expect(h.calls).toHaveLength(1));expect(h.calls[0]!.delivery?.scope).toBe(row.scope);expect(h.calls[0]!.threadId).toBe('unbound-native');expect(h.create).not.toHaveBeenCalled();
-  const restarted=new WebRoutes(join(h.dir,'web-routes.json'),'test','cli_test');await restarted.load();expect(restarted.get(row.scope)?.nativeId).toBe(unbound.nativeId);
-  expect(()=>restarted.set(row.scope,{...restarted.get(row.scope)!,nativeId:'replacement'})).toThrow('identity');
-  h.finish();
+it('lists only group-linked Web sessions, retains hidden native identities and rejects their old URLs', async () => {
+  const h = await harness('codex'); await h.replies.stop();
+  const routes = new WebRoutes(join(h.dir, 'web-routes.json'), 'test', 'cli_test'); await routes.load(); h.controls.webRoutes = routes;
+  const unbound = { ...h.native, nativeId: 'unbound-native', name: 'AA-cffex-行情' };
+  h.provider.list.mockResolvedValue([h.native, unbound]);
+  h.controls.ownerRefreshState = 'failed'; h.controls.ownerRefreshError = 'Request failed with status code 429';
+  const get = vi.mocked(h.channel.rawClient.im.v1.chat.get); get.mockClear();
+  const rows = await h.service.list();
+  expect(rows.map(r => r.name)).toEqual(['AA-web']); expect(rows[0]!.feishuChatId).toBe('oc_group');
+  const scope = routes.scope({ toolId: 'codex', sourceId: h.client.sourceId, nativeId: unbound.nativeId });
+  expect(routes.get(scope)?.nativeId).toBe(unbound.nativeId); expect(get).not.toHaveBeenCalled();
+  // Once a real group is bound, the same stable native identity becomes visible.
+  h.bindings.set('oc_second', { toolId: 'codex', sourceId: h.client.sourceId, nativeId: unbound.nativeId, nativeCreated: true });
+  const linked = (await h.service.list()).find(r => r.scope === scope)!; expect(linked).toBeDefined();
+  h.catalog.markChatDissolved('oc_second', []);
+  expect((await h.service.list()).some(r => r.id === linked.id)).toBe(false);
+  await expect(h.service.read(linked.id)).rejects.toMatchObject({ status: 404 });
+  await expect(h.service.send(linked.id, 'hidden-request-id-123', 'hidden')).rejects.toMatchObject({ status: 404 });
+  expect(h.create).not.toHaveBeenCalled(); expect(h.provider.archive).not.toHaveBeenCalled();
 });
 
 it('shares group detail evidence across console polls and cleanup, and bypasses it for an explicit fresh check', async () => {
@@ -256,13 +258,14 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('omits unnam
   h.native.name = '';
   h.provider.list.mockResolvedValue([h.native, ...unnamed, named]);
   const rows = await h.service.list();
-  expect(rows.map(row => row.name).sort()).toEqual(['AA-web', named.name].sort());
+  expect(rows.map(row => row.name)).toEqual(['AA-web']);
   expect(rows.find(row => row.name === 'AA-web')?.feishuChatId).toBe('oc_group');
   expect(routes.entries()).toHaveLength(unnamed.length + 2);
   expect(h.provider.archive).not.toHaveBeenCalled(); expect(h.provider.rename).not.toHaveBeenCalled();
-  // Naming a previously hidden session makes its existing identity visible.
+  // Naming and binding a hidden session reveals its existing native identity.
   const scope = routes.scope({ toolId: tool, sourceId: h.client.sourceId, nativeId: unnamed[0]!.nativeId });
   unnamed[0]!.name = '新增的会话名';
+  h.bindings.set('oc_named', { toolId: tool, sourceId: h.client.sourceId, nativeId: unnamed[0]!.nativeId, nativeCreated: true });
   const refreshed = h.makeService(); await refreshed.load();
   expect((await refreshed.list()).find(row => row.scope === scope)?.name).toBe('新增的会话名');
 });
@@ -273,6 +276,7 @@ it('preserves a known Web title when native metadata temporarily falls back to a
   await routes.load(); h.controls.webRoutes = routes;
   const native = { ...h.native, nativeId: '01234567-89ab-4cde-8fab-0123456789ab', name: '研究报告' };
   h.provider.list.mockResolvedValue([native]);
+  h.bindings.set('oc_group', { ...h.bindings.get('oc_group')!, nativeId: native.nativeId });
   const original = (await h.service.list())[0]!;
   native.name = native.nativeId;
   const refreshed = h.makeService(); await refreshed.load();
@@ -297,7 +301,7 @@ it('keeps old group URLs as aliases and forks/archives native Web sessions witho
   const fork=await h.service.control(native.id,'fork');const forkButton=fork.elements.find(e=>e.kind==='button')!;
   if(forkButton.kind!=='button')throw Error('Missing fork confirmation');
   await h.service.control(native.id,forkButton.action);await h.service.control(native.id,forkButton.action);expect(h.provider.fork).toHaveBeenCalledOnce();
-  expect((await h.service.list()).some(r=>r.name==='AA-web（分叉）')).toBe(true);expect(h.create).not.toHaveBeenCalled();
+  expect((await h.service.list()).some(r=>r.name==='AA-web（分叉）')).toBe(false);expect(h.create).not.toHaveBeenCalled();
   const archive=await h.service.control(native.id,'finish');const archiveButton=archive.elements.find(e=>e.kind==='button')!;
   if(archiveButton.kind!=='button')throw Error('Missing archive confirmation');
   await h.service.control(native.id,archiveButton.action);expect(h.provider.archive).toHaveBeenCalledOnce();
@@ -1184,6 +1188,7 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('console man
   expect(h.send.mock.calls.filter(([chat, content]: unknown[]) => chat === 'oc_shared' && JSON.stringify(content).includes('会话共享已启用'))).toHaveLength(1);
   const announcements = h.send.mock.calls.length;
   const other = { ...h.native, nativeId: 'another', name: 'AA-另一个会话' }; h.provider.list.mockResolvedValue([h.native, other]);
+  h.bindings.set('oc_other_target', { toolId: h.controls.toolRegistry!.all()[0]!.id, sourceId: h.client.sourceId, nativeId: other.nativeId, nativeCreated: true });
   const choices = await h.consoleService.snapshot(true), next = choices.sharedTargets.find(t => t.name === other.name)!;
   expect((await h.request('/api/console/action', { action: 'shared-bind', id: after.sharedGroups[0]!.id, target: next.id })).status).toBe(200);
   expect(h.bindings.get('oc_shared')?.nativeId).toBe('another'); expect(h.bindings.get('oc_group')?.nativeId).toBe('native');
@@ -1202,6 +1207,25 @@ it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh', 'pi'] as const)('console man
   expect(h.provider.archive).not.toHaveBeenCalled(); expect(h.bindings.get('oc_group')?.nativeId).toBe('native');
 });
 
+it('shows an auxiliary-only source once, excludes unbound/A2A-only history and hides a closed last entrance', async () => {
+  const h = await harness('codex'); await h.replies.stop();
+  h.controls.webRoutes = new WebRoutes(join(h.dir, 'group-routes.json'), 'test', 'cli_test');
+  const groups = await managedShared(h), group = groups.get('oc_shared')!;
+  await groups.bindSession(group.chatId, group.ownerId, group.generation,
+    { toolId: 'codex', sourceId: h.client.sourceId, nativeId: h.native.nativeId }, async () => {});
+  h.catalog.markChatDissolved('oc_group', []);
+  const unbound = { ...h.native, nativeId: 'unbound-only', name: 'FF-unbound', updatedAtMs: 999999 };
+  h.provider.list.mockResolvedValue([h.native, unbound]);
+  h.bindings.set('aux_a2a_only', { toolId: 'codex', sourceId: h.client.sourceId, nativeId: unbound.nativeId,
+    linkedSource: { toolId: 'codex', sourceId: h.client.sourceId, nativeId: unbound.nativeId } });
+  expect((await h.service.list()).map(s => s.name)).toEqual(['AA-web']);
+  expect((await h.consoleService.snapshot(true)).sharedTargets.map(s => s.name)).toEqual(['AA-web']);
+  await groups.closeDissolvedChat('oc_shared');
+  expect(await h.service.list()).toEqual([]);
+  expect((await h.consoleService.snapshot(true)).sharedTargets).toEqual([]);
+  expect(h.provider.archive).not.toHaveBeenCalled();
+});
+
 it('puts FF sessions before AA and newer ordinary sessions in the Web association picker', async () => {
   const h = await harness('codex'); await h.replies.stop(); await managedShared(h);
   const ff = ['FF-old', '  FF-new'].map((name, index) => ({ ...h.native, nativeId: `ff-sort-${index}`, name, updatedAtMs: index }));
@@ -1209,6 +1233,7 @@ it('puts FF sessions before AA and newer ordinary sessions in the Web associatio
     nativeId: row.nativeId, nativeCreated: true, linkedSource: { toolId: 'codex', sourceId: h.client.sourceId, nativeId: row.nativeId } });
   h.provider.list.mockResolvedValue([h.native, { ...h.native, nativeId: 'aa-new', name: 'AA-new', updatedAtMs: 100 },
     { ...h.native, nativeId: 'ordinary', name: '普通会话', updatedAtMs: 1000 }, ...ff]);
+  for (const row of [...ff, { nativeId: 'aa-new' }, { nativeId: 'ordinary' }]) h.bindings.set(`oc_${row.nativeId}`, { toolId: 'codex', sourceId: h.client.sourceId, nativeId: row.nativeId, nativeCreated: true });
   expect((await h.consoleService.snapshot(true)).sharedTargets.map(s => s.name)).toEqual(['FF-new', 'FF-old', 'AA-new', 'AA-web', '普通会话']);
 });
 
@@ -1234,6 +1259,7 @@ it('console refuses shared switches with pending messages, late worker acceptanc
   const h = await harness(); await h.replies.stop(); const groups = await managedShared(h), row = groups.get('oc_shared')!;
   await groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'kilo', sourceId: h.client.sourceId, nativeId: 'native' }, async () => {});
   const other = { ...h.native, nativeId: 'another', name: '另一个会话' }; h.provider.list.mockResolvedValue([h.native, other]);
+  h.bindings.set('oc_other_target', { toolId: h.controls.toolRegistry!.all()[0]!.id, sourceId: h.client.sourceId, nativeId: other.nativeId, nativeCreated: true });
   let snapshot = await h.consoleService.snapshot(true); const id = snapshot.sharedGroups[0]!.id, target = snapshot.sharedTargets.find(t => t.name === other.name)!.id;
   const message = { messageId: 'shared-pending-switch', chatId: 'oc_shared', content: '原消息', createTime: Date.now(), resources: [] } as unknown as NormalizedMessage;
   await h.inbox.receive('oc_shared', message);
@@ -1275,6 +1301,7 @@ it('console preserves historical missing or unknown receipts without counting th
     options: { ...h.options, delivery: { ...h.options.delivery!, scope: 'oc_shared', messageIds: [message.messageId] } } } as import('../../../src/worker/protocol').WorkerJob;
   await h.inbox.reconcile([historic]);
   const other = { ...h.native, nativeId: 'another', name: 'AA-new' }; h.provider.list.mockResolvedValue([h.native, other]);
+  h.bindings.set('oc_other_target', { toolId: h.controls.toolRegistry!.all()[0]!.id, sourceId: h.client.sourceId, nativeId: other.nativeId, nativeCreated: true });
   let snapshot = await h.consoleService.snapshot(true);
   expect(snapshot.items.find(i => i.scope === 'oc_shared')?.status).toBe('accepted_unconfirmed');
   expect(snapshot.sharedGroups[0]).toMatchObject({ busy: false, canBind: true });

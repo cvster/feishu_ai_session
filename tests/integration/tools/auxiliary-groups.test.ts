@@ -121,14 +121,14 @@ describe('auxiliary owner linking and lifecycle', () => {
     expect(h.agent.runOptions).toHaveLength(0); expect(h.agent.threadNames).toEqual([]);
     expect(h.groups.isAuxiliaryNative(toolId, h.home, sourceId)).toBe(false);
   });
-  it.each(['codex', 'claude'] as const)('lists all original %s sessions with personal workgroups before other sessions', async toolId => {
+  it.each(['codex', 'claude'] as const)('lists only %s sessions linked to existing workgroups', async toolId => {
     const h = await harness(toolId);
     const tool = h.tools.get(toolId);
     const original = (await tool.listSessions())[0]!;
     const excluded = ['unbound', 'missing-group', 'topic', 'archived-group', 'other-source', 'auxiliary'];
     vi.mocked(tool.listSessions).mockResolvedValue([original, ...excluded.map(nativeId => ({ ...original, nativeId, name: nativeId }))]);
     const bind = (scope: string, nativeId: string) => h.bindings.set(scope, { toolId, sourceId: h.home, nativeId });
-    bind('oc_missing', 'missing-group');
+    bind('oc_missing', 'missing-group'); h.catalog.markChatDissolved('oc_missing', []);
     bind('oc_original:thread', 'topic');
     bind('oc_archived', 'archived-group'); h.catalog.archiveScope('oc_archived', 'archived-group');
     h.bindings.set('oc_other', { toolId, sourceId: '/other/source', nativeId: 'other-source' });
@@ -138,24 +138,31 @@ describe('auxiliary owner linking and lifecycle', () => {
     await h.groups.joined(joined); await h.groups.action(h.event());
     const labels = h.cards.at(-1).body.elements.filter((e: any) => e.tag === 'button').map((e: any) => e.text.content);
     expect(labels.filter((label: string) => label.includes(' · '))).toEqual(
-      ['原会话', 'archived-group', 'missing-group', 'other-source', 'topic', 'unbound'].map(name => `${name} · ${h.cwd}`));
+      ['原会话'].map(name => `${name} · ${h.cwd}`));
     expect(JSON.stringify(h.cards.at(-1))).toContain('同类按最近更新排序');
   });
-  it('still lists and binds original sessions when personal workgroups no longer exist', async () => {
+  it('uses local group bindings without depending on the chat roster', async () => {
     const h = await harness(); vi.mocked(h.channel.listChats).mockResolvedValue([]);
     await h.groups.joined(joined); await h.groups.action(h.event());
     expect(JSON.stringify(h.cards.at(-1))).toContain('原会话');
     await h.groups.action(h.event());
     expect(h.groups.isActive('oc_aux')).toBe(true);
   });
-  it('falls back to AA and recency ordering when group discovery fails', async () => {
+  it('keeps locally bound sessions selectable when group discovery fails', async () => {
     const h = await harness(); vi.mocked(h.channel.listChats).mockRejectedValue(new Error('unavailable'));
     await h.groups.joined(joined);
     await h.groups.action(h.event());
     expect(h.groups.get('oc_aux')?.status).toBe('pending');
-    expect(JSON.stringify(h.cards.at(-1))).toContain('群列表暂不可用');
+    expect(JSON.stringify(h.cards.at(-1))).toContain('原会话');
+    expect(h.channel.listChats).not.toHaveBeenCalled();
   });
-  it('ranks FF before AA, other personal sessions and unbound history, then paginates', async () => {
+  it('rejects a selection whose last workgroup was closed after the card was issued', async () => {
+    const h = await harness(); await h.groups.joined(joined); await h.groups.action(h.event());
+    const choice = h.event(); h.catalog.markChatDissolved('oc_original', []);
+    await expect(h.groups.action(choice)).rejects.toThrow('未关联工作群');
+    expect(h.groups.isActive('oc_aux')).toBe(false);
+  });
+  it('ranks grouped FF before AA and ordinary sessions, excludes unbound history, then paginates', async () => {
     const h = await harness('codex'); const tool = h.tools.get('codex'); const original = (await tool.listSessions())[0]!;
     for (const name of ['FF-first', '  FF-second']) h.bindings.set(`aux_${name.trim()}`, { toolId: 'codex', sourceId: h.home,
       nativeId: name, nativeCreated: true, linkedSource: { toolId: 'codex', sourceId: h.home, nativeId: name } });
@@ -166,15 +173,19 @@ describe('auxiliary owner linking and lifecycle', () => {
         ({ ...original, nativeId: name, name, updatedAtMs: i < 2 ? 1 : 100 + i })),
       { ...original, nativeId: 'archived-native', name: 'AA-archived', archived: true, updatedAtMs: 9999 },
     ]);
+    for (const name of ['FF-first', '  FF-second', 'AA-first', '  AA-second', 'history-a', 'history-b', 'history-c', 'history-d', 'history-e', 'history-f', 'history-g', 'history-h'])
+      h.bindings.set(`oc_${name.trim()}`, { toolId: 'codex', sourceId: h.home, nativeId: name, nativeCreated: true });
+    const rows = await tool.listSessions();
+    vi.mocked(tool.listSessions).mockResolvedValue([...rows, { ...original, nativeId: 'unbound-ff', name: 'FF-unbound', updatedAtMs: 999999 }]);
     await h.groups.joined(joined); await h.groups.action(h.event());
     const labels = () => h.cards.at(-1).body.elements.filter((e: any) => e.tag === 'button').map((e: any) => e.text.content);
     expect(labels().filter((s: string) => s.includes(' · ')).map((s: string) => s.split(' · ')[0]))
-      .toEqual(['  FF-second', 'FF-first', '  AA-second', 'AA-first', '普通个人会话', 'history-h', 'history-g', 'history-f', 'history-e', 'history-d']);
+      .toEqual(['  FF-second', 'FF-first', '  AA-second', 'AA-first', 'history-h', 'history-g', 'history-f', 'history-e', 'history-d', 'history-c']);
     const sent = vi.mocked(h.channel.send).mock.calls.length;
     const creates = vi.mocked(h.channel.createCard).mock.calls.length;
     const next = h.cards.at(-1).body.elements.find((e: any) => e.text?.content === '下一页').behaviors[0].value;
     await h.groups.action(h.event(next));
-    expect(labels().filter((s: string) => s.includes(' · '))).toEqual(['history-c', 'history-b', 'history-a'].map(name => `${name} · ${h.cwd}`));
+    expect(labels().filter((s: string) => s.includes(' · '))).toEqual(['history-b', 'history-a', '普通个人会话'].map(name => `${name} · ${h.cwd}`));
     expect(h.channel.send).toHaveBeenCalledTimes(sent); expect(h.channel.createCard).toHaveBeenCalledTimes(creates);
     expect(h.channel.updateCardById).toHaveBeenCalled();
     const previous = h.cards.at(-1).body.elements.find((e: any) => e.text?.content === '上一页').behaviors[0].value;
@@ -642,6 +653,7 @@ it('switches one shared entrance across tools and rotates its generation without
   expect(h.groups.matchesRequestGeneration('oc_aux', input)).toBe(true);
   h.tools.register({ id: 'codex', sourceId: 'another-worker', label: 'Codex', agent: new FakeAgentAdapter({ id: 'codex', events: [] }),
     listSessions: async () => [{ nativeId: freshId, name: 'AA-new', cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 }] });
+  h.bindings.set('oc_codex_target', { toolId: 'codex', sourceId: 'another-worker', nativeId: freshId, nativeCreated: true });
   const check = vi.fn(async () => {});
   await h.groups.bindSession('oc_aux', 'ou_owner', old, { toolId: 'codex', sourceId: 'another-worker', nativeId: freshId }, check);
   expect(check).toHaveBeenCalledOnce(); expect(h.groups.get('oc_aux')!.generation).not.toBe(old);
@@ -659,6 +671,7 @@ it('switches one shared entrance across tools and rotates its generation without
 it('replaces an archived shared source without unarchiving that native conversation', async () => {
   const h = await harness(); await h.activate(); const row = h.groups.get('oc_aux')!;
   h.catalog.archiveScope('oc_aux', sourceId); h.bindings.archive('claude', h.home, sourceId);
+  h.bindings.set('oc_target', { toolId: 'claude', sourceId: h.home, nativeId: freshId, nativeCreated: true });
   vi.mocked(h.tools.get('claude').listSessions).mockResolvedValue([{ nativeId: freshId, name: '新会话', cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 }]);
   expect(h.groups.isActive('oc_aux')).toBe(false);
   await h.groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'claude', sourceId: h.home, nativeId: freshId }, async () => {});
@@ -668,6 +681,7 @@ it('replaces an archived shared source without unarchiving that native conversat
 
 it('keeps a failed route switch inactive and recoverable instead of routing messages to a half-written binding', async () => {
   const h = await harness(); await h.activate(); const row = h.groups.get('oc_aux')!;
+  h.bindings.set('oc_target', { toolId: 'claude', sourceId: h.home, nativeId: freshId, nativeCreated: true });
   vi.mocked(h.tools.get('claude').listSessions).mockResolvedValue([{ nativeId: freshId, name: '新会话', cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 }]);
   const flush = vi.spyOn(h.bindings, 'flush').mockRejectedValueOnce(Error('disk unavailable'));
   await expect(h.groups.bindSession(row.chatId, row.ownerId, row.generation, { toolId: 'claude', sourceId: h.home, nativeId: freshId }, async () => {})).rejects.toThrow('disk unavailable');
@@ -688,6 +702,7 @@ it('announces the first binding once per chat and keeps switches, duplicate sele
   expect(announcements()).toHaveLength(2);
   vi.mocked(tool.listSessions).mockResolvedValue([{ nativeId: sourceId, name: '原会话', cwd: h.cwd, createdAtMs: 1, updatedAtMs: 2 },
     { nativeId: freshId, name: '其他会话', cwd: h.cwd, createdAtMs: 1, updatedAtMs: 3 }]);
+  h.bindings.set('oc_target', { toolId: 'claude', sourceId: h.home, nativeId: freshId, nativeCreated: true });
   const restored = new AuxiliaryGroups(h.deps); await restored.load();
   await restored.bindSession('oc_aux', 'ou_owner', restored.get('oc_aux')!.generation, { ...source, nativeId: freshId }, async () => {});
   expect(h.bindings.get('oc_aux')?.nativeId).toBe(freshId); expect(announcements()).toHaveLength(2);

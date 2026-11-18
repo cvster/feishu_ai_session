@@ -20,7 +20,7 @@ import { WebMarkdown, type WebAnswerSection } from './markdown';
 import { renameChat } from '../bot/group';
 import { sharedPersonalScope, sharedJobPersonalScope, namedSharedMessages, feishuSenderName } from '../worker/shared-history';
 import { messageRequestId } from '../worker/identity';
-import { isPersonalWorkgroup, type ToolBinding } from '../tools/bindings';
+import { isPersonalWorkgroup, sessionRefKey, type ToolBinding } from '../tools/bindings';
 import { DEFAULT_MODEL, resolveModelArg, type ModelOption } from '../agent/models';
 import { cachedModelChoices, modelCachePath } from '../agent/model-cache';
 import { isStorableModel } from '../agent/defaults';
@@ -33,6 +33,7 @@ import { namedSession } from '../session/display-name';
 import { fetchChatInfoResult } from '../bot/lark-info';
 import { a2aSessionBindings } from '../a2a/sessions';
 import { WebA2AManagement } from './a2a';
+import { groupSessionBindings } from '../session/group-sessions';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
@@ -316,8 +317,11 @@ export class PersonalSessionService {
   }
   async list(localSnapshot = false): Promise<WebSession[]> {
     this.owner(); if (!localSnapshot) await this.refresh(); const owner = this.owner();
-    const personalBindings = this.feishuBindings();
+    const c = this.deps.controls;
+    const grouped = groupSessionBindings(c.toolBindings, c.auxiliary?.groups?.(), this.deps.catalog);
+    const groupedKeys = new Set(grouped.flatMap(([, b]) => b.nativeId ? [sessionRefKey(b.toolId, b.sourceId, b.nativeId)] : []));
     return this.bindings().flatMap(([scope, b]) => {
+      if (isWebScope(scope) ? !b.nativeId || !groupedKeys.has(sessionRefKey(b.toolId, b.sourceId, b.nativeId)) : !grouped.some(([group]) => group === scope)) return [];
       if (this.deps.controls.auxiliary?.isAuxiliary(scope) || ['topic', 'p2p'].includes(this.groups.get(scope)?.mode ?? '')) return [];
       // A not-yet-started session is only shown while its group is confirmed.
       if (b.nativeCreated === false && this.groups.get(scope)?.mode !== 'group') return [];
@@ -333,12 +337,13 @@ export class PersonalSessionService {
       const online = (groupAvailable || b.nativeCreated !== false) && meta?.online === true && !!tool && tool.sourceId === b.sourceId && (!!row || b.nativeCreated === false);
       const group = this.groups.get(scope);
       // A confirmed name sync may be newer than our 15-second group snapshot.
-      const personal = personalBindings.filter(([, f]) => f.toolId === b.toolId && f.sourceId === b.sourceId && f.nativeId === b.nativeId);
-      const name = isWebScope(scope) ? namedSession(b.nativeId!, row?.name, b.name, ...personal.map(([, f]) => f.name)) : group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
+      const matchingGroups = grouped.filter(([, f]) => f.toolId === b.toolId && f.sourceId === b.sourceId && f.nativeId === b.nativeId);
+      const personal = matchingGroups.find(([group, binding]) => isPersonalWorkgroup(group, binding));
+      const name = isWebScope(scope) ? namedSession(b.nativeId!, row?.name, b.name, ...matchingGroups.map(([, f]) => f.name)) : group?.bindingName !== b.name ? b.name : group?.name ?? b.name;
       // Keep unnamed native records in the identity directory, but do not flood
       // the sidebar/recent list with UUIDs from temporary or untitled sessions.
       if (isWebScope(scope) && !name) return [];
-      const feishuChatId=isWebScope(scope)?personal[0]?.[0]:scope;
+      const feishuChatId=isWebScope(scope)?personal?.[0] ?? matchingGroups[0]?.[0]:scope;
       const aliasIds=this.aliases(scope,b);
       // Use native activity rather than the catalog's periodically refreshed timestamp.
       // Pending bridge input should also appear immediately, before the worker lists it.
