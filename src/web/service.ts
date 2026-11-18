@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { dirname, isAbsolute, normalize } from 'node:path';
+import { dirname, isAbsolute, normalize, join } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { QueuedMessage } from '../bot/message-queue';
 import type { Controls } from '../commands';
@@ -31,6 +31,8 @@ import {isWebScope} from './routes';
 import {executionBinding} from '../tools/execution-routes';
 import { namedSession } from '../session/display-name';
 import { fetchChatInfoResult } from '../bot/lark-info';
+import { a2aSessionBindings } from '../a2a/sessions';
+import { WebA2AManagement } from './a2a';
 
 export class WebError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export interface WebSession {
@@ -73,6 +75,23 @@ export class PersonalSessionService {
     create?(owner: string, toolId: string, cwd: string, name: string): Promise<{ scope?: string } & WebControlResult>;
     cwdFor?(scope: string): string | undefined;
   }) {}
+  private a2aManagement() {
+    const c = this.deps.controls;
+    return new WebA2AManagement({ path: join(dirname(this.deps.path), 'a2a.json'),
+      owner: () => {
+        if (c.ownerRefreshState !== 'ok' || !c.botOwnerId) throw new WebError(503, '暂时无法确认当前应用所有者，A2A 管理暂不可用');
+        return c.botOwnerId;
+      },
+      target: async id => {
+        const { session, b } = await this.resolve(id);
+        const candidate = a2aSessionBindings(c.toolBindings?.entries() ?? [], c.webRoutes?.entries()).find(([, route]) =>
+          route.toolId === b.toolId && route.sourceId === b.sourceId && route.nativeId === b.nativeId);
+        if (!candidate || !c.auxiliary?.apiSession(candidate[0])) throw new WebError(409, '此会话尚未就绪或已归档，无法开通 A2A');
+        return { scope: candidate[0], name: session.name };
+      } });
+  }
+  a2aConfig(id: string) { return this.a2aManagement().read(id); }
+  createA2a(id: string, input: Record<string, unknown>) { return this.a2aManagement().create(id, input); }
   async load() {
     let legacy = true;
     try {

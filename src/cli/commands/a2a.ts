@@ -1,8 +1,6 @@
-import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { isIPv4 } from 'node:net';
 import { networkInterfaces } from 'node:os';
-import * as lockfile from 'proper-lockfile';
 import { createLarkChannel } from '@larksuite/channel';
 import { resolveAppPaths } from '../../config/app-paths';
 import { loadRootConfig, readActiveProfile, runtimeProfileConfig } from '../../config/profile-store';
@@ -12,6 +10,8 @@ import { createDirectLarkHttpInstance } from '../../platform/lark-http';
 import { ToolBindingStore } from '../../tools/bindings';
 import { DEFAULT_A2A_PORT, defaultAlias, endpointForAlias, loadA2AConfig, mintKey, saveA2AConfig, select10Address, setAlias, validSlug } from '../../a2a/config';
 import { a2aSessionBindings } from '../../a2a/sessions';
+import { withA2AConfigLock } from '../../a2a/management';
+import { WebRoutes } from '../../web/routes';
 
 export interface A2AOptions { profile?: string; config?: string; namespace?: string; host?: string; port?: string; alias?: string; name?: string; owner?: boolean; keyId?: string }
 export async function runA2A(action: 'configure' | 'list' | 'enable' | 'disable' | 'alias' | 'grant' | 'revoke', target: string | undefined, options: A2AOptions): Promise<void> {
@@ -21,12 +21,10 @@ export async function runA2A(action: 'configure' | 'list' | 'enable' | 'disable'
   const paths = resolveAppPaths({ rootDir, profile }), root = await loadRootConfig(paths.configFile);
   if (!root?.profiles[profile]) throw new Error(`profile not found: ${profile}`);
   const bindings = new ToolBindingStore(join(paths.profileDir, 'tool-bindings.json')); await bindings.load();
-  const sessions = a2aSessionBindings(bindings.entries());
+  const routes = new WebRoutes(join(paths.profileDir, 'web-session-routes.json'), profile, root.profiles[profile]!.accounts.app.id); await routes.load();
+  const sessions = a2aSessionBindings(bindings.entries(), routes.entries());
   const path = join(paths.profileDir, 'a2a.json');
-  await mkdir(paths.profileDir, { recursive: true, mode: 0o700 });
-  const lockPath = join(paths.profileDir, 'a2a-config.lock'); await writeFile(lockPath, '', { flag: 'a', mode: 0o600 });
-  const release = await lockfile.lock(lockPath, { realpath: false, retries: 3 });
-  try {
+  await withA2AConfigLock(path, async () => {
     let config = await loadA2AConfig(path);
     if (action === 'configure') {
       const namespace = options.namespace ?? config?.namespace;
@@ -80,5 +78,5 @@ export async function runA2A(action: 'configure' | 'list' | 'enable' | 'disable'
     console.log(JSON.stringify({ defaultAlias: defaultAlias(scope), alias: endpoint.alias, enabled: endpoint.enabled,
       agentCard: `${base}/agent-card.json`, ...(issued ? { keyId: issued.key.id, role: issued.key.role, token: issued.token,
         notice: '密钥仅显示一次；普通密钥不自动获得所有者权限。' } : {}) }, null, 2));
-  } finally { await release(); }
+  });
 }

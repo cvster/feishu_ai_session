@@ -7,6 +7,7 @@ import type { AgentKind } from '../config/profile-schema';
 import type { ToolRegistry, ToolSession } from '../tools/types';
 import { isPersonalWorkgroup, sessionRefKey, type ToolBindingStore, type LinkedSession, type ToolBinding } from '../tools/bindings';
 import { a2aSessionBindings } from '../a2a/sessions';
+import type { WebRoutes } from '../web/routes';
 import type { SessionCatalog, SessionCatalogIdentity } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
@@ -58,6 +59,7 @@ interface Deps {
   sessions: SessionStore;
   catalog?: SessionCatalog;
   workspaces: WorkspaceStore;
+  webRoutes?: () => WebRoutes | undefined;
   cancelPending(chatId: string): Promise<void>;
 }
 interface Choice {
@@ -148,9 +150,10 @@ export class AuxiliaryGroups {
     return row?.status === 'active' && (!row.privateGroup || row.ownerId === this.deps.ownerId()) && !this.deps.catalog?.isScopeArchived(chatId);
   }
   apiRequest(scope: string): AuxiliaryApiRequest | undefined { return this.apiRequests[scope]; }
+  private apiBindings() { return a2aSessionBindings(this.deps.bindings.entries(), this.deps.webRoutes?.()?.entries()); }
   /** Stable API aliases survive the migration from FF to the original conversation. */
   apiSession(sharedScope: string): { sharedScope: string; name: string; cwd: string; generation: string; ownerId: string } | undefined {
-    const b = a2aSessionBindings(this.deps.bindings.entries()).find(([scope]) => scope === sharedScope)?.[1], ownerId = this.deps.ownerId();
+    const b = this.apiBindings().find(([scope]) => scope === sharedScope)?.[1], ownerId = this.deps.ownerId();
     if (!ownerId || !b?.linkedSource || b.sharedScope || b.nativeId !== b.linkedSource.nativeId ||
         (b.nativeId && (this.deps.bindings.isArchived(b.toolId, b.sourceId, b.nativeId) || this.deps.catalog?.isThreadArchived(b.nativeId)))) return;
     const peers = Object.values(this.records).filter(r => r.ownerId === ownerId && r.source && this.deps.bindings.get(r.chatId)?.sharedScope === sharedScope);
@@ -158,17 +161,19 @@ export class AuxiliaryGroups {
     const personal = this.deps.bindings.entries().find(([scope, binding]) => (isPersonalWorkgroup(scope, binding) || binding.auxiliaryWorkgroup) && b.nativeId &&
       binding.nativeCreated !== false && binding.toolId === b.toolId && binding.sourceId === b.sourceId && binding.nativeId === b.nativeId &&
       !this.deps.catalog?.isScopeArchived(scope));
-    const cwd = (personal && this.deps.workspaces.cwdFor(personal[0])) || active?.cwd;
-    if (!cwd || (!active && !personal)) return;
+    const native = this.deps.webRoutes?.()?.entries().find(([, route]) => route.toolId === b.toolId && route.sourceId === b.sourceId && route.nativeId === b.nativeId)?.[1];
+    if (native?.archived) return;
+    const cwd = (personal && this.deps.workspaces.cwdFor(personal[0])) || active?.cwd || native?.cwd;
+    if (!cwd || (!active && !personal && !native)) return;
     return { sharedScope, name: b.name || 'AI助手', cwd, ownerId,
       generation: createHash('sha256').update(JSON.stringify([sharedScope, b.toolId, b.sourceId, b.linkedSource.nativeId, ownerId, "direct-source"])).digest('hex') };
   }
   apiSessions() {
-    return a2aSessionBindings(this.deps.bindings.entries())
+    return this.apiBindings()
       .flatMap(([scope]) => { const session = this.apiSession(scope); return session ? [session] : []; });
   }
   async acceptApi(sharedScope: string, requestId: string, actorId: string): Promise<string> {
-    const session = this.apiSession(sharedScope), binding = a2aSessionBindings(this.deps.bindings.entries()).find(([scope]) => scope === sharedScope)?.[1];
+    const session = this.apiSession(sharedScope), binding = this.apiBindings().find(([scope]) => scope === sharedScope)?.[1];
     if (!session || !binding?.linkedSource) throw new Error('原会话已不可用');
     const scope = `a2a_${requestId}`;
     const previous = this.apiRequests[scope];
@@ -597,7 +602,7 @@ export class AuxiliaryGroups {
       const peer = Object.values(this.records).find(r => r.chatId !== row.chatId && r.ownerId === row.ownerId && r.source &&
         this.sourceKey(r.source) === this.sourceKey(linkedSource) && (r.status === 'active' || (r.status === 'leaving' && !r.archivedNative)));
       const peerBinding = peer ? this.deps.bindings.get(peer.chatId) : undefined;
-      const sharedScope = peerBinding?.sharedScope ?? a2aSessionBindings(this.deps.bindings.entries()).find(([, b]) =>
+      const sharedScope = peerBinding?.sharedScope ?? this.apiBindings().find(([, b]) =>
         b.linkedSource && this.sourceKey(b.linkedSource) === this.sourceKey(linkedSource))?.[0] ?? `aux_${randomUUID()}`, name = source.name || source.nativeId;
       const shared = peerBinding ? { ...peerBinding, sharedScope: undefined, name } : { toolId: tool.id, sourceId: tool.sourceId, name,
         nativeId: source.nativeId, nativeCreated: true, linkedSource,

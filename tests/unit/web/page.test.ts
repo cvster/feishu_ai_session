@@ -21,6 +21,7 @@ class Element {
   onerror?: () => void;
   onsubmit?: (event: { preventDefault(): void }) => Promise<void>;
   onkeydown?: (event: { key: string; preventDefault(): void }) => void;
+  oncancel?: (event: { preventDefault(): void }) => void;
   open = false;
   isConnected = true;
   style: Record<string, string> = {};
@@ -62,7 +63,7 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const elements = new Map(ids.map(id => [id, new Element('div', id)]));
   const node = (id: string) => elements.get(id)!;
   node('app').style.setProperty = ((key: string, value: string) => { node('app').style[key] = value; }) as any;
-  node('session-menu').hidden = true; node('session-menu').append(node('session-rename'), node('session-archive'), node('session-copy'), node('session-remove-recent'));
+  node('session-menu').hidden = true; node('session-menu').append(node('session-rename'), node('session-archive'), node('session-copy'), node('session-a2a'), node('session-remove-recent'));
   for (const action of ['stop', 'refresh', 'fork', 'finish', 'config']) { const button = new Element('button'); const img = new Element('img'); img.src = '/assets/run-controls/' + action + '.png'; button.append(img); button.setAttribute('data-control', action); node('session-controls').append(button); }
   const rows = Array.from({ length: count }, (_, i) => String.fromCharCode(97 + i)).map((id, index) => ({ id: id.repeat(64), toolId: index ? 'another' : 'generic', tool: index ? 'Other' : 'Tool', favorite: false, updatedAtMs: updatedAtMs?.[index] ?? count - index,
     project: 'project', cwd: '/project', scope: 'oc_' + id, name: '会话' + index, online: true, canSend: true, canRename: true }));
@@ -107,6 +108,38 @@ function harness(preferences?: unknown, count = 2, savedStorage?: Map<string, st
   const snapshot = (index: number, answer?: string, count?: number) => Stream.all.at(-1)!.emit('snapshot', { sessions: rows, conversation: conversation(index, answer, count) });
   return { node, rows, requests, writes, ready, choose, menu, settle, snapshot, conversation, streams: Stream.all, storage, browserWindow, settings, clipboard, fallbackCopy, body };
 }
+
+it('queries A2A config, issues and copies a member credential, and clears the secret on close', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  h.menu(0); h.node('session-a2a').onclick!();
+  expect(h.requests[1]!.path).toBe(`/api/sessions/${h.rows[0]!.id}/a2a`);
+  const config = { configured: true, listenerEnabled: true, enabled: false, alias: '', baseUrl: 'http://10.88.1.2:36999/Test/agents/session-test', agentCard: 'http://10.88.1.2:36999/Test/agents/session-test/agent-card.json', keys: [] };
+  h.requests[1]!.resolve(config); await h.settle();
+  expect(h.node('a2a-dialog').open).toBe(true); expect(h.node('a2a-create').disabled).toBe(false);
+  expect(JSON.parse(h.node('a2a-config').value).headers).toEqual({ 'A2A-Version': '1.0' });
+  h.node('a2a-alias').value = 'map'; h.node('a2a-name').value = 'my-agent';
+  const creating = h.node('a2a-form').onsubmit!({ preventDefault() {} });
+  expect(h.requests[2]!.data).toEqual({ alias: 'map', name: 'my-agent' });
+  expect(h.node('a2a-close').disabled).toBe(true);
+  h.node('a2a-dialog').oncancel!({ preventDefault() {} }); expect(h.node('a2a-dialog').open).toBe(true);
+  h.requests[2]!.resolve({ ...config, enabled: true, alias: 'map', credential: { token: 'a2a_private-token', role: 'member' }, keys: [{ name: 'my-agent', role: 'member', active: true }] }); await creating;
+  expect(h.node('a2a-state').textContent).toContain('请复制');
+  await h.node('a2a-copy').onclick!();
+  expect(JSON.parse(h.clipboard.writeText.mock.calls[0]![0]).headers.Authorization).toBe('Bearer a2a_private-token');
+  expect([...h.storage.values()].join('')).not.toContain('a2a_private-token');
+  h.node('a2a-close').onclick!(); expect(h.node('a2a-config').value).toBe(''); expect(h.node('a2a-dialog').open).toBe(false);
+});
+
+it('does not expose a late A2A secret after authentication is revoked', async () => {
+  const h = harness(); await h.ready(); h.requests[0]!.resolve(h.conversation(0)); await h.settle();
+  h.menu(0); h.node('session-a2a').onclick!();
+  const config = { configured: true, listenerEnabled: true, enabled: true, baseUrl: 'http://10.88.1.2/agent', agentCard: 'http://10.88.1.2/agent/agent-card.json', keys: [] };
+  h.requests[1]!.resolve(config); await h.settle(); h.node('a2a-name').value = 'caller';
+  const creating = h.node('a2a-form').onsubmit!({ preventDefault() {} });
+  h.streams.at(-1)!.emit('auth', {});
+  h.requests[2]!.resolve({ ...config, credential: { token: 'must-stay-hidden' } }); await creating;
+  expect(h.node('a2a-dialog').open).toBe(false); expect(h.node('a2a-config').value).toBe('');
+});
 
 it('keeps the composer enabled at mobile width for a locally writable session',async()=>{
   const h=harness();h.browserWindow.innerWidth=375;await h.ready();

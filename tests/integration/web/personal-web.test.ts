@@ -39,6 +39,8 @@ import type { WebConfig } from '../../../src/web/config';
 import { WebMarkdown } from '../../../src/web/markdown';
 import {WebRoutes,isWebScope} from '../../../src/web/routes';
 import { chatIsDissolved } from '../../../src/bot/group-cleanup';
+import { loadA2AConfig, mintKey, saveA2AConfig } from '../../../src/a2a/config';
+import { a2aSessionBindings } from '../../../src/a2a/sessions';
 
 async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi' = 'kilo', host = '127.0.0.1', access: Pick<WebConfig, 'additionalHosts' | 'trustedNetworks'> = {}, authoritative = false, archiveEffect?: 'delete') {
   const native = { nativeId: 'native', name: 'AA-web', cwd: '/project', createdAtMs: 1, updatedAtMs: 2, archived: false };
@@ -114,6 +116,71 @@ async function harness(tool: 'codex' | 'zcode' | 'kilo' | 'claude' | 'dsh' | 'pi
   controls.workerRuntimes!.get(tool)!.replies = replies;
   return { ...h, bindings, agentDefaults, catalog, controls, sessions, pending, inbox, service, consoleService, makeService, makeConsole, request, login, web, secret, configPath, webControls, workspaces, send, channel, create, enqueue, names, native, conversation, provider, replies, activeRuns, group: (name: string) => { group = name; } };
 }
+
+async function webA2a(h: Awaited<ReturnType<typeof harness>>) {
+  h.workspaces.setCwd('oc_group', h.native.cwd);
+  const auxiliary = new AuxiliaryGroups({ path: join(h.dir, 'aux-a2a.json'), appId: 'cli_test', channel: h.channel,
+    tools: h.controls.toolRegistry!, bindings: h.bindings, sessions: h.sessions, catalog: h.catalog, workspaces: h.workspaces,
+    webRoutes: () => h.controls.webRoutes, ownerId: () => h.controls.botOwnerId, refreshOwner: async () => {}, cancelPending: async () => {} });
+  await auxiliary.load(); h.controls.auxiliary = auxiliary;
+  cleanups.push(() => auxiliary.flush());
+  return auxiliary;
+}
+
+it('creates and queries A2A config behind Web auth, preserving unrelated endpoints and returning plaintext only once', async () => {
+  const h = await harness('codex', '127.0.0.2'); await h.replies.stop(); await webA2a(h);
+  const row = (await h.service.list())[0]!, path = `/api/sessions/${row.id}/a2a`, configPath = join(h.dir, 'a2a.json');
+  expect((await h.request(path)).status).toBe(401); await h.login();
+  expect(await (await h.request(path)).json()).toMatchObject({ configured: false, enabled: false });
+  expect((await h.request(path, { name: 'caller' })).status).toBe(409);
+  const original = { enabled: true, alias: 'other', keys: [mintKey('someone', 'ou_owner').key] };
+  await saveA2AConfig(configPath, { version: 1, enabled: true, host: '10.88.1.2', port: 36999, namespace: 'Test', endpoints: { aux_other: original } });
+  expect((await h.request(path, { name: 'caller', role: 'owner' })).status).toBe(400);
+  expect((await h.request(path, { name: 'caller', alias: 'other' })).status).toBe(400);
+  expect((await h.request(path, { name: 'caller' }, { Origin: 'http://evil.test' })).status).toBe(403);
+  const before = h.bindings.entries();
+  const response = await h.request(path, { name: 'caller', alias: 'web-test' }); expect(response.status).toBe(201);
+  const created = await response.json() as Awaited<ReturnType<PersonalSessionService['createA2a']>>;
+  expect(created).toMatchObject({ enabled: true, alias: 'web-test', credential: { role: 'member' }, keys: [{ name: 'caller', active: true }] });
+  expect(created.credential.token).toMatch(/^a2a_/);
+  expect(h.bindings.entries()).toEqual(before);
+  const queried = await (await h.request(path)).json() as Awaited<ReturnType<PersonalSessionService['a2aConfig']>>;
+  expect(queried).not.toHaveProperty('credential');
+  expect(JSON.stringify(queried)).not.toContain(created.credential.token);
+  expect(JSON.stringify(queried)).not.toContain('ou_owner');
+  expect(queried.keys[0]).not.toHaveProperty('hash');
+  expect(await readFile(configPath, 'utf8')).not.toContain(created.credential.token);
+  expect((await stat(configPath)).mode & 0o777).toBe(0o600);
+  expect((await h.request(path, { name: 'caller', alias: 'web-test' })).status).toBe(409);
+  const parallel = await Promise.all(['caller-2', 'caller-3'].map(name => h.request(path, { name })));
+  expect(parallel.map(r => r.status)).toEqual([201, 201]);
+  const config = await loadA2AConfig(configPath);
+  expect(config!.endpoints.aux_other).toEqual(original);
+  expect(Object.values(config!.endpoints).find(e => e.alias === 'web-test')!.keys).toHaveLength(3);
+  h.controls.ownerRefreshState = 'failed'; h.controls.ownerRefreshError = 'Request failed with status code 429';
+  expect((await h.request(path, { name: 'offline' })).status).toBe(503);
+  h.controls.ownerRefreshState = 'ok';
+  h.bindings.archive('codex', h.client.sourceId, 'native');
+  expect((await h.request(path, { name: 'archived' })).status).toBe(404);
+});
+
+it('opens A2A for a native Web conversation without creating a personal group and retires it on native archival', async () => {
+  const h = await harness('codex'); await h.replies.stop();
+  const routes = new WebRoutes(join(h.dir, 'web-session-routes.json'), 'test', 'cli_test'); await routes.load(); h.controls.webRoutes = routes;
+  const unbound = { ...h.native, nativeId: 'unbound-a2a', name: 'AA-unbound' };
+  h.provider.list.mockResolvedValue([h.native, unbound]);
+  const auxiliary = await webA2a(h), rows = await h.service.list(), row = rows.find(r => r.name === unbound.name)!;
+  await saveA2AConfig(join(h.dir, 'a2a.json'), { version: 1, enabled: true, host: '10.88.1.2', port: 36999, namespace: 'Test', endpoints: {} });
+  const before = h.bindings.entries(), response = await h.request(`/api/sessions/${row.id}/a2a`, { name: 'native-caller' });
+  expect(response.status).toBe(201); expect(h.bindings.entries()).toEqual(before);
+  const scope = a2aSessionBindings(h.bindings.entries(), routes.entries()).find(([, b]) => b.nativeId === unbound.nativeId)![0];
+  const task = await auxiliary.acceptApi(scope, 'test-request', 'test-caller');
+  expect(h.bindings.get(task)).toMatchObject({ nativeId: unbound.nativeId, sharedScope: scope });
+  expect(auxiliary.apiSession(scope)?.cwd).toBe(unbound.cwd);
+  routes.set(row.scope, { ...routes.get(row.scope)!, archived: true });
+  expect(auxiliary.apiSession(scope)).toBeUndefined(); expect(auxiliary.isActive(task)).toBe(false);
+  expect(h.send).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
+});
 
 it('lists native Web sessions without a Feishu binding and mutates them without IM APIs',async()=>{
   const h=await harness('codex');await h.replies.stop();

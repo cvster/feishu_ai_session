@@ -472,7 +472,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   if (deps.appPaths?.profileDir && controls.toolRegistry && controls.toolBindings) {
     controls.auxiliary = new AuxiliaryGroups({
       path: join(deps.appPaths.profileDir, 'auxiliary-groups.json'), appId: cfg.accounts.app.id,
-      channel, tools: controls.toolRegistry, bindings: controls.toolBindings, sessions, catalog: sessionCatalog, workspaces,
+      channel, tools: controls.toolRegistry, bindings: controls.toolBindings, sessions, catalog: sessionCatalog, workspaces, webRoutes: () => controls.webRoutes,
       ownerId: () => controls.botOwnerId, refreshOwner: () => controls.refreshOwner(channel),
       cancelPending: async chatId => {
         const dropped = pending.cancel(chatId);
