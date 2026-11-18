@@ -6,6 +6,7 @@ import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import { saveRootConfig } from '../../../src/config/profile-store';
 import { ToolBindingStore } from '../../../src/tools/bindings';
 import { runA2A } from '../../../src/cli/commands/a2a';
+import { a2aSessionBindings } from '../../../src/a2a/sessions';
 import { authenticate, DEFAULT_A2A_PORT, defaultAlias, loadA2AConfig, mintKey, saveA2AConfig, type A2AConfig } from '../../../src/a2a/config';
 
 const roots: string[] = [];
@@ -54,4 +55,27 @@ it('fails closed on invalid keys, ambiguous aliases, wildcard listeners and malf
   await saveA2AConfig(path, { ...config, host: '0.0.0.0' }); await expect(loadA2AConfig(path)).rejects.toThrow();
   config.endpoints.aux_b = { enabled: true, alias: 'project', keys: [] };
   await saveA2AConfig(path, config); await expect(loadA2AConfig(path)).rejects.toThrow('aliases');
+});
+
+it('enables a personal AA session without writing its live binding ledger', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'a2a-personal-')); roots.push(root);
+  const profileDir = join(root, 'profiles', 'test'), configPath = join(root, 'config.json');
+  const selected = createDefaultProfileConfig({ agentKind: 'codex', codex: { binaryPath: 'codex' }, accounts: { app: { id: 'cli_test', secret: 'fake', tenant: 'feishu' } } });
+  await saveRootConfig({ schemaVersion: 2, activeProfile: 'test', preferences: {}, profiles: { test: selected } }, configPath);
+  const path = join(profileDir, 'tool-bindings.json'), bindings = new ToolBindingStore(path); await bindings.load();
+  bindings.set('oc_personal', { toolId: 'codex', sourceId: root, name: 'AA-a1地图', nativeId: 'original', nativeCreated: true }); await bindings.flush();
+  const before = await readFile(path, 'utf8'), output = vi.spyOn(console, 'log').mockImplementation(() => {});
+  const options = { config: configPath, profile: 'test' };
+  await runA2A('configure', undefined, { ...options, namespace: 'TestUser' });
+  await runA2A('list', undefined, options);
+  const entry = JSON.parse(output.mock.calls.at(-1)![0]);
+  expect(entry).toMatchObject({ name: 'AA-a1地图', enabled: false });
+  await runA2A('enable', entry.defaultAlias, { ...options, alias: 'a1-map' });
+  await runA2A('grant', 'a1-map', { ...options, name: 'map-agent' });
+  expect(JSON.parse(output.mock.calls.at(-1)![0])).toMatchObject({ alias: 'a1-map', role: 'member', enabled: true });
+  expect(await readFile(path, 'utf8')).toBe(before);
+  const routes = a2aSessionBindings(bindings.entries());
+  expect(routes[0]![0]).toBe(entry.id);
+  bindings.set(entry.id, routes[0]![1]);
+  expect(a2aSessionBindings(bindings.entries())).toHaveLength(1);
 });

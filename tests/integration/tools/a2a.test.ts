@@ -24,6 +24,7 @@ import { defaultAlias, loadA2AConfig, mintKey, saveA2AConfig, setAlias, type A2A
 import { startA2AServer, parseSend } from '../../../src/a2a/server';
 import { createA2ARunner } from '../../../src/a2a/runner';
 import { A2ATaskStore } from '../../../src/a2a/store';
+import { a2aSessionBindings } from '../../../src/a2a/sessions';
 
 const roots: string[] = [], cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const f of cleanup.splice(0)) await f(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
@@ -35,16 +36,22 @@ async function freePort() {
   const port = (server.address() as { port: number }).port; await new Promise<void>(resolve => server.close(() => resolve())); return port;
 }
 function deferred() { let resolve!: () => void; return { promise: new Promise<void>(r => { resolve = r; }), release: () => resolve() }; }
-async function setup(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' | 'dsh' = 'codex') {
+async function setup(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' | 'dsh' = 'codex', personalOnly = false) {
   const root = await mkdtemp(join(tmpdir(), 'ff-a2a-')); roots.push(root);
   const history = join(root, 'source.jsonl'); await writeFile(history, '原会话记录');
   const bindings = new ToolBindingStore(join(root, 'bindings.json')); await bindings.load();
-  bindings.set(shared, { toolId, sourceId: root, name: 'FF-C系列', nativeId, nativeCreated: true,
-    linkedSource: { toolId, sourceId: root, nativeId: originalId, historyPath: history } });
-  bindings.linkAuxiliary('oc_group', shared); await bindings.flush();
+  if (personalOnly) bindings.set('oc_personal', { toolId, sourceId: root, name: 'AA-a1地图', nativeId, nativeCreated: true });
+  else {
+    bindings.set(shared, { toolId, sourceId: root, name: 'FF-C系列', nativeId, nativeCreated: true,
+      linkedSource: { toolId, sourceId: root, nativeId: originalId, historyPath: history } });
+    bindings.linkAuxiliary('oc_group', shared);
+  }
+  await bindings.flush();
+  const endpointScope = a2aSessionBindings(bindings.entries())[0]![0];
   const sessions = new SessionStore(join(root, 'sessions.json')); await sessions.load();
   const catalog = new SessionCatalog(join(root, 'catalog.json')); await catalog.load();
   const workspaces = new WorkspaceStore(join(root, 'workspaces.json')); await workspaces.load();
+  if (personalOnly) workspaces.setCwd('oc_personal', root);
   const send = vi.fn(async () => ({ messageId: 'om_receipt' }));
   const create = vi.fn(async (..._args: unknown[]) => ({ code: 0, data: { message_id: 'om_approval' } }));
   const cards: any[] = [];
@@ -60,7 +67,7 @@ async function setup(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' | 'dsh' = 'co
     await writeFile(join(historyRoot, `${nativeId}.jsonl`), '');
   }
   const tools = new ToolRegistry(); tools.register({ id: toolId, sourceId: root, label: toolId, agent, listSessions: async () => [], ...(['zcode', 'kilo', 'dsh'].includes(toolId) ? { sessions: { historyPointer: async () => ({ format: 'json' as const, path: history }), rename: async () => {}, archive: async () => {} } } : {}) });
-  await writeFile(join(root, 'aux.json'), JSON.stringify({ version: 1, appId: 'cli_test', groups: {
+  await writeFile(join(root, 'aux.json'), JSON.stringify({ version: 1, appId: 'cli_test', groups: personalOnly ? {} : {
     oc_group: { chatId: 'oc_group', ownerId: 'ou_owner', generation: 'g1', status: 'active', name: 'C系列讨论', cwd: root,
       source: bindings.get(shared)!.linkedSource },
   } }));
@@ -79,7 +86,7 @@ async function setup(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' | 'dsh' = 'co
     toolRegistry: tools, executorForTool: () => executor } as unknown as Controls;
   const issued = mintKey('alice', owner), second = mintKey('bob', owner);
   const config: A2AConfig = { version: 1, enabled: true, host: '127.0.0.1', port: await freePort(), namespace: 'LennoxGao',
-    endpoints: { [shared]: { enabled: true, alias: 'c-series', keys: [issued.key, second.key] } } };
+    endpoints: { [endpointScope]: { enabled: true, alias: 'c-series', keys: [issued.key, second.key] } } };
   const configPath = join(root, 'a2a.json'), tasksPath = join(root, 'tasks.json'); await saveA2AConfig(configPath, config);
   const deps = { configPath, tasksPath, auxiliary, approvals, ownerId: () => owner, execute: createA2ARunner({ controls, sessions, sessionCatalog: catalog, workspaces }) };
   service = await startA2AServer(deps);
@@ -97,11 +104,31 @@ async function setup(toolId: 'codex' | 'claude' | 'zcode' | 'kilo' | 'dsh' = 'co
     return result;
   }
   cleanup.push(async () => { await service?.close(); await activeRuns.disconnectAll(); await Promise.all([auxiliary.flush(), bindings.flush(), approvals.flush(), sessions.flush(), catalog.flush(), workspaces.flush()]); });
-  return { root, config, configPath, tasksPath, bindings, auxiliary, approvals, agent, channel, send, create, cards, request, ask, finished, deps,
+  return { root, config, configPath, tasksPath, bindings, auxiliary, approvals, agent, channel, send, create, cards, request, ask, finished, deps, catalog,
     owner: (id: string) => { owner = id; }, issued, second, shared,
     restart: async () => { await service?.close(); service = await startA2AServer(deps); },
   };
 }
+
+it('serves a personal AA session directly, preserves its binding, and closes access after archival', async () => {
+  const h = await setup('codex', true), scope = Object.keys(h.config.endpoints)[0]!;
+  const original = h.bindings.get('oc_personal');
+  expect(h.bindings.get(scope)).toBeUndefined();
+  expect((await h.request('/agent-card.json')).status).toBe(200);
+  const accepted = await h.request('/message:send', h.ask());
+  expect(accepted.status).toBe(200);
+  expect((await h.finished(accepted.body.task.id)).body.status.state).toBe('TASK_STATE_COMPLETED');
+  expect(h.agent.runOptions[0]).toMatchObject({ threadId: nativeId });
+  expect(h.bindings.get('oc_personal')).toEqual(original);
+  expect(h.bindings.get(scope)?.linkedSource?.nativeId).toBe(nativeId);
+  await h.auxiliary.load();
+  await h.restart();
+  expect((await h.request('/agent-card.json', undefined, h.issued.token, defaultAlias(scope))).status).toBe(200);
+  h.catalog.archiveScope('oc_personal', nativeId);
+  expect((await h.request('/message:send', h.ask('禁止执行', 'archived'))).status).toBe(410);
+  expect(h.agent.runOptions).toHaveLength(1);
+  expect(h.send).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
+});
 
 it.each(['codex', 'claude', 'zcode', 'kilo', 'dsh'] as const)('runs %s in the original conversation with both aliases, owner-bound member keys and no IM delivery', async toolId => {
   const h = await setup(toolId);

@@ -21,6 +21,7 @@ import { PendingQueue } from '../../../src/bot/pending-queue';
 import type { ChatModeCache } from '../../../src/bot/chat-mode-cache';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import { syncAaSessionGroupsOnce } from '../../../src/bot/aa-session-groups';
+import { a2aSessionBindings } from '../../../src/a2a/sessions';
 
 const roots: string[] = [];
 const flushes: (() => Promise<unknown>)[] = [];
@@ -76,6 +77,16 @@ async function harness(toolId: 'codex' | 'claude' = 'claude') {
 }
 
 describe('auxiliary owner linking and lifecycle', () => {
+  it('preserves a personal session A2A address when its first auxiliary group is linked', async () => {
+    const h = await harness();
+    h.workspaces.setCwd('oc_original', h.cwd);
+    const scope = a2aSessionBindings(h.bindings.entries())[0]![0];
+    expect(h.groups.apiSession(scope)).toBeDefined();
+    await h.activate();
+    expect(h.bindings.get('oc_aux')?.sharedScope).toBe(scope);
+    expect(h.groups.apiSession(scope)).toBeDefined();
+    expect(a2aSessionBindings(h.bindings.entries())).toHaveLength(1);
+  });
   it('passively closes a dissolved group while keeping its original and other linked entrances', async () => {
     const h = await harness(); await h.activate(); await h.activate('oc_aux_2');
     await h.groups.closeDissolvedChat('oc_aux');

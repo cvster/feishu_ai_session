@@ -11,6 +11,7 @@ import { loadRuntimeEnv } from '../../config/runtime-env';
 import { createDirectLarkHttpInstance } from '../../platform/lark-http';
 import { ToolBindingStore } from '../../tools/bindings';
 import { DEFAULT_A2A_PORT, defaultAlias, endpointForAlias, loadA2AConfig, mintKey, saveA2AConfig, select10Address, setAlias, validSlug } from '../../a2a/config';
+import { a2aSessionBindings } from '../../a2a/sessions';
 
 export interface A2AOptions { profile?: string; config?: string; namespace?: string; host?: string; port?: string; alias?: string; name?: string; owner?: boolean; keyId?: string }
 export async function runA2A(action: 'configure' | 'list' | 'enable' | 'disable' | 'alias' | 'grant' | 'revoke', target: string | undefined, options: A2AOptions): Promise<void> {
@@ -20,7 +21,7 @@ export async function runA2A(action: 'configure' | 'list' | 'enable' | 'disable'
   const paths = resolveAppPaths({ rootDir, profile }), root = await loadRootConfig(paths.configFile);
   if (!root?.profiles[profile]) throw new Error(`profile not found: ${profile}`);
   const bindings = new ToolBindingStore(join(paths.profileDir, 'tool-bindings.json')); await bindings.load();
-  const sessions = bindings.entries().filter(([, b]) => b.linkedSource && !b.sharedScope);
+  const sessions = a2aSessionBindings(bindings.entries());
   const path = join(paths.profileDir, 'a2a.json');
   await mkdir(paths.profileDir, { recursive: true, mode: 0o700 });
   const lockPath = join(paths.profileDir, 'a2a-config.lock'); await writeFile(lockPath, '', { flag: 'a', mode: 0o600 });
@@ -51,7 +52,8 @@ export async function runA2A(action: 'configure' | 'list' | 'enable' | 'disable'
     if (!config) throw new Error('请先执行 a2a configure');
     const scope = (target && endpointForAlias(config, target)?.[0]) ?? sessions.find(([s]) => s === target || defaultAlias(s) === target)?.[0];
     if (!scope) throw new Error('会话入口不存在，请通过 a2a list 选择默认别名或内部 ID');
-    const binding = bindings.get(scope)!;
+    const binding = sessions.find(([s]) => s === scope)?.[1];
+    if (!binding) throw new Error('原会话已不可用');
     if (!binding.linkedSource || binding.sharedScope || binding.nativeId !== binding.linkedSource.nativeId) throw new Error('不是原会话共享入口');
     if (binding.nativeId && bindings.isArchived(binding.toolId, binding.sourceId, binding.nativeId)) throw new Error('原会话已归档');
     const endpoint = config.endpoints[scope] ??= { enabled: false, keys: [] };

@@ -28,7 +28,7 @@ API 请求实时跟随原 AA 工作群的模型和推理档位，不复用旧 FF
 node bin/lark-channel-bridge.mjs a2a configure --profile my-bot \
   --namespace LennoxGao --port 36999
 
-# 查看内部 ID、永久别名、易读别名和密钥摘要，不输出密钥。
+# 查看个人会话和已有共享入口的永久别名、易读别名和密钥摘要，不输出密钥。
 node bin/lark-channel-bridge.mjs a2a list --profile my-bot
 
 # 用 list 中的完整永久别名替换占位符。
@@ -39,6 +39,8 @@ node bin/lark-channel-bridge.mjs a2a enable 'session-<UUID>' \
 node bin/lark-channel-bridge.mjs a2a grant c-series \
   --name colleague-agent --profile my-bot
 ```
+
+已绑定个人工作群的原会话可直接开通 A2A，无须先关联辅助群。`list` 为这些会话计算稳定入口；`enable` 和 `grant` 只更新 A2A 配置，首次任务由运行中的桥接建立共享路由，个人工作群绑定保持不变。
 
 配置监听后按现有部署流程重启桥接，才会开始监听。管理命令本身不会部署或重启服务；未配置时默认不监听。已经监听后，启停单个入口、修改别名、签发/撤销密钥无需重启。更改 host/port 需要重启，在此之前旧监听拒绝执行。命名空间固定，防止旧 URL 意外指向不同用户服务。
 
